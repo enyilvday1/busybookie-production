@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "pricingReviewedOn": "2026-09-22",
+  "gen45": {
+    "creditsPerSecond": 12,
+    "maxCreditsPerGeneration": 60,
+    "maxDurationSeconds": 5
+  },
+  "task": {
+    "waitTimeoutMs": 600000
+  }
+}

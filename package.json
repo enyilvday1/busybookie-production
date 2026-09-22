@@ -10,7 +10,8 @@
     "test:watch": "vitest --config vitest.config.ts",
     "validate:characters": "tsx src/validation/validateCharacterBible.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "validate:rules": "tsx src/validation/validateProductionRules.ts"
+    "validate:rules": "tsx src/validation/validateProductionRules.ts",
+    "validate:episode": "tsx src/validation/validateEpisodeManifest.ts"
   },
   "keywords": [],
   "author": "",

@@ -1,0 +1,101 @@
+{
+  "schemaVersion": "1.0",
+  "episodeId": "EP02",
+  "title": "Development Pipeline Test",
+  "slug": "development-pipeline-test",
+  "status": "DRAFT",
+  "audience": {
+    "description": "preschool children",
+    "minAgeYears": 2,
+    "maxAgeYears": 5
+  },
+  "learningGoals": [
+    "observation",
+    "friendly communication"
+  ],
+  "emotionalTheme": "curiosity and friendship",
+  "targetDurationSeconds": 180,
+  "approvals": {
+    "script": "PENDING",
+    "storyboard": "PENDING",
+    "references": "PENDING",
+    "roughCut": "PENDING",
+    "finalQc": "PENDING"
+  },
+  "scenes": [
+    {
+      "id": "SC01",
+      "title": "Morning in Littleleaf Valley",
+      "summary": "Ollie begins a new morning adventure.",
+      "shots": [
+        {
+          "id": "S01",
+          "order": 1,
+          "title": "Littleleaf Valley establishing shot",
+          "type": "ESTABLISHING",
+          "durationSeconds": 5,
+          "characters": [],
+          "visualAction": "A peaceful morning establishes Littleleaf Valley.",
+          "camera": "Slow gentle cinematic push toward the village.",
+          "dialogue": [],
+          "audio": {
+            "ambience": "Soft birds, gentle breeze and distant stream.",
+            "sfx": []
+          },
+          "references": {
+            "required": true,
+            "assetIds": [],
+            "approvalStatus": "PENDING"
+          },
+          "generation": {
+            "provider": "RUNWAY",
+            "nativeAudio": false,
+            "status": "PLANNED"
+          },
+          "continuityNotes": [
+            "Preserve the approved Littleleaf Valley visual identity."
+          ]
+        },
+        {
+          "id": "S02",
+          "order": 2,
+          "title": "Ollie discovers something",
+          "type": "DIALOGUE",
+          "durationSeconds": 6,
+          "characters": [
+            "OLLIE"
+          ],
+          "visualAction": "Ollie notices something interesting beside the path.",
+          "camera": "Medium tracking shot moving gently with Ollie.",
+          "dialogue": [
+            {
+              "characterId": "OLLIE",
+              "text": "Look what I found!",
+              "deliveryNotes": "Curious, excited and gentle."
+            }
+          ],
+          "audio": {
+            "ambience": "Soft morning birds and breeze.",
+            "sfx": [
+              "gentle footsteps"
+            ]
+          },
+          "references": {
+            "required": true,
+            "assetIds": [],
+            "approvalStatus": "PENDING"
+          },
+          "generation": {
+            "provider": "VEO",
+            "nativeAudio": true,
+            "status": "PLANNED"
+          },
+          "continuityNotes": [
+            "Use Ollie's approved character identity.",
+            "Preserve teal explorer backpack and compass pendant."
+          ]
+        }
+      ]
+    }
+  ]
+}

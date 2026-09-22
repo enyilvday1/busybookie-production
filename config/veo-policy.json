@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1.0",
+  "pricingReviewedOn": "2026-09-22",
+  "generation": {
+    "model": "veo-3.1-fast-generate-preview",
+    "centsPerSecond": 10,
+    "maxCentsPerGeneration": 80,
+    "allowedDurationsSeconds": [
+      4,
+      6,
+      8
+    ],
+    "aspectRatio": "16:9",
+    "resolution": "720p",
+    "numberOfVideos": 1,
+    "generateAudio": true,
+    "expectedOutputFps": 24,
+    "maxImageBytes": 10000000
+  },
+  "operation": {
+    "pollIntervalMs": 10000,
+    "timeoutMs": 900000
+  }
+}

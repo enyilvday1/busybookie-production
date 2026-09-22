@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "brand": {
+    "brandName": "Busybookie",
+    "showName": "Ollie, Kacey & Mont",
+    "setting": "Littleleaf Valley",
+    "tagline": "Little stories. Big imaginations."
+  },
+  "postProduction": {
+    "aspectRatio": "16:9",
+    "width": 1920,
+    "height": 1080,
+    "timelineFps": 25,
+    "audioSampleRateHz": 48000
+  },
+  "storage": {
+    "mediaRootEnvVar": "BUSYBOOKIE_MEDIA_ROOT",
+    "requireExternalMediaRoot": true
+  },
+  "approvals": {
+    "requireScriptApproval": true,
+    "requireStoryboardApproval": true,
+    "requireReferenceApproval": true,
+    "requireRoughCutApproval": true,
+    "requireFinalQcApproval": true
+  },
+  "generation": {
+    "allowUnapprovedGeneration": false,
+    "maxAutomaticRetries": 2,
+    "supportedProviders": [
+      "RUNWAY",
+      "VEO",
+      "MANUAL"
+    ]
+  }
+}

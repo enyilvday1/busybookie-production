@@ -9,7 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:watch": "vitest --config vitest.config.ts",
     "validate:characters": "tsx src/validation/validateCharacterBible.ts",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "validate:rules": "tsx src/validation/validateProductionRules.ts"
   },
   "keywords": [],
   "author": "",

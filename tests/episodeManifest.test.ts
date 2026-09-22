@@ -186,10 +186,41 @@ describe("Busybookie Episode Manifest", () => {
     shot.generation.status =
       "APPROVED_FOR_GENERATION";
 
+    const testBible =
+      structuredClone(
+        bible,
+      );
+
+    const mont =
+      testBible.characters.find(
+        (character) =>
+          character.id ===
+          "MONT",
+      );
+
+    if (!mont) {
+      throw new Error(
+        "Expected Mont in Character Bible.",
+      );
+    }
+
+    mont.voice = {
+      selectionStatus:
+        "PENDING",
+      provider:
+        "RUNWAY",
+      voiceName:
+        null,
+      deliveryTraits: [
+        ...mont.voice
+          .deliveryTraits,
+      ],
+    };
+
     expect(() =>
       validateEpisodeProduction(
         episode,
-        bible,
+        testBible,
         rules,
       ),
     ).toThrow(

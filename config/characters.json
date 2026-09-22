@@ -202,9 +202,9 @@
         ]
       },
       "voice": {
-        "selectionStatus": "PENDING",
+        "selectionStatus": "LOCKED",
         "provider": "RUNWAY",
-        "voiceName": null,
+        "voiceName": "Noah",
         "deliveryTraits": [
           "young male",
           "gentle",

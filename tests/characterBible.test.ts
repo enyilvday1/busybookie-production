@@ -93,7 +93,7 @@ describe("Busybookie Character Bible", () => {
     });
   });
 
-  it("keeps Mont's male Runway voice unresolved until auditioned", async () => {
+  it("locks Mont Runway voice to Noah", async () => {
     const bible = await loadCharacterBible();
 
     const mont = bible.characters.find(
@@ -102,13 +102,20 @@ describe("Busybookie Character Bible", () => {
 
     expect(mont?.gender).toBe("BOY");
 
-    expect(mont?.voice.selectionStatus).toBe("PENDING");
-
-    if (mont?.voice.selectionStatus === "PENDING") {
-      expect(mont.voice.provider).toBe("RUNWAY");
-      expect(mont.voice.voiceName).toBeNull();
-      expect(mont.voice.deliveryTraits).toContain("young male");
-    }
+    expect(mont?.voice).toEqual({
+      selectionStatus: "LOCKED",
+      provider: "RUNWAY",
+      voiceName: "Noah",
+      deliveryTraits: [
+        "young male",
+        "gentle",
+        "soft",
+        "calm",
+        "slightly shy",
+        "reassuring",
+        "natural",
+      ],
+    });
   });
 
   it("preserves each character species contract", async () => {

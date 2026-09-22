@@ -1,0 +1,221 @@
+{
+  "schemaVersion": "1.0",
+  "characters": [
+    {
+      "id": "OLLIE",
+      "name": "Ollie",
+      "species": "young otter",
+      "gender": "BOY",
+      "pronouns": {
+        "subject": "he",
+        "object": "him",
+        "possessiveAdjective": "his",
+        "possessivePronoun": "his",
+        "reflexive": "himself"
+      },
+      "presentation": "friendly preschool story character",
+      "role": "curious explorer",
+      "personalityTraits": [
+        "curious",
+        "friendly",
+        "energetic",
+        "gentle",
+        "eager to discover"
+      ],
+      "appearance": {
+        "body": "warm brown otter fur with a cream muzzle, chest and belly",
+        "face": "round friendly otter face with a small dark nose and expressive features",
+        "eyes": "large expressive warm brown eyes",
+        "outfit": [
+          "teal explorer backpack"
+        ],
+        "accessories": [
+          "small compass pendant",
+          "explorer satchel when required by the approved shot reference"
+        ],
+        "distinguishingFeatures": [
+          "clearly identifiable as an otter",
+          "rounded otter ears",
+          "long otter tail",
+          "warm brown and cream colour palette"
+        ]
+      },
+      "continuity": {
+        "mustPreserve": [
+          "otter species",
+          "warm brown and cream fur",
+          "large brown eyes",
+          "teal explorer backpack",
+          "compass pendant",
+          "child-friendly proportions"
+        ],
+        "mustNotChange": [
+          "do not turn Ollie into a human",
+          "do not turn Ollie into an owl or another animal",
+          "do not change his core fur colours",
+          "do not replace his teal explorer identity with unrelated clothing",
+          "do not alter his approved facial identity between shots"
+        ]
+      },
+      "voice": {
+        "selectionStatus": "LOCKED",
+        "provider": "RUNWAY",
+        "voiceName": "Chad",
+        "deliveryTraits": [
+          "young",
+          "curious",
+          "warm",
+          "friendly",
+          "natural"
+        ]
+      },
+      "promptAnchor": "Ollie is a young boy otter with warm brown and cream fur, large expressive brown eyes, a teal explorer backpack and a small compass pendant. He is curious, friendly, energetic and gentle. Preserve his approved Busybookie character design exactly."
+    },
+    {
+      "id": "KACEY",
+      "name": "Kacey",
+      "species": "young fox",
+      "gender": "GIRL",
+      "pronouns": {
+        "subject": "she",
+        "object": "her",
+        "possessiveAdjective": "her",
+        "possessivePronoun": "hers",
+        "reflexive": "herself"
+      },
+      "presentation": "friendly preschool story character",
+      "role": "thoughtful problem-solver",
+      "personalityTraits": [
+        "thoughtful",
+        "friendly",
+        "observant",
+        "patient",
+        "playful"
+      ],
+      "appearance": {
+        "body": "warm orange fox fur with cream facial markings, chest and tail tip",
+        "face": "friendly fox face with large upright ears and soft expressive features",
+        "eyes": "large expressive warm brown eyes",
+        "outfit": [
+          "pink or purple backpack",
+          "pink or purple neck scarf"
+        ],
+        "accessories": [
+          "small flower or leaf hair accessory"
+        ],
+        "distinguishingFeatures": [
+          "clearly identifiable as a fox",
+          "large upright fox ears",
+          "large fluffy white-tipped tail",
+          "warm orange and cream colour palette"
+        ]
+      },
+      "continuity": {
+        "mustPreserve": [
+          "fox species",
+          "orange and cream fur",
+          "large upright ears",
+          "large fluffy white-tipped tail",
+          "pink or purple backpack",
+          "pink or purple scarf",
+          "small flower or leaf hair accessory",
+          "child-friendly proportions"
+        ],
+        "mustNotChange": [
+          "do not turn Kacey into another animal",
+          "do not remove her fox tail",
+          "do not change her core orange and cream colours",
+          "do not replace her established pink or purple accessories",
+          "do not alter her approved facial identity between shots"
+        ]
+      },
+      "voice": {
+        "selectionStatus": "LOCKED",
+        "provider": "RUNWAY",
+        "voiceName": "Maya",
+        "deliveryTraits": [
+          "young",
+          "warm",
+          "thoughtful",
+          "friendly",
+          "clear"
+        ]
+      },
+      "promptAnchor": "Kacey is a young girl fox with warm orange and cream fur, large expressive brown eyes, large upright ears, a fluffy white-tipped tail, pink or purple explorer accessories and a small flower or leaf hair accessory. She is thoughtful, observant, friendly and playful. Preserve her approved Busybookie character design exactly."
+    },
+    {
+      "id": "MONT",
+      "name": "Mont",
+      "species": "young elephant",
+      "gender": "BOY",
+      "pronouns": {
+        "subject": "he",
+        "object": "him",
+        "possessiveAdjective": "his",
+        "possessivePronoun": "his",
+        "reflexive": "himself"
+      },
+      "presentation": "friendly preschool story character",
+      "role": "gentle dependable friend",
+      "personalityTraits": [
+        "gentle",
+        "kind",
+        "calm",
+        "helpful",
+        "slightly shy",
+        "dependable"
+      ],
+      "appearance": {
+        "body": "soft pale grey-blue elephant skin with child-friendly rounded proportions",
+        "face": "gentle young elephant face with a short expressive trunk",
+        "eyes": "large expressive blue eyes",
+        "outfit": [
+          "green explorer backpack",
+          "yellow cap with a leaf emblem"
+        ],
+        "accessories": [
+          "green explorer accents"
+        ],
+        "distinguishingFeatures": [
+          "clearly identifiable as an elephant",
+          "large rounded ears with soft pink inner ears",
+          "short expressive trunk",
+          "pale grey-blue colour palette"
+        ]
+      },
+      "continuity": {
+        "mustPreserve": [
+          "elephant species",
+          "pale grey-blue body colour",
+          "large rounded ears with pink inner ears",
+          "short expressive trunk",
+          "yellow leaf-emblem cap",
+          "green explorer backpack",
+          "child-friendly proportions"
+        ],
+        "mustNotChange": [
+          "do not turn Mont into another animal",
+          "do not remove or radically lengthen his trunk",
+          "do not change his core pale grey-blue colour",
+          "do not replace his yellow cap or green explorer identity",
+          "do not alter his approved facial identity between shots"
+        ]
+      },
+      "voice": {
+        "selectionStatus": "PENDING",
+        "provider": "RUNWAY",
+        "voiceName": null,
+        "deliveryTraits": [
+          "young male",
+          "gentle",
+          "soft",
+          "calm",
+          "slightly shy",
+          "reassuring",
+          "natural"
+        ]
+      },
+      "promptAnchor": "Mont is a young boy elephant with soft pale grey-blue colouring, large expressive blue eyes, large rounded pink-inner ears, a short expressive trunk, a yellow cap with a leaf emblem and a green explorer backpack. He is gentle, calm, kind, slightly shy and dependable. Preserve his approved Busybookie character design exactly."
+    }
+  ]
+}

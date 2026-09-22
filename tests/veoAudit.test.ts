@@ -106,7 +106,7 @@ describe(
               numberOfVideos:
                 1,
 
-              generateAudio:
+              nativeAudioExpected:
                 true,
 
               expectedOutputFps:

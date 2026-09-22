@@ -38,17 +38,19 @@ export function buildVeoGenerateRequest(
     model:
       policy.generation.model,
 
-    prompt:
-      input.promptText,
+    source: {
+      prompt:
+        input.promptText,
 
-    ...(
-      input.image
-        ? {
-            image:
-              input.image,
-          }
-        : {}
-    ),
+      ...(
+        input.image
+          ? {
+              image:
+                input.image,
+            }
+          : {}
+      ),
+    },
 
     config: {
       numberOfVideos:
@@ -65,10 +67,6 @@ export function buildVeoGenerateRequest(
       resolution:
         policy.generation
           .resolution,
-
-      generateAudio:
-        policy.generation
-          .generateAudio,
     },
   } satisfies GenerateVideosParameters;
 

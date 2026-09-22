@@ -261,7 +261,7 @@ export async function runVeoCli(
 
   console.log(
     `Native audio: ${
-      policy.generation.generateAudio
+      policy.generation.nativeAudioExpected
         ? "YES"
         : "NO"
     }`,
@@ -421,17 +421,22 @@ export async function runVeoCli(
                 model:
                   request.model,
 
-                prompt:
-                  request.prompt,
+                source: {
+                  prompt:
+                    request.source
+                      .prompt,
 
-                ...(
-                  request.image
-                    ? {
-                        image:
-                          request.image,
-                      }
-                    : {}
-                ),
+                  ...(
+                    request.source
+                      .image
+                      ? {
+                          image:
+                            request.source
+                              .image,
+                        }
+                      : {}
+                  ),
+                },
 
                 config:
                   request.config,

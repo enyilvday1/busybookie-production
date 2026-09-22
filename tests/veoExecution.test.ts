@@ -28,8 +28,10 @@ const request:
     model:
       "veo-3.1-fast-generate-preview",
 
-    prompt:
-      "Busybookie test",
+    source: {
+      prompt:
+        "Busybookie test",
+    },
 
     config: {
       durationSeconds:
@@ -44,8 +46,6 @@ const request:
       numberOfVideos:
         1,
 
-      generateAudio:
-        true,
     },
   };
 

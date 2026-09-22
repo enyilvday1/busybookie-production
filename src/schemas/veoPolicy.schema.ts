@@ -66,7 +66,7 @@ export const VeoPolicySchema =
         numberOfVideos:
           z.literal(1),
 
-        generateAudio:
+        nativeAudioExpected:
           z.literal(true),
 
         expectedOutputFps:

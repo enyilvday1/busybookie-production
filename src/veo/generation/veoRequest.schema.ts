@@ -26,13 +26,8 @@ export const VeoInlineImageSchema =
   })
     .strict();
 
-export const VeoGenerateRequestSchema =
+export const VeoGenerateSourceSchema =
   z.object({
-    model:
-      z.literal(
-        VEO31_FAST_MODEL,
-      ),
-
     prompt:
       z.string()
         .trim()
@@ -41,6 +36,18 @@ export const VeoGenerateRequestSchema =
     image:
       VeoInlineImageSchema
         .optional(),
+  })
+    .strict();
+
+export const VeoGenerateRequestSchema =
+  z.object({
+    model:
+      z.literal(
+        VEO31_FAST_MODEL,
+      ),
+
+    source:
+      VeoGenerateSourceSchema,
 
     config:
       z.object({
@@ -59,9 +66,6 @@ export const VeoGenerateRequestSchema =
           z.literal(
             VEO_720P_RESOLUTION,
           ),
-
-        generateAudio:
-          z.literal(true),
       })
         .strict(),
   })

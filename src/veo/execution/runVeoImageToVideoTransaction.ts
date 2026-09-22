@@ -316,10 +316,10 @@ export async function runVeoImageToVideoTransaction(
               .config
               .numberOfVideos,
 
-          generateAudio:
-            request
-              .config
-              .generateAudio,
+          nativeAudioExpected:
+            input.policy
+              .generation
+              .nativeAudioExpected,
 
           expectedOutputFps:
             input.policy
@@ -327,7 +327,7 @@ export async function runVeoImageToVideoTransaction(
               .expectedOutputFps,
 
           promptText:
-            request.prompt,
+            request.source.prompt,
 
           sourceImagePath:
             preparedImage

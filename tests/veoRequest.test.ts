@@ -16,7 +16,7 @@ describe(
   "Busybookie Veo request builder",
   () => {
     it(
-      "builds a controlled 4-second image-to-video request",
+      "builds a controlled image-to-video request using source",
       async () => {
         const policy =
           await loadVeoPolicy();
@@ -48,6 +48,19 @@ describe(
         );
 
         expect(
+          request.source.prompt,
+        ).toBe(
+          "Ollie looks toward the softly moving trees.",
+        );
+
+        expect(
+          request.source.image
+            ?.mimeType,
+        ).toBe(
+          "image/png",
+        );
+
+        expect(
           request.config,
         ).toEqual({
           numberOfVideos:
@@ -61,22 +74,57 @@ describe(
 
           resolution:
             "720p",
-
-          generateAudio:
-            true,
         });
-
-        expect(
-          request.image
-            ?.mimeType,
-        ).toBe(
-          "image/png",
-        );
       },
     );
 
     it(
-      "supports a controlled text-only request",
+      "does not emit deprecated top-level prompt, image, or generateAudio fields",
+      async () => {
+        const policy =
+          await loadVeoPolicy();
+
+        const request =
+          buildVeoGenerateRequest(
+            {
+              promptText:
+                "A calm morning in Littleleaf Valley.",
+
+              durationSeconds:
+                4,
+
+              image: {
+                imageBytes:
+                  "AQID",
+
+                mimeType:
+                  "image/png",
+              },
+            },
+            policy,
+          );
+
+        expect(
+          "prompt" in request,
+        ).toBe(false);
+
+        expect(
+          "image" in request,
+        ).toBe(false);
+
+        expect(
+          "generateAudio" in
+            request.config,
+        ).toBe(false);
+
+        expect(
+          request.source.image,
+        ).toBeDefined();
+      },
+    );
+
+    it(
+      "supports a controlled text-only source",
       async () => {
         const policy =
           await loadVeoPolicy();
@@ -94,8 +142,14 @@ describe(
           );
 
         expect(
-          request.image,
+          request.source.image,
         ).toBeUndefined();
+
+        expect(
+          request.source.prompt,
+        ).toBe(
+          "A calm morning in Littleleaf Valley.",
+        );
       },
     );
 

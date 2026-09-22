@@ -12,7 +12,8 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "validate:rules": "tsx src/validation/validateProductionRules.ts",
     "validate:episode": "tsx src/validation/validateEpisodeManifest.ts",
-    "validate:runtime": "tsx src/validation/validateRuntime.ts"
+    "validate:runtime": "tsx src/validation/validateRuntime.ts",
+    "runway:gen45": "tsx scripts/runway-gen45.ts"
   },
   "keywords": [],
   "author": "",

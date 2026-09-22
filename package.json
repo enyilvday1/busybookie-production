@@ -11,7 +11,8 @@
     "validate:characters": "tsx src/validation/validateCharacterBible.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "validate:rules": "tsx src/validation/validateProductionRules.ts",
-    "validate:episode": "tsx src/validation/validateEpisodeManifest.ts"
+    "validate:episode": "tsx src/validation/validateEpisodeManifest.ts",
+    "validate:runtime": "tsx src/validation/validateRuntime.ts"
   },
   "keywords": [],
   "author": "",

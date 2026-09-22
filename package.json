@@ -13,7 +13,8 @@
     "validate:rules": "tsx src/validation/validateProductionRules.ts",
     "validate:episode": "tsx src/validation/validateEpisodeManifest.ts",
     "validate:runtime": "tsx src/validation/validateRuntime.ts",
-    "runway:gen45": "tsx scripts/runway-gen45.ts"
+    "runway:gen45": "tsx scripts/runway-gen45.ts",
+    "veo:generate": "tsx scripts/veo.ts"
   },
   "keywords": [],
   "author": "",

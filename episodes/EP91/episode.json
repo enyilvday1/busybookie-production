@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "episodeId": "EP91",
+  "title": "Veo Connectivity Test",
+  "slug": "veo-connectivity-test",
+  "status": "READY_FOR_GENERATION",
+  "audience": {
+    "description": "Busybookie technical production validation",
+    "minAgeYears": 2,
+    "maxAgeYears": 5
+  },
+  "learningGoals": [
+    "technical media pipeline validation"
+  ],
+  "emotionalTheme": "gentle curiosity",
+  "targetDurationSeconds": 4,
+  "approvals": {
+    "script": "APPROVED",
+    "storyboard": "APPROVED",
+    "references": "APPROVED",
+    "roughCut": "PENDING",
+    "finalQc": "PENDING"
+  },
+  "scenes": [
+    {
+      "id": "SC01",
+      "title": "Littleleaf Valley Veo Connectivity Test",
+      "summary": "A short non-dialogue establishing shot used to validate the Veo production pipeline with native environmental audio.",
+      "shots": [
+        {
+          "id": "S01",
+          "order": 1,
+          "title": "Littleleaf Valley gentle motion with ambience",
+          "type": "ESTABLISHING",
+          "durationSeconds": 4,
+          "characters": [],
+          "visualAction": "Animate the approved Littleleaf Valley reference as a peaceful storybook morning. Flowers sway gently, leaves move softly, the stream sparkles, and distant clouds drift slowly. Preserve the composition and visual identity of the source image. Do not introduce characters, signs, lettering, or new foreground objects.",
+          "camera": "Use a very slow, smooth cinematic push toward the village with no sudden camera movement.",
+          "dialogue": [],
+          "audio": {
+            "ambience": "Soft morning birds, gently moving leaves, and a quiet distant stream. No music and no speech.",
+            "sfx": []
+          },
+          "references": {
+            "required": true,
+            "assetIds": [
+              "littleleaf-valley-storybook-village-v1"
+            ],
+            "approvalStatus": "APPROVED"
+          },
+          "generation": {
+            "provider": "VEO",
+            "nativeAudio": true,
+            "status": "APPROVED_FOR_GENERATION",
+            "notes": "Technical Veo 3.1 Fast image-to-video connectivity generation only."
+          },
+          "continuityNotes": [
+            "Preserve the approved Littleleaf Valley storybook style.",
+            "Preserve the existing village, bridge, river, flowers, trees and warm lighting.",
+            "Use gentle environmental movement only.",
+            "No characters.",
+            "No dialogue.",
+            "No text or subtitles."
+          ]
+        }
+      ]
+    }
+  ]
+}

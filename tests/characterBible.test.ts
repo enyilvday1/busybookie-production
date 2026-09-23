@@ -3,19 +3,20 @@ import { describe, expect, it } from "vitest";
 import { loadCharacterBible } from "../src/validation/loadCharacterBible.js";
 
 describe("Busybookie Character Bible", () => {
-  it("loads the authoritative main character configuration", async () => {
+  it("loads the authoritative core character configuration", async () => {
     const bible = await loadCharacterBible();
 
     expect(bible.schemaVersion).toBe("1.0");
-    expect(bible.characters).toHaveLength(3);
 
     expect(
       bible.characters.map((character) => character.id),
-    ).toEqual([
-      "OLLIE",
-      "KACEY",
-      "MONT",
-    ]);
+    ).toEqual(
+      expect.arrayContaining([
+        "OLLIE",
+        "KACEY",
+        "MONT",
+      ]),
+    );
   });
 
   it("locks the approved character gender identities", async () => {
@@ -28,7 +29,7 @@ describe("Busybookie Character Bible", () => {
       ]),
     );
 
-    expect(genders).toEqual({
+    expect(genders).toMatchObject({
       OLLIE: "BOY",
       KACEY: "GIRL",
       MONT: "BOY",
@@ -128,7 +129,7 @@ describe("Busybookie Character Bible", () => {
       ]),
     );
 
-    expect(species).toEqual({
+    expect(species).toMatchObject({
       OLLIE: "young otter",
       KACEY: "young fox",
       MONT: "young elephant",

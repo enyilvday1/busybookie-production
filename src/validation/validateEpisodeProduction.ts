@@ -95,6 +95,42 @@ export function assertShotCanProgress(
   bible: CharacterBible,
   rules: ProductionRules,
 ): void {
+  const registeredCharacters = new Map(
+    bible.characters.map(
+      (character) => [
+        character.id,
+        character,
+      ] as const,
+    ),
+  );
+
+  const speakingCharacterIds = new Set(
+    shot.dialogue.map(
+      (line) => line.characterId,
+    ),
+  );
+
+  for (const characterId of shot.characters) {
+    if (
+      !registeredCharacters.has(
+        characterId,
+      )
+    ) {
+      if (
+        speakingCharacterIds.has(
+          characterId,
+        )
+      ) {
+        throw new Error(
+          `${shot.id}: unknown dialogue character ${characterId}.`,
+        );
+      }
+
+      throw new Error(
+        `${shot.id}: unknown character ${characterId}.`,
+      );
+    }
+  }
   if (
     !rules.generation.supportedProviders.includes(
       shot.generation.provider,
@@ -122,17 +158,11 @@ export function assertShotCanProgress(
       shot.generation.status,
     )
   ) {
-    const speakingCharacterIds = new Set(
-      shot.dialogue.map(
-        (line) => line.characterId,
-      ),
-    );
-
     for (const characterId of speakingCharacterIds) {
-      const character = bible.characters.find(
-        (candidate) =>
-          candidate.id === characterId,
-      );
+      const character =
+        registeredCharacters.get(
+          characterId,
+        );
 
       if (!character) {
         throw new Error(

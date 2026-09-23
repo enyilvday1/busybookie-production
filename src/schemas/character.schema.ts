@@ -1,10 +1,9 @@
 import { z } from "zod";
 
-export const CharacterIdSchema = z.enum([
-  "OLLIE",
-  "KACEY",
-  "MONT",
-]);
+export const CharacterIdSchema = z.string().regex(
+  /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/,
+  "Character id must use uppercase letters, numbers, and single underscores only.",
+);
 
 export const CharacterGenderSchema = z.enum([
   "BOY",

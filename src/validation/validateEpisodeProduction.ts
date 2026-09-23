@@ -27,7 +27,7 @@ const REFERENCE_REQUIRED_STATUSES = new Set([
   "APPROVED",
 ]);
 
-function assertEpisodeApprovals(
+export function assertEpisodeApprovals(
   episode: EpisodeManifest,
   rules: ProductionRules,
 ): void {
@@ -90,7 +90,7 @@ function assertEpisodeApprovals(
   }
 }
 
-function assertShotCanProgress(
+export function assertShotCanProgress(
   shot: Shot,
   bible: CharacterBible,
   rules: ProductionRules,

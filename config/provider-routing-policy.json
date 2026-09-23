@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0",
+  "nonDialogue": {
+    "nativeAudioProvider": "VEO",
+    "visualOnlyProvider": "RUNWAY"
+  },
+  "dialogue": {
+    "requireLockedVoices": true,
+    "automaticProviderSelection": false,
+    "treatDialogueShotTypeAsDialogueIntent": true
+  },
+  "manifest": {
+    "flagProviderMismatch": true
+  }
+}

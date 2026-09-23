@@ -1,0 +1,171 @@
+import type {
+  Shot,
+} from "../schemas/episodeManifest.schema.js";
+
+import {
+  evaluateShotExecutionReadiness,
+} from "../planning/evaluateShotExecutionReadiness.js";
+
+import type {
+  PaidExecutionProvider,
+  SingleShotExecutionDependencies,
+  SingleShotExecutionRequest,
+  SingleShotExecutionResult,
+  SingleShotProviderExecutionInput,
+} from "./singleShotExecution.types.js";
+
+function findSelectedShot(
+  request:
+    SingleShotExecutionRequest,
+): Shot {
+  for (
+    const scene
+    of request.episode.scenes
+  ) {
+    const shot =
+      scene.shots.find(
+        (candidate) =>
+          candidate.id ===
+          request.shotId,
+      );
+
+    if (shot) {
+      return shot;
+    }
+  }
+
+  throw new Error(
+    `Shot ${request.shotId} was not found in episode ${request.episode.episodeId}.`,
+  );
+}
+
+function requirePaidProvider(
+  provider:
+    string | null,
+  shotId:
+    string,
+): PaidExecutionProvider {
+  switch (provider) {
+    case "RUNWAY":
+    case "VEO":
+      return provider;
+
+    default:
+      throw new Error(
+        `Single-shot execution blocked: ${shotId} has no supported paid execution provider.`,
+      );
+  }
+}
+
+export async function executeSingleShot(
+  request:
+    SingleShotExecutionRequest,
+
+  dependencies:
+    SingleShotExecutionDependencies,
+): Promise<SingleShotExecutionResult> {
+  const shot =
+    findSelectedShot(
+      request,
+    );
+
+  const readiness =
+    evaluateShotExecutionReadiness(
+      request.episode,
+      shot,
+      request.bible,
+      request.rules,
+      request.policy,
+    );
+
+  if (
+    readiness.disposition !==
+    "EXECUTABLE"
+  ) {
+    const blockerDetail =
+      readiness.blockers.length >
+      0
+        ? ` Blockers: ${readiness.blockers.join(" | ")}`
+        : "";
+
+    throw new Error(
+      `Single-shot execution blocked: ${shot.id} readiness is ${readiness.disposition}.${blockerDetail}`,
+    );
+  }
+
+  const provider =
+    requirePaidProvider(
+      readiness.executionProvider,
+      shot.id,
+    );
+
+  if (
+    !request.confirmPaidGeneration
+  ) {
+    throw new Error(
+      "Paid-generation confirmation is required before creating an execution reservation.",
+    );
+  }
+
+  const reservation =
+    await dependencies
+      .createReservation(
+        request.mediaRoot,
+        {
+          episodeId:
+            request.episode
+              .episodeId,
+
+          shotId:
+            shot.id,
+
+          provider,
+        },
+      );
+
+  const providerInput:
+    SingleShotProviderExecutionInput =
+    Object.freeze({
+      episode:
+        request.episode,
+
+      shot,
+
+      readiness,
+
+      mediaRoot:
+        request.mediaRoot,
+
+      sourceImagePath:
+        request.sourceImagePath,
+
+      reservation,
+    });
+
+  let providerExecution;
+
+  switch (provider) {
+    case "RUNWAY":
+      providerExecution =
+        await dependencies
+          .executeRunway(
+            providerInput,
+          );
+      break;
+
+    case "VEO":
+      providerExecution =
+        await dependencies
+          .executeVeo(
+            providerInput,
+          );
+      break;
+  }
+
+  return Object.freeze({
+    provider,
+    readiness,
+    reservation,
+    providerExecution,
+  });
+}

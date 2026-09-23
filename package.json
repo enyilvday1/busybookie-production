@@ -15,7 +15,8 @@
     "validate:runtime": "tsx src/validation/validateRuntime.ts",
     "runway:gen45": "tsx scripts/runway-gen45.ts",
     "veo:generate": "tsx scripts/veo.ts",
-    "routing:report": "tsx scripts/routing-report.ts"
+    "routing:report": "tsx scripts/routing-report.ts",
+    "execution:plan": "tsx scripts/execution-plan.ts"
   },
   "keywords": [],
   "author": "",

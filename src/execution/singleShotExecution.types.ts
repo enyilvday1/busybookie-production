@@ -20,17 +20,40 @@ import type {
 } from "../planning/executionReadiness.types.js";
 
 import type {
+  CreateExecutionCompletionResult,
+} from "./createExecutionCompletion.js";
+
+import type {
   CreateExecutionReservationResult,
 } from "./createExecutionReservation.js";
+
+import type {
+  CreateExecutionSubmissionResult,
+} from "./createExecutionSubmission.js";
+
+import type {
+  ExecutionCompletionInput,
+} from "./executionCompletion.schema.js";
 
 import type {
   ExecutionReservationInput,
 } from "./executionReservation.schema.js";
 
+import type {
+  ExecutionSubmissionInput,
+} from "./executionSubmission.schema.js";
+
 export type PaidExecutionProvider =
   ExecutionReservationInput[
     "provider"
   ];
+
+export type SingleShotSubmissionAcceptedHandler =
+  (
+    providerExecutionId:
+      string,
+  ) =>
+    Promise<void>;
 
 export type SingleShotExecutionRequest =
   Readonly<{
@@ -61,6 +84,9 @@ export type SingleShotProviderExecutionInput =
 
     reservation:
       CreateExecutionReservationResult;
+
+    onSubmissionAccepted:
+      SingleShotSubmissionAcceptedHandler;
   }>;
 
 export type SingleShotProviderExecutionResult =
@@ -82,6 +108,26 @@ export type ExecutionReservationCreator =
       CreateExecutionReservationResult
     >;
 
+export type ExecutionSubmissionCreator =
+  (
+    mediaRoot: string,
+    input:
+      ExecutionSubmissionInput,
+  ) =>
+    Promise<
+      CreateExecutionSubmissionResult
+    >;
+
+export type ExecutionCompletionCreator =
+  (
+    mediaRoot: string,
+    input:
+      ExecutionCompletionInput,
+  ) =>
+    Promise<
+      CreateExecutionCompletionResult
+    >;
+
 export type SingleShotProviderExecutor =
   (
     input:
@@ -95,6 +141,12 @@ export type SingleShotExecutionDependencies =
   Readonly<{
     createReservation:
       ExecutionReservationCreator;
+
+    createSubmission:
+      ExecutionSubmissionCreator;
+
+    createCompletion:
+      ExecutionCompletionCreator;
 
     executeRunway:
       SingleShotProviderExecutor;
@@ -114,6 +166,12 @@ export type SingleShotExecutionResult =
     reservation:
       CreateExecutionReservationResult;
 
+    submission:
+      CreateExecutionSubmissionResult;
+
     providerExecution:
       SingleShotProviderExecutionResult;
+
+    completion:
+      CreateExecutionCompletionResult;
   }>;

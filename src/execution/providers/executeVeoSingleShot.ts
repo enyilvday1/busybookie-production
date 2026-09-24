@@ -9,6 +9,7 @@ import type {
 import type {
   SingleShotProviderExecutionInput,
   SingleShotProviderExecutionResult,
+  SingleShotSubmissionAcceptedHandler,
 } from "../singleShotExecution.types.js";
 
 import {
@@ -52,6 +53,9 @@ export type VeoSingleShotTransactionRunner =
   (
     input:
       VeoSingleShotTransactionInput,
+
+    onSubmissionAccepted:
+      SingleShotSubmissionAcceptedHandler,
   ) =>
     Promise<
       VeoSingleShotTransactionResult
@@ -183,7 +187,9 @@ export async function executeVeoSingleShot(
 
         policy:
           dependencies.policy,
-      });
+      },
+      input.onSubmissionAccepted,
+    );
 
   return Object.freeze({
     providerExecutionId:

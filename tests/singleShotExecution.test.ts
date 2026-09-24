@@ -215,6 +215,121 @@ function makeDependencies(
       },
     );
 
+  const createSubmission =
+    vi.fn<
+      SingleShotExecutionDependencies[
+        "createSubmission"
+      ]
+    >(
+      async (
+        mediaRoot,
+        input,
+      ) => {
+        events.push(
+          "submission",
+        );
+
+        return {
+          record: {
+            schemaVersion:
+              "1.0",
+
+            submittedAt:
+              "2026-09-24T20:31:00.000Z",
+
+            status:
+              "SUBMITTED",
+
+            reservationId:
+              input.reservationId,
+
+            episodeId:
+              input.episodeId,
+
+            shotId:
+              input.shotId,
+
+            provider:
+              input.provider,
+
+            providerExecutionId:
+              input.providerExecutionId,
+          },
+
+          submissionPath:
+            join(
+              mediaRoot,
+              "generated-video",
+              input.episodeId,
+              input.shotId,
+              input.episodeId +
+                "_" +
+                input.shotId +
+                ".execution-submission.json",
+            ),
+        };
+      },
+    );
+
+  const createCompletion =
+    vi.fn<
+      SingleShotExecutionDependencies[
+        "createCompletion"
+      ]
+    >(
+      async (
+        mediaRoot,
+        input,
+      ) => {
+        events.push(
+          "completion",
+        );
+
+        return {
+          record: {
+            schemaVersion:
+              "1.0",
+
+            completedAt:
+              "2026-09-24T20:32:00.000Z",
+
+            status:
+              "COMPLETED",
+
+            reservationId:
+              input.reservationId,
+
+            episodeId:
+              input.episodeId,
+
+            shotId:
+              input.shotId,
+
+            provider:
+              input.provider,
+
+            providerExecutionId:
+              input.providerExecutionId,
+
+            generationRecordPath:
+              input.generationRecordPath,
+          },
+
+          completionPath:
+            join(
+              mediaRoot,
+              "generated-video",
+              input.episodeId,
+              input.shotId,
+              input.episodeId +
+                "_" +
+                input.shotId +
+                ".execution-completion.json",
+            ),
+        };
+      },
+    );
+
   const executeRunway =
     vi.fn(
       async (
@@ -226,6 +341,11 @@ function makeDependencies(
         events.push(
           "runway",
         );
+
+        await input
+          .onSubmissionAccepted(
+            "mock-runway-task-1",
+          );
 
         return {
           providerExecutionId:
@@ -251,6 +371,11 @@ function makeDependencies(
           "veo",
         );
 
+        await input
+          .onSubmissionAccepted(
+            "operations/mock-veo-1",
+          );
+
         return {
           providerExecutionId:
             "operations/mock-veo-1",
@@ -265,6 +390,8 @@ function makeDependencies(
 
   const dependencies = {
     createReservation,
+    createSubmission,
+    createCompletion,
     executeRunway,
     executeVeo,
   } satisfies
@@ -315,6 +442,8 @@ describe(
         expect(events).toEqual([
           "reservation",
           "runway",
+          "submission",
+          "completion",
         ]);
 
         expect(
@@ -405,6 +534,8 @@ describe(
         expect(events).toEqual([
           "reservation",
           "veo",
+          "submission",
+          "completion",
         ]);
 
         expect(
@@ -843,6 +974,20 @@ describe(
                 root,
                 input,
               ),
+
+          createSubmission:
+            async () => {
+              throw new Error(
+                "Submission persistence must not run after provider failure.",
+              );
+            },
+
+          createCompletion:
+            async () => {
+              throw new Error(
+                "Completion persistence must not run after provider failure.",
+              );
+            },
 
           executeRunway,
           executeVeo,

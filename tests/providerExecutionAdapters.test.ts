@@ -184,6 +184,12 @@ async function makeProviderInput(
         shot.id,
         readiness.executionProvider,
       ),
+
+    onSubmissionAccepted:
+      vi.fn(
+        async () =>
+          undefined,
+      ),
   };
 }
 
@@ -211,7 +217,21 @@ describe(
 
         const runTransaction =
           vi.fn(
-            async () => ({
+            async (
+              _transactionInput:
+                Parameters<
+                  RunwaySingleShotAdapterDependencies[
+                    "runTransaction"
+                  ]
+                >[0],
+
+              _onSubmissionAccepted:
+                Parameters<
+                  RunwaySingleShotAdapterDependencies[
+                    "runTransaction"
+                  ]
+                >[1],
+            ) => ({
               record: {
                 taskId:
                   "runway-task-123",
@@ -251,8 +271,9 @@ describe(
         );
 
         expect(
-          runTransaction,
-        ).toHaveBeenCalledWith({
+          runTransaction
+            .mock.calls[0]?.[0],
+        ).toEqual({
           episodeId:
             "EP90",
 
@@ -308,7 +329,21 @@ describe(
 
         const runTransaction =
           vi.fn(
-            async () => ({
+            async (
+              _transactionInput:
+                Parameters<
+                  VeoSingleShotAdapterDependencies[
+                    "runTransaction"
+                  ]
+                >[0],
+
+              _onSubmissionAccepted:
+                Parameters<
+                  VeoSingleShotAdapterDependencies[
+                    "runTransaction"
+                  ]
+                >[1],
+            ) => ({
               record: {
                 operationName:
                   "operations/veo-123",
@@ -348,8 +383,9 @@ describe(
         );
 
         expect(
-          runTransaction,
-        ).toHaveBeenCalledWith({
+          runTransaction
+            .mock.calls[0]?.[0],
+        ).toEqual({
           episodeId:
             "EP91",
 

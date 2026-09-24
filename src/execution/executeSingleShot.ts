@@ -123,6 +123,74 @@ export async function executeSingleShot(
         },
       );
 
+  let submission:
+    Awaited<
+      ReturnType<
+        SingleShotExecutionDependencies[
+          "createSubmission"
+        ]
+      >
+    > | null =
+    null;
+
+  let acceptedProviderExecutionId:
+    string | null =
+    null;
+
+  let submissionAttempted =
+    false;
+
+  const onSubmissionAccepted =
+    async (
+      providerExecutionId:
+        string,
+    ): Promise<void> => {
+      if (submissionAttempted) {
+        throw new Error(
+          `Provider submission acceptance was reported more than once for ${request.episode.episodeId}/${shot.id}.`,
+        );
+      }
+
+      submissionAttempted =
+        true;
+
+      const normalizedProviderExecutionId =
+        providerExecutionId
+          .trim();
+
+      if (!normalizedProviderExecutionId) {
+        throw new Error(
+          `Provider submission acceptance returned an empty execution ID for ${request.episode.episodeId}/${shot.id}.`,
+        );
+      }
+
+      acceptedProviderExecutionId =
+        normalizedProviderExecutionId;
+
+      submission =
+        await dependencies
+          .createSubmission(
+            request.mediaRoot,
+            {
+              reservationId:
+                reservation.record
+                  .reservationId,
+
+              episodeId:
+                request.episode
+                  .episodeId,
+
+              shotId:
+                shot.id,
+
+              provider,
+
+              providerExecutionId:
+                normalizedProviderExecutionId,
+            },
+          );
+    };
+
   const providerInput:
     SingleShotProviderExecutionInput =
     Object.freeze({
@@ -140,6 +208,8 @@ export async function executeSingleShot(
         request.sourceImagePath,
 
       reservation,
+
+      onSubmissionAccepted,
     });
 
   let providerExecution;
@@ -162,10 +232,77 @@ export async function executeSingleShot(
       break;
   }
 
+  if (
+    !submission ||
+    !acceptedProviderExecutionId
+  ) {
+    throw new Error(
+      `Provider execution for ${request.episode.episodeId}/${shot.id} completed without durable submission acceptance.`,
+    );
+  }
+
+  const returnedProviderExecutionId =
+    providerExecution
+      .providerExecutionId
+      .trim();
+
+  if (!returnedProviderExecutionId) {
+    throw new Error(
+      `Provider execution for ${request.episode.episodeId}/${shot.id} returned an empty execution ID.`,
+    );
+  }
+
+  if (
+    returnedProviderExecutionId !==
+    acceptedProviderExecutionId
+  ) {
+    throw new Error(
+      `Provider execution ID ${returnedProviderExecutionId} does not match accepted submission ID ${acceptedProviderExecutionId} for ${request.episode.episodeId}/${shot.id}.`,
+    );
+  }
+
+  const generationRecordPath =
+    providerExecution
+      .recordPath
+      .trim();
+
+  if (!generationRecordPath) {
+    throw new Error(
+      `Provider execution for ${request.episode.episodeId}/${shot.id} returned an empty generation record path.`,
+    );
+  }
+
+  const completion =
+    await dependencies
+      .createCompletion(
+        request.mediaRoot,
+        {
+          reservationId:
+            reservation.record
+              .reservationId,
+
+          episodeId:
+            request.episode
+              .episodeId,
+
+          shotId:
+            shot.id,
+
+          provider,
+
+          providerExecutionId:
+            returnedProviderExecutionId,
+
+          generationRecordPath,
+        },
+      );
+
   return Object.freeze({
     provider,
     readiness,
     reservation,
+    submission,
     providerExecution,
+    completion,
   });
 }

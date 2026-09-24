@@ -34,6 +34,13 @@ export type VeoExecutionClient =
       }>;
   }>;
 
+export type VeoSubmissionAcceptedHandler =
+  (
+    operationName:
+      string,
+  ) =>
+    Promise<void>;
+
 export type VeoExecutionOptions =
   Readonly<{
     pollIntervalMs:
@@ -41,6 +48,9 @@ export type VeoExecutionOptions =
 
     timeoutMs:
       number;
+
+    onSubmissionAccepted:
+      VeoSubmissionAcceptedHandler;
 
     sleep?:
       (
@@ -271,6 +281,21 @@ export async function executeVeoGeneration(
     requireOperationName(
       operation,
     );
+
+  try {
+    await options
+      .onSubmissionAccepted(
+        operationName,
+      );
+  } catch (error) {
+    throw new Error(
+      `Veo accepted paid operation ${operationName}, but Busybookie could not durably record the submission. Do not resubmit automatically.`,
+      {
+        cause:
+          error,
+      },
+    );
+  }
 
   const startedAt =
     nowMs();

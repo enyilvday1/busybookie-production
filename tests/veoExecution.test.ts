@@ -104,6 +104,9 @@ describe(
 
               timeoutMs:
                 60_000,
+
+              onSubmissionAccepted:
+                async () => {},
             },
           );
 
@@ -195,6 +198,9 @@ describe(
             timeoutMs:
               60_000,
 
+            onSubmissionAccepted:
+              async () => {},
+
             nowMs:
               () =>
                 now,
@@ -260,6 +266,9 @@ describe(
 
               timeoutMs:
                 60_000,
+
+              onSubmissionAccepted:
+                async () => {},
             },
           ),
         ).rejects.toThrow(
@@ -314,6 +323,9 @@ describe(
 
               timeoutMs:
                 20_000,
+
+              onSubmissionAccepted:
+                async () => {},
 
               nowMs:
                 () =>

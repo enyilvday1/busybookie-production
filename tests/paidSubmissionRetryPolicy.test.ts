@@ -251,6 +251,9 @@ describe(
             timeoutMs:
               60_000,
 
+            onSubmissionAccepted:
+              async () => {},
+
             sleep:
               async () => {},
           },

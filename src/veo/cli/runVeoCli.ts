@@ -5,6 +5,14 @@ import {
 } from "node:path";
 
 import {
+  createExecutionReservation,
+} from "../../execution/createExecutionReservation.js";
+
+import {
+  createExecutionSubmission,
+} from "../../execution/createExecutionSubmission.js";
+
+import {
   loadCharacterBible,
 } from "../../validation/loadCharacterBible.js";
 
@@ -356,6 +364,21 @@ export async function runVeoCli(
       geminiApiKey,
     );
 
+  const reservation =
+    await createExecutionReservation(
+      mediaRoot,
+      {
+        episodeId:
+          episode.episodeId,
+
+        shotId:
+          shot.id,
+
+        provider:
+          "VEO",
+      },
+    );
+
   const result =
     await runVeoImageToVideoTransaction(
       {
@@ -441,7 +464,34 @@ export async function runVeoCli(
                 config:
                   request.config,
               },
-              executionOptions,
+              {
+                ...executionOptions,
+
+                onSubmissionAccepted:
+                  async (
+                    operationName,
+                  ) => {
+                    await createExecutionSubmission(
+                      mediaRoot,
+                      {
+                        reservationId:
+                          reservation.record.reservationId,
+
+                        episodeId:
+                          episode.episodeId,
+
+                        shotId:
+                          shot.id,
+
+                        provider:
+                          "VEO",
+
+                        providerExecutionId:
+                          operationName,
+                      },
+                    );
+                  },
+              },
             ),
 
         persistGeneratedVideo:

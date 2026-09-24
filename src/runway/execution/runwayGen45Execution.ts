@@ -109,6 +109,10 @@ export async function executeRunwayGen45(
   const task =
     client.imageToVideo.create(
       request,
+      {
+        maxRetries:
+          0,
+      },
     );
 
   const created =

@@ -241,10 +241,30 @@ export async function executeVeoGeneration(
     options.nowMs ??
     Date.now;
 
+  const submissionRequest:
+    GenerateVideosParameters = {
+      ...request,
+
+      config: {
+        ...(request.config ?? {}),
+
+        httpOptions: {
+          ...(request.config?.httpOptions ?? {}),
+
+          retryOptions: {
+            ...(request.config?.httpOptions?.retryOptions ?? {}),
+
+            attempts:
+              1,
+          },
+        },
+      },
+    };
+
   let operation =
     await client.models
       .generateVideos(
-        request,
+        submissionRequest,
       );
 
   const operationName =

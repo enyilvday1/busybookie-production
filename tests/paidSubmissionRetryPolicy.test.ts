@@ -119,7 +119,13 @@ describe(
         await executeRunwayGen45(
           client,
           request,
-          600_000,
+          {
+            waitTimeoutMs:
+              600_000,
+
+            onSubmissionAccepted:
+              async () => {},
+          },
         );
 
         expect(

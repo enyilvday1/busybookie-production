@@ -5,6 +5,14 @@ import {
 } from "node:path";
 
 import {
+  createExecutionReservation,
+} from "../../execution/createExecutionReservation.js";
+
+import {
+  createExecutionSubmission,
+} from "../../execution/createExecutionSubmission.js";
+
+import {
   writeRunwayGenerationRecord,
 } from "../audit/writeRunwayGenerationRecord.js";
 
@@ -329,6 +337,21 @@ export async function runRunwayGen45Cli(
         runwayApiSecret,
     });
 
+  const reservation =
+    await createExecutionReservation(
+      mediaRoot,
+      {
+        episodeId:
+          episode.episodeId,
+
+        shotId:
+          shot.id,
+
+        provider:
+          "RUNWAY",
+      },
+    );
+
   const result =
     await runRunwayGen45Transaction(
       {
@@ -369,7 +392,34 @@ export async function runRunwayGen45Cli(
             executeRunwayGen45(
               client,
               request,
-              waitTimeoutMs,
+              {
+                waitTimeoutMs,
+
+                onSubmissionAccepted:
+                  async (
+                    taskId,
+                  ) => {
+                    await createExecutionSubmission(
+                      mediaRoot,
+                      {
+                        reservationId:
+                          reservation.record.reservationId,
+
+                        episodeId:
+                          episode.episodeId,
+
+                        shotId:
+                          shot.id,
+
+                        provider:
+                          "RUNWAY",
+
+                        providerExecutionId:
+                          taskId,
+                      },
+                    );
+                  },
+              },
             ),
 
         downloadOutput:

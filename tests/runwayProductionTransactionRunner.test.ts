@@ -14,7 +14,7 @@ describe(
   "Busybookie Runway production transaction runner",
   () => {
     it(
-      "forwards the orchestrator submission-acceptance handler into the low-level Runway executor",
+      "translates low-level Runway submission acceptance into the generic provider acceptance contract",
       async () => {
         const client =
           Object.freeze({
@@ -27,15 +27,10 @@ describe(
         const onSubmissionAccepted =
           vi.fn(
             async (
-              providerExecutionId:
-                string,
-            ) => {
-              expect(
-                providerExecutionId,
-              ).toBe(
-                "runway-production-task-1",
-              );
-            },
+              _acceptance:
+                unknown,
+            ) =>
+              undefined,
           );
 
         const executeGeneration =
@@ -55,16 +50,15 @@ describe(
                 client,
               );
 
-              expect(
-                options
-                  .onSubmissionAccepted,
-              ).toBe(
-                onSubmissionAccepted,
-              );
-
               await options
                 .onSubmissionAccepted(
-                  "runway-production-task-1",
+                  {
+                    taskId:
+                      "runway-production-task-1",
+
+                    providerEstimatedCredits:
+                      1,
+                  },
                 );
 
               return {
@@ -165,6 +159,19 @@ describe(
         ).toHaveBeenCalledTimes(
           1,
         );
+
+        expect(
+          onSubmissionAccepted,
+        ).toHaveBeenCalledWith({
+          provider:
+            "RUNWAY",
+
+          providerExecutionId:
+            "runway-production-task-1",
+
+          providerEstimatedCredits:
+            1,
+        });
 
         expect(
           executeGeneration,

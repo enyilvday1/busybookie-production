@@ -144,6 +144,9 @@ async function prepareSubmission(
 
         providerExecutionId:
           "task-runway-inspection-123",
+
+        providerEstimatedCredits:
+          60,
       },
       submissionDependencies,
     );

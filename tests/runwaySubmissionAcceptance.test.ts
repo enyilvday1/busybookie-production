@@ -10,6 +10,7 @@ import {
 import {
   executeRunwayGen45,
   type RunwayCreatedGeneration,
+  type RunwaySubmissionAcceptance,
   type RunwaySucceededGeneration,
 } from "../src/runway/execution/runwayGen45Execution.js";
 
@@ -86,17 +87,17 @@ describe(
         const onSubmissionAccepted =
           vi.fn(
             async (
-              taskId:
-                string,
+              acceptance:
+                RunwaySubmissionAcceptance,
             ) => {
               events.push(
-                `accepted-start:${taskId}`,
+                `accepted-start:${acceptance.taskId}`,
               );
 
               await Promise.resolve();
 
               events.push(
-                `accepted-end:${taskId}`,
+                `accepted-end:${acceptance.taskId}`,
               );
             },
           );
@@ -155,9 +156,13 @@ describe(
 
         expect(
           onSubmissionAccepted,
-        ).toHaveBeenCalledWith(
-          "task-accepted-123",
-        );
+        ).toHaveBeenCalledWith({
+          taskId:
+            "task-accepted-123",
+
+          providerEstimatedCredits:
+            60,
+        });
 
         expect(
           events,
@@ -244,9 +249,13 @@ describe(
 
         expect(
           onSubmissionAccepted,
-        ).toHaveBeenCalledWith(
-          "task-receipt-failure",
-        );
+        ).toHaveBeenCalledWith({
+          taskId:
+            "task-receipt-failure",
+
+          providerEstimatedCredits:
+            60,
+        });
 
         expect(
           waitForTaskOutput,

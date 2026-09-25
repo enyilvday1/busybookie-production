@@ -48,10 +48,29 @@ export type PaidExecutionProvider =
     "provider"
   ];
 
+export type SingleShotSubmissionAcceptance =
+  | Readonly<{
+      provider:
+        "RUNWAY";
+
+      providerExecutionId:
+        string;
+
+      providerEstimatedCredits:
+        number;
+    }>
+  | Readonly<{
+      provider:
+        "VEO";
+
+      providerExecutionId:
+        string;
+    }>;
+
 export type SingleShotSubmissionAcceptedHandler =
   (
-    providerExecutionId:
-      string,
+    acceptance:
+      SingleShotSubmissionAcceptance,
   ) =>
     Promise<void>;
 

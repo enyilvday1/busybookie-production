@@ -124,7 +124,17 @@ export function createVeoSingleShotProductionTransactionRunner(
                   {
                     ...executionOptions,
 
-                    onSubmissionAccepted,
+                    onSubmissionAccepted:
+                      async (
+                        operationName,
+                      ) =>
+                        onSubmissionAccepted({
+                          provider:
+                            "VEO",
+
+                          providerExecutionId:
+                            operationName,
+                        }),
                   },
                 ),
 

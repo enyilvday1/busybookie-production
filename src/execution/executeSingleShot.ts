@@ -12,6 +12,7 @@ import type {
   SingleShotExecutionRequest,
   SingleShotExecutionResult,
   SingleShotProviderExecutionInput,
+  SingleShotSubmissionAcceptance,
 } from "./singleShotExecution.types.js";
 
 function findSelectedShot(
@@ -142,8 +143,8 @@ export async function executeSingleShot(
 
   const onSubmissionAccepted =
     async (
-      providerExecutionId:
-        string,
+      acceptance:
+        SingleShotSubmissionAcceptance,
     ): Promise<void> => {
       if (submissionAttempted) {
         throw new Error(
@@ -154,8 +155,18 @@ export async function executeSingleShot(
       submissionAttempted =
         true;
 
+      if (
+        acceptance.provider !==
+        provider
+      ) {
+        throw new Error(
+          `Provider submission acceptance reported ${acceptance.provider} for ${request.episode.episodeId}/${shot.id}, but the selected provider is ${provider}.`,
+        );
+      }
+
       const normalizedProviderExecutionId =
-        providerExecutionId
+        acceptance
+          .providerExecutionId
           .trim();
 
       if (!normalizedProviderExecutionId) {
@@ -168,27 +179,56 @@ export async function executeSingleShot(
         normalizedProviderExecutionId;
 
       submission =
-        await dependencies
-          .createSubmission(
-            request.mediaRoot,
-            {
-              reservationId:
-                reservation.record
-                  .reservationId,
+        acceptance.provider ===
+          "RUNWAY"
+          ? await dependencies
+              .createSubmission(
+                request.mediaRoot,
+                {
+                  reservationId:
+                    reservation.record
+                      .reservationId,
 
-              episodeId:
-                request.episode
-                  .episodeId,
+                  episodeId:
+                    request.episode
+                      .episodeId,
 
-              shotId:
-                shot.id,
+                  shotId:
+                    shot.id,
 
-              provider,
+                  provider:
+                    "RUNWAY",
 
-              providerExecutionId:
-                normalizedProviderExecutionId,
-            },
-          );
+                  providerExecutionId:
+                    normalizedProviderExecutionId,
+
+                  providerEstimatedCredits:
+                    acceptance
+                      .providerEstimatedCredits,
+                },
+              )
+          : await dependencies
+              .createSubmission(
+                request.mediaRoot,
+                {
+                  reservationId:
+                    reservation.record
+                      .reservationId,
+
+                  episodeId:
+                    request.episode
+                      .episodeId,
+
+                  shotId:
+                    shot.id,
+
+                  provider:
+                    "VEO",
+
+                  providerExecutionId:
+                    normalizedProviderExecutionId,
+                },
+              );
     };
 
   const providerInput:

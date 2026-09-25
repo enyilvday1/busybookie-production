@@ -165,6 +165,9 @@ describe(
 
               providerExecutionId:
                 "task-runway-123",
+
+              providerEstimatedCredits:
+                60,
             },
             submissionDependencies,
           );
@@ -173,7 +176,7 @@ describe(
           result.record,
         ).toEqual({
           schemaVersion:
-            "1.0",
+            "1.1",
 
           submittedAt:
             "2026-09-24T12:01:00.000Z",
@@ -195,6 +198,9 @@ describe(
 
           providerExecutionId:
             "task-runway-123",
+
+          providerEstimatedCredits:
+            60,
         });
 
         const stored =
@@ -307,6 +313,9 @@ describe(
 
               providerExecutionId:
                 "task-without-reservation",
+
+              providerEstimatedCredits:
+                60,
             },
             submissionDependencies,
           ),
@@ -355,6 +364,9 @@ describe(
 
               providerExecutionId:
                 "task-wrong-reservation",
+
+              providerEstimatedCredits:
+                60,
             },
             submissionDependencies,
           ),
@@ -455,6 +467,9 @@ describe(
 
               providerExecutionId:
                 "   ",
+
+              providerEstimatedCredits:
+                60,
             },
             submissionDependencies,
           ),
@@ -500,6 +515,9 @@ describe(
 
           providerExecutionId:
             "task-once-only",
+
+          providerEstimatedCredits:
+            60,
         };
 
         await createExecutionSubmission(
@@ -558,6 +576,9 @@ describe(
 
           providerExecutionId:
             "task-race",
+
+          providerEstimatedCredits:
+            60,
         };
 
         const attempts =
@@ -716,6 +737,9 @@ describe(
 
               providerExecutionId:
                 "task-after-damage",
+
+              providerEstimatedCredits:
+                60,
             },
             submissionDependencies,
           ),

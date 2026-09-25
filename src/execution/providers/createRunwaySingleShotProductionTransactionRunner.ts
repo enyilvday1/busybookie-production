@@ -115,7 +115,20 @@ export function createRunwaySingleShotProductionTransactionRunner(
                   {
                     waitTimeoutMs,
 
-                    onSubmissionAccepted,
+                    onSubmissionAccepted:
+                      async (
+                        acceptance,
+                      ) =>
+                        onSubmissionAccepted({
+                          provider:
+                            "RUNWAY",
+
+                          providerExecutionId:
+                            acceptance.taskId,
+
+                          providerEstimatedCredits:
+                            acceptance.providerEstimatedCredits,
+                        }),
                   },
                 ),
 

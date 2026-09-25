@@ -397,7 +397,7 @@ export async function runRunwayGen45Cli(
 
                 onSubmissionAccepted:
                   async (
-                    taskId,
+                    acceptance,
                   ) => {
                     await createExecutionSubmission(
                       mediaRoot,
@@ -415,7 +415,10 @@ export async function runRunwayGen45Cli(
                           "RUNWAY",
 
                         providerExecutionId:
-                          taskId,
+                          acceptance.taskId,
+
+                        providerEstimatedCredits:
+                          acceptance.providerEstimatedCredits,
                       },
                     );
                   },

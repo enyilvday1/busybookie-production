@@ -343,9 +343,16 @@ function makeDependencies(
         );
 
         await input
-          .onSubmissionAccepted(
-            "mock-runway-task-1",
-          );
+          .onSubmissionAccepted({
+            provider:
+              "RUNWAY",
+
+            providerExecutionId:
+              "mock-runway-task-1",
+
+            providerEstimatedCredits:
+              60,
+          });
 
         return {
           providerExecutionId:
@@ -372,9 +379,13 @@ function makeDependencies(
         );
 
         await input
-          .onSubmissionAccepted(
-            "operations/mock-veo-1",
-          );
+          .onSubmissionAccepted({
+            provider:
+              "VEO",
+
+            providerExecutionId:
+              "operations/mock-veo-1",
+          });
 
         return {
           providerExecutionId:

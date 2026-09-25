@@ -277,9 +277,16 @@ describe(
                 );
               }
 
-              await acceptanceHook(
-                "mock-runway-task-1",
-              );
+              await acceptanceHook({
+                provider:
+                  "RUNWAY",
+
+                providerExecutionId:
+                  "mock-runway-task-1",
+
+                providerEstimatedCredits:
+                  60,
+              });
 
               events.push(
                 "provider-complete",
@@ -386,6 +393,9 @@ describe(
 
             providerExecutionId:
               "mock-runway-task-1",
+
+            providerEstimatedCredits:
+              60,
           },
         );
 
@@ -656,9 +666,15 @@ function makeLifecycleFailureDependencies(
         );
 
         await input
-          .onSubmissionAccepted(
+          .onSubmissionAccepted({
+            provider:
+              "RUNWAY",
+
             providerExecutionId,
-          );
+
+            providerEstimatedCredits:
+              60,
+          });
 
         events.push(
           "provider-complete",

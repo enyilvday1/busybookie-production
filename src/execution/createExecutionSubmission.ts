@@ -106,34 +106,68 @@ export async function createExecutionSubmission(
       new Date()
         .toISOString());
 
+  const submittedAt =
+    now();
+
   const record =
-    ExecutionSubmissionSchema
-      .parse({
-        schemaVersion:
-          "1.0",
+    validatedInput.provider ===
+      "RUNWAY"
+      ? ExecutionSubmissionSchema
+          .parse({
+            schemaVersion:
+              "1.1",
 
-        submittedAt:
-          now(),
+            submittedAt,
 
-        status:
-          "SUBMITTED",
+            status:
+              "SUBMITTED",
 
-        reservationId:
-          reservation.reservationId,
+            reservationId:
+              reservation.reservationId,
 
-        episodeId:
-          reservation.episodeId,
+            episodeId:
+              reservation.episodeId,
 
-        shotId:
-          reservation.shotId,
+            shotId:
+              reservation.shotId,
 
-        provider:
-          reservation.provider,
+            provider:
+              "RUNWAY",
 
-        providerExecutionId:
-          validatedInput
-            .providerExecutionId,
-      });
+            providerExecutionId:
+              validatedInput
+                .providerExecutionId,
+
+            providerEstimatedCredits:
+              validatedInput
+                .providerEstimatedCredits,
+          })
+      : ExecutionSubmissionSchema
+          .parse({
+            schemaVersion:
+              "1.0",
+
+            submittedAt,
+
+            status:
+              "SUBMITTED",
+
+            reservationId:
+              reservation.reservationId,
+
+            episodeId:
+              reservation.episodeId,
+
+            shotId:
+              reservation.shotId,
+
+            provider:
+              "VEO",
+
+            providerExecutionId:
+              validatedInput
+                .providerExecutionId,
+          });
 
   const submissionPath =
     createExecutionSubmissionPath(

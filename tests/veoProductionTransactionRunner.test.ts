@@ -14,7 +14,7 @@ describe(
   "Busybookie Veo production transaction runner",
   () => {
     it(
-      "forwards the orchestrator submission-acceptance handler into the low-level Veo executor",
+      "translates low-level Veo operation acceptance into the generic provider acceptance contract",
       async () => {
         const client =
           Object.freeze({
@@ -27,15 +27,10 @@ describe(
         const onSubmissionAccepted =
           vi.fn(
             async (
-              providerExecutionId:
-                string,
-            ) => {
-              expect(
-                providerExecutionId,
-              ).toBe(
-                "operations/veo-production-1",
-              );
-            },
+              _acceptance:
+                unknown,
+            ) =>
+              undefined,
           );
 
         const executeGeneration =
@@ -53,13 +48,6 @@ describe(
                 receivedClient,
               ).toBe(
                 client,
-              );
-
-              expect(
-                options
-                  .onSubmissionAccepted,
-              ).toBe(
-                onSubmissionAccepted,
               );
 
               await options
@@ -196,6 +184,16 @@ describe(
         ).toHaveBeenCalledTimes(
           1,
         );
+
+        expect(
+          onSubmissionAccepted,
+        ).toHaveBeenCalledWith({
+          provider:
+            "VEO",
+
+          providerExecutionId:
+            "operations/veo-production-1",
+        });
 
         expect(
           executeGeneration,

@@ -45,10 +45,19 @@ export type RunwayGen45ExecutionResult =
       readonly string[];
   }>;
 
+export type RunwaySubmissionAcceptance =
+  Readonly<{
+    taskId:
+      string;
+
+    providerEstimatedCredits:
+      number;
+  }>;
+
 export type RunwaySubmissionAcceptedHandler =
   (
-    taskId:
-      string,
+    acceptance:
+      RunwaySubmissionAcceptance,
   ) =>
     Promise<void>;
 
@@ -197,9 +206,14 @@ export async function executeRunwayGen45(
 
   try {
     await options
-      .onSubmissionAccepted(
+      .onSubmissionAccepted({
         taskId,
-      );
+
+        providerEstimatedCredits:
+          created
+            .estimatedCost
+            .credits,
+      });
   } catch (error) {
     throw new Error(
       `Runway accepted paid task ${taskId}, but Busybookie could not durably record the submission. Do not resubmit automatically.`,

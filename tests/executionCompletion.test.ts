@@ -144,6 +144,9 @@ async function prepareRunwaySubmission(
 
         providerExecutionId:
           "task-completion-123",
+
+        providerEstimatedCredits:
+          60,
       },
       submissionDependencies,
     );

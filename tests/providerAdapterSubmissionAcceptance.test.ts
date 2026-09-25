@@ -207,13 +207,14 @@ describe(
           string[] = [];
 
         const onSubmissionAccepted =
-          vi.fn(
+          vi.fn<
+            SingleShotSubmissionAcceptedHandler
+          >(
             async (
-              providerExecutionId:
-                string,
+              acceptance,
             ) => {
               events.push(
-                `accepted:${providerExecutionId}`,
+                `accepted:${acceptance.providerExecutionId}`,
               );
             },
           );
@@ -241,9 +242,16 @@ describe(
                 "transaction-start",
               );
 
-              await acceptanceHandler(
-                "runway-task-accept-1",
-              );
+              await acceptanceHandler({
+                provider:
+                  "RUNWAY",
+
+                providerExecutionId:
+                  "runway-task-accept-1",
+
+                providerEstimatedCredits:
+                  1,
+              });
 
               events.push(
                 "transaction-after-acceptance",
@@ -300,9 +308,16 @@ describe(
 
         expect(
           onSubmissionAccepted,
-        ).toHaveBeenCalledWith(
-          "runway-task-accept-1",
-        );
+        ).toHaveBeenCalledWith({
+          provider:
+            "RUNWAY",
+
+          providerExecutionId:
+            "runway-task-accept-1",
+
+          providerEstimatedCredits:
+            1,
+        });
 
         expect(
           runTransaction
@@ -327,13 +342,14 @@ describe(
           string[] = [];
 
         const onSubmissionAccepted =
-          vi.fn(
+          vi.fn<
+            SingleShotSubmissionAcceptedHandler
+          >(
             async (
-              providerExecutionId:
-                string,
+              acceptance,
             ) => {
               events.push(
-                `accepted:${providerExecutionId}`,
+                `accepted:${acceptance.providerExecutionId}`,
               );
             },
           );
@@ -361,9 +377,13 @@ describe(
                 "transaction-start",
               );
 
-              await acceptanceHandler(
-                "operations/veo-accept-1",
-              );
+              await acceptanceHandler({
+                provider:
+                  "VEO",
+
+                providerExecutionId:
+                  "operations/veo-accept-1",
+              });
 
               events.push(
                 "transaction-after-acceptance",
@@ -420,9 +440,13 @@ describe(
 
         expect(
           onSubmissionAccepted,
-        ).toHaveBeenCalledWith(
-          "operations/veo-accept-1",
-        );
+        ).toHaveBeenCalledWith({
+          provider:
+            "VEO",
+
+          providerExecutionId:
+            "operations/veo-accept-1",
+        });
 
         expect(
           runTransaction

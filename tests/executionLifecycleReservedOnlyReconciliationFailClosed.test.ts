@@ -86,7 +86,7 @@ describe(
             },
           ),
         ).rejects.toThrow(
-          /currently requires SUBMITTED state; received RESERVED_ONLY/i,
+          /currently requires SUBMITTED or COMPLETED state; received RESERVED_ONLY/i,
         );
 
         expect(

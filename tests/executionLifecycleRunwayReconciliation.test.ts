@@ -485,6 +485,9 @@ describe(
           lifecycleState:
             "COMPLETED",
 
+          reconciliationMode:
+            "RECOVERED_SUBMISSION",
+
           provider:
             "RUNWAY",
 

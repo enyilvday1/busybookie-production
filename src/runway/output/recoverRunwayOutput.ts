@@ -23,7 +23,7 @@ import {
   type RunwayFetch,
 } from "./downloadRunwayOutput.js";
 
-type InspectedRunwayOutput =
+export type InspectedRunwayOutput =
   Readonly<{
     bytes:
       number;
@@ -166,6 +166,25 @@ async function inspectAndHashExistingRunwayOutput(
         "hex",
       ),
   });
+}
+
+export async function inspectRunwayOutput(
+  filePath:
+    string,
+
+  maxBytes:
+    number =
+      RUNWAY_MAX_OUTPUT_BYTES,
+): Promise<InspectedRunwayOutput> {
+  validateRecoveryArguments(
+    filePath,
+    maxBytes,
+  );
+
+  return inspectAndHashExistingRunwayOutput(
+    filePath,
+    maxBytes,
+  );
 }
 
 async function destinationExists(

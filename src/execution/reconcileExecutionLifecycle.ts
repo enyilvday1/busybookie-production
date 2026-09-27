@@ -1,10 +1,18 @@
 import {
+  isDeepStrictEqual,
+} from "node:util";
+
+import {
   inspectExecutionLifecycle,
 } from "./inspectExecutionLifecycle.js";
 
 import {
   recoverExecutionCompletion,
 } from "./recoverExecutionCompletion.js";
+
+import {
+  createExecutionCompletionPath,
+} from "./executionCompletionPath.js";
 
 import type {
   ExecutionCompletion,
@@ -13,6 +21,14 @@ import type {
 import {
   recoverRunwayGenerationRecord,
 } from "../runway/audit/recoverRunwayGenerationRecord.js";
+
+import {
+  readRunwayGenerationRecord,
+} from "../runway/audit/readRunwayGenerationRecord.js";
+
+import {
+  createRunwayGenerationRecordPathFromIdentity,
+} from "../runway/audit/writeRunwayGenerationRecord.js";
 
 import type {
   RunwayGenerationRecord,
@@ -23,6 +39,7 @@ import {
 } from "../runway/output/runwayOutputPath.js";
 
 import {
+  inspectRunwayOutput,
   recoverRunwayOutput,
 } from "../runway/output/recoverRunwayOutput.js";
 
@@ -66,8 +83,14 @@ export type ExecutionLifecycleReconciliationDependencies =
     recoverRunwayOutput?:
       typeof recoverRunwayOutput;
 
+    inspectRunwayOutput?:
+      typeof inspectRunwayOutput;
+
     recoverRunwayGenerationRecord?:
       typeof recoverRunwayGenerationRecord;
+
+    readRunwayGenerationRecord?:
+      typeof readRunwayGenerationRecord;
 
     recoverExecutionCompletion?:
       typeof recoverExecutionCompletion;
@@ -77,31 +100,59 @@ export type ExecutionLifecycleReconciliationDependencies =
   }>;
 
 export type ExecutionLifecycleReconciliationResult =
-  Readonly<{
-    lifecycleState:
-      "COMPLETED";
+  | Readonly<{
+      lifecycleState:
+        "COMPLETED";
 
-    provider:
-      "RUNWAY";
+      reconciliationMode:
+        "RECOVERED_SUBMISSION";
 
-    providerExecutionId:
-      string;
+      provider:
+        "RUNWAY";
 
-    providerExecution:
-      RunwayGen45ExecutionResult;
+      providerExecutionId:
+        string;
 
-    generationRecord:
-      RunwayGenerationRecord;
+      providerExecution:
+        RunwayGen45ExecutionResult;
 
-    generationRecordPath:
-      string;
+      generationRecord:
+        RunwayGenerationRecord;
 
-    completion:
-      ExecutionCompletion;
+      generationRecordPath:
+        string;
 
-    completionPath:
-      string;
-  }>;
+      completion:
+        ExecutionCompletion;
+
+      completionPath:
+        string;
+    }>
+  | Readonly<{
+      lifecycleState:
+        "COMPLETED";
+
+      reconciliationMode:
+        "DURABLE_COMPLETION";
+
+      provider:
+        "RUNWAY";
+
+      providerExecutionId:
+        string;
+
+      generationRecord:
+        RunwayGenerationRecord;
+
+      generationRecordPath:
+        string;
+
+      completion:
+        ExecutionCompletion;
+
+      completionPath:
+        string;
+    }>;
 
 export async function reconcileExecutionLifecycle(
   input:
@@ -119,11 +170,191 @@ export async function reconcileExecutionLifecycle(
       );
 
   if (
+    lifecycle.state ===
+    "COMPLETED"
+  ) {
+    const submission =
+      lifecycle.submission;
+
+    const completion =
+      lifecycle.completion;
+
+    if (
+      submission.provider !==
+      "RUNWAY"
+    ) {
+      throw new Error(
+        `Execution lifecycle reconciliation for completed provider ${submission.provider} is not implemented in this milestone.`,
+      );
+    }
+
+    if (
+      submission.schemaVersion !==
+      "1.2"
+    ) {
+      throw new Error(
+        `Completed Runway submission schema ${submission.schemaVersion} cannot be automatically reconciled because durable recovery metadata is unavailable.`,
+      );
+    }
+
+    const generationRecordPath =
+      createRunwayGenerationRecordPathFromIdentity(
+        input.mediaRoot,
+        submission.episodeId,
+        submission.shotId,
+        submission.providerExecutionId,
+      );
+
+    if (
+      completion.generationRecordPath !==
+      generationRecordPath
+    ) {
+      throw new Error(
+        "Execution completion generation record path does not match the canonical durable Runway generation record path.",
+      );
+    }
+
+    const readGenerationRecord =
+      dependencies
+        .readRunwayGenerationRecord ??
+      readRunwayGenerationRecord;
+
+    const generationRecord =
+      await readGenerationRecord(
+        input.mediaRoot,
+        submission.episodeId,
+        submission.shotId,
+        submission.providerExecutionId,
+      );
+
+    if (!generationRecord) {
+      throw new Error(
+        "Execution completion references a missing durable Runway generation record.",
+      );
+    }
+
+    const generationIdentityMatchesSubmission =
+      generationRecord.episodeId ===
+        submission.episodeId &&
+      generationRecord.shotId ===
+        submission.shotId &&
+      generationRecord.taskId ===
+        submission.providerExecutionId;
+
+    if (
+      !generationIdentityMatchesSubmission
+    ) {
+      throw new Error(
+        "Durable Runway generation record identity does not match completed submission identity.",
+      );
+    }
+
+    const generationEvidenceMatchesSubmission =
+      isDeepStrictEqual(
+        generationRecord.request,
+        submission
+          .recoveryMetadata
+          .request,
+      ) &&
+      generationRecord
+        .credits
+        .locallyExpected ===
+        submission
+          .recoveryMetadata
+          .locallyExpectedCredits &&
+      generationRecord
+        .credits
+        .providerEstimated ===
+        submission
+          .providerEstimatedCredits;
+
+    if (
+      !generationEvidenceMatchesSubmission
+    ) {
+      throw new Error(
+        "Durable Runway generation record does not match durable submission recovery metadata.",
+      );
+    }
+
+    const inspectLocalRunwayOutput =
+      dependencies
+        .inspectRunwayOutput ??
+      inspectRunwayOutput;
+
+    for (
+      const output
+      of generationRecord.outputs
+    ) {
+      const canonicalOutputPath =
+        createRunwayVideoOutputPath(
+          input.mediaRoot,
+          generationRecord.episodeId,
+          generationRecord.shotId,
+          generationRecord.taskId,
+          output.outputIndex,
+        );
+
+      if (
+        output.destinationPath !==
+        canonicalOutputPath
+      ) {
+        throw new Error(
+          "Durable Runway generation record output path does not match canonical output path.",
+        );
+      }
+
+      const inspectedOutput =
+        await inspectLocalRunwayOutput(
+          output.destinationPath,
+        );
+
+      if (
+        inspectedOutput.bytes !==
+          output.bytes ||
+        inspectedOutput.sha256 !==
+          output.sha256
+      ) {
+        throw new Error(
+          "Durable Runway local output does not match generation record evidence.",
+        );
+      }
+    }
+
+    return Object.freeze({
+      lifecycleState:
+        "COMPLETED",
+
+      reconciliationMode:
+        "DURABLE_COMPLETION",
+
+      provider:
+        "RUNWAY",
+
+      providerExecutionId:
+        submission
+          .providerExecutionId,
+
+      generationRecord,
+
+      generationRecordPath,
+
+      completion,
+
+      completionPath:
+        createExecutionCompletionPath(
+          input.mediaRoot,
+          completion.episodeId,
+          completion.shotId,
+        ),
+    });
+  }
+
+  if (
     lifecycle.state !==
     "SUBMITTED"
   ) {
     throw new Error(
-      `Execution lifecycle reconciliation currently requires SUBMITTED state; received ${lifecycle.state}.`,
+      `Execution lifecycle reconciliation currently requires SUBMITTED or COMPLETED state; received ${lifecycle.state}.`,
     );
   }
 
@@ -321,6 +552,9 @@ export async function reconcileExecutionLifecycle(
   return Object.freeze({
     lifecycleState:
       "COMPLETED",
+
+    reconciliationMode:
+      "RECOVERED_SUBMISSION",
 
     provider:
       "RUNWAY",

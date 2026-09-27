@@ -3,8 +3,11 @@ import type {
 } from "../../schemas/runwayPolicy.schema.js";
 
 import {
-  RunwayGenerationRecordSchema,
-  type RunwayGenerationRecord,
+  buildRunwayGenerationRecord,
+} from "../audit/buildRunwayGenerationRecord.js";
+
+import type {
+  RunwayGenerationRecord,
 } from "../audit/runwayGenerationRecord.schema.js";
 
 import type {
@@ -40,10 +43,39 @@ export type RunwayImageResolver =
     filePath: string,
   ) => Promise<ResolvedRunwayImageAsset>;
 
+export type RunwayGenerationRecoveryMetadata =
+  Readonly<{
+    request:
+      Readonly<{
+        durationSeconds:
+          Gen45Request["duration"];
+
+        ratio:
+          Gen45Request["ratio"];
+
+        outputFormat:
+          Gen45Request["outputFormat"];
+
+        promptText:
+          Gen45Request["promptText"];
+
+        sourceImagePath:
+          string;
+
+        assetStrategy:
+          ResolvedRunwayImageAsset["strategy"];
+      }>;
+
+    locallyExpectedCredits:
+      number;
+  }>;
+
 export type RunwayGenerationExecutor =
   (
     request: Gen45Request,
     waitTimeoutMs: number,
+    recoveryMetadata:
+      RunwayGenerationRecoveryMetadata,
   ) => Promise<RunwayGen45ExecutionResult>;
 
 export type RunwayOutputDownloader =
@@ -136,11 +168,39 @@ export async function runRunwayGen45Transaction(
         input.durationSeconds,
     });
 
+  const recoveryMetadata:
+    RunwayGenerationRecoveryMetadata =
+    Object.freeze({
+      request:
+        Object.freeze({
+          durationSeconds:
+            request.duration,
+
+          ratio:
+            request.ratio,
+
+          outputFormat:
+            request.outputFormat,
+
+          promptText:
+            request.promptText,
+
+          sourceImagePath:
+            resolvedAsset.sourcePath,
+
+          assetStrategy:
+            resolvedAsset.strategy,
+        }),
+
+      locallyExpectedCredits,
+    });
+
   const execution =
     await dependencies
       .executeGeneration(
         request,
         input.policy.task.waitTimeoutMs,
+        recoveryMetadata,
       );
 
   const outputs:
@@ -192,20 +252,8 @@ export async function runRunwayGen45Transaction(
       : new Date().toISOString();
 
   const record =
-    RunwayGenerationRecordSchema.parse({
-      schemaVersion:
-        "1.0",
-
+    buildRunwayGenerationRecord({
       recordedAt,
-
-      provider:
-        "RUNWAY",
-
-      model:
-        "gen4.5",
-
-      status:
-        "SUCCEEDED",
 
       episodeId:
         input.episodeId,

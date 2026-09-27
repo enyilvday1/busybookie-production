@@ -205,6 +205,10 @@ export async function executeSingleShot(
                   providerEstimatedCredits:
                     acceptance
                       .providerEstimatedCredits,
+
+                  recoveryMetadata:
+                    acceptance
+                      .recoveryMetadata,
                 },
               )
           : await dependencies

@@ -117,7 +117,7 @@ describe(
     );
 
     it(
-      "persists Runway acceptance-time estimated credits in submission schema version 1.1",
+      "persists Runway acceptance and recovery metadata in submission schema version 1.2",
       async () => {
         const mediaRoot =
           await makeTempDirectory();
@@ -158,6 +158,31 @@ describe(
 
             providerEstimatedCredits:
               60,
+
+            recoveryMetadata: {
+              request: {
+                durationSeconds:
+                  5,
+
+                ratio:
+                  "1280:720",
+
+                outputFormat:
+                  "mp4",
+
+                promptText:
+                  "Busybookie durable submission recovery metadata test.",
+
+                sourceImagePath:
+                  "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+                assetStrategy:
+                  "DATA_URI",
+              },
+
+              locallyExpectedCredits:
+                60,
+            },
           });
 
         const submission =
@@ -171,7 +196,7 @@ describe(
           submission.record,
         ).toEqual({
           schemaVersion:
-            "1.1",
+            "1.2",
 
           submittedAt:
             "2026-09-25T20:11:00.000Z",
@@ -197,6 +222,31 @@ describe(
 
           providerEstimatedCredits:
             60,
+
+          recoveryMetadata: {
+            request: {
+              durationSeconds:
+                5,
+
+              ratio:
+                "1280:720",
+
+              outputFormat:
+                "mp4",
+
+              promptText:
+                "Busybookie durable submission recovery metadata test.",
+
+              sourceImagePath:
+                "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+              assetStrategy:
+                "DATA_URI",
+            },
+
+            locallyExpectedCredits:
+              60,
+          },
         });
       },
     );

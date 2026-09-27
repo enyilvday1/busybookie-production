@@ -115,7 +115,7 @@ export async function createExecutionSubmission(
       ? ExecutionSubmissionSchema
           .parse({
             schemaVersion:
-              "1.1",
+              "1.2",
 
             submittedAt,
 
@@ -141,6 +141,10 @@ export async function createExecutionSubmission(
             providerEstimatedCredits:
               validatedInput
                 .providerEstimatedCredits,
+
+            recoveryMetadata:
+              validatedInput
+                .recoveryMetadata,
           })
       : ExecutionSubmissionSchema
           .parse({

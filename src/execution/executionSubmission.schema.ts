@@ -25,6 +25,52 @@ const ProviderEstimatedCreditsSchema =
     .int()
     .nonnegative();
 
+const RunwayRecoveryMetadataSchema =
+  z.object({
+    request:
+      z.object({
+        durationSeconds:
+          z.number()
+            .int()
+            .min(2)
+            .max(10),
+
+        ratio:
+          z.literal(
+            "1280:720",
+          ),
+
+        outputFormat:
+          z.literal(
+            "mp4",
+          ),
+
+        promptText:
+          z.string()
+            .trim()
+            .min(1)
+            .max(1000),
+
+        sourceImagePath:
+          z.string()
+            .trim()
+            .min(1),
+
+        assetStrategy:
+          z.enum([
+            "DATA_URI",
+            "EPHEMERAL_UPLOAD",
+          ]),
+      })
+        .strict(),
+
+    locallyExpectedCredits:
+      z.number()
+        .int()
+        .nonnegative(),
+  })
+    .strict();
+
 const RunwayExecutionSubmissionInputSchema =
   z.object({
     reservationId:
@@ -46,6 +92,9 @@ const RunwayExecutionSubmissionInputSchema =
 
     providerEstimatedCredits:
       ProviderEstimatedCreditsSchema,
+
+    recoveryMetadata:
+      RunwayRecoveryMetadataSchema,
   })
     .strict();
 
@@ -150,12 +199,54 @@ const RunwayExecutionSubmissionV1_1Schema =
   })
     .strict();
 
+const RunwayExecutionSubmissionV1_2Schema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "1.2",
+      ),
+
+    submittedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUBMITTED",
+      ),
+
+    reservationId:
+      ExecutionSubmissionReservationIdSchema,
+
+    episodeId:
+      ExecutionReservationEpisodeIdSchema,
+
+    shotId:
+      ExecutionReservationShotIdSchema,
+
+    provider:
+      z.literal(
+        "RUNWAY",
+      ),
+
+    providerExecutionId:
+      ExecutionSubmissionProviderExecutionIdSchema,
+
+    providerEstimatedCredits:
+      ProviderEstimatedCreditsSchema,
+
+    recoveryMetadata:
+      RunwayRecoveryMetadataSchema,
+  })
+    .strict();
+
 export const ExecutionSubmissionSchema =
   z.discriminatedUnion(
     "schemaVersion",
     [
       ExecutionSubmissionV1Schema,
       RunwayExecutionSubmissionV1_1Schema,
+      RunwayExecutionSubmissionV1_2Schema,
     ],
   );
 

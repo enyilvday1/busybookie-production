@@ -223,6 +223,36 @@ describe(
         );
 
         expect(
+          executeGeneration,
+        ).toHaveBeenCalledWith(
+          expect.any(Object),
+          policy.task.waitTimeoutMs,
+          {
+            request: {
+              durationSeconds:
+                5,
+
+              ratio:
+                "1280:720",
+
+              outputFormat:
+                "mp4",
+
+              promptText:
+                "A gentle morning breeze moves through Littleleaf Valley while sunlight sparkles softly.",
+
+              sourceImagePath,
+
+              assetStrategy:
+                "DATA_URI",
+            },
+
+            locallyExpectedCredits:
+              60,
+          },
+        );
+
+        expect(
           fetchMock,
         ).toHaveBeenCalledTimes(
           1,

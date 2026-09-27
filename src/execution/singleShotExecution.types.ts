@@ -58,6 +58,12 @@ export type SingleShotSubmissionAcceptance =
 
       providerEstimatedCredits:
         number;
+
+      recoveryMetadata:
+        Extract<
+          ExecutionSubmissionInput,
+          { provider: "RUNWAY" }
+        >["recoveryMetadata"];
     }>
   | Readonly<{
       provider:

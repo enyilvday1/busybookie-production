@@ -107,6 +107,7 @@ export function createRunwaySingleShotProductionTransactionRunner(
             (
               request,
               waitTimeoutMs,
+              recoveryMetadata,
             ) =>
               dependencies
                 .executeGeneration(
@@ -128,6 +129,8 @@ export function createRunwaySingleShotProductionTransactionRunner(
 
                           providerEstimatedCredits:
                             acceptance.providerEstimatedCredits,
+
+                          recoveryMetadata,
                         }),
                   },
                 ),

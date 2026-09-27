@@ -388,6 +388,7 @@ export async function runRunwayGen45Cli(
           (
             request,
             waitTimeoutMs,
+            recoveryMetadata,
           ) =>
             executeRunwayGen45(
               client,
@@ -419,6 +420,8 @@ export async function runRunwayGen45Cli(
 
                         providerEstimatedCredits:
                           acceptance.providerEstimatedCredits,
+
+                        recoveryMetadata,
                       },
                     );
                   },

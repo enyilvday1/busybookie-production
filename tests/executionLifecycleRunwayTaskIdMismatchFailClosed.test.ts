@@ -52,7 +52,7 @@ describe(
             submission:
               Object.freeze({
                 schemaVersion:
-                  "1.1",
+                  "1.2",
 
                 submittedAt:
                   "2026-09-25T20:01:00.000Z",
@@ -77,6 +77,31 @@ describe(
 
                 providerEstimatedCredits:
                   60,
+
+                recoveryMetadata: {
+                  request: {
+                    durationSeconds:
+                      5,
+
+                    ratio:
+                      "1280:720",
+
+                    outputFormat:
+                      "mp4",
+
+                    promptText:
+                      "Busybookie Runway task identity reconciliation test.",
+
+                    sourceImagePath:
+                      "D:/Busybookie/Production/references/EP91/S05/reference.png",
+
+                    assetStrategy:
+                      "DATA_URI",
+                  },
+
+                  locallyExpectedCredits:
+                    60,
+                } as const,
               }),
           });
 

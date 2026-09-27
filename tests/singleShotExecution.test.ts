@@ -352,6 +352,35 @@ function makeDependencies(
 
             providerEstimatedCredits:
               60,
+
+            recoveryMetadata: {
+              request: {
+                durationSeconds:
+                  5,
+
+                ratio:
+                  "1280:720",
+
+                outputFormat:
+                  "mp4",
+
+                promptText:
+                  "Busybookie single-shot execution recovery test.",
+
+                sourceImagePath:
+                  join(
+                    input.mediaRoot,
+                    "references",
+                    "test-reference.png",
+                  ),
+
+                assetStrategy:
+                  "DATA_URI",
+              },
+
+              locallyExpectedCredits:
+                60,
+            },
           });
 
         return {

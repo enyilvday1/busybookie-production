@@ -98,6 +98,30 @@ describe(
                   .executeGeneration(
                     request,
                     30_000,
+                    {
+                      request: {
+                        durationSeconds:
+                          5,
+
+                        ratio:
+                          "1280:720",
+
+                        outputFormat:
+                          "mp4",
+
+                        promptText:
+                          "Busybookie durable recovery metadata test.",
+
+                        sourceImagePath:
+                          "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+                        assetStrategy:
+                          "DATA_URI",
+                      },
+
+                      locallyExpectedCredits:
+                        60,
+                    },
                   );
 
               return {
@@ -171,6 +195,31 @@ describe(
 
           providerEstimatedCredits:
             1,
+
+          recoveryMetadata: {
+            request: {
+              durationSeconds:
+                5,
+
+              ratio:
+                "1280:720",
+
+              outputFormat:
+                "mp4",
+
+              promptText:
+                "Busybookie durable recovery metadata test.",
+
+              sourceImagePath:
+                "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+              assetStrategy:
+                "DATA_URI",
+            },
+
+            locallyExpectedCredits:
+              60,
+          },
         });
 
         expect(

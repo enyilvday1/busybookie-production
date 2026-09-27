@@ -147,6 +147,31 @@ async function prepareRunwaySubmission(
 
         providerEstimatedCredits:
           60,
+
+        recoveryMetadata: {
+          request: {
+            durationSeconds:
+              5,
+
+            ratio:
+              "1280:720",
+
+            outputFormat:
+              "mp4",
+
+            promptText:
+              "Busybookie execution completion test.",
+
+            sourceImagePath:
+              "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+            assetStrategy:
+              "DATA_URI",
+          },
+
+          locallyExpectedCredits:
+            60,
+        },
       },
       submissionDependencies,
     );

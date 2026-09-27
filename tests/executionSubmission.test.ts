@@ -75,6 +75,33 @@ const submissionDependencies = {
     "2026-09-24T12:01:00.000Z",
 };
 
+const runwayRecoveryMetadata =
+  Object.freeze({
+    request:
+      Object.freeze({
+        durationSeconds:
+          5,
+
+        ratio:
+          "1280:720",
+
+        outputFormat:
+          "mp4",
+
+        promptText:
+          "Busybookie execution submission recovery metadata test.",
+
+        sourceImagePath:
+          "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+        assetStrategy:
+          "DATA_URI",
+      }),
+
+    locallyExpectedCredits:
+      60,
+  });
+
 afterEach(
   async () => {
     await Promise.all(
@@ -168,6 +195,9 @@ describe(
 
               providerEstimatedCredits:
                 60,
+
+              recoveryMetadata:
+                runwayRecoveryMetadata,
             },
             submissionDependencies,
           );
@@ -176,7 +206,7 @@ describe(
           result.record,
         ).toEqual({
           schemaVersion:
-            "1.1",
+            "1.2",
 
           submittedAt:
             "2026-09-24T12:01:00.000Z",
@@ -201,6 +231,9 @@ describe(
 
           providerEstimatedCredits:
             60,
+
+          recoveryMetadata:
+            runwayRecoveryMetadata,
         });
 
         const stored =
@@ -316,6 +349,9 @@ describe(
 
               providerEstimatedCredits:
                 60,
+
+              recoveryMetadata:
+                runwayRecoveryMetadata,
             },
             submissionDependencies,
           ),
@@ -367,6 +403,9 @@ describe(
 
               providerEstimatedCredits:
                 60,
+
+              recoveryMetadata:
+                runwayRecoveryMetadata,
             },
             submissionDependencies,
           ),
@@ -470,6 +509,9 @@ describe(
 
               providerEstimatedCredits:
                 60,
+
+              recoveryMetadata:
+                runwayRecoveryMetadata,
             },
             submissionDependencies,
           ),
@@ -518,6 +560,9 @@ describe(
 
           providerEstimatedCredits:
             60,
+
+          recoveryMetadata:
+            runwayRecoveryMetadata,
         };
 
         await createExecutionSubmission(
@@ -579,6 +624,9 @@ describe(
 
           providerEstimatedCredits:
             60,
+
+          recoveryMetadata:
+            runwayRecoveryMetadata,
         };
 
         const attempts =
@@ -740,6 +788,9 @@ describe(
 
               providerEstimatedCredits:
                 60,
+
+              recoveryMetadata:
+                runwayRecoveryMetadata,
             },
             submissionDependencies,
           ),

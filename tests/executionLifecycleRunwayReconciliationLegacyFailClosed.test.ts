@@ -127,5 +127,131 @@ describe(
         ).not.toHaveBeenCalled();
       },
     );
+
+    it(
+      "rejects Runway 1.1 before provider resume because recovery metadata is unavailable",
+      async () => {
+        const lifecycle:
+          ExecutionLifecycleClassification =
+          Object.freeze({
+            state:
+              "SUBMITTED",
+
+            reservation:
+              Object.freeze({
+                schemaVersion:
+                  "1.0",
+
+                reservationId:
+                  "33333333-3333-4333-8333-333333333333",
+
+                reservedAt:
+                  "2026-09-25T20:00:00.000Z",
+
+                status:
+                  "RESERVED",
+
+                episodeId:
+                  "EP91",
+
+                shotId:
+                  "S03",
+
+                provider:
+                  "RUNWAY",
+              }),
+
+            submission:
+              Object.freeze({
+                schemaVersion:
+                  "1.1",
+
+                submittedAt:
+                  "2026-09-25T20:01:00.000Z",
+
+                status:
+                  "SUBMITTED",
+
+                reservationId:
+                  "33333333-3333-4333-8333-333333333333",
+
+                episodeId:
+                  "EP91",
+
+                shotId:
+                  "S03",
+
+                provider:
+                  "RUNWAY",
+
+                providerExecutionId:
+                  "task-runway-1-1",
+
+                providerEstimatedCredits:
+                  60,
+              }),
+          });
+
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              lifecycle,
+          );
+
+        const resumeRunwayTask =
+          vi.fn(
+            async () =>
+              Object.freeze({
+                taskId:
+                  "task-runway-1-1",
+
+                estimatedCredits:
+                  60,
+
+                finalCredits:
+                  55,
+
+                outputUrls:
+                  Object.freeze([
+                    "https://example.test/legacy-1-1.mp4",
+                  ]),
+              }),
+          );
+
+        await expect(
+          reconcileExecutionLifecycle(
+            {
+              mediaRoot:
+                "D:/Busybookie/Production",
+
+              episodeId:
+                "EP91",
+
+              shotId:
+                "S03",
+
+              runwayWaitTimeoutMs:
+                600_000,
+            },
+            {
+              inspectLifecycle,
+              resumeRunwayTask,
+            },
+          ),
+        ).rejects.toThrow(
+          /Runway 1\.1 submissions require manual reconciliation/i,
+        );
+
+        expect(
+          inspectLifecycle,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          resumeRunwayTask,
+        ).not.toHaveBeenCalled();
+      },
+    );
   },
 );

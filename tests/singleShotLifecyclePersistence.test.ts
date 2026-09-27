@@ -286,6 +286,35 @@ describe(
 
                 providerEstimatedCredits:
                   60,
+
+                recoveryMetadata: {
+                  request: {
+                    durationSeconds:
+                      5,
+
+                    ratio:
+                      "1280:720",
+
+                    outputFormat:
+                      "mp4",
+
+                    promptText:
+                      "Busybookie durable recovery persistence test.",
+
+                    sourceImagePath:
+                      join(
+                        input.mediaRoot,
+                        "references",
+                        "test-reference.png",
+                      ),
+
+                    assetStrategy:
+                      "DATA_URI",
+                  },
+
+                  locallyExpectedCredits:
+                    60,
+                },
               });
 
               events.push(
@@ -396,6 +425,35 @@ describe(
 
             providerEstimatedCredits:
               60,
+
+            recoveryMetadata: {
+              request: {
+                durationSeconds:
+                  5,
+
+                ratio:
+                  "1280:720",
+
+                outputFormat:
+                  "mp4",
+
+                promptText:
+                  "Busybookie durable recovery persistence test.",
+
+                sourceImagePath:
+                  join(
+                    mediaRoot,
+                    "references",
+                    "test-reference.png",
+                  ),
+
+                assetStrategy:
+                  "DATA_URI",
+              },
+
+              locallyExpectedCredits:
+                60,
+            },
           },
         );
 
@@ -674,6 +732,35 @@ function makeLifecycleFailureDependencies(
 
             providerEstimatedCredits:
               60,
+
+            recoveryMetadata: {
+              request: {
+                durationSeconds:
+                  5,
+
+                ratio:
+                  "1280:720",
+
+                outputFormat:
+                  "mp4",
+
+                promptText:
+                  "Busybookie single-shot lifecycle failure recovery test.",
+
+                sourceImagePath:
+                  join(
+                    input.mediaRoot,
+                    "references",
+                    "test-reference.png",
+                  ),
+
+                assetStrategy:
+                  "DATA_URI",
+              },
+
+              locallyExpectedCredits:
+                60,
+            },
           });
 
         events.push(

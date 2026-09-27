@@ -47,21 +47,35 @@ function sanitizeTaskId(
   return result;
 }
 
-export function createRunwayGenerationRecordPath(
+export function createRunwayGenerationRecordPathFromIdentity(
   mediaRoot: string,
-  record: RunwayGenerationRecord,
+  episodeId: string,
+  shotId: string,
+  taskId: string,
 ): string {
   const safeTaskId =
     sanitizeTaskId(
-      record.taskId,
+      taskId,
     );
 
   return resolve(
     mediaRoot,
     "generated-video",
+    episodeId,
+    shotId,
+    `${episodeId}_${shotId}_${safeTaskId}.runway-generation.json`,
+  );
+}
+
+export function createRunwayGenerationRecordPath(
+  mediaRoot: string,
+  record: RunwayGenerationRecord,
+): string {
+  return createRunwayGenerationRecordPathFromIdentity(
+    mediaRoot,
     record.episodeId,
     record.shotId,
-    `${record.episodeId}_${record.shotId}_${safeTaskId}.runway-generation.json`,
+    record.taskId,
   );
 }
 

@@ -92,11 +92,38 @@ describe(
                   typeof transactionDependencies.executeGeneration
                 >[0];
 
+              const recoveryMetadata =
+                Object.freeze({
+                  request: {
+                    durationSeconds:
+                      5,
+
+                    ratio:
+                      "1280:720" as const,
+
+                    outputFormat:
+                      "mp4" as const,
+
+                    promptText:
+                      "Busybookie production acceptance metadata test.",
+
+                    sourceImagePath:
+                      "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+                    assetStrategy:
+                      "DATA_URI" as const,
+                  },
+
+                  locallyExpectedCredits:
+                    60,
+                });
+
               const execution =
                 await transactionDependencies
                   .executeGeneration(
                     request,
                     30_000,
+                    recoveryMetadata,
                   );
 
               return {
@@ -170,6 +197,31 @@ describe(
 
           providerEstimatedCredits:
             60,
+
+          recoveryMetadata: {
+            request: {
+              durationSeconds:
+                5,
+
+              ratio:
+                "1280:720",
+
+              outputFormat:
+                "mp4",
+
+              promptText:
+                "Busybookie production acceptance metadata test.",
+
+              sourceImagePath:
+                "D:/Busybookie/Production/references/EP90/S01/reference.png",
+
+              assetStrategy:
+                "DATA_URI",
+            },
+
+            locallyExpectedCredits:
+              60,
+          },
         });
 
         expect(

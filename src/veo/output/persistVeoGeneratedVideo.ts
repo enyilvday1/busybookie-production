@@ -36,6 +36,27 @@ export type VeoSdkFileDownloader =
   ) =>
     Promise<void>;
 
+export class VeoOutputAlreadyExistsError
+  extends Error {
+  readonly destinationPath:
+    string;
+
+  constructor(
+    destinationPath:
+      string,
+  ) {
+    super(
+      `Veo output already exists: ${destinationPath}`,
+    );
+
+    this.name =
+      "VeoOutputAlreadyExistsError";
+
+    this.destinationPath =
+      destinationPath;
+  }
+}
+
 export type PersistedVeoOutput =
   Readonly<{
     destinationPath:
@@ -309,8 +330,8 @@ export async function persistVeoGeneratedVideo(
         code ===
         "EEXIST"
       ) {
-        throw new Error(
-          `Veo output already exists: ${destinationPath}`,
+        throw new VeoOutputAlreadyExistsError(
+          destinationPath,
         );
       }
 

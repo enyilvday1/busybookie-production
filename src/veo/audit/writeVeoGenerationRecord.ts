@@ -27,6 +27,33 @@ import {
   type VeoGenerationRecord,
 } from "./veoGenerationRecord.schema.js";
 
+export function createVeoGenerationRecordPathFromIdentity(
+  mediaRoot:
+    string,
+
+  episodeId:
+    string,
+
+  shotId:
+    string,
+
+  operationName:
+    string,
+): string {
+  const operationId =
+    sanitizeVeoOperationId(
+      operationName,
+    );
+
+  return resolve(
+    mediaRoot,
+    "generated-video",
+    episodeId,
+    shotId,
+    `${episodeId}_${shotId}_${operationId}.veo-generation.json`,
+  );
+}
+
 export function createVeoGenerationRecordPath(
   mediaRoot:
     string,
@@ -34,17 +61,11 @@ export function createVeoGenerationRecordPath(
   record:
     VeoGenerationRecord,
 ): string {
-  const operationId =
-    sanitizeVeoOperationId(
-      record.operationName,
-    );
-
-  return resolve(
+  return createVeoGenerationRecordPathFromIdentity(
     mediaRoot,
-    "generated-video",
     record.episodeId,
     record.shotId,
-    `${record.episodeId}_${record.shotId}_${operationId}.veo-generation.json`,
+    record.operationName,
   );
 }
 

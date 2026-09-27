@@ -303,6 +303,48 @@ describe(
 
               providerExecutionId:
                 "models/veo/operations/123",
+
+              recoveryMetadata: {
+                request: {
+                  durationSeconds:
+                    4,
+
+                  aspectRatio:
+                    "16:9",
+
+                  resolution:
+                    "720p",
+
+                  numberOfVideos:
+                    1,
+
+                  nativeAudioExpected:
+                    true,
+
+                  expectedOutputFps:
+                    24,
+
+                  promptText:
+                    "Busybookie Veo execution submission test.",
+
+                  sourceImagePath:
+                    "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+                  imageMimeType:
+                    "image/png",
+                },
+
+                costPolicy: {
+                  pricingReviewedOn:
+                    "2026-09-22",
+
+                  centsPerSecond:
+                    10,
+
+                  locallyExpectedCents:
+                    40,
+                },
+              },
             },
             submissionDependencies,
           );
@@ -456,6 +498,48 @@ describe(
 
               providerExecutionId:
                 "operation-provider-mismatch",
+
+              recoveryMetadata: {
+                request: {
+                  durationSeconds:
+                    4,
+
+                  aspectRatio:
+                    "16:9",
+
+                  resolution:
+                    "720p",
+
+                  numberOfVideos:
+                    1,
+
+                  nativeAudioExpected:
+                    true,
+
+                  expectedOutputFps:
+                    24,
+
+                  promptText:
+                    "Busybookie Veo execution submission test.",
+
+                  sourceImagePath:
+                    "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+                  imageMimeType:
+                    "image/png",
+                },
+
+                costPolicy: {
+                  pricingReviewedOn:
+                    "2026-09-22",
+
+                  centsPerSecond:
+                    10,
+
+                  locallyExpectedCents:
+                    40,
+                },
+              },
             },
             submissionDependencies,
           ),

@@ -48,6 +48,19 @@ export type VeoImagePreparer =
       PreparedVeoImageAsset
     >;
 
+export type VeoGenerationRecoveryMetadata =
+  Readonly<{
+    request:
+      Readonly<
+        VeoGenerationRecord["request"]
+      >;
+
+    costPolicy:
+      Readonly<
+        VeoGenerationRecord["costPolicy"]
+      >;
+  }>;
+
 export type VeoGenerationExecutor =
   (
     request:
@@ -63,6 +76,9 @@ export type VeoGenerationExecutor =
         timeoutMs:
           number;
       }>,
+
+    recoveryMetadata:
+      VeoGenerationRecoveryMetadata,
   ) =>
     Promise<
       VeoExecutionResult
@@ -181,6 +197,71 @@ export async function runVeoImageToVideoTransaction(
       input.policy,
     );
 
+  const recoveryMetadata:
+    VeoGenerationRecoveryMetadata =
+      Object.freeze({
+        request:
+          Object.freeze({
+            durationSeconds:
+              request
+                .config
+                .durationSeconds,
+
+            aspectRatio:
+              request
+                .config
+                .aspectRatio,
+
+            resolution:
+              request
+                .config
+                .resolution,
+
+            numberOfVideos:
+              request
+                .config
+                .numberOfVideos,
+
+            nativeAudioExpected:
+              input.policy
+                .generation
+                .nativeAudioExpected,
+
+            expectedOutputFps:
+              input.policy
+                .generation
+                .expectedOutputFps,
+
+            promptText:
+              request
+                .source
+                .prompt,
+
+            sourceImagePath:
+              preparedImage
+                .sourcePath,
+
+            imageMimeType:
+              preparedImage
+                .image
+                .mimeType,
+          }),
+
+        costPolicy:
+          Object.freeze({
+            pricingReviewedOn:
+              input.policy
+                .pricingReviewedOn,
+
+            centsPerSecond:
+              input.policy
+                .generation
+                .centsPerSecond,
+
+            locallyExpectedCents,
+          }),
+      });
+
   const execution =
     await dependencies
       .executeGeneration(
@@ -196,6 +277,7 @@ export async function runVeoImageToVideoTransaction(
               .operation
               .timeoutMs,
         },
+        recoveryMetadata,
       );
 
   if (

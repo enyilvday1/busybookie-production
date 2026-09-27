@@ -94,6 +94,7 @@ export function createVeoSingleShotProductionTransactionRunner(
             (
               request,
               executionOptions,
+              recoveryMetadata,
             ) =>
               dependencies
                 .executeGeneration(
@@ -134,6 +135,8 @@ export function createVeoSingleShotProductionTransactionRunner(
 
                           providerExecutionId:
                             operationName,
+
+                          recoveryMetadata,
                         }),
                   },
                 ),

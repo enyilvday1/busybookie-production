@@ -252,7 +252,7 @@ describe(
     );
 
     it(
-      "continues to persist new Veo submissions as schema version 1.0 without Runway credit metadata",
+      "persists Veo acceptance and recovery metadata in submission schema version 1.3",
       async () => {
         const mediaRoot =
           await makeTempDirectory();
@@ -290,6 +290,48 @@ describe(
 
             providerExecutionId:
               "models/veo/operations/123",
+
+            recoveryMetadata: {
+              request: {
+                durationSeconds:
+                  4,
+
+                aspectRatio:
+                  "16:9",
+
+                resolution:
+                  "720p",
+
+                numberOfVideos:
+                  1,
+
+                nativeAudioExpected:
+                  true,
+
+                expectedOutputFps:
+                  24,
+
+                promptText:
+                  "Busybookie durable Veo submission recovery metadata test.",
+
+                sourceImagePath:
+                  "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+                imageMimeType:
+                  "image/png",
+              },
+
+              costPolicy: {
+                pricingReviewedOn:
+                  "2026-09-22",
+
+                centsPerSecond:
+                  10,
+
+                locallyExpectedCents:
+                  40,
+              },
+            },
           });
 
         const submission =
@@ -303,7 +345,7 @@ describe(
           submission.record,
         ).toEqual({
           schemaVersion:
-            "1.0",
+            "1.3",
 
           submittedAt:
             "2026-09-25T20:11:00.000Z",
@@ -326,6 +368,48 @@ describe(
 
           providerExecutionId:
             "models/veo/operations/123",
+
+          recoveryMetadata: {
+            request: {
+              durationSeconds:
+                4,
+
+              aspectRatio:
+                "16:9",
+
+              resolution:
+                "720p",
+
+              numberOfVideos:
+                1,
+
+              nativeAudioExpected:
+                true,
+
+              expectedOutputFps:
+                24,
+
+              promptText:
+                "Busybookie durable Veo submission recovery metadata test.",
+
+              sourceImagePath:
+                "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+              imageMimeType:
+                "image/png",
+            },
+
+            costPolicy: {
+              pricingReviewedOn:
+                "2026-09-22",
+
+              centsPerSecond:
+                10,
+
+              locallyExpectedCents:
+                40,
+            },
+          },
         });
       },
     );

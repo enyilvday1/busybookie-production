@@ -149,7 +149,7 @@ export async function createExecutionSubmission(
       : ExecutionSubmissionSchema
           .parse({
             schemaVersion:
-              "1.0",
+              "1.3",
 
             submittedAt,
 
@@ -171,6 +171,10 @@ export async function createExecutionSubmission(
             providerExecutionId:
               validatedInput
                 .providerExecutionId,
+
+            recoveryMetadata:
+              validatedInput
+                .recoveryMetadata,
           });
 
   const submissionPath =

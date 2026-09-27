@@ -125,6 +125,47 @@ describe(
                       timeoutMs:
                         30_000,
                     },
+                    {
+                      request: {
+                        durationSeconds:
+                          4,
+
+                        aspectRatio:
+                          "16:9",
+
+                        resolution:
+                          "720p",
+
+                        numberOfVideos:
+                          1,
+
+                        nativeAudioExpected:
+                          true,
+
+                        expectedOutputFps:
+                          24,
+
+                        promptText:
+                          "Mock Veo prompt.",
+
+                        sourceImagePath:
+                          "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+                        imageMimeType:
+                          "image/png",
+                      },
+
+                      costPolicy: {
+                        pricingReviewedOn:
+                          "2026-09-22",
+
+                        centsPerSecond:
+                          10,
+
+                        locallyExpectedCents:
+                          40,
+                      },
+                    },
                   );
 
               return {
@@ -193,6 +234,48 @@ describe(
 
           providerExecutionId:
             "operations/veo-production-1",
+
+          recoveryMetadata: {
+            request: {
+              durationSeconds:
+                4,
+
+              aspectRatio:
+                "16:9",
+
+              resolution:
+                "720p",
+
+              numberOfVideos:
+                1,
+
+              nativeAudioExpected:
+                true,
+
+              expectedOutputFps:
+                24,
+
+              promptText:
+                "Mock Veo prompt.",
+
+              sourceImagePath:
+                "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+              imageMimeType:
+                "image/png",
+            },
+
+            costPolicy: {
+              pricingReviewedOn:
+                "2026-09-22",
+
+              centsPerSecond:
+                10,
+
+              locallyExpectedCents:
+                40,
+            },
+          },
         });
 
         expect(

@@ -437,6 +437,7 @@ export async function runVeoCli(
           (
             request,
             executionOptions,
+            recoveryMetadata,
           ) =>
             executeVeoGeneration(
               client,
@@ -488,6 +489,8 @@ export async function runVeoCli(
 
                         providerExecutionId:
                           operationName,
+
+                        recoveryMetadata,
                       },
                     );
                   },

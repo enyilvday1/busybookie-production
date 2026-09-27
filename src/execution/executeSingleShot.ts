@@ -231,6 +231,10 @@ export async function executeSingleShot(
 
                   providerExecutionId:
                     normalizedProviderExecutionId,
+
+                  recoveryMetadata:
+                    acceptance
+                      .recoveryMetadata,
                 },
               );
     };

@@ -414,6 +414,52 @@ function makeDependencies(
 
             providerExecutionId:
               "operations/mock-veo-1",
+
+            recoveryMetadata: {
+              request: {
+                durationSeconds:
+                  4,
+
+                aspectRatio:
+                  "16:9",
+
+                resolution:
+                  "720p",
+
+                numberOfVideos:
+                  1,
+
+                nativeAudioExpected:
+                  true,
+
+                expectedOutputFps:
+                  24,
+
+                promptText:
+                  "Mock Veo prompt.",
+
+                sourceImagePath:
+                  join(
+                    input.mediaRoot,
+                    "references",
+                    "approved-reference.png",
+                  ),
+
+                imageMimeType:
+                  "image/png",
+              },
+
+              costPolicy: {
+                pricingReviewedOn:
+                  "2026-09-22",
+
+                centsPerSecond:
+                  10,
+
+                locallyExpectedCents:
+                  40,
+              },
+            },
           });
 
         return {

@@ -71,6 +71,12 @@ export type SingleShotSubmissionAcceptance =
 
       providerExecutionId:
         string;
+
+      recoveryMetadata:
+        Extract<
+          ExecutionSubmissionInput,
+          { provider: "VEO" }
+        >["recoveryMetadata"];
     }>;
 
 export type SingleShotSubmissionAcceptedHandler =

@@ -8,6 +8,17 @@ import {
   ExecutionReservationShotIdSchema,
 } from "./executionReservation.schema.js";
 
+import {
+  VeoDurationSecondsSchema,
+} from "../schemas/veoPolicy.schema.js";
+
+import {
+  VEO_720P_RESOLUTION,
+  VEO_EXPECTED_OUTPUT_FPS,
+  VEO_IMAGE_MIME_TYPES,
+  VEO_LANDSCAPE_ASPECT_RATIO,
+} from "../veo/veo.types.js";
+
 const ExecutionSubmissionReservationIdSchema =
   z.string()
     .uuid();
@@ -71,6 +82,74 @@ const RunwayRecoveryMetadataSchema =
   })
     .strict();
 
+const VeoRecoveryMetadataSchema =
+  z.object({
+    request:
+      z.object({
+        durationSeconds:
+          VeoDurationSecondsSchema,
+
+        aspectRatio:
+          z.literal(
+            VEO_LANDSCAPE_ASPECT_RATIO,
+          ),
+
+        resolution:
+          z.literal(
+            VEO_720P_RESOLUTION,
+          ),
+
+        numberOfVideos:
+          z.literal(1),
+
+        nativeAudioExpected:
+          z.literal(true),
+
+        expectedOutputFps:
+          z.literal(
+            VEO_EXPECTED_OUTPUT_FPS,
+          ),
+
+        promptText:
+          z.string()
+            .trim()
+            .min(1),
+
+        sourceImagePath:
+          z.string()
+            .trim()
+            .min(1),
+
+        imageMimeType:
+          z.enum(
+            VEO_IMAGE_MIME_TYPES,
+          ),
+      })
+        .strict(),
+
+    costPolicy:
+      z.object({
+        pricingReviewedOn:
+          z.string()
+            .regex(
+              /^\d{4}-\d{2}-\d{2}$/,
+              "pricingReviewedOn must use YYYY-MM-DD.",
+            ),
+
+        centsPerSecond:
+          z.number()
+            .int()
+            .positive(),
+
+        locallyExpectedCents:
+          z.number()
+            .int()
+            .nonnegative(),
+      })
+        .strict(),
+  })
+    .strict();
+
 const RunwayExecutionSubmissionInputSchema =
   z.object({
     reservationId:
@@ -116,6 +195,9 @@ const VeoExecutionSubmissionInputSchema =
 
     providerExecutionId:
       ExecutionSubmissionProviderExecutionIdSchema,
+
+    recoveryMetadata:
+      VeoRecoveryMetadataSchema,
   })
     .strict();
 
@@ -240,6 +322,44 @@ const RunwayExecutionSubmissionV1_2Schema =
   })
     .strict();
 
+const VeoExecutionSubmissionV1_3Schema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "1.3",
+      ),
+
+    submittedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUBMITTED",
+      ),
+
+    reservationId:
+      ExecutionSubmissionReservationIdSchema,
+
+    episodeId:
+      ExecutionReservationEpisodeIdSchema,
+
+    shotId:
+      ExecutionReservationShotIdSchema,
+
+    provider:
+      z.literal(
+        "VEO",
+      ),
+
+    providerExecutionId:
+      ExecutionSubmissionProviderExecutionIdSchema,
+
+    recoveryMetadata:
+      VeoRecoveryMetadataSchema,
+  })
+    .strict();
+
 export const ExecutionSubmissionSchema =
   z.discriminatedUnion(
     "schemaVersion",
@@ -247,6 +367,7 @@ export const ExecutionSubmissionSchema =
       ExecutionSubmissionV1Schema,
       RunwayExecutionSubmissionV1_1Schema,
       RunwayExecutionSubmissionV1_2Schema,
+      VeoExecutionSubmissionV1_3Schema,
     ],
   );
 

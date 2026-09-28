@@ -20,6 +20,10 @@ import type {
   loadRunwayPolicy,
 } from "../../validation/loadRunwayPolicy.js";
 
+import type {
+  loadVeoPolicy,
+} from "../../validation/loadVeoPolicy.js";
+
 import {
   resolveAndValidateMediaRootPath,
 } from "../../validation/validateMediaRoot.js";
@@ -31,6 +35,14 @@ import type {
 import type {
   resumeRunwayGen45Task,
 } from "../../runway/execution/resumeRunwayGen45Task.js";
+
+import type {
+  createVeoOperationLookupClient,
+} from "../../veo/execution/createVeoOperationLookupClient.js";
+
+import type {
+  resumeVeoOperation,
+} from "../../veo/execution/resumeVeoOperation.js";
 
 import {
   parseExecutionReconcileCliArgs,
@@ -73,6 +85,15 @@ export type RunExecutionReconcileCliDependencies =
 
     resumeRunwayTask?:
       typeof resumeRunwayGen45Task;
+
+    loadVeoPolicy?:
+      typeof loadVeoPolicy;
+
+    createVeoOperationLookupClient?:
+      typeof createVeoOperationLookupClient;
+
+    resumeVeoOperation?:
+      typeof resumeVeoOperation;
   }>;
 
 export async function runExecutionReconcileCli(
@@ -152,6 +173,105 @@ export async function runExecutionReconcileCli(
 
   const submission =
     lifecycle.submission;
+
+  if (
+    submission.provider ===
+    "VEO"
+  ) {
+    if (
+      submission.schemaVersion !==
+      "1.3"
+    ) {
+      await dependencies
+        .reconcileLifecycle(
+          reconciliationInput,
+          {
+            inspectLifecycle:
+              cachedInspectLifecycle,
+          },
+        );
+
+      return;
+    }
+
+    const loadVeoRecoveryPolicy =
+      dependencies
+        .loadVeoPolicy;
+
+    if (!loadVeoRecoveryPolicy) {
+      throw new Error(
+        "Veo reconciliation CLI requires a Veo policy loader.",
+      );
+    }
+
+    const createVeoLookupClient =
+      dependencies
+        .createVeoOperationLookupClient;
+
+    if (!createVeoLookupClient) {
+      throw new Error(
+        "Veo reconciliation CLI requires a recovery-only operation lookup client factory.",
+      );
+    }
+
+    const resumeExistingVeoOperation =
+      dependencies
+        .resumeVeoOperation;
+
+    if (!resumeExistingVeoOperation) {
+      throw new Error(
+        "Veo reconciliation CLI requires a same-operation resume function.",
+      );
+    }
+
+    const veoPolicy =
+      await loadVeoRecoveryPolicy();
+
+    const geminiApiKey =
+      env.GEMINI_API_KEY
+        ?.trim();
+
+    if (!geminiApiKey) {
+      throw new Error(
+        "Veo reconciliation requires GEMINI_API_KEY.",
+      );
+    }
+
+    const veoClient =
+      createVeoLookupClient(
+        geminiApiKey,
+      );
+
+    await dependencies
+      .reconcileLifecycle(
+        {
+          ...reconciliationInput,
+
+          veoPollIntervalMs:
+            veoPolicy
+              .operation
+              .pollIntervalMs,
+
+          veoTimeoutMs:
+            veoPolicy
+              .operation
+              .timeoutMs,
+        },
+        {
+          inspectLifecycle:
+            cachedInspectLifecycle,
+
+          resumeVeoOperation:
+            (input) =>
+              resumeExistingVeoOperation(
+                veoClient,
+                input,
+              ),
+        },
+      );
+
+    return;
+  }
 
   if (
     submission.provider !==

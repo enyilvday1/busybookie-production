@@ -51,6 +51,43 @@ import type {
   RunwayGen45ExecutionResult,
 } from "../runway/execution/runwayGen45Execution.js";
 
+import {
+  recoverVeoGenerationRecord,
+} from "../veo/audit/recoverVeoGenerationRecord.js";
+
+import type {
+  VeoGenerationRecord,
+} from "../veo/audit/veoGenerationRecord.schema.js";
+
+import {
+  createVeoVideoOutputPath,
+} from "../veo/output/veoOutputPath.js";
+
+import type {
+  ResumeVeoOperationInput,
+} from "../veo/execution/resumeVeoOperation.js";
+
+import type {
+  VeoExecutionResult,
+} from "../veo/execution/veoExecution.js";
+
+type RecoverVeoOutput =
+  (
+    generatedVideo:
+      VeoExecutionResult[
+        "generatedVideos"
+      ][number],
+
+    destinationPath:
+      string,
+  ) =>
+    Promise<
+      Omit<
+        VeoGenerationRecord["outputs"][number],
+        "outputIndex"
+      >
+    >;
+
 export type ExecutionLifecycleReconciliationInput =
   Readonly<{
     mediaRoot:
@@ -62,7 +99,13 @@ export type ExecutionLifecycleReconciliationInput =
     shotId:
       string;
 
-    runwayWaitTimeoutMs:
+    runwayWaitTimeoutMs?:
+      number;
+
+    veoPollIntervalMs?:
+      number;
+
+    veoTimeoutMs?:
       number;
   }>;
 
@@ -71,7 +114,7 @@ export type ExecutionLifecycleReconciliationDependencies =
     inspectLifecycle:
       typeof inspectExecutionLifecycle;
 
-    resumeRunwayTask:
+    resumeRunwayTask?:
       (
         input:
           ResumeRunwayGen45TaskInput,
@@ -79,6 +122,21 @@ export type ExecutionLifecycleReconciliationDependencies =
         Promise<
           RunwayGen45ExecutionResult
         >;
+
+    resumeVeoOperation?:
+      (
+        input:
+          ResumeVeoOperationInput,
+      ) =>
+        Promise<
+          VeoExecutionResult
+        >;
+
+    recoverVeoOutput?:
+      RecoverVeoOutput;
+
+    recoverVeoGenerationRecord?:
+      typeof recoverVeoGenerationRecord;
 
     recoverRunwayOutput?:
       typeof recoverRunwayOutput;
@@ -118,6 +176,34 @@ export type ExecutionLifecycleReconciliationResult =
 
       generationRecord:
         RunwayGenerationRecord;
+
+      generationRecordPath:
+        string;
+
+      completion:
+        ExecutionCompletion;
+
+      completionPath:
+        string;
+    }>
+  | Readonly<{
+      lifecycleState:
+        "COMPLETED";
+
+      reconciliationMode:
+        "RECOVERED_SUBMISSION";
+
+      provider:
+        "VEO";
+
+      providerExecutionId:
+        string;
+
+      providerExecution:
+        VeoExecutionResult;
+
+      generationRecord:
+        VeoGenerationRecord;
 
       generationRecordPath:
         string;
@@ -362,6 +448,265 @@ export async function reconcileExecutionLifecycle(
     lifecycle.submission;
 
   if (
+    submission.provider ===
+    "VEO"
+  ) {
+    if (
+      submission.schemaVersion !==
+      "1.3"
+    ) {
+      throw new Error(
+        `Execution lifecycle reconciliation for provider ${submission.provider} is not implemented in this milestone.`,
+      );
+    }
+
+    const resumeVeo =
+      dependencies
+        .resumeVeoOperation;
+
+    if (!resumeVeo) {
+      throw new Error(
+        "Veo lifecycle reconciliation requires a same-operation resume dependency.",
+      );
+    }
+
+    const veoPollIntervalMs =
+      input.veoPollIntervalMs;
+
+    const veoTimeoutMs =
+      input.veoTimeoutMs;
+
+    if (
+      veoPollIntervalMs ===
+        undefined ||
+      veoTimeoutMs ===
+        undefined
+    ) {
+      throw new Error(
+        "Veo lifecycle reconciliation requires polling interval and timeout values.",
+      );
+    }
+
+    const providerExecution =
+      await resumeVeo({
+        operationName:
+          submission
+            .providerExecutionId,
+
+        pollIntervalMs:
+          veoPollIntervalMs,
+
+        timeoutMs:
+          veoTimeoutMs,
+      });
+
+    if (
+      providerExecution
+        .operationName !==
+      submission
+        .providerExecutionId
+    ) {
+      throw new Error(
+        `Veo reconciliation returned operation name ${providerExecution.operationName} but durable submission records ${submission.providerExecutionId}.`,
+      );
+    }
+
+    if (
+      providerExecution
+        .generatedVideos
+        .length !==
+      submission
+        .recoveryMetadata
+        .request
+        .numberOfVideos
+    ) {
+      throw new Error(
+        "Veo reconciliation output count does not match durable submission recovery metadata.",
+      );
+    }
+
+    const recoverOutput =
+      dependencies
+        .recoverVeoOutput;
+
+    if (!recoverOutput) {
+      throw new Error(
+        "Veo lifecycle reconciliation requires an already-generated output recovery dependency.",
+      );
+    }
+
+    const outputs:
+      VeoGenerationRecord["outputs"] =
+      [];
+
+    for (
+      const [
+        zeroBasedIndex,
+        generatedVideo,
+      ]
+      of providerExecution
+        .generatedVideos
+        .entries()
+    ) {
+      const outputIndex =
+        zeroBasedIndex + 1;
+
+      const destinationPath =
+        createVeoVideoOutputPath(
+          input.mediaRoot,
+          submission.episodeId,
+          submission.shotId,
+          submission
+            .providerExecutionId,
+          outputIndex,
+        );
+
+      const recovered =
+        await recoverOutput(
+          generatedVideo,
+          destinationPath,
+        );
+
+      outputs.push({
+        outputIndex,
+
+        destinationPath:
+          recovered
+            .destinationPath,
+
+        bytes:
+          recovered.bytes,
+
+        sha256:
+          recovered.sha256,
+
+        contentType:
+          recovered
+            .contentType,
+      });
+    }
+
+    const recordedAt =
+      dependencies.now
+        ? dependencies.now()
+        : new Date()
+            .toISOString();
+
+    const recoverGenerationRecord =
+      dependencies
+        .recoverVeoGenerationRecord ??
+      recoverVeoGenerationRecord;
+
+    const generationRecovery =
+      await recoverGenerationRecord(
+        input.mediaRoot,
+        {
+          recordedAt,
+
+          episodeId:
+            submission.episodeId,
+
+          shotId:
+            submission.shotId,
+
+          operationName:
+            submission
+              .providerExecutionId,
+
+          request:
+            submission
+              .recoveryMetadata
+              .request,
+
+          costPolicy:
+            submission
+              .recoveryMetadata
+              .costPolicy,
+
+          safety: {
+            raiMediaFilteredCount:
+              providerExecution
+                .raiMediaFilteredCount,
+
+            raiMediaFilteredReasons:
+              [
+                ...providerExecution
+                  .raiMediaFilteredReasons,
+              ],
+          },
+
+          outputs,
+        },
+      );
+
+    const recoverCompletion =
+      dependencies
+        .recoverExecutionCompletion ??
+      recoverExecutionCompletion;
+
+    const completionRecovery =
+      await recoverCompletion(
+        input.mediaRoot,
+        {
+          reservationId:
+            lifecycle
+              .reservation
+              .reservationId,
+
+          episodeId:
+            submission.episodeId,
+
+          shotId:
+            submission.shotId,
+
+          provider:
+            submission.provider,
+
+          providerExecutionId:
+            submission
+              .providerExecutionId,
+
+          generationRecordPath:
+            generationRecovery
+              .recordPath,
+        },
+      );
+
+    return Object.freeze({
+      lifecycleState:
+        "COMPLETED",
+
+      reconciliationMode:
+        "RECOVERED_SUBMISSION",
+
+      provider:
+        "VEO",
+
+      providerExecutionId:
+        submission
+          .providerExecutionId,
+
+      providerExecution,
+
+      generationRecord:
+        generationRecovery
+          .record,
+
+      generationRecordPath:
+        generationRecovery
+          .recordPath,
+
+      completion:
+        completionRecovery
+          .record,
+
+      completionPath:
+        completionRecovery
+          .completionPath,
+    });
+  }
+
+  if (
     submission.provider !==
     "RUNWAY"
   ) {
@@ -388,21 +733,41 @@ export async function reconcileExecutionLifecycle(
     );
   }
 
+  const resumeRunway =
+    dependencies
+      .resumeRunwayTask;
+
+  if (!resumeRunway) {
+    throw new Error(
+      "Runway lifecycle reconciliation requires a same-task resume dependency.",
+    );
+  }
+
+  const runwayWaitTimeoutMs =
+    input.runwayWaitTimeoutMs;
+
+  if (
+    runwayWaitTimeoutMs ===
+    undefined
+  ) {
+    throw new Error(
+      "Runway lifecycle reconciliation requires a wait timeout.",
+    );
+  }
+
   const providerExecution =
-    await dependencies
-      .resumeRunwayTask({
-        taskId:
-          submission
-            .providerExecutionId,
+    await resumeRunway({
+      taskId:
+        submission
+          .providerExecutionId,
 
-        providerEstimatedCredits:
-          submission
-            .providerEstimatedCredits,
+      providerEstimatedCredits:
+        submission
+          .providerEstimatedCredits,
 
-        waitTimeoutMs:
-          input
-            .runwayWaitTimeoutMs,
-      });
+      waitTimeoutMs:
+        runwayWaitTimeoutMs,
+    });
 
   if (
     providerExecution.taskId !==

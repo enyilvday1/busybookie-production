@@ -44,6 +44,14 @@ import type {
   resumeVeoOperation,
 } from "../../veo/execution/resumeVeoOperation.js";
 
+import type {
+  createVeoFileDownloadClient,
+} from "../../veo/output/createVeoFileDownloadClient.js";
+
+import type {
+  recoverVeoOutput,
+} from "../../veo/output/recoverVeoOutput.js";
+
 import {
   parseExecutionReconcileCliArgs,
 } from "./executionReconcileCliArgs.js";
@@ -92,8 +100,14 @@ export type RunExecutionReconcileCliDependencies =
     createVeoOperationLookupClient?:
       typeof createVeoOperationLookupClient;
 
+    createVeoFileDownloadClient?:
+      typeof createVeoFileDownloadClient;
+
     resumeVeoOperation?:
       typeof resumeVeoOperation;
+
+    recoverVeoOutput?:
+      typeof recoverVeoOutput;
   }>;
 
 export async function runExecutionReconcileCli(
@@ -214,6 +228,16 @@ export async function runExecutionReconcileCli(
       );
     }
 
+    const createVeoDownloadClient =
+      dependencies
+        .createVeoFileDownloadClient;
+
+    if (!createVeoDownloadClient) {
+      throw new Error(
+        "Veo reconciliation CLI requires a recovery-only file download client factory.",
+      );
+    }
+
     const resumeExistingVeoOperation =
       dependencies
         .resumeVeoOperation;
@@ -221,6 +245,16 @@ export async function runExecutionReconcileCli(
     if (!resumeExistingVeoOperation) {
       throw new Error(
         "Veo reconciliation CLI requires a same-operation resume function.",
+      );
+    }
+
+    const recoverExistingVeoOutput =
+      dependencies
+        .recoverVeoOutput;
+
+    if (!recoverExistingVeoOutput) {
+      throw new Error(
+        "Veo reconciliation CLI requires an already-generated output recovery function.",
       );
     }
 
@@ -239,6 +273,11 @@ export async function runExecutionReconcileCli(
 
     const veoClient =
       createVeoLookupClient(
+        geminiApiKey,
+      );
+
+    const veoFileClient =
+      createVeoDownloadClient(
         geminiApiKey,
       );
 
@@ -266,6 +305,22 @@ export async function runExecutionReconcileCli(
               resumeExistingVeoOperation(
                 veoClient,
                 input,
+              ),
+
+          recoverVeoOutput:
+            (
+              generatedVideo,
+              destinationPath,
+            ) =>
+              recoverExistingVeoOutput(
+                generatedVideo,
+                destinationPath,
+                (downloadParameters) =>
+                  veoFileClient
+                    .files
+                    .download(
+                      downloadParameters,
+                    ),
               ),
         },
       );

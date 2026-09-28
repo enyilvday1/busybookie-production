@@ -30,6 +30,14 @@ import type {
 } from "../src/veo/execution/veoExecution.js";
 
 import {
+  createVeoFileDownloadClient as createVeoFileDownloadClientProduction,
+} from "../src/veo/output/createVeoFileDownloadClient.js";
+
+import {
+  recoverVeoOutput as recoverVeoOutputProduction,
+} from "../src/veo/output/recoverVeoOutput.js";
+
+import {
   runExecutionReconcileCli,
 } from "../src/execution/cli/runExecutionReconcileCli.js";
 
@@ -318,6 +326,11 @@ describe(
             createVeoOperationLookupClientProduction,
           );
 
+        const createVeoFileDownloadClient =
+          vi.fn(
+            createVeoFileDownloadClientProduction,
+          );
+
         const generatedVideo =
           Object.freeze({
             video:
@@ -329,6 +342,53 @@ describe(
                   "video/mp4",
               }),
           });
+
+        const recoveredOutputPath =
+          "D:/Busybookie/Production/generated-video/EP91/S04/EP91_S04_durable-veo-123_01.mp4";
+
+        const recoverVeoOutput =
+          vi.fn<
+            typeof recoverVeoOutputProduction
+          >(
+            async (
+              recoveryGeneratedVideo,
+              destinationPath,
+              downloadFile,
+            ) => {
+              expect(
+                recoveryGeneratedVideo,
+              ).toBe(
+                generatedVideo,
+              );
+
+              expect(
+                destinationPath,
+              ).toBe(
+                recoveredOutputPath,
+              );
+
+              expect(
+                downloadFile,
+              ).toBeTypeOf(
+                "function",
+              );
+
+              return Object.freeze({
+                destinationPath,
+
+                bytes:
+                  321,
+
+                sha256:
+                  "c".repeat(
+                    64,
+                  ),
+
+                contentType:
+                  "video/mp4",
+              });
+            },
+          );
 
         const providerExecution:
           VeoExecutionResult =
@@ -577,6 +637,13 @@ describe(
                 "function",
               );
 
+              expect(
+                dependencies
+                  .recoverVeoOutput,
+              ).toBeTypeOf(
+                "function",
+              );
+
               await dependencies
                 .resumeVeoOperation?.({
                   operationName,
@@ -587,6 +654,12 @@ describe(
                   timeoutMs:
                     900_000,
                 });
+
+              await dependencies
+                .recoverVeoOutput?.(
+                  generatedVideo,
+                  recoveredOutputPath,
+                );
 
               return reconciliationResult;
             },
@@ -627,8 +700,10 @@ describe(
             createRunwayTaskLookupClient,
             loadVeoPolicy,
             createVeoOperationLookupClient,
+            createVeoFileDownloadClient,
             resumeVeoOperation:
               resumeVeo,
+            recoverVeoOutput,
           },
         );
 
@@ -657,7 +732,25 @@ describe(
         );
 
         expect(
+          createVeoFileDownloadClient,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          createVeoFileDownloadClient,
+        ).toHaveBeenCalledWith(
+          "test-gemini-key",
+        );
+
+        expect(
           resumeVeo,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          recoverVeoOutput,
         ).toHaveBeenCalledTimes(
           1,
         );
@@ -692,6 +785,16 @@ describe(
             .invocationCallOrder[0],
         ).toBeLessThan(
           createVeoOperationLookupClient
+            .mock
+            .invocationCallOrder[0]!,
+        );
+
+        expect(
+          inspectLifecycle
+            .mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(
+          createVeoFileDownloadClient
             .mock
             .invocationCallOrder[0]!,
         );

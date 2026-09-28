@@ -12,6 +12,10 @@ import {
   createVeoOperationLookupClient,
 } from "../src/veo/execution/createVeoOperationLookupClient.js";
 
+import {
+  createVeoFileDownloadClient,
+} from "../src/veo/output/createVeoFileDownloadClient.js";
+
 describe(
   "Busybookie recovery-only provider clients",
   () => {
@@ -90,6 +94,54 @@ describe(
 
         expect(
           "models" in
+            client,
+        ).toBe(
+          false,
+        );
+      },
+    );
+
+    it(
+      "exposes only Veo file download capability",
+      () => {
+        const client =
+          createVeoFileDownloadClient(
+            "test-gemini-key",
+          );
+
+        expect(
+          Object.keys(
+            client,
+          ),
+        ).toEqual([
+          "files",
+        ]);
+
+        expect(
+          Object.keys(
+            client.files,
+          ),
+        ).toEqual([
+          "download",
+        ]);
+
+        expect(
+          typeof client
+            .files
+            .download,
+        ).toBe(
+          "function",
+        );
+
+        expect(
+          "models" in
+            client,
+        ).toBe(
+          false,
+        );
+
+        expect(
+          "operations" in
             client,
         ).toBe(
           false,

@@ -16,9 +16,21 @@ import {
   loadProductionRules,
 } from "../../validation/loadProductionRules.js";
 
+import type {
+  loadRunwayPolicy,
+} from "../../validation/loadRunwayPolicy.js";
+
 import {
   resolveAndValidateMediaRootPath,
 } from "../../validation/validateMediaRoot.js";
+
+import type {
+  createRunwayTaskLookupClient,
+} from "../../runway/execution/createRunwayTaskLookupClient.js";
+
+import type {
+  resumeRunwayGen45Task,
+} from "../../runway/execution/resumeRunwayGen45Task.js";
 
 import {
   parseExecutionReconcileCliArgs,
@@ -53,6 +65,14 @@ export type RunExecutionReconcileCliDependencies =
     reconcileLifecycle:
       ReconcileLifecycle;
 
+    loadRunwayPolicy?:
+      typeof loadRunwayPolicy;
+
+    createRunwayTaskLookupClient?:
+      typeof createRunwayTaskLookupClient;
+
+    resumeRunwayTask?:
+      typeof resumeRunwayGen45Task;
   }>;
 
 export async function runExecutionReconcileCli(
@@ -90,32 +110,143 @@ export async function runExecutionReconcileCli(
         options.shotId,
       );
 
-  if (
-    lifecycle.state !==
-    "COMPLETED"
-  ) {
-    throw new Error(
-      `Execution reconciliation CLI currently supports COMPLETED lifecycle only; received ${lifecycle.state}.`,
-    );
-  }
-
   const cachedInspectLifecycle:
     typeof inspectExecutionLifecycle =
     async () =>
       lifecycle;
 
+  const reconciliationInput:
+    ExecutionLifecycleReconciliationInput =
+    {
+      mediaRoot,
+      episodeId:
+        options.episodeId,
+      shotId:
+        options.shotId,
+    };
+
+  if (
+    lifecycle.state ===
+    "COMPLETED"
+  ) {
+    await dependencies
+      .reconcileLifecycle(
+        reconciliationInput,
+        {
+          inspectLifecycle:
+            cachedInspectLifecycle,
+        },
+      );
+
+    return;
+  }
+
+  if (
+    lifecycle.state !==
+    "SUBMITTED"
+  ) {
+    throw new Error(
+      `Execution reconciliation CLI currently supports SUBMITTED or COMPLETED lifecycle only; received ${lifecycle.state}.`,
+    );
+  }
+
+  const submission =
+    lifecycle.submission;
+
+  if (
+    submission.provider !==
+    "RUNWAY"
+  ) {
+    throw new Error(
+      `Execution reconciliation CLI does not yet support SUBMITTED provider ${submission.provider}.`,
+    );
+  }
+
+  if (
+    submission.schemaVersion !==
+    "1.2"
+  ) {
+    await dependencies
+      .reconcileLifecycle(
+        reconciliationInput,
+        {
+          inspectLifecycle:
+            cachedInspectLifecycle,
+        },
+      );
+
+    return;
+  }
+
+  const loadRunwayRecoveryPolicy =
+    dependencies
+      .loadRunwayPolicy;
+
+  if (!loadRunwayRecoveryPolicy) {
+    throw new Error(
+      "Runway reconciliation CLI requires a Runway policy loader.",
+    );
+  }
+
+  const createRunwayLookupClient =
+    dependencies
+      .createRunwayTaskLookupClient;
+
+  if (!createRunwayLookupClient) {
+    throw new Error(
+      "Runway reconciliation CLI requires a recovery-only task lookup client factory.",
+    );
+  }
+
+  const resumeRunwayTask =
+    dependencies
+      .resumeRunwayTask;
+
+  if (!resumeRunwayTask) {
+    throw new Error(
+      "Runway reconciliation CLI requires a same-task resume function.",
+    );
+  }
+
+  const runwayPolicy =
+    await loadRunwayRecoveryPolicy();
+
+  const runwayApiSecret =
+    env.RUNWAYML_API_SECRET
+      ?.trim();
+
+  if (!runwayApiSecret) {
+    throw new Error(
+      "Runway reconciliation requires RUNWAYML_API_SECRET.",
+    );
+  }
+
+  const runwayClient =
+    createRunwayLookupClient({
+      RUNWAYML_API_SECRET:
+        runwayApiSecret,
+    });
+
   await dependencies
     .reconcileLifecycle(
       {
-        mediaRoot,
-        episodeId:
-          options.episodeId,
-        shotId:
-          options.shotId,
+        ...reconciliationInput,
+
+        runwayWaitTimeoutMs:
+          runwayPolicy
+            .task
+            .waitTimeoutMs,
       },
       {
         inspectLifecycle:
           cachedInspectLifecycle,
+
+        resumeRunwayTask:
+          (input) =>
+            resumeRunwayTask(
+              runwayClient,
+              input,
+            ),
       },
     );
 }

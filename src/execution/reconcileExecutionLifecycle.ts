@@ -55,9 +55,21 @@ import {
   recoverVeoGenerationRecord,
 } from "../veo/audit/recoverVeoGenerationRecord.js";
 
+import {
+  readVeoGenerationRecord,
+} from "../veo/audit/readVeoGenerationRecord.js";
+
 import type {
   VeoGenerationRecord,
 } from "../veo/audit/veoGenerationRecord.schema.js";
+
+import {
+  createVeoGenerationRecordPathFromIdentity,
+} from "../veo/audit/writeVeoGenerationRecord.js";
+
+import {
+  inspectVeoOutput,
+} from "../veo/output/recoverVeoOutput.js";
 
 import {
   createVeoVideoOutputPath,
@@ -137,6 +149,12 @@ export type ExecutionLifecycleReconciliationDependencies =
 
     recoverVeoGenerationRecord?:
       typeof recoverVeoGenerationRecord;
+
+    readVeoGenerationRecord?:
+      typeof readVeoGenerationRecord;
+
+    inspectVeoOutput?:
+      typeof inspectVeoOutput;
 
     recoverRunwayOutput?:
       typeof recoverRunwayOutput;
@@ -238,6 +256,31 @@ export type ExecutionLifecycleReconciliationResult =
 
       completionPath:
         string;
+    }>
+  | Readonly<{
+      lifecycleState:
+        "COMPLETED";
+
+      reconciliationMode:
+        "DURABLE_COMPLETION";
+
+      provider:
+        "VEO";
+
+      providerExecutionId:
+        string;
+
+      generationRecord:
+        VeoGenerationRecord;
+
+      generationRecordPath:
+        string;
+
+      completion:
+        ExecutionCompletion;
+
+      completionPath:
+        string;
     }>;
 
 export async function reconcileExecutionLifecycle(
@@ -264,6 +307,187 @@ export async function reconcileExecutionLifecycle(
 
     const completion =
       lifecycle.completion;
+
+    if (
+      submission.provider ===
+      "VEO"
+    ) {
+      if (
+        submission.schemaVersion !==
+        "1.3"
+      ) {
+        throw new Error(
+          `Completed Veo submission schema ${submission.schemaVersion} cannot be automatically reconciled because durable recovery metadata is unavailable.`,
+        );
+      }
+
+      const generationRecordPath =
+        createVeoGenerationRecordPathFromIdentity(
+          input.mediaRoot,
+          submission.episodeId,
+          submission.shotId,
+          submission
+            .providerExecutionId,
+        );
+
+      if (
+        completion
+          .generationRecordPath !==
+        generationRecordPath
+      ) {
+        throw new Error(
+          "Execution completion generation record path does not match the canonical durable Veo generation record path.",
+        );
+      }
+
+      const readGenerationRecord =
+        dependencies
+          .readVeoGenerationRecord ??
+        readVeoGenerationRecord;
+
+      const generationRecord =
+        await readGenerationRecord(
+          input.mediaRoot,
+          submission.episodeId,
+          submission.shotId,
+          submission
+            .providerExecutionId,
+        );
+
+      if (!generationRecord) {
+        throw new Error(
+          "Execution completion references a missing durable Veo generation record.",
+        );
+      }
+
+      const generationIdentityMatchesSubmission =
+        generationRecord.episodeId ===
+          submission.episodeId &&
+        generationRecord.shotId ===
+          submission.shotId &&
+        generationRecord.operationName ===
+          submission.providerExecutionId;
+
+      if (
+        !generationIdentityMatchesSubmission
+      ) {
+        throw new Error(
+          "Durable Veo generation record identity does not match completed submission identity.",
+        );
+      }
+
+      const generationEvidenceMatchesSubmission =
+        isDeepStrictEqual(
+          generationRecord.request,
+          submission
+            .recoveryMetadata
+            .request,
+        ) &&
+        isDeepStrictEqual(
+          generationRecord
+            .costPolicy,
+          submission
+            .recoveryMetadata
+            .costPolicy,
+        );
+
+      if (
+        !generationEvidenceMatchesSubmission
+      ) {
+        throw new Error(
+          "Durable Veo generation record does not match durable submission recovery metadata.",
+        );
+      }
+
+      if (
+        generationRecord
+          .outputs
+          .length !==
+        submission
+          .recoveryMetadata
+          .request
+          .numberOfVideos
+      ) {
+        throw new Error(
+          "Durable Veo generation record output count does not match durable submission recovery metadata.",
+        );
+      }
+
+      const inspectLocalVeoOutput =
+        dependencies
+          .inspectVeoOutput ??
+        inspectVeoOutput;
+
+      for (
+        const output
+        of generationRecord.outputs
+      ) {
+        const canonicalOutputPath =
+          createVeoVideoOutputPath(
+            input.mediaRoot,
+            generationRecord
+              .episodeId,
+            generationRecord
+              .shotId,
+            generationRecord
+              .operationName,
+            output.outputIndex,
+          );
+
+        if (
+          output.destinationPath !==
+          canonicalOutputPath
+        ) {
+          throw new Error(
+            "Durable Veo generation record output path does not match canonical output path.",
+          );
+        }
+
+        const inspectedOutput =
+          await inspectLocalVeoOutput(
+            output.destinationPath,
+          );
+
+        if (
+          inspectedOutput.bytes !==
+            output.bytes ||
+          inspectedOutput.sha256 !==
+            output.sha256
+        ) {
+          throw new Error(
+            "Durable Veo local output does not match generation record evidence.",
+          );
+        }
+      }
+
+      return Object.freeze({
+        lifecycleState:
+          "COMPLETED",
+
+        reconciliationMode:
+          "DURABLE_COMPLETION",
+
+        provider:
+          "VEO",
+
+        providerExecutionId:
+          submission
+            .providerExecutionId,
+
+        generationRecord,
+
+        generationRecordPath,
+
+        completion,
+
+        completionPath:
+          createExecutionCompletionPath(
+            input.mediaRoot,
+            completion.episodeId,
+            completion.shotId,
+          ),
+      });
+    }
 
     if (
       submission.provider !==

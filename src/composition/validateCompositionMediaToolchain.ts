@@ -5,10 +5,10 @@ import {
 export type CompositionMediaToolchainSource =
   Readonly<{
     BUSYBOOKIE_FFMPEG_PATH?:
-      string;
+      string | undefined;
 
     BUSYBOOKIE_FFPROBE_PATH?:
-      string;
+      string | undefined;
   }>;
 
 export type CompositionMediaToolchainProbeResult =

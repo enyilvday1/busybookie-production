@@ -214,6 +214,9 @@ describe(
               provider:
                 shot.provider,
 
+              nativeAudio:
+                shot.nativeAudio,
+
               sourceVideoPath:
                 shot.sourceVideoPath,
             }),
@@ -229,6 +232,9 @@ describe(
             provider:
               "RUNWAY",
 
+            nativeAudio:
+              false,
+
             sourceVideoPath:
               `${mediaRoot}/generated-video/EP02/S01/S01_01.mp4`,
           },
@@ -241,6 +247,9 @@ describe(
 
             provider:
               "VEO",
+
+            nativeAudio:
+              true,
 
             sourceVideoPath:
               `${mediaRoot}/generated-video/EP02/S02/S02_01.mp4`,

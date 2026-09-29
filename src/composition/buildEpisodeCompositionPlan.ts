@@ -23,6 +23,9 @@ export type EpisodeCompositionPlanShot =
     durationSeconds:
       number;
 
+    nativeAudio:
+      boolean;
+
     provider:
       "RUNWAY" | "VEO";
 
@@ -170,6 +173,9 @@ export async function buildEpisodeCompositionPlan(
 
         durationSeconds:
           shot.durationSeconds,
+
+        nativeAudio:
+          shot.generation.nativeAudio,
 
         provider:
           verified.provider,

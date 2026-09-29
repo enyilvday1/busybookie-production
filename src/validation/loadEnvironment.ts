@@ -15,6 +15,12 @@ export function loadEnvironment(): Environment {
 
     GEMINI_API_KEY:
       process.env.GEMINI_API_KEY || undefined,
+
+    BUSYBOOKIE_FFMPEG_PATH:
+      process.env.BUSYBOOKIE_FFMPEG_PATH || undefined,
+
+    BUSYBOOKIE_FFPROBE_PATH:
+      process.env.BUSYBOOKIE_FFPROBE_PATH || undefined,
   });
 
   if (!result.success) {

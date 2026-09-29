@@ -15,6 +15,16 @@ export const EnvironmentSchema = z.object({
     .string()
     .trim()
     .optional(),
+
+  BUSYBOOKIE_FFMPEG_PATH: z
+    .string()
+    .trim()
+    .optional(),
+
+  BUSYBOOKIE_FFPROBE_PATH: z
+    .string()
+    .trim()
+    .optional(),
 }).strict();
 
 export type Environment = z.infer<

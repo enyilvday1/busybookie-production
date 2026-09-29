@@ -154,6 +154,20 @@ function validatePlan(
   }
 
   if (
+    plan.video.width !==
+      1920 ||
+    plan.video.height !==
+      1080 ||
+    plan.video.frameRate !==
+      25 ||
+    plan.audio.sampleRateHz !==
+      48000
+  ) {
+    throw new Error(
+      "Composition normalization FFmpeg command requires the v1 master profile geometry/timing: 1920x1080 at 25 fps with 48000 Hz audio.",
+    );
+  }
+  if (
     plan.durationMode !==
     "MANIFEST_LOCKED"
   ) {

@@ -390,3 +390,106 @@ describe(
     );
   },
 );
+
+describe(
+  "Busybookie composition normalization FFmpeg fixed master profile",
+  () => {
+    it(
+      "fails closed when the v1 master profile numerical contract is altered",
+      () => {
+        const basePlan =
+          createPlan({
+            episodeId:
+              "EP90",
+
+            durationSeconds:
+              5,
+
+            nativeAudio:
+              false,
+
+            audioMode:
+              "SYNTHETIC_SILENCE",
+
+            sourceVideoPath:
+              "D:/Busybookie/Production/generated-video/EP90/S01/source.mp4",
+
+            sourceSha256:
+              "1f2d3cb765ba2ff0379af6d1ad9a34901a8a1b2153cad45875da3a3c072ff982",
+          });
+
+        const malformedPlans:
+          readonly CompositionShotNormalizationPlan[] =
+          [
+            Object.freeze({
+              ...basePlan,
+
+              video:
+                Object.freeze({
+                  ...basePlan.video,
+
+                  width:
+                    1280,
+                }),
+            }),
+
+            Object.freeze({
+              ...basePlan,
+
+              video:
+                Object.freeze({
+                  ...basePlan.video,
+
+                  height:
+                    720,
+                }),
+            }),
+
+            Object.freeze({
+              ...basePlan,
+
+              video:
+                Object.freeze({
+                  ...basePlan.video,
+
+                  frameRate:
+                    24,
+                }),
+            }),
+
+            Object.freeze({
+              ...basePlan,
+
+              audio:
+                Object.freeze({
+                  ...basePlan.audio,
+
+                  sampleRateHz:
+                    44100,
+                }),
+            }),
+          ];
+
+        for (
+          const plan
+          of malformedPlans
+        ) {
+          expect(
+            () =>
+              buildCompositionShotNormalizationFfmpegCommand({
+                ffmpegExecutable:
+                  "C:/Tools/ffmpeg.exe",
+
+                plan,
+
+                outputPath:
+                  "D:/Busybookie/Production/cache/composition-normalized/EP90/S01/output.mp4.part-test",
+              }),
+          ).toThrow(
+            /v1 master profile|1920x1080|48000/i,
+          );
+        }
+      },
+    );
+  },
+);

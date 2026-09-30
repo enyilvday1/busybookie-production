@@ -3,20 +3,17 @@ import {
 } from "node:child_process";
 
 import {
-  createHash,
   randomUUID,
 } from "node:crypto";
 
 import {
   constants,
-  createReadStream,
 } from "node:fs";
 
 import {
   copyFile,
   lstat,
   mkdir,
-  stat,
   unlink,
 } from "node:fs/promises";
 
@@ -27,6 +24,10 @@ import {
 import {
   buildCompositionShotNormalizationFfmpegCommand,
 } from "./buildCompositionShotNormalizationFfmpegCommand.js";
+
+import {
+  inspectCompositionNormalizationFile,
+} from "./inspectCompositionNormalizationFile.js";
 
 import type {
   CompositionShotNormalizationPlan,
@@ -281,135 +282,6 @@ async function assertDestinationAbsent(
   );
 }
 
-async function inspectAndHashFile(
-  filePath:
-    string,
-
-  maxBytes:
-    number,
-): Promise<
-  Readonly<{
-    bytes:
-      number;
-
-    sha256:
-      string;
-  }>
-> {
-  if (
-    !Number.isSafeInteger(
-      maxBytes,
-    ) ||
-    maxBytes <=
-      0
-  ) {
-    throw new Error(
-      "Composition normalization maximum output size must be a positive safe integer.",
-    );
-  }
-
-  const metadata =
-    await stat(
-      filePath,
-    );
-
-  if (
-    !metadata.isFile()
-  ) {
-    throw new Error(
-      "Composition normalization did not produce a regular output file.",
-    );
-  }
-
-  if (
-    metadata.size <=
-      0
-  ) {
-    throw new Error(
-      "Composition normalization produced an empty output file.",
-    );
-  }
-
-  if (
-    metadata.size >
-      maxBytes
-  ) {
-    throw new Error(
-      `Composition normalization output exceeds the ${maxBytes}-byte local limit.`,
-    );
-  }
-
-  const hash =
-    createHash(
-      "sha256",
-    );
-
-  let bytes =
-    0;
-
-  const stream =
-    createReadStream(
-      filePath,
-    );
-
-  for await (
-    const chunk
-    of stream
-  ) {
-    const buffer =
-      Buffer.isBuffer(
-        chunk,
-      )
-        ? chunk
-        : Buffer.from(
-            chunk,
-          );
-
-    bytes +=
-      buffer.length;
-
-    if (
-      bytes >
-        maxBytes
-    ) {
-      throw new Error(
-        `Composition normalization output exceeded the ${maxBytes}-byte local limit while hashing.`,
-      );
-    }
-
-    hash.update(
-      buffer,
-    );
-  }
-
-  if (
-    bytes <=
-      0
-  ) {
-    throw new Error(
-      "Composition normalization output contained no data.",
-    );
-  }
-
-  if (
-    bytes !==
-      metadata.size
-  ) {
-    throw new Error(
-      "Composition normalization output changed while it was being inspected.",
-    );
-  }
-
-  return Object.freeze({
-    bytes,
-
-    sha256:
-      hash.digest(
-        "hex",
-      ),
-  });
-}
-
 export async function materializeCompositionShotNormalization(
   input:
     MaterializeCompositionShotNormalizationInput,
@@ -459,7 +331,7 @@ export async function materializeCompositionShotNormalization(
 
   try {
     sourceInspected =
-      await inspectAndHashFile(
+      await inspectCompositionNormalizationFile(
         input.plan.sourceVideoPath,
         COMPOSITION_NORMALIZATION_MAX_SOURCE_BYTES,
       );
@@ -567,7 +439,7 @@ export async function materializeCompositionShotNormalization(
       });
 
     const inspected =
-      await inspectAndHashFile(
+      await inspectCompositionNormalizationFile(
         temporaryPath,
         COMPOSITION_NORMALIZATION_MAX_OUTPUT_BYTES,
       );

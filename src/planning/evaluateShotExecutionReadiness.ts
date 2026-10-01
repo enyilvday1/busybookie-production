@@ -149,6 +149,17 @@ export function evaluateShotExecutionReadiness(
         );
         break;
 
+      case "KREA":
+        return {
+          disposition: "BLOCKED",
+          executionProvider: null,
+          routing,
+          reasons: routing.reasons,
+          blockers: [
+            `${shot.id}: KREA is a provider identity placeholder and has no production execution readiness guard.`,
+          ],
+        };
+
       case "MANUAL":
         return {
           disposition: "MANUAL_REVIEW",

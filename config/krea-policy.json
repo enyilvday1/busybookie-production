@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0",
+  "provider": "KREA",
+  "integration": {
+    "status": "PLACEHOLDER",
+    "productionExecutionEnabled": false,
+    "automaticRoutingEnabled": false,
+    "paidCallsEnabled": false
+  },
+  "externalApiContract": {
+    "status": "UNDEFINED",
+    "credentialRequirementDefined": false,
+    "requestContractDefined": false,
+    "responseContractDefined": false
+  }
+}

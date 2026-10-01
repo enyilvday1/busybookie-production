@@ -3,6 +3,7 @@ import { z } from "zod";
 export const GenerationProviderSchema = z.enum([
   "RUNWAY",
   "VEO",
+  "KREA",
   "MANUAL",
 ]);
 
@@ -86,6 +87,15 @@ export const ProductionRulesSchema = z.object({
   }
 
   const providers = value.generation.supportedProviders;
+
+  if (providers.includes("KREA")) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["generation", "supportedProviders"],
+      message:
+        "KREA is a provider identity placeholder and is not enabled for production generation.",
+    });
+  }
 
   if (new Set(providers).size !== providers.length) {
     ctx.addIssue({

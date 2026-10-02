@@ -1,0 +1,483 @@
+import {
+  isAbsolute,
+} from "node:path";
+
+import {
+  z,
+} from "zod";
+
+import {
+  CharacterIdSchema,
+} from "../schemas/character.schema.js";
+
+const WINDOWS_ABSOLUTE_PATH_PATTERN =
+  /^[A-Za-z]:[\\/]/;
+
+const EPISODE_ID_PATTERN =
+  /^EP[0-9]{2,3}$/;
+
+const SCENE_ID_PATTERN =
+  /^SC[0-9]{2,3}$/;
+
+const SHOT_ID_PATTERN =
+  /^S[0-9]{2,3}[A-Z]?$/;
+
+const DIALOGUE_LINE_ID_PATTERN =
+  /^EP[0-9]{2,3}_SC[0-9]{2,3}_S[0-9]{2,3}[A-Z]?_L[0-9]{2,3}$/;
+
+const SHA256_PATTERN =
+  /^[a-f0-9]{64}$/;
+
+function isPortableAbsolutePath(
+  value:
+    string,
+): boolean {
+  return (
+    isAbsolute(
+      value,
+    ) ||
+    WINDOWS_ABSOLUTE_PATH_PATTERN.test(
+      value,
+    )
+  );
+}
+
+const Sha256Schema =
+  z.string()
+    .regex(
+      SHA256_PATTERN,
+      "sha256 must be a lowercase 64-character hexadecimal digest.",
+    );
+
+const AbsoluteArtifactPathSchema =
+  z.string()
+    .trim()
+    .min(1)
+    .refine(
+      isPortableAbsolutePath,
+      {
+        message:
+          "Dialogue output path must be absolute.",
+      },
+    );
+
+export const DialogueGenerationOutputRecordSchema =
+  z.object({
+    outputIndex:
+      z.number()
+        .int()
+        .positive(),
+
+    destinationPath:
+      AbsoluteArtifactPathSchema,
+
+    bytes:
+      z.number()
+        .int()
+        .positive(),
+
+    sha256:
+      Sha256Schema,
+
+    contentType:
+      z.string()
+        .trim()
+        .min(1)
+        .nullable(),
+  })
+    .strict();
+
+const DialogueGenerationVoiceSnapshotSchema =
+  z.object({
+    provider:
+      z.literal(
+        "RUNWAY",
+      ),
+
+    voiceName:
+      z.string()
+        .trim()
+        .min(1),
+
+    deliveryTraits:
+      z.array(
+        z.string()
+          .trim()
+          .min(1),
+      )
+        .min(1),
+  })
+    .strict();
+
+export const DialogueGenerationPlanSnapshotSchema =
+  z.object({
+    planKey:
+      Sha256Schema,
+
+    episodeId:
+      z.string()
+        .regex(
+          EPISODE_ID_PATTERN,
+        ),
+
+    sceneId:
+      z.string()
+        .regex(
+          SCENE_ID_PATTERN,
+        ),
+
+    shotId:
+      z.string()
+        .regex(
+          SHOT_ID_PATTERN,
+        ),
+
+    dialogueLineId:
+      z.string()
+        .regex(
+          DIALOGUE_LINE_ID_PATTERN,
+        ),
+
+    lineNumber:
+      z.number()
+        .int()
+        .positive(),
+
+    characterId:
+      CharacterIdSchema,
+
+    characterName:
+      z.string()
+        .trim()
+        .min(1),
+
+    text:
+      z.string()
+        .trim()
+        .min(1),
+
+    deliveryNotes:
+      z.string()
+        .trim()
+        .min(1)
+        .nullable(),
+
+    voice:
+      DialogueGenerationVoiceSnapshotSchema,
+  })
+    .strict()
+    .superRefine(
+      (
+        plan,
+        context,
+      ) => {
+        if (
+          !plan.dialogueLineId.startsWith(
+            `${plan.episodeId}_${plan.sceneId}_${plan.shotId}_`,
+          )
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "dialogueLineId",
+            ],
+
+            message:
+              "Dialogue line identity must match the recorded episode, scene, and shot identity.",
+          });
+        }
+
+        const expectedLineSuffix =
+          `_L${String(
+            plan.lineNumber,
+          ).padStart(
+            2,
+            "0",
+          )}`;
+
+        if (
+          !plan.dialogueLineId.endsWith(
+            expectedLineSuffix,
+          )
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "dialogueLineId",
+            ],
+
+            message:
+              "Dialogue line identity must match the recorded line number.",
+          });
+        }
+      },
+    );
+
+export const DialogueGenerationRequestVoiceSchema =
+  z.object({
+    type:
+      z.literal(
+        "runway-preset",
+      ),
+
+    presetId:
+      z.string()
+        .trim()
+        .min(1),
+  })
+    .strict();
+
+export const DialogueGenerationRequestRecordSchema =
+  z.object({
+    model:
+      z.string()
+        .trim()
+        .min(1),
+
+    promptText:
+      z.string()
+        .trim()
+        .min(1),
+
+    voice:
+      DialogueGenerationRequestVoiceSchema,
+
+    applyTextNormalization:
+      z.enum([
+        "auto",
+        "on",
+        "off",
+      ]),
+
+    languageCode:
+      z.string()
+        .regex(
+          /^[a-z]{2}$/,
+          "Dialogue generation request languageCode must use a two-letter lowercase ISO 639-1 code.",
+        ),
+
+    seed:
+      z.number()
+        .int()
+        .min(
+          0,
+        )
+        .max(
+          4_294_967_295,
+        ),
+
+    similarityBoost:
+      z.number()
+        .min(
+          0,
+        )
+        .max(
+          1,
+        ),
+
+    speed:
+      z.number()
+        .min(
+          0.7,
+        )
+        .max(
+          1.2,
+        ),
+
+    stability:
+      z.number()
+        .min(
+          0,
+        )
+        .max(
+          1,
+        ),
+
+    style:
+      z.number()
+        .min(
+          0,
+        )
+        .max(
+          1,
+        ),
+
+    useSpeakerBoost:
+      z.boolean(),
+  })
+    .strict();
+
+export const DialogueGenerationCreditsSchema =
+  z.object({
+    locallyExpected:
+      z.number()
+        .int()
+        .nonnegative(),
+
+    providerEstimated:
+      z.number()
+        .int()
+        .nonnegative(),
+
+    providerFinal:
+      z.number()
+        .int()
+        .nonnegative(),
+  })
+    .strict();
+
+export const DialogueGenerationRecordSchema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "1.0",
+      ),
+
+    recordedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUCCEEDED",
+      ),
+
+    provider:
+      z.literal(
+        "RUNWAY",
+      ),
+
+    providerExecutionId:
+      z.string()
+        .trim()
+        .min(1),
+
+    providerModel:
+      z.string()
+        .trim()
+        .min(1),
+
+    providerCreatedAt:
+      z.string()
+        .datetime(),
+
+    request:
+      DialogueGenerationRequestRecordSchema,
+
+    credits:
+      DialogueGenerationCreditsSchema,
+
+    plan:
+      DialogueGenerationPlanSnapshotSchema,
+
+    outputs:
+      z.array(
+        DialogueGenerationOutputRecordSchema,
+      )
+        .min(1),
+  })
+    .strict()
+    .superRefine(
+      (
+        record,
+        context,
+      ) => {
+        if (
+          record.plan.voice.provider !==
+          record.provider
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "plan",
+              "voice",
+              "provider",
+            ],
+
+            message:
+              "Dialogue generation record provider must match the locked voice provider.",
+          });
+        }
+
+        if (
+          record.request.model !==
+          record.providerModel
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "request",
+              "model",
+            ],
+
+            message:
+              "Dialogue generation request model must match the recorded provider model.",
+          });
+        }
+
+        if (
+          record.request.promptText !==
+          record.plan.text
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "request",
+              "promptText",
+            ],
+
+            message:
+              "Dialogue generation request prompt text must match the planned dialogue text.",
+          });
+        }
+
+        if (
+          record.request.voice.presetId !==
+          record.plan.voice.voiceName
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "request",
+              "voice",
+              "presetId",
+            ],
+
+            message:
+              "Dialogue generation request preset voice must match the locked planned voice.",
+          });
+        }
+      },
+    );
+
+export type DialogueGenerationOutputRecord =
+  z.infer<
+    typeof DialogueGenerationOutputRecordSchema
+  >;
+
+export type DialogueGenerationRequestRecord =
+  z.infer<
+    typeof DialogueGenerationRequestRecordSchema
+  >;
+
+export type DialogueGenerationCredits =
+  z.infer<
+    typeof DialogueGenerationCreditsSchema
+  >;
+
+export type DialogueGenerationRecord =
+  z.infer<
+    typeof DialogueGenerationRecordSchema
+  >;

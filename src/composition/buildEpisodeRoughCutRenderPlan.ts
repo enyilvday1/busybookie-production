@@ -28,6 +28,9 @@ const ROUGH_CUT_RENDER_PROFILE_ID =
 const NORMALIZATION_PROFILE_ID =
   "busybookie-master-normalization-v1" as const;
 
+const DIALOGUE_NORMALIZATION_PROFILE_ID =
+  "busybookie-master-normalization-v2-dialogue" as const;
+
 const WINDOWS_ABSOLUTE_PATH_PATTERN =
   /^[A-Za-z]:[\\/]/;
 
@@ -316,14 +319,25 @@ function assertTrustedNormalizedShot(
         shot.shotId,
       );
 
+  const trustedNormalizationProfile =
+    (
+      shot.normalizationPlan.schemaVersion ===
+        "1.0" &&
+      shot.normalizationPlan.profileId ===
+        NORMALIZATION_PROFILE_ID
+    ) ||
+    (
+      shot.normalizationPlan.schemaVersion ===
+        "2.0" &&
+      shot.normalizationPlan.profileId ===
+        DIALOGUE_NORMALIZATION_PROFILE_ID
+    );
+
   if (
-    shot.normalizationPlan.schemaVersion !==
-      "1.0" ||
-    shot.normalizationPlan.profileId !==
-      NORMALIZATION_PROFILE_ID
+    !trustedNormalizationProfile
   ) {
     throw new Error(
-      `Episode rough-cut render planning requires trusted normalization profile ${NORMALIZATION_PROFILE_ID} for ${episodeId}/${shotId}.`,
+      `Episode rough-cut render planning requires trusted normalization profile ${NORMALIZATION_PROFILE_ID} or ${DIALOGUE_NORMALIZATION_PROFILE_ID} for ${episodeId}/${shotId}.`,
     );
   }
 

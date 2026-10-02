@@ -1,4 +1,8 @@
 import type {
+  DialogueCompositionAudioPlan,
+} from "../dialogue/buildDialogueCompositionAudioPlan.js";
+
+import type {
   EpisodeCompositionPlan,
 } from "./buildEpisodeCompositionPlan.js";
 
@@ -29,6 +33,9 @@ export type ComposeEpisodeRoughCutInput =
   Readonly<{
     compositionPlan:
       EpisodeCompositionPlan;
+
+    dialogueAudioPlans?:
+      readonly DialogueCompositionAudioPlan[];
 
     mediaRoot:
       string;
@@ -96,6 +103,16 @@ export async function composeEpisodeRoughCut(
       .prepareComposition({
         compositionPlan:
           input.compositionPlan,
+
+        ...(
+          input.dialogueAudioPlans ===
+            undefined
+            ? {}
+            : {
+                dialogueAudioPlans:
+                  input.dialogueAudioPlans,
+              }
+        ),
 
         mediaRoot:
           input.mediaRoot,

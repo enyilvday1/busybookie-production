@@ -17,7 +17,9 @@
     "veo:generate": "tsx scripts/veo.ts",
     "routing:report": "tsx scripts/routing-report.ts",
     "execution:plan": "tsx scripts/execution-plan.ts",
-    "execution:reconcile": "tsx scripts/execution-reconcile.ts"
+    "execution:reconcile": "tsx scripts/execution-reconcile.ts",
+    "dialogue:generate": "tsx scripts/dialogue-generate.ts",
+    "dialogue:reconcile": "tsx scripts/dialogue-reconcile.ts"
   },
   "keywords": [],
   "author": "",

@@ -11,6 +11,73 @@ import type {
   Shot,
 } from "../schemas/episodeManifest.schema.js";
 
+export type ShotDialoguePresetVoice =
+  Readonly<{
+    provider:
+      "RUNWAY";
+
+    voiceName:
+      string;
+
+    deliveryTraits:
+      readonly string[];
+  }>;
+
+export type ShotDialogueReferenceAudio =
+  Readonly<{
+    assetId:
+      string;
+
+    mediaRootRelativePath:
+      string;
+
+    bytes:
+      number;
+
+    sha256:
+      string;
+
+    contentType:
+      string;
+
+    durationSeconds:
+      number;
+
+    codecName:
+      string;
+
+    sampleRateHz:
+      number;
+
+    channels:
+      number;
+  }>;
+
+export type ShotDialogueReferenceVoice =
+  Readonly<{
+    selectionStatus:
+      "LOCKED";
+
+    provider:
+      "RUNWAY";
+
+    voiceName:
+      string;
+
+    deliveryTraits:
+      readonly string[];
+
+    executionMode:
+      "RUNWAY_REFERENCE_AUDIO";
+
+    referenceAudio:
+      ShotDialogueReferenceAudio;
+  }>;
+
+export type ShotDialoguePlanVoice =
+  | ShotDialoguePresetVoice
+  | ShotDialogueReferenceVoice;
+
 export type ShotDialoguePlanLine =
   Readonly<{
     lineNumber:
@@ -32,22 +99,13 @@ export type ShotDialoguePlanLine =
       string | null;
 
     voice:
-      Readonly<{
-        provider:
-          "RUNWAY";
-
-        voiceName:
-          string;
-
-        deliveryTraits:
-          readonly string[];
-      }>;
+      ShotDialoguePlanVoice;
   }>;
 
 export type ShotDialoguePlan =
   Readonly<{
     schemaVersion:
-      "1.0";
+      "1.0" | "2.0";
 
     episodeId:
       string;
@@ -152,11 +210,23 @@ function createDialogueLineId(
   );
 }
 
+function isReferenceAudioVoice(
+  voice:
+    ShotDialoguePlanVoice,
+): voice is ShotDialogueReferenceVoice {
+  return (
+    "executionMode" in
+      voice &&
+    voice.executionMode ===
+      "RUNWAY_REFERENCE_AUDIO"
+  );
+}
+
 function buildCanonicalPlanIdentity(
   input:
     Readonly<{
       schemaVersion:
-        "1.0";
+        "1.0" | "2.0";
 
       episodeId:
         string;
@@ -230,18 +300,93 @@ function buildCanonicalPlanIdentity(
           deliveryNotes:
             line.deliveryNotes,
 
-          voice: {
-            provider:
-              line.voice.provider,
+          voice:
+            isReferenceAudioVoice(
+              line.voice,
+            )
+              ? {
+                  selectionStatus:
+                    line.voice
+                      .selectionStatus,
 
-            voiceName:
-              line.voice.voiceName,
+                  provider:
+                    line.voice
+                      .provider,
 
-            deliveryTraits: [
-              ...line.voice
-                .deliveryTraits,
-            ],
-          },
+                  voiceName:
+                    line.voice
+                      .voiceName,
+
+                  deliveryTraits: [
+                    ...line.voice
+                      .deliveryTraits,
+                  ],
+
+                  executionMode:
+                    line.voice
+                      .executionMode,
+
+                  referenceAudio: {
+                    assetId:
+                      line.voice
+                        .referenceAudio
+                        .assetId,
+
+                    mediaRootRelativePath:
+                      line.voice
+                        .referenceAudio
+                        .mediaRootRelativePath,
+
+                    bytes:
+                      line.voice
+                        .referenceAudio
+                        .bytes,
+
+                    sha256:
+                      line.voice
+                        .referenceAudio
+                        .sha256,
+
+                    contentType:
+                      line.voice
+                        .referenceAudio
+                        .contentType,
+
+                    durationSeconds:
+                      line.voice
+                        .referenceAudio
+                        .durationSeconds,
+
+                    codecName:
+                      line.voice
+                        .referenceAudio
+                        .codecName,
+
+                    sampleRateHz:
+                      line.voice
+                        .referenceAudio
+                        .sampleRateHz,
+
+                    channels:
+                      line.voice
+                        .referenceAudio
+                        .channels,
+                  },
+                }
+              : {
+                  provider:
+                    line.voice
+                      .provider,
+
+                  voiceName:
+                    line.voice
+                      .voiceName,
+
+                  deliveryTraits: [
+                    ...line.voice
+                      .deliveryTraits,
+                  ],
+                },
         }),
       ),
   });
@@ -315,6 +460,96 @@ export function buildShotDialoguePlan(
           const lineNumber =
             index + 1;
 
+          const deliveryTraits =
+            Object.freeze([
+              ...character.voice
+                .deliveryTraits,
+            ]);
+
+          const voice:
+            ShotDialoguePlanVoice =
+              "executionMode" in
+                character.voice &&
+              character.voice
+                .executionMode ===
+                "RUNWAY_REFERENCE_AUDIO"
+                ? Object.freeze({
+                    selectionStatus:
+                      "LOCKED" as const,
+
+                    provider:
+                      character.voice
+                        .provider,
+
+                    voiceName:
+                      character.voice
+                        .voiceName,
+
+                    deliveryTraits,
+
+                    executionMode:
+                      "RUNWAY_REFERENCE_AUDIO" as const,
+
+                    referenceAudio:
+                      Object.freeze({
+                        assetId:
+                          character.voice
+                            .referenceAudio
+                            .assetId,
+
+                        mediaRootRelativePath:
+                          character.voice
+                            .referenceAudio
+                            .mediaRootRelativePath,
+
+                        bytes:
+                          character.voice
+                            .referenceAudio
+                            .bytes,
+
+                        sha256:
+                          character.voice
+                            .referenceAudio
+                            .sha256,
+
+                        contentType:
+                          character.voice
+                            .referenceAudio
+                            .contentType,
+
+                        durationSeconds:
+                          character.voice
+                            .referenceAudio
+                            .durationSeconds,
+
+                        codecName:
+                          character.voice
+                            .referenceAudio
+                            .codecName,
+
+                        sampleRateHz:
+                          character.voice
+                            .referenceAudio
+                            .sampleRateHz,
+
+                        channels:
+                          character.voice
+                            .referenceAudio
+                            .channels,
+                      }),
+                  })
+                : Object.freeze({
+                    provider:
+                      character.voice
+                        .provider,
+
+                    voiceName:
+                      character.voice
+                        .voiceName,
+
+                    deliveryTraits,
+                  });
+
           return Object.freeze({
             lineNumber,
 
@@ -339,30 +574,27 @@ export function buildShotDialoguePlan(
               dialogue.deliveryNotes ??
               null,
 
-            voice:
-              Object.freeze({
-                provider:
-                  character.voice
-                    .provider,
-
-                voiceName:
-                  character.voice
-                    .voiceName,
-
-                deliveryTraits:
-                  Object.freeze([
-                    ...character.voice
-                      .deliveryTraits,
-                  ]),
-              }),
+            voice,
           });
         },
       );
 
+  const hasReferenceAudioVoice =
+    lines.some(
+      (line) =>
+        isReferenceAudioVoice(
+          line.voice,
+        ),
+    );
+
+  const schemaVersion =
+    hasReferenceAudioVoice
+      ? "2.0" as const
+      : "1.0" as const;
+
   const planWithoutKey =
     Object.freeze({
-      schemaVersion:
-        "1.0" as const,
+      schemaVersion,
 
       episodeId,
 

@@ -66,6 +66,17 @@ export function buildRunwayElevenV3Request(
     );
   }
 
+  if (
+    "executionMode" in
+      input.line.voice &&
+    input.line.voice.executionMode ===
+      "RUNWAY_REFERENCE_AUDIO"
+  ) {
+    throw new Error(
+      "Runway Eleven v3 preset dialogue request does not support reference-audio voices.",
+    );
+  }
+
   assertDialogueWithinBudget(
     input.line.text,
     input.policy,

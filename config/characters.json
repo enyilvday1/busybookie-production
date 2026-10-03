@@ -58,16 +58,28 @@
         ]
       },
       "voice": {
-        "selectionStatus": "PENDING",
+        "selectionStatus": "LOCKED",
         "provider": "RUNWAY",
-        "voiceName": null,
+        "voiceName": "Ollie",
         "deliveryTraits": [
           "young",
           "curious",
           "warm",
           "friendly",
           "natural"
-        ]
+        ],
+        "executionMode": "RUNWAY_REFERENCE_AUDIO",
+        "referenceAudio": {
+          "assetId": "OLLIE_VOICE_REFERENCE_V1",
+          "mediaRootRelativePath": "references/voices/OLLIE/ollie-reference-v1.mp3",
+          "bytes": 231593,
+          "sha256": "ad7bc6a50675bddc74a4885f290667fad1076c5cd3d9844eb7ff2d84b0f94a2f",
+          "contentType": "audio/mpeg",
+          "durationSeconds": 14.4,
+          "codecName": "mp3",
+          "sampleRateHz": 44100,
+          "channels": 1
+        }
       },
       "promptAnchor": "Ollie is a young boy otter with warm brown and cream fur, large expressive brown eyes, a teal explorer backpack and a small compass pendant. He is curious, friendly, energetic and gentle. Preserve his approved Busybookie character design exactly."
     },

@@ -56,7 +56,7 @@ describe("Busybookie Character Bible", () => {
     expect(mont?.pronouns.subject).toBe("he");
   });
 
-  it("keeps Ollie pending until creative voice approval while retaining Kacey's locked voice", async () => {
+  it("locks Ollie to the approved Runway reference-audio identity while retaining Kacey's locked voice", async () => {
     const bible = await loadCharacterBible();
 
     const ollie = bible.characters.find(
@@ -68,9 +68,9 @@ describe("Busybookie Character Bible", () => {
     );
 
     expect(ollie?.voice).toEqual({
-      selectionStatus: "PENDING",
+      selectionStatus: "LOCKED",
       provider: "RUNWAY",
-      voiceName: null,
+      voiceName: "Ollie",
       deliveryTraits: [
         "young",
         "curious",
@@ -78,6 +78,20 @@ describe("Busybookie Character Bible", () => {
         "friendly",
         "natural",
       ],
+      executionMode: "RUNWAY_REFERENCE_AUDIO",
+      referenceAudio: {
+        assetId: "OLLIE_VOICE_REFERENCE_V1",
+        mediaRootRelativePath:
+          "references/voices/OLLIE/ollie-reference-v1.mp3",
+        bytes: 231_593,
+        sha256:
+          "ad7bc6a50675bddc74a4885f290667fad1076c5cd3d9844eb7ff2d84b0f94a2f",
+        contentType: "audio/mpeg",
+        durationSeconds: 14.4,
+        codecName: "mp3",
+        sampleRateHz: 44_100,
+        channels: 1,
+      },
     });
 
     expect(kacey?.voice).toEqual({

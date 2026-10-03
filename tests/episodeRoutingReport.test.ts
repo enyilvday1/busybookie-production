@@ -50,8 +50,8 @@ describe("Busybookie Episode Routing Report", () => {
     expect(report.totalShots).toBe(2);
     expect(report.summary).toEqual({
       ROUTABLE: 1,
-      BLOCKED: 1,
-      MANUAL_REVIEW: 0,
+      BLOCKED: 0,
+      MANUAL_REVIEW: 1,
       CONFLICT: 0,
     });
   });
@@ -97,7 +97,7 @@ describe("Busybookie Episode Routing Report", () => {
       order: 2,
       title: "Ollie discovers something",
       decision: {
-        disposition: "BLOCKED",
+        disposition: "MANUAL_REVIEW",
         recommendedProvider: null,
         currentProvider: "VEO",
       },

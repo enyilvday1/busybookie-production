@@ -164,11 +164,11 @@ describe(
         );
 
         expect(formatted).toContain(
-          "BLOCKED: 1",
+          "BLOCKED: 0",
         );
 
         expect(formatted).toContain(
-          "MANUAL_REVIEW: 0",
+          "MANUAL_REVIEW: 1",
         );
 
         expect(formatted).toContain(
@@ -194,7 +194,7 @@ describe(
     );
 
     it(
-      "renders blocked unresolved recommendation for a pending dialogue voice",
+      "renders manual-review unresolved recommendation for a locked dialogue voice",
       async () => {
         const formatted =
           formatEpisodeRoutingReport(
@@ -202,7 +202,7 @@ describe(
           );
 
         expect(formatted).toContain(
-          "S02  BLOCKED        current=VEO  recommended=unresolved",
+          "S02  MANUAL_REVIEW  current=VEO  recommended=unresolved",
         );
       },
     );

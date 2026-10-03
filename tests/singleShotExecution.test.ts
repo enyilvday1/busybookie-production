@@ -765,6 +765,46 @@ describe(
           loadExecutionContext(),
         ]);
 
+        const testBible =
+          structuredClone(
+            context.bible,
+          );
+
+        const ollie =
+          testBible.characters.find(
+            (character) =>
+              character.id ===
+              "OLLIE",
+          );
+
+        if (!ollie) {
+          throw new Error(
+            "Expected Ollie in Character Bible.",
+          );
+        }
+
+        ollie.voice = {
+          selectionStatus:
+            "LOCKED",
+
+          provider:
+            "RUNWAY",
+
+          voiceName:
+            "Chad",
+
+          deliveryTraits: [
+            ...ollie.voice
+              .deliveryTraits,
+          ],
+        };
+
+        const testContext = {
+          ...context,
+          bible:
+            testBible,
+        };
+
         const mocks =
           makeDependencies();
 
@@ -773,7 +813,7 @@ describe(
             makeRequest(
               episode,
               "S02",
-              context,
+              testContext,
             ),
             mocks.dependencies,
           ),

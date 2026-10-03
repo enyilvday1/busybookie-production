@@ -134,9 +134,9 @@ describe(
         expect(plan.summary).toEqual({
           EXECUTABLE: 0,
           NOT_READY: 1,
-          MANUAL_REVIEW: 1,
+          MANUAL_REVIEW: 0,
           CONFLICT: 0,
-          BLOCKED: 0,
+          BLOCKED: 1,
         });
 
         expect(plan.shots[0]?.readiness).toMatchObject({
@@ -149,9 +149,15 @@ describe(
         ).toMatch(/status is DRAFT/i);
 
         expect(plan.shots[1]?.readiness).toMatchObject({
-          disposition: "MANUAL_REVIEW",
+          disposition: "BLOCKED",
           executionProvider: null,
         });
+
+        expect(
+          plan.shots[1]?.readiness.blockers.join(" "),
+        ).toMatch(
+          /Ollie requires dialogue but no approved voice is locked/i,
+        );
       },
     );
 

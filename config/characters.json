@@ -58,9 +58,9 @@
         ]
       },
       "voice": {
-        "selectionStatus": "LOCKED",
+        "selectionStatus": "PENDING",
         "provider": "RUNWAY",
-        "voiceName": "Chad",
+        "voiceName": null,
         "deliveryTraits": [
           "young",
           "curious",

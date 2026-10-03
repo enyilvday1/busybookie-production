@@ -274,10 +274,44 @@ describe("Busybookie Episode Manifest", () => {
     shot.generation.status =
       "APPROVED_FOR_GENERATION";
 
+    const testBible =
+      structuredClone(
+        bible,
+      );
+
+    const ollie =
+      testBible.characters.find(
+        (character) =>
+          character.id ===
+          "OLLIE",
+      );
+
+    if (!ollie) {
+      throw new Error(
+        "Expected Ollie in Character Bible.",
+      );
+    }
+
+    ollie.voice = {
+      selectionStatus:
+        "LOCKED",
+
+      provider:
+        "RUNWAY",
+
+      voiceName:
+        "Chad",
+
+      deliveryTraits: [
+        ...ollie.voice
+          .deliveryTraits,
+      ],
+    };
+
     expect(() =>
       validateEpisodeProduction(
         episode,
-        bible,
+        testBible,
         rules,
       ),
     ).not.toThrow();

@@ -162,11 +162,45 @@ describe(
           "S02",
         );
 
+        const testBible =
+          structuredClone(
+            context.bible,
+          );
+
+        const ollie =
+          testBible.characters.find(
+            (character) =>
+              character.id ===
+              "OLLIE",
+          );
+
+        if (!ollie) {
+          throw new Error(
+            "Expected Ollie in Character Bible.",
+          );
+        }
+
+        ollie.voice = {
+          selectionStatus:
+            "LOCKED",
+
+          provider:
+            "RUNWAY",
+
+          voiceName:
+            "Chad",
+
+          deliveryTraits: [
+            ...ollie.voice
+              .deliveryTraits,
+          ],
+        };
+
         const result =
           evaluateShotExecutionReadiness(
             episode,
             shot,
-            context.bible,
+            testBible,
             context.rules,
             context.policy,
           );

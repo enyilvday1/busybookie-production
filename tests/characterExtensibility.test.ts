@@ -66,6 +66,18 @@ function createGuestBibleCandidate(
           "synthetic character extensibility fixture",
         promptAnchor:
           "Synthetic test-only Busybookie guest character.",
+        voice: {
+          selectionStatus:
+            "LOCKED",
+          provider:
+            "RUNWAY",
+          voiceName:
+            "Chad",
+          deliveryTraits: [
+            ...template.voice
+              .deliveryTraits,
+          ],
+        },
       },
     ],
   };

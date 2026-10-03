@@ -32,6 +32,44 @@ import {
 const MEDIA_ROOT =
   "D:/Busybookie/Production";
 
+async function loadApprovedDialogueTestBible() {
+  const bible =
+    structuredClone(
+      await loadCharacterBible(),
+    );
+
+  const ollie =
+    bible.characters.find(
+      (character) =>
+        character.id ===
+        "OLLIE",
+    );
+
+  if (!ollie) {
+    throw new Error(
+      "Expected Ollie in Character Bible.",
+    );
+  }
+
+  ollie.voice = {
+    selectionStatus:
+      "LOCKED",
+
+    provider:
+      "RUNWAY",
+
+    voiceName:
+      "Chad",
+
+    deliveryTraits: [
+      ...ollie.voice
+        .deliveryTraits,
+    ],
+  };
+
+  return bible;
+}
+
 function baseDependencies(
   createExecutor:
     (
@@ -67,7 +105,8 @@ function baseDependencies(
 
     loadDialogueVoicePolicy,
 
-    loadCharacterBible,
+    loadCharacterBible:
+      loadApprovedDialogueTestBible,
 
     loadEpisodeManifest,
 

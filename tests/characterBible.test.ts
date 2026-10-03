@@ -56,7 +56,7 @@ describe("Busybookie Character Bible", () => {
     expect(mont?.pronouns.subject).toBe("he");
   });
 
-  it("locks Ollie and Kacey Runway voices", async () => {
+  it("keeps Ollie pending until creative voice approval while retaining Kacey's locked voice", async () => {
     const bible = await loadCharacterBible();
 
     const ollie = bible.characters.find(
@@ -68,9 +68,9 @@ describe("Busybookie Character Bible", () => {
     );
 
     expect(ollie?.voice).toEqual({
-      selectionStatus: "LOCKED",
+      selectionStatus: "PENDING",
       provider: "RUNWAY",
-      voiceName: "Chad",
+      voiceName: null,
       deliveryTraits: [
         "young",
         "curious",

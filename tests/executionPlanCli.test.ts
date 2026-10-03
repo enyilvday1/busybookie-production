@@ -178,13 +178,13 @@ describe(
           "NOT_READY: 1",
         );
         expect(formatted).toContain(
-          "MANUAL_REVIEW: 1",
+          "MANUAL_REVIEW: 0",
         );
         expect(formatted).toContain(
           "CONFLICT: 0",
         );
         expect(formatted).toContain(
-          "BLOCKED: 0",
+          "BLOCKED: 1",
         );
       },
     );
@@ -224,10 +224,14 @@ describe(
         );
 
         expect(formatted).toContain(
-          "S02  MANUAL_REVIEW",
+          "S02  BLOCKED",
         );
         expect(formatted).toContain(
           "provider=unresolved",
+        );
+
+        expect(formatted).toMatch(
+          /blocker: .*Ollie requires dialogue but no approved voice is locked/i,
         );
       },
     );

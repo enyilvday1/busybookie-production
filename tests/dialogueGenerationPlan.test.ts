@@ -19,7 +19,7 @@ import {
 async function loadEp02DialogueFixture() {
   const [
     episode,
-    bible,
+    loadedBible,
   ] = await Promise.all([
     loadEpisodeManifest(
       "EP02",
@@ -27,6 +27,40 @@ async function loadEp02DialogueFixture() {
 
     loadCharacterBible(),
   ]);
+
+  const bible =
+    structuredClone(
+      loadedBible,
+    );
+
+  const ollie =
+    bible.characters.find(
+      (character) =>
+        character.id ===
+        "OLLIE",
+    );
+
+  if (!ollie) {
+    throw new Error(
+      "Expected Ollie in Character Bible.",
+    );
+  }
+
+  ollie.voice = {
+    selectionStatus:
+      "LOCKED",
+
+    provider:
+      "RUNWAY",
+
+    voiceName:
+      "Chad",
+
+    deliveryTraits: [
+      ...ollie.voice
+        .deliveryTraits,
+    ],
+  };
 
   const scene =
     episode.scenes.find(

@@ -223,7 +223,7 @@ describe(
                 "OLLIE_VOICE_REFERENCE_V1",
 
               mediaRootRelativePath:
-                "voice-references/OLLIE/ollie-reference-v1.mp3",
+                "references/voices/OLLIE/ollie-reference-v1.mp3",
 
               bytes:
                 231_593,

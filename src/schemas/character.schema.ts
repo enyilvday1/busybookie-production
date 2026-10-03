@@ -48,7 +48,10 @@ const ReferenceAudioRelativePathSchema =
         const segments =
           value.split("/");
 
-        return segments.every(
+        return value.startsWith(
+          "references/voices/",
+        ) &&
+          segments.every(
           (segment) =>
             segment.length >
               0 &&
@@ -60,7 +63,7 @@ const ReferenceAudioRelativePathSchema =
       },
       {
         message:
-          "Reference audio path must be a canonical media-root-relative path using forward slashes with no traversal segments.",
+          "Reference audio path must be a canonical media-root-relative path under references/voices/ using forward slashes with no traversal segments.",
       },
     );
 

@@ -56,6 +56,11 @@ import type {
 } from "./resumeRunwayElevenV3Task.js";
 
 import type {
+  ResumeRunwayReferenceAudioTaskInput,
+  RunwayReferenceAudioTaskResumeResult,
+} from "./resumeRunwayReferenceAudioTask.js";
+
+import type {
   RunwayElevenV3ExecutionResult,
 } from "./runwayElevenV3Execution.js";
 
@@ -93,6 +98,15 @@ type ResumeRunwayDialogueTask =
       RunwayElevenV3ExecutionResult
     >;
 
+type ResumeRunwayReferenceAudioDialogueTask =
+  (
+    input:
+      ResumeRunwayReferenceAudioTaskInput,
+  ) =>
+    Promise<
+      RunwayReferenceAudioTaskResumeResult
+    >;
+
 type RecoverDialogueOutput =
   (
     sourceUrl:
@@ -121,6 +135,9 @@ export type DialogueLifecycleReconciliationDependencies =
 
     resumeRunwayTask?:
       ResumeRunwayDialogueTask;
+
+    resumeRunwayReferenceAudioTask?:
+      ResumeRunwayReferenceAudioDialogueTask;
 
     recoverOutput?:
       RecoverDialogueOutput;
@@ -576,11 +593,45 @@ export async function reconcileDialogueLifecycle(
   }
 
   if (
-    lifecycle.submission.schemaVersion !==
-    "1.0"
+    lifecycle.submission.schemaVersion ===
+    "2.0"
   ) {
+    if (
+      lifecycle.state !==
+      "SUBMITTED"
+    ) {
+      throw new Error(
+        "Dialogue lifecycle reconciliation does not yet support durable COMPLETED reference-audio submission schema version 2.0.",
+      );
+    }
+
+    const resumeRunwayReferenceAudioTask =
+      requireDependency(
+        dependencies
+          .resumeRunwayReferenceAudioTask,
+        "resumeRunwayReferenceAudioTask for a durable SUBMITTED Runway reference-audio dialogue task",
+      );
+
+    const waitTimeoutMs =
+      requireRunwayWaitTimeoutMs(
+        input.runwayWaitTimeoutMs ??
+          DEFAULT_RUNWAY_WAIT_TIMEOUT_MS,
+      );
+
+    await resumeRunwayReferenceAudioTask({
+      taskId:
+        lifecycle.submission
+          .providerExecutionId,
+
+      providerEstimatedCredits:
+        lifecycle.submission
+          .providerEstimatedCredits,
+
+      waitTimeoutMs,
+    });
+
     throw new Error(
-      "Dialogue lifecycle reconciliation does not yet support reference-audio submission schema version 2.0.",
+      "Dialogue lifecycle reconciliation reference-audio recovery continuation is not yet implemented.",
     );
   }
 

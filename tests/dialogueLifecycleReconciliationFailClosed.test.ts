@@ -700,7 +700,7 @@ describe(
   "Busybookie dialogue reconciliation fail-closed coverage",
   () => {
     it(
-      "rejects a reference-audio v2 submission before invoking the Eleven v3 resume or recovery path",
+      "dispatches a SUBMITTED reference-audio v2 lifecycle only to the reference-audio same-task resume adapter",
       async () => {
         const inspectLifecycle =
           vi.fn(
@@ -726,11 +726,42 @@ describe(
             },
           );
 
+        const resumeRunwayReferenceAudioTask =
+          vi.fn(
+            async (
+              resumeInput:
+                Readonly<{
+                  taskId: string;
+                  providerEstimatedCredits: number;
+                  waitTimeoutMs: number;
+                }>,
+            ) => {
+              expect(
+                resumeInput,
+              ).toEqual({
+                taskId:
+                  referenceAudioSubmission
+                    .providerExecutionId,
+
+                providerEstimatedCredits:
+                  referenceAudioSubmission
+                    .providerEstimatedCredits,
+
+                waitTimeoutMs:
+                  600_000,
+              });
+
+              throw new Error(
+                "REFERENCE_AUDIO_RESUME_DISPATCH_CONFIRMED",
+              );
+            },
+          );
+
         const recoverOutput =
           vi.fn(
             async () => {
               throw new Error(
-                "Reference-audio reconciliation must not recover output through the Eleven v3 path.",
+                "Reference-audio dispatch test must stop before output recovery.",
               );
             },
           );
@@ -739,7 +770,7 @@ describe(
           vi.fn(
             async () => {
               throw new Error(
-                "Reference-audio reconciliation must not recover a generation record through the Eleven v3 path.",
+                "Reference-audio dispatch test must stop before generation-record recovery.",
               );
             },
           );
@@ -748,19 +779,21 @@ describe(
           vi.fn(
             async () => {
               throw new Error(
-                "Reference-audio reconciliation must not recover completion through the Eleven v3 path.",
+                "Reference-audio dispatch test must stop before completion recovery.",
               );
             },
           );
 
-        const dependencies = {
-          inspectLifecycle,
-          resumeRunwayTask,
-          recoverOutput,
-          recoverGenerationRecord,
-          recoverCompletion,
-        } satisfies
-          DialogueLifecycleReconciliationDependencies;
+        const dependencies =
+          {
+            inspectLifecycle,
+            resumeRunwayTask,
+            resumeRunwayReferenceAudioTask,
+            recoverOutput,
+            recoverGenerationRecord,
+            recoverCompletion,
+          } satisfies
+            DialogueLifecycleReconciliationDependencies;
 
         await expect(
           reconcileDialogueLifecycle(
@@ -768,7 +801,78 @@ describe(
             dependencies,
           ),
         ).rejects.toThrow(
-          /does not yet support reference-audio submission schema version 2\.0/i,
+          "REFERENCE_AUDIO_RESUME_DISPATCH_CONFIRMED",
+        );
+
+        expect(
+          resumeRunwayTask,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          resumeRunwayReferenceAudioTask,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          recoverOutput,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          recoverGenerationRecord,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          recoverCompletion,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "requires the reference-audio resume dependency for a SUBMITTED v2 lifecycle and never falls back to Eleven v3",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayTask =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Eleven v3 resume must not be used as a fallback for reference-audio recovery.",
+              );
+            },
+          );
+
+        const recoverOutput =
+          vi.fn();
+
+        const dependencies =
+          {
+            inspectLifecycle,
+            resumeRunwayTask,
+            recoverOutput,
+          } satisfies
+            DialogueLifecycleReconciliationDependencies;
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          /requires resumeRunwayReferenceAudioTask for a durable SUBMITTED Runway reference-audio dialogue task/i,
         );
 
         expect(
@@ -778,6 +882,103 @@ describe(
         expect(
           recoverOutput,
         ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "fails closed after successful reference-audio task resume until v2 recovery continuation is implemented",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayTask =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Eleven v3 resume must not be invoked for reference-audio recovery.",
+              );
+            },
+          );
+
+        const resumeRunwayReferenceAudioTask =
+          vi.fn(
+            async () =>
+              Object.freeze({
+                taskId:
+                  referenceAudioSubmission
+                    .providerExecutionId,
+
+                providerCreatedAt:
+                  "2026-10-05T13:00:00.000Z",
+
+                estimatedCredits:
+                  referenceAudioSubmission
+                    .providerEstimatedCredits,
+
+                finalCredits:
+                  1.75,
+
+                outputUrls:
+                  Object.freeze([
+                    "https://example.test/reference-audio-output.mp3",
+                  ]),
+              }),
+          );
+
+        const recoverOutput =
+          vi.fn();
+
+        const recoverGenerationRecord =
+          vi.fn();
+
+        const recoverCompletion =
+          vi.fn();
+
+        const dependencies =
+          {
+            inspectLifecycle,
+            resumeRunwayTask,
+            resumeRunwayReferenceAudioTask,
+            recoverOutput,
+            recoverGenerationRecord,
+            recoverCompletion,
+          } satisfies
+            DialogueLifecycleReconciliationDependencies;
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          "Dialogue lifecycle reconciliation reference-audio recovery continuation is not yet implemented.",
+        );
+
+        expect(
+          resumeRunwayTask,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          resumeRunwayReferenceAudioTask,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          recoverOutput,
+        ).not.toHaveBeenCalled();
 
         expect(
           recoverGenerationRecord,
@@ -785,6 +986,59 @@ describe(
 
         expect(
           recoverCompletion,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "keeps durable COMPLETED reference-audio v2 reconciliation fail-closed without contacting either resume adapter",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "COMPLETED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+
+                completion,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayTask =
+          vi.fn();
+
+        const resumeRunwayReferenceAudioTask =
+          vi.fn();
+
+        const dependencies =
+          {
+            inspectLifecycle,
+            resumeRunwayTask,
+            resumeRunwayReferenceAudioTask,
+          } satisfies
+            DialogueLifecycleReconciliationDependencies;
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          /does not yet support durable COMPLETED reference-audio submission schema version 2.0/i,
+        );
+
+        expect(
+          resumeRunwayTask,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          resumeRunwayReferenceAudioTask,
         ).not.toHaveBeenCalled();
       },
     );

@@ -186,7 +186,9 @@ export function createRunwayDialogueProductionReconciler(
 
     if (
       lifecycle.submission.schemaVersion ===
-      "2.0"
+      "2.0" ||
+      lifecycle.submission.schemaVersion ===
+      "3.0"
     ) {
       const resumeReferenceAudioTask =
         dependencies
@@ -196,7 +198,7 @@ export function createRunwayDialogueProductionReconciler(
         !resumeReferenceAudioTask
       ) {
         throw new Error(
-          "Runway dialogue production reconciliation requires resumeRunwayReferenceAudioTask for a durable SUBMITTED reference-audio v2 lifecycle.",
+          "Runway dialogue production reconciliation requires resumeRunwayReferenceAudioTask for a durable SUBMITTED reference-audio v2/v3 lifecycle.",
         );
       }
 

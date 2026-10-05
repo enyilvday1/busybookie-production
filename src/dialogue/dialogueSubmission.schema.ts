@@ -3,6 +3,7 @@ import {
 } from "zod";
 
 import {
+  DialogueGenerationDirectSeedAudioRequestRecordSchema,
   DialogueGenerationPlanSnapshotSchema,
   DialogueGenerationReferenceAudioPlanSnapshotSchema,
   DialogueGenerationReferenceAudioRequestRecordSchema,
@@ -178,6 +179,62 @@ export const DialogueReferenceAudioGenerationRecoveryMetadataSchema =
 
             message:
               "Dialogue reference-audio recovery plan must use the Runway voice provider.",
+          });
+        }
+      },
+    );
+
+export const DialogueDirectSeedAudioGenerationRecoveryMetadataSchema =
+  z.object({
+    request:
+      DialogueGenerationDirectSeedAudioRequestRecordSchema,
+
+    locallyExpectedCredits:
+      SafeNonnegativeIntegerSchema,
+
+    plan:
+      DialogueGenerationReferenceAudioPlanSnapshotSchema,
+  })
+    .strict()
+    .superRefine(
+      (
+        recovery,
+        context,
+      ) => {
+        if (
+          recovery.request.promptText !==
+          recovery.plan.text
+        ) {
+          context.addIssue({
+            code:
+              z.ZodIssueCode.custom,
+
+            path: [
+              "request",
+              "promptText",
+            ],
+
+            message:
+              "Dialogue direct SeedAudio recovery request prompt text must match the immutable dialogue plan.",
+          });
+        }
+
+        if (
+          recovery.plan.voice.provider !==
+          "RUNWAY"
+        ) {
+          context.addIssue({
+            code:
+              z.ZodIssueCode.custom,
+
+            path: [
+              "plan",
+              "voice",
+              "provider",
+            ],
+
+            message:
+              "Dialogue direct SeedAudio recovery plan must use the Runway voice provider.",
           });
         }
       },
@@ -577,12 +634,174 @@ export const DialogueSubmissionV2Schema =
       addDialogueSubmissionV2IdentityValidation,
     );
 
+const DialogueSubmissionV3IdentityFieldsSchema =
+  z.object({
+    reservationId:
+      DialogueSubmissionReservationIdSchema,
+
+    episodeId:
+      DialogueReservationEpisodeIdSchema,
+
+    sceneId:
+      DialogueReservationSceneIdSchema,
+
+    shotId:
+      DialogueReservationShotIdSchema,
+
+    dialogueLineId:
+      DialogueReservationLineIdSchema,
+
+    planKey:
+      DialogueReservationPlanKeySchema,
+
+    provider:
+      DialogueReservationProviderSchema,
+
+    providerExecutionId:
+      DialogueSubmissionProviderExecutionIdSchema,
+
+    providerEstimatedCredits:
+      DialogueGenerationProviderCreditSchema,
+
+    recoveryMetadata:
+      DialogueDirectSeedAudioGenerationRecoveryMetadataSchema,
+  })
+    .strict();
+
+function addDialogueSubmissionV3IdentityValidation(
+  value:
+    z.infer<
+      typeof DialogueSubmissionV3IdentityFieldsSchema
+    >,
+
+  context:
+    z.RefinementCtx,
+): void {
+  if (
+    !dialogueReservationIdentityMatches(
+      value.episodeId,
+      value.sceneId,
+      value.shotId,
+      value.dialogueLineId,
+    )
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "dialogueLineId",
+      ],
+
+      message:
+        "Dialogue submission line identity does not match the selected episode, scene, and shot.",
+    });
+  }
+
+  const recoveryPlan =
+    value.recoveryMetadata.plan;
+
+  if (
+    recoveryPlan.episodeId !==
+      value.episodeId ||
+    recoveryPlan.sceneId !==
+      value.sceneId ||
+    recoveryPlan.shotId !==
+      value.shotId ||
+    recoveryPlan.dialogueLineId !==
+      value.dialogueLineId
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "recoveryMetadata",
+        "plan",
+      ],
+
+      message:
+        "Dialogue recovery plan identity does not match the submission identity.",
+    });
+  }
+
+  if (
+    recoveryPlan.planKey !==
+    value.planKey
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "recoveryMetadata",
+        "plan",
+        "planKey",
+      ],
+
+      message:
+        "Dialogue recovery planKey does not match the submission planKey.",
+    });
+  }
+
+  if (
+    recoveryPlan.voice.provider !==
+    value.provider
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "recoveryMetadata",
+        "plan",
+        "voice",
+        "provider",
+      ],
+
+      message:
+        "Dialogue recovery voice provider does not match the submission provider.",
+    });
+  }
+}
+
+export const DialogueDirectSeedAudioSubmissionInputSchema =
+  DialogueSubmissionV3IdentityFieldsSchema
+    .superRefine(
+      addDialogueSubmissionV3IdentityValidation,
+    );
+
+const DialogueSubmissionV3BaseSchema =
+  DialogueSubmissionV3IdentityFieldsSchema
+    .extend({
+      schemaVersion:
+        z.literal(
+          "3.0",
+        ),
+
+      submittedAt:
+        z.string()
+          .datetime(),
+
+      status:
+        z.literal(
+          "SUBMITTED",
+        ),
+    });
+
+export const DialogueSubmissionV3Schema =
+  DialogueSubmissionV3BaseSchema
+    .superRefine(
+      addDialogueSubmissionV3IdentityValidation,
+    );
+
 export const DialogueSubmissionSchema =
   z.discriminatedUnion(
     "schemaVersion",
     [
       DialogueSubmissionV1Schema,
       DialogueSubmissionV2Schema,
+      DialogueSubmissionV3Schema,
     ],
   );
 
@@ -604,6 +823,16 @@ export type DialogueReferenceAudioSubmissionInput =
 export type DialogueSubmissionV2 =
   z.infer<
     typeof DialogueSubmissionV2Schema
+  >;
+
+export type DialogueDirectSeedAudioSubmissionInput =
+  z.infer<
+    typeof DialogueDirectSeedAudioSubmissionInputSchema
+  >;
+
+export type DialogueSubmissionV3 =
+  z.infer<
+    typeof DialogueSubmissionV3Schema
   >;
 
 export type DialogueSubmission =

@@ -26,6 +26,7 @@ import type {
 import type {
   DialogueSubmissionV1,
   DialogueSubmissionV2,
+  DialogueSubmissionV3,
 } from "./dialogueSubmission.schema.js";
 
 import {
@@ -510,6 +511,104 @@ function assertReferenceAudioGenerationRecordMatchesSubmission(
   }
 }
 
+function assertDirectSeedAudioGenerationRecordMatchesSubmission(
+  record:
+    DialogueGenerationRecord,
+
+  submission:
+    DialogueSubmissionV3,
+): void {
+  if (
+    record.schemaVersion !==
+    "3.0"
+  ) {
+    throw new Error(
+      "Dialogue generation record schema version does not match the supported v3 direct SeedAudio reconciliation contract.",
+    );
+  }
+
+  if (
+    record.provider !==
+      submission.provider ||
+    record.providerExecutionId !==
+      submission.providerExecutionId
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record provider execution identity does not match the durable submission.",
+    );
+  }
+
+  if (
+    record.plan.episodeId !==
+      submission.episodeId ||
+    record.plan.sceneId !==
+      submission.sceneId ||
+    record.plan.shotId !==
+      submission.shotId ||
+    record.plan.dialogueLineId !==
+      submission.dialogueLineId
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record plan identity does not match the durable submission.",
+    );
+  }
+
+  if (
+    record.plan.planKey !==
+    submission.planKey
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record planKey does not match the durable submission.",
+    );
+  }
+
+  if (
+    !isDeepStrictEqual(
+      record.plan,
+      submission.recoveryMetadata.plan,
+    )
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record plan does not match the immutable submission recovery plan.",
+    );
+  }
+
+  if (
+    !isDeepStrictEqual(
+      record.request,
+      submission.recoveryMetadata.request,
+    )
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record request does not match the immutable submission recovery request.",
+    );
+  }
+
+  if (
+    record.providerModel !==
+    submission.recoveryMetadata
+      .request
+      .model
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record provider model does not match the durable submission request.",
+    );
+  }
+
+  if (
+    record.credits.locallyExpected !==
+      submission.recoveryMetadata
+        .locallyExpectedCredits ||
+    record.credits.providerEstimated !==
+      submission.providerEstimatedCredits
+  ) {
+    throw new Error(
+      "Dialogue direct SeedAudio generation record credit evidence does not match the durable submission.",
+    );
+  }
+}
+
+
 function assertCanonicalGenerationOutputs(
   mediaRoot:
     string,
@@ -703,7 +802,9 @@ export async function reconcileDialogueLifecycle(
 
   if (
     lifecycle.submission.schemaVersion ===
-    "2.0"
+    "2.0" ||
+    lifecycle.submission.schemaVersion ===
+    "3.0"
   ) {
     if (
       lifecycle.state ===
@@ -780,10 +881,20 @@ export async function reconcileDialogueLifecycle(
         );
       }
 
-      assertReferenceAudioGenerationRecordMatchesSubmission(
-        generationRecord,
-        lifecycle.submission,
-      );
+      if (
+        lifecycle.submission.schemaVersion ===
+        "2.0"
+      ) {
+        assertReferenceAudioGenerationRecordMatchesSubmission(
+          generationRecord,
+          lifecycle.submission,
+        );
+      } else {
+        assertDirectSeedAudioGenerationRecordMatchesSubmission(
+          generationRecord,
+          lifecycle.submission,
+        );
+      }
 
       assertCanonicalGenerationOutputs(
         input.mediaRoot,
@@ -944,65 +1055,125 @@ export async function reconcileDialogueLifecycle(
     }
 
     const expectedGenerationRecord:
-      DialogueGenerationRecord = {
-        schemaVersion:
-          "2.0",
+      DialogueGenerationRecord =
+        lifecycle.submission
+          .schemaVersion ===
+        "2.0"
+          ? {
+              schemaVersion:
+                "2.0",
 
-        recordedAt:
-          now(),
+              recordedAt:
+                now(),
 
-        status:
-          "SUCCEEDED",
+              status:
+                "SUCCEEDED",
 
-        provider:
-          lifecycle.submission
-            .provider,
+              provider:
+                lifecycle.submission
+                  .provider,
 
-        providerExecutionId:
-          lifecycle.submission
-            .providerExecutionId,
+              providerExecutionId:
+                lifecycle.submission
+                  .providerExecutionId,
 
-        providerModel:
-          lifecycle.submission
-            .routing
-            .model,
+              providerModel:
+                lifecycle.submission
+                  .routing
+                  .model,
 
-        providerCreatedAt:
-          providerExecution
-            .providerCreatedAt,
+              providerCreatedAt:
+                providerExecution
+                  .providerCreatedAt,
 
-        request:
-          lifecycle.submission
-            .recoveryMetadata
-            .request,
+              request:
+                lifecycle.submission
+                  .recoveryMetadata
+                  .request,
 
-        routing:
-          lifecycle.submission
-            .routing,
+              routing:
+                lifecycle.submission
+                  .routing,
 
-        credits: {
-          locallyExpected:
-            lifecycle.submission
-              .recoveryMetadata
-              .locallyExpectedCredits,
+              credits: {
+                locallyExpected:
+                  lifecycle.submission
+                    .recoveryMetadata
+                    .locallyExpectedCredits,
 
-          providerEstimated:
-            lifecycle.submission
-              .providerEstimatedCredits,
+                providerEstimated:
+                  lifecycle.submission
+                    .providerEstimatedCredits,
 
-          providerFinal:
-            providerExecution
-              .finalCredits,
-        },
+                providerFinal:
+                  providerExecution
+                    .finalCredits,
+              },
 
-        plan:
-          lifecycle.submission
-            .recoveryMetadata
-            .plan,
+              plan:
+                lifecycle.submission
+                  .recoveryMetadata
+                  .plan,
 
-        outputs:
-          recoveredOutputs,
-      };
+              outputs:
+                recoveredOutputs,
+            }
+          : {
+              schemaVersion:
+                "3.0",
+
+              recordedAt:
+                now(),
+
+              status:
+                "SUCCEEDED",
+
+              provider:
+                lifecycle.submission
+                  .provider,
+
+              providerExecutionId:
+                lifecycle.submission
+                  .providerExecutionId,
+
+              providerModel:
+                lifecycle.submission
+                  .recoveryMetadata
+                  .request
+                  .model,
+
+              providerCreatedAt:
+                providerExecution
+                  .providerCreatedAt,
+
+              request:
+                lifecycle.submission
+                  .recoveryMetadata
+                  .request,
+
+              credits: {
+                locallyExpected:
+                  lifecycle.submission
+                    .recoveryMetadata
+                    .locallyExpectedCredits,
+
+                providerEstimated:
+                  lifecycle.submission
+                    .providerEstimatedCredits,
+
+                providerFinal:
+                  providerExecution
+                    .finalCredits,
+              },
+
+              plan:
+                lifecycle.submission
+                  .recoveryMetadata
+                  .plan,
+
+              outputs:
+                recoveredOutputs,
+            };
 
     assertCanonicalGenerationOutputs(
       input.mediaRoot,

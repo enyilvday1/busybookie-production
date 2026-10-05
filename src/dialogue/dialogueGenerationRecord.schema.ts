@@ -502,6 +502,87 @@ export const DialogueGenerationReferenceAudioRequestRecordSchema =
   })
     .strict();
 
+export const DialogueGenerationDirectSeedAudioRequestRecordSchema =
+  z.object({
+    model:
+      z.literal(
+        "seed_audio",
+      ),
+
+    promptText:
+      z.string()
+        .trim()
+        .min(1),
+
+    loudnessRate:
+      z.number()
+        .refine(
+          Number.isFinite,
+          "Runway direct SeedAudio loudnessRate must be finite.",
+        )
+        .optional(),
+
+    outputFormat:
+      z.enum([
+        "wav",
+        "mp3",
+        "ogg_opus",
+      ])
+        .optional(),
+
+    pitchRate:
+      z.number()
+        .refine(
+          Number.isFinite,
+          "Runway direct SeedAudio pitchRate must be finite.",
+        )
+        .optional(),
+
+    sampleRate:
+      z.union([
+        z.literal(8_000),
+        z.literal(16_000),
+        z.literal(24_000),
+        z.literal(32_000),
+        z.literal(44_100),
+        z.literal(48_000),
+      ])
+        .optional(),
+
+    speechRate:
+      z.number()
+        .refine(
+          Number.isFinite,
+          "Runway direct SeedAudio speechRate must be finite.",
+        )
+        .optional(),
+
+    voice:
+      z.object({
+        type:
+          z.literal(
+            "reference-audio",
+          ),
+
+        audioUri:
+          z.string()
+            .trim()
+            .min(1)
+            .refine(
+              (value) =>
+                value.startsWith(
+                  "runway://",
+                ),
+              {
+                message:
+                  "Runway direct SeedAudio reference-audio request must use a Runway upload URI.",
+              },
+            ),
+      })
+        .strict(),
+  })
+    .strict();
+
 export const DialogueGenerationProviderCreditSchema =
   z.number()
     .refine(
@@ -912,12 +993,126 @@ export const DialogueGenerationRecordV2Schema =
       },
     );
 
+export const DialogueGenerationRecordV3Schema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "3.0",
+      ),
+
+    recordedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUCCEEDED",
+      ),
+
+    provider:
+      z.literal(
+        "RUNWAY",
+      ),
+
+    providerExecutionId:
+      z.string()
+        .trim()
+        .min(1),
+
+    providerModel:
+      z.literal(
+        "seed_audio",
+      ),
+
+    providerCreatedAt:
+      z.string()
+        .datetime(),
+
+    request:
+      DialogueGenerationDirectSeedAudioRequestRecordSchema,
+
+    credits:
+      DialogueGenerationReferenceAudioCreditsSchema,
+
+    plan:
+      DialogueGenerationReferenceAudioPlanSnapshotSchema,
+
+    outputs:
+      z.array(
+        DialogueGenerationOutputRecordSchema,
+      )
+        .min(1),
+  })
+    .strict()
+    .superRefine(
+      (
+        record,
+        context,
+      ) => {
+        if (
+          record.plan.voice.provider !==
+          record.provider
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "plan",
+              "voice",
+              "provider",
+            ],
+
+            message:
+              "Dialogue direct SeedAudio generation record provider must match the locked voice provider.",
+          });
+        }
+
+        if (
+          record.request.model !==
+          record.providerModel
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "request",
+              "model",
+            ],
+
+            message:
+              "Dialogue direct SeedAudio request model must match the recorded provider model.",
+          });
+        }
+
+        if (
+          record.request.promptText !==
+          record.plan.text
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "request",
+              "promptText",
+            ],
+
+            message:
+              "Dialogue direct SeedAudio request prompt text must match the planned dialogue text.",
+          });
+        }
+      },
+    );
+
 export const DialogueGenerationRecordSchema =
   z.discriminatedUnion(
     "schemaVersion",
     [
       DialogueGenerationRecordV1Schema,
       DialogueGenerationRecordV2Schema,
+      DialogueGenerationRecordV3Schema,
     ],
   );
 
@@ -939,6 +1134,11 @@ export type DialogueGenerationCredits =
 export type DialogueGenerationRecordV1 =
   z.infer<
     typeof DialogueGenerationRecordV1Schema
+  >;
+
+export type DialogueGenerationRecordV3 =
+  z.infer<
+    typeof DialogueGenerationRecordV3Schema
   >;
 
 export type DialogueGenerationRecord =

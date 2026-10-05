@@ -173,7 +173,8 @@ export type DialogueLifecycleReconciliationResult =
         string;
 
       providerExecution:
-        RunwayElevenV3ExecutionResult;
+        | RunwayElevenV3ExecutionResult
+        | RunwayReferenceAudioTaskResumeResult;
 
       generationRecord:
         DialogueGenerationRecord;
@@ -253,7 +254,8 @@ function requireDependency<T>(
 
 function assertRecoveredProviderExecution(
   providerExecution:
-    RunwayElevenV3ExecutionResult,
+    | RunwayElevenV3ExecutionResult
+    | RunwayReferenceAudioTaskResumeResult,
 
   durableTaskId:
     string,
@@ -612,27 +614,309 @@ export async function reconcileDialogueLifecycle(
         "resumeRunwayReferenceAudioTask for a durable SUBMITTED Runway reference-audio dialogue task",
       );
 
+    const recoverOutput =
+      dependencies
+        .recoverOutput ??
+      recoverDialogueAudioOutput;
+
+    const recoverGenerationRecord =
+      dependencies
+        .recoverGenerationRecord ??
+      recoverDialogueGenerationRecord;
+
+    const recoverCompletion =
+      dependencies
+        .recoverCompletion ??
+      recoverDialogueCompletion;
+
+    const now =
+      dependencies.now ??
+      (() =>
+        new Date()
+          .toISOString());
+
     const waitTimeoutMs =
       requireRunwayWaitTimeoutMs(
         input.runwayWaitTimeoutMs ??
           DEFAULT_RUNWAY_WAIT_TIMEOUT_MS,
       );
 
-    await resumeRunwayReferenceAudioTask({
-      taskId:
+    const providerExecution =
+      await resumeRunwayReferenceAudioTask({
+        taskId:
+          lifecycle.submission
+            .providerExecutionId,
+
+        providerEstimatedCredits:
+          lifecycle.submission
+            .providerEstimatedCredits,
+
+        waitTimeoutMs,
+      });
+
+    assertRecoveredProviderExecution(
+      providerExecution,
+      lifecycle.submission
+        .providerExecutionId,
+      lifecycle.submission
+        .providerEstimatedCredits,
+    );
+
+    const recoveredOutputs:
+      DialogueGenerationRecord[
+        "outputs"
+      ] =
+        [];
+
+    for (
+      let index =
+        0;
+      index <
+        providerExecution
+          .outputUrls
+          .length;
+      index +=
+        1
+    ) {
+      const outputIndex =
+        index +
+        1;
+
+      const destinationPath =
+        createDialogueAudioOutputPath(
+          input.mediaRoot,
+          lifecycle.submission
+            .episodeId,
+          lifecycle.submission
+            .shotId,
+          lifecycle.submission
+            .dialogueLineId,
+          lifecycle.submission
+            .provider,
+          lifecycle.submission
+            .providerExecutionId,
+          outputIndex,
+        );
+
+      const recovered =
+        await recoverOutput(
+          providerExecution
+            .outputUrls[index]!,
+          destinationPath,
+        );
+
+      assertRecoveredOutputPath(
+        recovered,
+        destinationPath,
+      );
+
+      recoveredOutputs.push(
+        Object.freeze({
+          outputIndex,
+
+          destinationPath,
+
+          bytes:
+            recovered.bytes,
+
+          sha256:
+            recovered.sha256,
+
+          contentType:
+            recovered.contentType,
+        }),
+      );
+    }
+
+    const expectedGenerationRecord:
+      DialogueGenerationRecord = {
+        schemaVersion:
+          "2.0",
+
+        recordedAt:
+          now(),
+
+        status:
+          "SUCCEEDED",
+
+        provider:
+          lifecycle.submission
+            .provider,
+
+        providerExecutionId:
+          lifecycle.submission
+            .providerExecutionId,
+
+        providerModel:
+          lifecycle.submission
+            .routing
+            .model,
+
+        providerCreatedAt:
+          providerExecution
+            .providerCreatedAt,
+
+        request:
+          lifecycle.submission
+            .recoveryMetadata
+            .request,
+
+        routing:
+          lifecycle.submission
+            .routing,
+
+        credits: {
+          locallyExpected:
+            lifecycle.submission
+              .recoveryMetadata
+              .locallyExpectedCredits,
+
+          providerEstimated:
+            lifecycle.submission
+              .providerEstimatedCredits,
+
+          providerFinal:
+            providerExecution
+              .finalCredits,
+        },
+
+        plan:
+          lifecycle.submission
+            .recoveryMetadata
+            .plan,
+
+        outputs:
+          recoveredOutputs,
+      };
+
+    assertCanonicalGenerationOutputs(
+      input.mediaRoot,
+      expectedGenerationRecord,
+    );
+
+    const canonicalGenerationRecordPath =
+      createDialogueGenerationRecordPath(
+        input.mediaRoot,
+        lifecycle.submission
+          .episodeId,
+        lifecycle.submission
+          .shotId,
+        lifecycle.submission
+          .dialogueLineId,
+        lifecycle.submission
+          .provider,
+        lifecycle.submission
+          .providerExecutionId,
+      );
+
+    const recoveredGenerationRecord =
+      await recoverGenerationRecord(
+        input.mediaRoot,
+        expectedGenerationRecord,
+      );
+
+    assertRecoveredGenerationRecord(
+      expectedGenerationRecord,
+      recoveredGenerationRecord,
+      canonicalGenerationRecordPath,
+    );
+
+    const canonicalCompletionPath =
+      createDialogueCompletionPath(
+        input.mediaRoot,
+        lifecycle.submission
+          .episodeId,
+        lifecycle.submission
+          .sceneId,
+        lifecycle.submission
+          .shotId,
+        lifecycle.submission
+          .dialogueLineId,
+      );
+
+    const completionInput:
+      DialogueCompletionInput = {
+        reservationId:
+          lifecycle.reservation
+            .reservationId,
+
+        episodeId:
+          lifecycle.submission
+            .episodeId,
+
+        sceneId:
+          lifecycle.submission
+            .sceneId,
+
+        shotId:
+          lifecycle.submission
+            .shotId,
+
+        dialogueLineId:
+          lifecycle.submission
+            .dialogueLineId,
+
+        planKey:
+          lifecycle.submission
+            .planKey,
+
+        provider:
+          lifecycle.submission
+            .provider,
+
+        providerExecutionId:
+          lifecycle.submission
+            .providerExecutionId,
+
+        generationRecordPath:
+          recoveredGenerationRecord
+            .recordPath,
+      };
+
+    const recoveredCompletion =
+      await recoverCompletion(
+        input.mediaRoot,
+        completionInput,
+      );
+
+    assertRecoveredCompletion(
+      recoveredCompletion,
+      completionInput,
+      canonicalCompletionPath,
+    );
+
+    return Object.freeze({
+      lifecycleState:
+        "COMPLETED",
+
+      reconciliationMode:
+        "RECOVERED_SUBMISSION",
+
+      provider:
+        "RUNWAY",
+
+      providerExecutionId:
         lifecycle.submission
           .providerExecutionId,
 
-      providerEstimatedCredits:
-        lifecycle.submission
-          .providerEstimatedCredits,
+      providerExecution,
 
-      waitTimeoutMs,
+      generationRecord:
+        recoveredGenerationRecord
+          .record,
+
+      generationRecordPath:
+        recoveredGenerationRecord
+          .recordPath,
+
+      completion:
+        recoveredCompletion
+          .record,
+
+      completionPath:
+        recoveredCompletion
+          .completionPath,
     });
-
-    throw new Error(
-      "Dialogue lifecycle reconciliation reference-audio recovery continuation is not yet implemented.",
-    );
   }
 
   const canonicalGenerationRecordPath =

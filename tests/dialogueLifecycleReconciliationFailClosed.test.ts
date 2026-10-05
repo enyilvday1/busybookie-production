@@ -886,7 +886,422 @@ describe(
     );
 
     it(
-      "fails closed after successful reference-audio task resume until v2 recovery continuation is implemented",
+      "recovers a SUBMITTED reference-audio v2 lifecycle through canonical output, v2 generation record, and completion recovery",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayTask =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Eleven v3 resume must not be invoked for reference-audio recovery.",
+              );
+            },
+          );
+
+        const providerExecution =
+          Object.freeze({
+            taskId:
+              referenceAudioSubmission
+                .providerExecutionId,
+
+            providerCreatedAt:
+              "2026-10-05T13:00:00.000Z",
+
+            estimatedCredits:
+              referenceAudioSubmission
+                .providerEstimatedCredits,
+
+            finalCredits:
+              1.75,
+
+            outputUrls:
+              Object.freeze([
+                "https://example.test/reference-audio-output.mp3",
+              ]),
+          });
+
+        const resumeRunwayReferenceAudioTask =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "resumeRunwayReferenceAudioTask"
+              ]
+            >
+          >(
+            async (
+              resumeInput,
+            ) => {
+              expect(
+                resumeInput,
+              ).toEqual({
+                taskId:
+                  referenceAudioSubmission
+                    .providerExecutionId,
+
+                providerEstimatedCredits:
+                  referenceAudioSubmission
+                    .providerEstimatedCredits,
+
+                waitTimeoutMs:
+                  600_000,
+              });
+
+              return providerExecution;
+            },
+          );
+
+        const referenceAudioGenerationRecordPath =
+          createDialogueGenerationRecordPath(
+            mediaRoot,
+            identity.episodeId,
+            identity.shotId,
+            identity.dialogueLineId,
+            "RUNWAY",
+            referenceAudioSubmission
+              .providerExecutionId,
+          );
+
+        const referenceAudioOutputPath =
+          createDialogueAudioOutputPath(
+            mediaRoot,
+            identity.episodeId,
+            identity.shotId,
+            identity.dialogueLineId,
+            "RUNWAY",
+            referenceAudioSubmission
+              .providerExecutionId,
+            1,
+          );
+
+        const expectedGenerationRecord:
+          DialogueGenerationRecord = {
+            schemaVersion:
+              "2.0",
+
+            recordedAt:
+              "2026-10-05T13:01:00.000Z",
+
+            status:
+              "SUCCEEDED",
+
+            provider:
+              "RUNWAY",
+
+            providerExecutionId:
+              referenceAudioSubmission
+                .providerExecutionId,
+
+            providerModel:
+              referenceAudioSubmission
+                .routing
+                .model,
+
+            providerCreatedAt:
+              providerExecution
+                .providerCreatedAt,
+
+            request:
+              referenceAudioSubmission
+                .recoveryMetadata
+                .request,
+
+            routing:
+              referenceAudioSubmission
+                .routing,
+
+            credits: {
+              locallyExpected:
+                referenceAudioSubmission
+                  .recoveryMetadata
+                  .locallyExpectedCredits,
+
+              providerEstimated:
+                referenceAudioSubmission
+                  .providerEstimatedCredits,
+
+              providerFinal:
+                providerExecution
+                  .finalCredits,
+            },
+
+            plan:
+              referenceAudioSubmission
+                .recoveryMetadata
+                .plan,
+
+            outputs: [
+              {
+                outputIndex:
+                  1,
+
+                destinationPath:
+                  referenceAudioOutputPath,
+
+                bytes:
+                  456,
+
+                sha256:
+                  "c".repeat(
+                    64,
+                  ),
+
+                contentType:
+                  "audio/mpeg",
+              },
+            ],
+          };
+
+        const referenceAudioCompletion:
+          DialogueCompletion = {
+            schemaVersion:
+              "1.0",
+
+            completedAt:
+              "2026-10-05T13:02:00.000Z",
+
+            status:
+              "COMPLETED",
+
+            reservationId:
+              reservation
+                .reservationId,
+
+            ...identity,
+
+            planKey,
+
+            provider:
+              "RUNWAY",
+
+            providerExecutionId:
+              referenceAudioSubmission
+                .providerExecutionId,
+
+            generationRecordPath:
+              referenceAudioGenerationRecordPath,
+          };
+
+        const recoverOutput =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "recoverOutput"
+              ]
+            >
+          >(
+            async (
+              sourceUrl,
+              destinationPath,
+            ) => {
+              expect(
+                sourceUrl,
+              ).toBe(
+                providerExecution
+                  .outputUrls[0],
+              );
+
+              expect(
+                destinationPath,
+              ).toBe(
+                referenceAudioOutputPath,
+              );
+
+              return {
+                destinationPath,
+
+                bytes:
+                  456,
+
+                sha256:
+                  "c".repeat(
+                    64,
+                  ),
+
+                contentType:
+                  "audio/mpeg",
+              };
+            },
+          );
+
+        const recoverGenerationRecord =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "recoverGenerationRecord"
+              ]
+            >
+          >(
+            async (
+              recoveryMediaRoot,
+              inputRecord,
+            ) => {
+              expect(
+                recoveryMediaRoot,
+              ).toBe(
+                mediaRoot,
+              );
+
+              expect(
+                inputRecord,
+              ).toEqual(
+                expectedGenerationRecord,
+              );
+
+              return {
+                record:
+                  inputRecord,
+
+                recordPath:
+                  referenceAudioGenerationRecordPath,
+              };
+            },
+          );
+
+        const recoverCompletion =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "recoverCompletion"
+              ]
+            >
+          >(
+            async (
+              recoveryMediaRoot,
+              completionInput,
+            ) => {
+              expect(
+                recoveryMediaRoot,
+              ).toBe(
+                mediaRoot,
+              );
+
+              expect(
+                completionInput,
+              ).toEqual({
+                reservationId:
+                  reservation
+                    .reservationId,
+
+                ...identity,
+
+                planKey,
+
+                provider:
+                  "RUNWAY",
+
+                providerExecutionId:
+                  referenceAudioSubmission
+                    .providerExecutionId,
+
+                generationRecordPath:
+                  referenceAudioGenerationRecordPath,
+              });
+
+              return {
+                record:
+                  referenceAudioCompletion,
+
+                completionPath,
+              };
+            },
+          );
+
+        const dependencies = {
+          inspectLifecycle,
+          resumeRunwayTask,
+          resumeRunwayReferenceAudioTask,
+          recoverOutput,
+          recoverGenerationRecord,
+          recoverCompletion,
+
+          now:
+            () =>
+              "2026-10-05T13:01:00.000Z",
+        } satisfies
+          DialogueLifecycleReconciliationDependencies;
+
+        const result =
+          await reconcileDialogueLifecycle(
+            reconciliationInput(),
+            dependencies,
+          );
+
+        expect(
+          result,
+        ).toEqual({
+          lifecycleState:
+            "COMPLETED",
+
+          reconciliationMode:
+            "RECOVERED_SUBMISSION",
+
+          provider:
+            "RUNWAY",
+
+          providerExecutionId:
+            referenceAudioSubmission
+              .providerExecutionId,
+
+          providerExecution,
+
+          generationRecord:
+            expectedGenerationRecord,
+
+          generationRecordPath:
+            referenceAudioGenerationRecordPath,
+
+          completion:
+            referenceAudioCompletion,
+
+          completionPath,
+        });
+
+        expect(
+          resumeRunwayTask,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          resumeRunwayReferenceAudioTask,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          recoverOutput,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          recoverGenerationRecord,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          recoverCompletion,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+      },
+    );
+
+    it(
+      "rejects a resumed reference-audio task whose task ID differs from the durable v2 submission",
       async () => {
         const inspectLifecycle =
           vi.fn(
@@ -913,57 +1328,49 @@ describe(
           );
 
         const resumeRunwayReferenceAudioTask =
-          vi.fn(
-            async () =>
-              Object.freeze({
-                taskId:
-                  referenceAudioSubmission
-                    .providerExecutionId,
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "resumeRunwayReferenceAudioTask"
+              ]
+            >
+          >(
+            async () => ({
+              taskId:
+                "task-reference-audio-conflict",
 
-                providerCreatedAt:
-                  "2026-10-05T13:00:00.000Z",
+              providerCreatedAt:
+                "2026-10-05T13:00:00.000Z",
 
-                estimatedCredits:
-                  referenceAudioSubmission
-                    .providerEstimatedCredits,
+              estimatedCredits:
+                referenceAudioSubmission
+                  .providerEstimatedCredits,
 
-                finalCredits:
-                  1.75,
+              finalCredits:
+                1.75,
 
-                outputUrls:
-                  Object.freeze([
-                    "https://example.test/reference-audio-output.mp3",
-                  ]),
-              }),
+              outputUrls:
+                Object.freeze([
+                  "https://example.test/reference-audio-output.mp3",
+                ]),
+            }),
           );
 
         const recoverOutput =
           vi.fn();
 
-        const recoverGenerationRecord =
-          vi.fn();
-
-        const recoverCompletion =
-          vi.fn();
-
-        const dependencies =
-          {
-            inspectLifecycle,
-            resumeRunwayTask,
-            resumeRunwayReferenceAudioTask,
-            recoverOutput,
-            recoverGenerationRecord,
-            recoverCompletion,
-          } satisfies
-            DialogueLifecycleReconciliationDependencies;
-
         await expect(
           reconcileDialogueLifecycle(
             reconciliationInput(),
-            dependencies,
+            {
+              inspectLifecycle,
+              resumeRunwayTask,
+              resumeRunwayReferenceAudioTask,
+              recoverOutput,
+            },
           ),
         ).rejects.toThrow(
-          "Dialogue lifecycle reconciliation reference-audio recovery continuation is not yet implemented.",
+          /task ID.*durable submission task ID/i,
         );
 
         expect(
@@ -971,14 +1378,250 @@ describe(
         ).not.toHaveBeenCalled();
 
         expect(
-          resumeRunwayReferenceAudioTask,
-        ).toHaveBeenCalledTimes(
-          1,
+          recoverOutput,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "rejects resumed reference-audio estimated credits that differ from the durable v2 submission",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayReferenceAudioTask =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "resumeRunwayReferenceAudioTask"
+              ]
+            >
+          >(
+            async () => ({
+              taskId:
+                referenceAudioSubmission
+                  .providerExecutionId,
+
+              providerCreatedAt:
+                "2026-10-05T13:00:00.000Z",
+
+              estimatedCredits:
+                2.5,
+
+              finalCredits:
+                1.75,
+
+              outputUrls:
+                Object.freeze([
+                  "https://example.test/reference-audio-output.mp3",
+                ]),
+            }),
+          );
+
+        const recoverOutput =
+          vi.fn();
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            {
+              inspectLifecycle,
+              resumeRunwayReferenceAudioTask,
+              recoverOutput,
+            },
+          ),
+        ).rejects.toThrow(
+          /estimated credits.*durable submission/i,
         );
 
         expect(
           recoverOutput,
         ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "rejects a resumed reference-audio task that reports no output URLs",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayReferenceAudioTask =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "resumeRunwayReferenceAudioTask"
+              ]
+            >
+          >(
+            async () => ({
+              taskId:
+                referenceAudioSubmission
+                  .providerExecutionId,
+
+              providerCreatedAt:
+                "2026-10-05T13:00:00.000Z",
+
+              estimatedCredits:
+                referenceAudioSubmission
+                  .providerEstimatedCredits,
+
+              finalCredits:
+                1.75,
+
+              outputUrls:
+                Object.freeze([]),
+            }),
+          );
+
+        const recoverOutput =
+          vi.fn();
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            {
+              inspectLifecycle,
+              resumeRunwayReferenceAudioTask,
+              recoverOutput,
+            },
+          ),
+        ).rejects.toThrow(
+          /no output URLs/i,
+        );
+
+        expect(
+          recoverOutput,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "rejects recovered reference-audio output whose destination is not the canonical v2 path",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayReferenceAudioTask =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "resumeRunwayReferenceAudioTask"
+              ]
+            >
+          >(
+            async () => ({
+              taskId:
+                referenceAudioSubmission
+                  .providerExecutionId,
+
+              providerCreatedAt:
+                "2026-10-05T13:00:00.000Z",
+
+              estimatedCredits:
+                referenceAudioSubmission
+                  .providerEstimatedCredits,
+
+              finalCredits:
+                1.75,
+
+              outputUrls:
+                Object.freeze([
+                  "https://example.test/reference-audio-output.mp3",
+                ]),
+            }),
+          );
+
+        const recoverOutput =
+          vi.fn<
+            NonNullable<
+              DialogueLifecycleReconciliationDependencies[
+                "recoverOutput"
+              ]
+            >
+          >(
+            async (
+              _sourceUrl,
+              destinationPath,
+            ) => ({
+              destinationPath:
+                `${destinationPath}.wrong`,
+
+              bytes:
+                456,
+
+              sha256:
+                "c".repeat(
+                  64,
+                ),
+
+              contentType:
+                "audio/mpeg",
+            }),
+          );
+
+        const recoverGenerationRecord =
+          vi.fn();
+
+        const recoverCompletion =
+          vi.fn();
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            {
+              inspectLifecycle,
+              resumeRunwayReferenceAudioTask,
+              recoverOutput,
+              recoverGenerationRecord,
+              recoverCompletion,
+            },
+          ),
+        ).rejects.toThrow(
+          /output path.*canonical/i,
+        );
+
+        expect(
+          recoverOutput,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
 
         expect(
           recoverGenerationRecord,

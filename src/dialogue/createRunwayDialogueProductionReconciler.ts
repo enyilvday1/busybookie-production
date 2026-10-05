@@ -24,6 +24,10 @@ import {
   resumeRunwayElevenV3Task,
 } from "./resumeRunwayElevenV3Task.js";
 
+import {
+  resumeRunwayReferenceAudioTask,
+} from "./resumeRunwayReferenceAudioTask.js";
+
 export type RunwayDialogueProductionReconciliationInput =
   Omit<
     DialogueLifecycleReconciliationInput,
@@ -53,6 +57,9 @@ export type RunwayDialogueProductionReconcilerDependencies =
     resumeRunwayTask:
       typeof resumeRunwayElevenV3Task;
 
+    resumeRunwayReferenceAudioTask?:
+      typeof resumeRunwayReferenceAudioTask;
+
     reconcileLifecycle:
       typeof reconcileDialogueLifecycle;
   }>;
@@ -71,6 +78,9 @@ const defaultDependencies:
 
       resumeRunwayTask:
         resumeRunwayElevenV3Task,
+
+      resumeRunwayReferenceAudioTask:
+        resumeRunwayReferenceAudioTask,
 
       reconcileLifecycle:
         reconcileDialogueLifecycle,
@@ -166,15 +176,52 @@ export function createRunwayDialogueProductionReconciler(
           credentialSource,
         );
 
+    const reconciliationInput = {
+      ...input,
+
+      runwayWaitTimeoutMs:
+        policy.task
+          .waitTimeoutMs,
+    };
+
+    if (
+      lifecycle.submission.schemaVersion ===
+      "2.0"
+    ) {
+      const resumeReferenceAudioTask =
+        dependencies
+          .resumeRunwayReferenceAudioTask;
+
+      if (
+        !resumeReferenceAudioTask
+      ) {
+        throw new Error(
+          "Runway dialogue production reconciliation requires resumeRunwayReferenceAudioTask for a durable SUBMITTED reference-audio v2 lifecycle.",
+        );
+      }
+
+      return dependencies
+        .reconcileLifecycle(
+          reconciliationInput,
+          {
+            inspectLifecycle:
+              cachedInspectLifecycle,
+
+            resumeRunwayReferenceAudioTask:
+              (
+                resumeInput,
+              ) =>
+                resumeReferenceAudioTask(
+                  lookupClient,
+                  resumeInput,
+                ),
+          },
+        );
+    }
+
     return dependencies
       .reconcileLifecycle(
-        {
-          ...input,
-
-          runwayWaitTimeoutMs:
-            policy.task
-              .waitTimeoutMs,
-        },
+        reconciliationInput,
         {
           inspectLifecycle:
             cachedInspectLifecycle,

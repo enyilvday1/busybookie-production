@@ -25,6 +25,7 @@ import type {
 
 import type {
   DialogueSubmissionV1,
+  DialogueSubmissionV2,
 } from "./dialogueSubmission.schema.js";
 
 import {
@@ -403,6 +404,112 @@ function assertGenerationRecordMatchesSubmission(
   }
 }
 
+function assertReferenceAudioGenerationRecordMatchesSubmission(
+  record:
+    DialogueGenerationRecord,
+
+  submission:
+    DialogueSubmissionV2,
+): void {
+  if (
+    record.schemaVersion !==
+    "2.0"
+  ) {
+    throw new Error(
+      "Dialogue generation record schema version does not match the supported v2 reference-audio dialogue reconciliation contract.",
+    );
+  }
+
+  if (
+    record.provider !==
+      submission.provider ||
+    record.providerExecutionId !==
+      submission.providerExecutionId
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record provider execution identity does not match the durable submission.",
+    );
+  }
+
+  if (
+    record.plan.episodeId !==
+      submission.episodeId ||
+    record.plan.sceneId !==
+      submission.sceneId ||
+    record.plan.shotId !==
+      submission.shotId ||
+    record.plan.dialogueLineId !==
+      submission.dialogueLineId
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record plan identity does not match the durable submission.",
+    );
+  }
+
+  if (
+    record.plan.planKey !==
+    submission.planKey
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record planKey does not match the durable submission.",
+    );
+  }
+
+  if (
+    !isDeepStrictEqual(
+      record.plan,
+      submission.recoveryMetadata.plan,
+    )
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record plan does not match the immutable submission recovery plan.",
+    );
+  }
+
+  if (
+    !isDeepStrictEqual(
+      record.request,
+      submission.recoveryMetadata.request,
+    )
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record request does not match the immutable submission recovery request.",
+    );
+  }
+
+  if (
+    !isDeepStrictEqual(
+      record.routing,
+      submission.routing,
+    )
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record routing evidence does not match the durable submission.",
+    );
+  }
+
+  if (
+    record.providerModel !==
+    submission.routing.model
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record provider model does not match the accepted router model.",
+    );
+  }
+
+  if (
+    record.credits.locallyExpected !==
+      submission.recoveryMetadata
+        .locallyExpectedCredits ||
+    record.credits.providerEstimated !==
+      submission.providerEstimatedCredits
+  ) {
+    throw new Error(
+      "Dialogue reference-audio generation record credit evidence does not match the durable submission.",
+    );
+  }
+}
+
 function assertCanonicalGenerationOutputs(
   mediaRoot:
     string,
@@ -599,12 +706,120 @@ export async function reconcileDialogueLifecycle(
     "2.0"
   ) {
     if (
-      lifecycle.state !==
-      "SUBMITTED"
+      lifecycle.state ===
+        "COMPLETED"
     ) {
-      throw new Error(
-        "Dialogue lifecycle reconciliation does not yet support durable COMPLETED reference-audio submission schema version 2.0.",
+      const canonicalGenerationRecordPath =
+        createDialogueGenerationRecordPath(
+          input.mediaRoot,
+          lifecycle.submission
+            .episodeId,
+          lifecycle.submission
+            .shotId,
+          lifecycle.submission
+            .dialogueLineId,
+          lifecycle.submission
+            .provider,
+          lifecycle.submission
+            .providerExecutionId,
+        );
+
+      const canonicalCompletionPath =
+        createDialogueCompletionPath(
+          input.mediaRoot,
+          lifecycle.submission
+            .episodeId,
+          lifecycle.submission
+            .sceneId,
+          lifecycle.submission
+            .shotId,
+          lifecycle.submission
+            .dialogueLineId,
+        );
+
+      if (
+        lifecycle.completion
+          .generationRecordPath !==
+        canonicalGenerationRecordPath
+      ) {
+        throw new Error(
+          "Durable dialogue completion generation record path does not match the canonical path.",
+        );
+      }
+
+      const readGenerationRecord =
+        dependencies
+          .readGenerationRecord ??
+        readDialogueGenerationRecord;
+
+      const inspectOutput =
+        dependencies
+          .inspectOutput ??
+        inspectDialogueAudioOutput;
+
+      const generationRecord =
+        await readGenerationRecord(
+          input.mediaRoot,
+          lifecycle.submission
+            .episodeId,
+          lifecycle.submission
+            .shotId,
+          lifecycle.submission
+            .dialogueLineId,
+          lifecycle.submission
+            .provider,
+          lifecycle.submission
+            .providerExecutionId,
+        );
+
+      if (
+        !generationRecord
+      ) {
+        throw new Error(
+          "Durable dialogue completion points to a missing generation record.",
+        );
+      }
+
+      assertReferenceAudioGenerationRecordMatchesSubmission(
+        generationRecord,
+        lifecycle.submission,
       );
+
+      assertCanonicalGenerationOutputs(
+        input.mediaRoot,
+        generationRecord,
+      );
+
+      await verifyDurableOutputs(
+        generationRecord,
+        inspectOutput,
+      );
+
+      return Object.freeze({
+        lifecycleState:
+          "COMPLETED",
+
+        reconciliationMode:
+          "DURABLE_COMPLETION",
+
+        provider:
+          "RUNWAY",
+
+        providerExecutionId:
+          lifecycle.submission
+            .providerExecutionId,
+
+        generationRecord,
+
+        generationRecordPath:
+          canonicalGenerationRecordPath,
+
+        completion:
+          lifecycle.completion,
+
+        completionPath:
+          canonicalCompletionPath,
+      });
     }
 
     const resumeRunwayReferenceAudioTask =

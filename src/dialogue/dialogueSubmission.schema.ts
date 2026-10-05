@@ -374,22 +374,8 @@ const DialogueSubmissionV1Schema =
       addDialogueSubmissionIdentityValidation,
     );
 
-const DialogueSubmissionV2BaseSchema =
+const DialogueSubmissionV2IdentityFieldsSchema =
   z.object({
-    schemaVersion:
-      z.literal(
-        "2.0",
-      ),
-
-    submittedAt:
-      z.string()
-        .datetime(),
-
-    status:
-      z.literal(
-        "SUBMITTED",
-      ),
-
     reservationId:
       DialogueSubmissionReservationIdSchema,
 
@@ -425,10 +411,28 @@ const DialogueSubmissionV2BaseSchema =
   })
     .strict();
 
+const DialogueSubmissionV2BaseSchema =
+  DialogueSubmissionV2IdentityFieldsSchema
+    .extend({
+      schemaVersion:
+        z.literal(
+          "2.0",
+        ),
+
+      submittedAt:
+        z.string()
+          .datetime(),
+
+      status:
+        z.literal(
+          "SUBMITTED",
+        ),
+    });
+
 function addDialogueSubmissionV2IdentityValidation(
   value:
     z.infer<
-      typeof DialogueSubmissionV2BaseSchema
+      typeof DialogueSubmissionV2IdentityFieldsSchema
     >,
 
   context:
@@ -561,6 +565,12 @@ function addDialogueSubmissionV2IdentityValidation(
   }
 }
 
+export const DialogueReferenceAudioSubmissionInputSchema =
+  DialogueSubmissionV2IdentityFieldsSchema
+    .superRefine(
+      addDialogueSubmissionV2IdentityValidation,
+    );
+
 export const DialogueSubmissionV2Schema =
   DialogueSubmissionV2BaseSchema
     .superRefine(
@@ -584,6 +594,16 @@ export type DialogueSubmissionInput =
 export type DialogueSubmissionV1 =
   z.infer<
     typeof DialogueSubmissionV1Schema
+  >;
+
+export type DialogueReferenceAudioSubmissionInput =
+  z.infer<
+    typeof DialogueReferenceAudioSubmissionInputSchema
+  >;
+
+export type DialogueSubmissionV2 =
+  z.infer<
+    typeof DialogueSubmissionV2Schema
   >;
 
 export type DialogueSubmission =

@@ -283,6 +283,327 @@ describe(
       },
     );
 
+    it(
+      "admits a schema-validated v2 reference-audio durable completion without preparing provider recovery capability",
+      async () => {
+        const {
+          DialogueGenerationRecordSchema,
+        } =
+          await import(
+            "../src/dialogue/dialogueGenerationRecord.schema.js"
+          );
+
+        const lifecycle =
+          createCompletedLifecycle();
+
+        const generationRecord =
+          DialogueGenerationRecordSchema
+            .parse({
+              schemaVersion:
+                "2.0",
+
+              recordedAt:
+                "2026-10-05T13:01:00.000Z",
+
+              status:
+                "SUCCEEDED",
+
+              provider:
+                "RUNWAY",
+
+              providerExecutionId:
+                "task-reference-audio-123",
+
+              providerModel:
+                "test-reference-audio-model",
+
+              providerCreatedAt:
+                "2026-10-05T13:00:00.000Z",
+
+              request: {
+                configId:
+                  "busybookie-reference-audio-test",
+
+                input: {
+                  type:
+                    "speech",
+
+                  promptText:
+                    "Look what I found!",
+
+                  voice: {
+                    type:
+                      "reference-audio",
+
+                    audioUri:
+                      "runway://uploads/reference-audio-test",
+                  },
+                },
+              },
+
+              routing: {
+                configId:
+                  "busybookie-reference-audio-test",
+
+                model:
+                  "test-reference-audio-model",
+
+                provider:
+                  "test-provider",
+
+                estimatedCost: {
+                  credits:
+                    2,
+                },
+
+                resolvedInput: {
+                  type:
+                    "speech",
+
+                  voice:
+                    "reference-audio",
+                },
+
+                resolvedSettings: {
+                  optimizeFor:
+                    "quality",
+
+                  priceCeiling:
+                    10,
+                },
+              },
+
+              credits: {
+                locallyExpected:
+                  2,
+
+                providerEstimated:
+                  2,
+
+                providerFinal:
+                  1.75,
+              },
+
+              plan: {
+                planKey:
+                  "a".repeat(
+                    64,
+                  ),
+
+                episodeId:
+                  input.episodeId,
+
+                sceneId:
+                  input.sceneId,
+
+                shotId:
+                  input.shotId,
+
+                dialogueLineId:
+                  input.dialogueLineId,
+
+                lineNumber:
+                  1,
+
+                characterId:
+                  "OLLIE",
+
+                characterName:
+                  "Ollie",
+
+                text:
+                  "Look what I found!",
+
+                deliveryNotes:
+                  "Curious, excited and gentle.",
+
+                voice: {
+                  selectionStatus:
+                    "LOCKED",
+
+                  provider:
+                    "RUNWAY",
+
+                  voiceName:
+                    "Ollie",
+
+                  deliveryTraits: [
+                    "young",
+                    "curious",
+                    "warm",
+                    "friendly",
+                    "natural",
+                  ],
+
+                  executionMode:
+                    "RUNWAY_REFERENCE_AUDIO",
+
+                  referenceAudio: {
+                    assetId:
+                      "OLLIE_VOICE_REFERENCE_V1",
+
+                    mediaRootRelativePath:
+                      "references/voices/OLLIE/ollie-reference-v1.mp3",
+
+                    bytes:
+                      231_593,
+
+                    sha256:
+                      "ad7bc6a50675bddc74a4885f290667fad1076c5cd3d9844eb7ff2d84b0f94a2f",
+
+                    contentType:
+                      "audio/mpeg",
+
+                    durationSeconds:
+                      14.4,
+
+                    codecName:
+                      "mp3",
+
+                    sampleRateHz:
+                      44_100,
+
+                    channels:
+                      1,
+                  },
+                },
+              },
+
+              outputs: [
+                {
+                  outputIndex:
+                    1,
+
+                  destinationPath:
+                    "D:/Busybookie/Production/voices/EP02/S02/EP02_SC01_S02_L01/EP02_SC01_S02_L01_RUNWAY_task-reference-audio-123_01.audio",
+
+                  bytes:
+                    456,
+
+                  sha256:
+                    "c".repeat(
+                      64,
+                    ),
+
+                  contentType:
+                    "audio/mpeg",
+                },
+              ],
+            });
+
+        const verified =
+          createDurableVerification(
+            generationRecord,
+          );
+
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              lifecycle,
+          );
+
+        const verifyLifecycle =
+          vi.fn(
+            async (
+              verificationInput:
+                DialogueLifecycleReconciliationInput,
+
+              dependencies:
+                DialogueLifecycleReconciliationDependencies,
+            ):
+            Promise<
+              DialogueLifecycleReconciliationResult
+            > => {
+              expect(
+                verificationInput,
+              ).toEqual(
+                input,
+              );
+
+              expect(
+                dependencies
+                  .resumeRunwayTask,
+              ).toBeUndefined();
+
+              expect(
+                dependencies
+                  .resumeRunwayReferenceAudioTask,
+              ).toBeUndefined();
+
+              expect(
+                dependencies
+                  .recoverOutput,
+              ).toBeUndefined();
+
+              expect(
+                dependencies
+                  .recoverGenerationRecord,
+              ).toBeUndefined();
+
+              expect(
+                dependencies
+                  .recoverCompletion,
+              ).toBeUndefined();
+
+              return verified;
+            },
+          );
+
+        const result =
+          await verifyCompletedDialogueLineForTiming(
+            input,
+            {
+              inspectLifecycle:
+                inspectLifecycle as never,
+
+              verifyLifecycle:
+                verifyLifecycle as never,
+            },
+          );
+
+        expect(
+          result
+            .generationRecord
+            .schemaVersion,
+        ).toBe(
+          "2.0",
+        );
+
+        expect(
+          result
+            .generationRecord,
+        ).toBe(
+          generationRecord,
+        );
+
+        expect(
+          result.output,
+        ).toBe(
+          generationRecord
+            .outputs[0],
+        );
+
+        expect(
+          result.output
+            .destinationPath,
+        ).toContain(
+          "task-reference-audio-123",
+        );
+
+        expect(
+          inspectLifecycle,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          verifyLifecycle,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+      },
+    );
+
     it.each([
       "NOTHING",
       "RESERVED_ONLY",

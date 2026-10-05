@@ -8,6 +8,7 @@ import {
 
 import {
   CharacterIdSchema,
+  RunwayReferenceAudioAssetSchema,
 } from "../schemas/character.schema.js";
 
 const WINDOWS_ABSOLUTE_PATH_PATTERN =
@@ -109,6 +110,41 @@ const DialogueGenerationVoiceSnapshotSchema =
   })
     .strict();
 
+export const DialogueGenerationReferenceAudioVoiceSnapshotSchema =
+  z.object({
+    selectionStatus:
+      z.literal(
+        "LOCKED",
+      ),
+
+    provider:
+      z.literal(
+        "RUNWAY",
+      ),
+
+    voiceName:
+      z.string()
+        .trim()
+        .min(1),
+
+    deliveryTraits:
+      z.array(
+        z.string()
+          .trim()
+          .min(1),
+      )
+        .min(1),
+
+    executionMode:
+      z.literal(
+        "RUNWAY_REFERENCE_AUDIO",
+      ),
+
+    referenceAudio:
+      RunwayReferenceAudioAssetSchema,
+  })
+    .strict();
+
 export const DialogueGenerationPlanSnapshotSchema =
   z.object({
     planKey:
@@ -164,6 +200,114 @@ export const DialogueGenerationPlanSnapshotSchema =
 
     voice:
       DialogueGenerationVoiceSnapshotSchema,
+  })
+    .strict()
+    .superRefine(
+      (
+        plan,
+        context,
+      ) => {
+        if (
+          !plan.dialogueLineId.startsWith(
+            `${plan.episodeId}_${plan.sceneId}_${plan.shotId}_`,
+          )
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "dialogueLineId",
+            ],
+
+            message:
+              "Dialogue line identity must match the recorded episode, scene, and shot identity.",
+          });
+        }
+
+        const expectedLineSuffix =
+          `_L${String(
+            plan.lineNumber,
+          ).padStart(
+            2,
+            "0",
+          )}`;
+
+        if (
+          !plan.dialogueLineId.endsWith(
+            expectedLineSuffix,
+          )
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "dialogueLineId",
+            ],
+
+            message:
+              "Dialogue line identity must match the recorded line number.",
+          });
+        }
+      },
+    );
+
+export const DialogueGenerationReferenceAudioPlanSnapshotSchema =
+  z.object({
+    planKey:
+      Sha256Schema,
+
+    episodeId:
+      z.string()
+        .regex(
+          EPISODE_ID_PATTERN,
+        ),
+
+    sceneId:
+      z.string()
+        .regex(
+          SCENE_ID_PATTERN,
+        ),
+
+    shotId:
+      z.string()
+        .regex(
+          SHOT_ID_PATTERN,
+        ),
+
+    dialogueLineId:
+      z.string()
+        .regex(
+          DIALOGUE_LINE_ID_PATTERN,
+        ),
+
+    lineNumber:
+      z.number()
+        .int()
+        .positive(),
+
+    characterId:
+      CharacterIdSchema,
+
+    characterName:
+      z.string()
+        .trim()
+        .min(1),
+
+    text:
+      z.string()
+        .trim()
+        .min(1),
+
+    deliveryNotes:
+      z.string()
+        .trim()
+        .min(1)
+        .nullable(),
+
+    voice:
+      DialogueGenerationReferenceAudioVoiceSnapshotSchema,
   })
     .strict()
     .superRefine(
@@ -311,6 +455,140 @@ export const DialogueGenerationRequestRecordSchema =
   })
     .strict();
 
+export const DialogueGenerationReferenceAudioRequestRecordSchema =
+  z.object({
+    configId:
+      z.string()
+        .trim()
+        .min(1),
+
+    input:
+      z.object({
+        type:
+          z.literal(
+            "speech",
+          ),
+
+        promptText:
+          z.string()
+            .trim()
+            .min(1),
+
+        voice:
+          z.object({
+            type:
+              z.literal(
+                "reference-audio",
+              ),
+
+            audioUri:
+              z.string()
+                .trim()
+                .min(1)
+                .refine(
+                  (value) =>
+                    value.startsWith(
+                      "runway://",
+                    ),
+                  {
+                    message:
+                      "Runway reference-audio request must use a Runway upload URI.",
+                  },
+                ),
+          })
+            .strict(),
+      })
+        .strict(),
+  })
+    .strict();
+
+export const DialogueGenerationProviderCreditSchema =
+  z.number()
+    .refine(
+      Number.isFinite,
+      "Provider credit value must be finite.",
+    )
+    .refine(
+      (value) =>
+        value >=
+        0,
+      "Provider credit value must be nonnegative.",
+    );
+
+const DialogueGenerationRoutingCreditsSchema =
+  z.object({
+    credits:
+      DialogueGenerationProviderCreditSchema,
+  })
+    .strict();
+
+export const DialogueGenerationRoutingEvidenceSchema =
+  z.object({
+    configId:
+      z.string()
+        .trim()
+        .min(1),
+
+    model:
+      z.string()
+        .trim()
+        .min(1),
+
+    provider:
+      z.string()
+        .trim()
+        .min(1),
+
+    estimatedCost:
+      DialogueGenerationRoutingCreditsSchema,
+
+    resolvedInput:
+      z.object({
+        type:
+          z.literal(
+            "speech",
+          ),
+
+        voice:
+          z.literal(
+            "reference-audio",
+          ),
+      })
+        .strict(),
+
+    resolvedSettings:
+      z.object({
+        optimizeFor:
+          z.enum([
+            "cost",
+            "latency",
+            "quality",
+          ]),
+
+        priceCeiling:
+          z.number()
+            .nonnegative()
+            .nullable(),
+      })
+        .strict(),
+
+    capacityFallback:
+      z.object({
+        allExhausted:
+          z.boolean(),
+
+        skipped:
+          z.array(
+            z.string()
+              .trim()
+              .min(1),
+          ),
+      })
+        .strict()
+        .optional(),
+  })
+    .strict();
+
 export const DialogueGenerationCreditsSchema =
   z.object({
     locallyExpected:
@@ -330,7 +608,22 @@ export const DialogueGenerationCreditsSchema =
   })
     .strict();
 
-export const DialogueGenerationRecordSchema =
+const DialogueGenerationReferenceAudioCreditsSchema =
+  z.object({
+    locallyExpected:
+      z.number()
+        .int()
+        .nonnegative(),
+
+    providerEstimated:
+      DialogueGenerationProviderCreditSchema,
+
+    providerFinal:
+      DialogueGenerationProviderCreditSchema,
+  })
+    .strict();
+
+export const DialogueGenerationRecordV1Schema =
   z.object({
     schemaVersion:
       z.literal(
@@ -462,6 +755,172 @@ export const DialogueGenerationRecordSchema =
       },
     );
 
+export const DialogueGenerationRecordV2Schema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "2.0",
+      ),
+
+    recordedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUCCEEDED",
+      ),
+
+    provider:
+      z.literal(
+        "RUNWAY",
+      ),
+
+    providerExecutionId:
+      z.string()
+        .trim()
+        .min(1),
+
+    providerModel:
+      z.string()
+        .trim()
+        .min(1),
+
+    providerCreatedAt:
+      z.string()
+        .datetime(),
+
+    request:
+      DialogueGenerationReferenceAudioRequestRecordSchema,
+
+    routing:
+      DialogueGenerationRoutingEvidenceSchema,
+
+    credits:
+      DialogueGenerationReferenceAudioCreditsSchema,
+
+    plan:
+      DialogueGenerationReferenceAudioPlanSnapshotSchema,
+
+    outputs:
+      z.array(
+        DialogueGenerationOutputRecordSchema,
+      )
+        .min(1),
+  })
+    .strict()
+    .superRefine(
+      (
+        record,
+        context,
+      ) => {
+        if (
+          record.plan.voice.provider !==
+          record.provider
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "plan",
+              "voice",
+              "provider",
+            ],
+
+            message:
+              "Dialogue generation record provider must match the locked voice provider.",
+          });
+        }
+
+        if (
+          record.request
+            .input
+            .promptText !==
+          record.plan.text
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "request",
+              "input",
+              "promptText",
+            ],
+
+            message:
+              "Dialogue reference-audio request prompt text must match the planned dialogue text.",
+          });
+        }
+
+        if (
+          record.request.configId !==
+          record.routing.configId
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "routing",
+              "configId",
+            ],
+
+            message:
+              "Dialogue reference-audio routing configId must match the immutable request configId.",
+          });
+        }
+
+        if (
+          record.providerModel !==
+          record.routing.model
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "providerModel",
+            ],
+
+            message:
+              "Dialogue reference-audio provider model must match the accepted router model.",
+          });
+        }
+
+        if (
+          record.credits
+            .providerEstimated !==
+          record.routing
+            .estimatedCost
+            .credits
+        ) {
+          context.addIssue({
+            code:
+              "custom",
+
+            path: [
+              "credits",
+              "providerEstimated",
+            ],
+
+            message:
+              "Dialogue reference-audio provider-estimated credits must match the accepted router estimate.",
+          });
+        }
+      },
+    );
+
+export const DialogueGenerationRecordSchema =
+  z.discriminatedUnion(
+    "schemaVersion",
+    [
+      DialogueGenerationRecordV1Schema,
+      DialogueGenerationRecordV2Schema,
+    ],
+  );
+
 export type DialogueGenerationOutputRecord =
   z.infer<
     typeof DialogueGenerationOutputRecordSchema
@@ -475,6 +934,11 @@ export type DialogueGenerationRequestRecord =
 export type DialogueGenerationCredits =
   z.infer<
     typeof DialogueGenerationCreditsSchema
+  >;
+
+export type DialogueGenerationRecordV1 =
+  z.infer<
+    typeof DialogueGenerationRecordV1Schema
   >;
 
 export type DialogueGenerationRecord =

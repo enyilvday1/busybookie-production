@@ -23,6 +23,10 @@ import type {
   DialogueGenerationRecord,
 } from "./dialogueGenerationRecord.schema.js";
 
+import type {
+  DialogueSubmissionV1,
+} from "./dialogueSubmission.schema.js";
+
 import {
   inspectDialogueLifecycle,
 } from "./inspectDialogueLifecycle.js";
@@ -290,27 +294,17 @@ function assertGenerationRecordMatchesSubmission(
     DialogueGenerationRecord,
 
   submission:
-    Readonly<{
-      episodeId: string;
-      sceneId: string;
-      shotId: string;
-      dialogueLineId: string;
-      planKey: string;
-      provider: "RUNWAY";
-      providerExecutionId: string;
-      providerEstimatedCredits: number;
-      recoveryMetadata: {
-        request:
-          DialogueGenerationRecord["request"];
-
-        locallyExpectedCredits:
-          number;
-
-        plan:
-          DialogueGenerationRecord["plan"];
-      };
-    }>,
+    DialogueSubmissionV1,
 ): void {
+  if (
+    record.schemaVersion !==
+    "1.0"
+  ) {
+    throw new Error(
+      "Dialogue generation record schema version does not match the supported v1 dialogue reconciliation contract.",
+    );
+  }
+
   if (
     record.provider !==
       submission.provider ||
@@ -578,6 +572,15 @@ export async function reconcileDialogueLifecycle(
   ) {
     throw new Error(
       `Dialogue lifecycle reconciliation requires a SUBMITTED or COMPLETED lifecycle; found ${lifecycle.state}.`,
+    );
+  }
+
+  if (
+    lifecycle.submission.schemaVersion !==
+    "1.0"
+  ) {
+    throw new Error(
+      "Dialogue lifecycle reconciliation does not yet support reference-audio submission schema version 2.0.",
     );
   }
 

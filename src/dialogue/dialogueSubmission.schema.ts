@@ -4,6 +4,10 @@ import {
 
 import {
   DialogueGenerationPlanSnapshotSchema,
+  DialogueGenerationReferenceAudioPlanSnapshotSchema,
+  DialogueGenerationReferenceAudioRequestRecordSchema,
+  DialogueGenerationProviderCreditSchema,
+  DialogueGenerationRoutingEvidenceSchema,
 } from "./dialogueGenerationRecord.schema.js";
 
 import {
@@ -115,6 +119,65 @@ export const DialogueGenerationRecoveryMetadataSchema =
 
             message:
               "Dialogue recovery plan must use the Runway voice provider.",
+          });
+        }
+      },
+    );
+
+export const DialogueReferenceAudioGenerationRecoveryMetadataSchema =
+  z.object({
+    request:
+      DialogueGenerationReferenceAudioRequestRecordSchema,
+
+    locallyExpectedCredits:
+      SafeNonnegativeIntegerSchema,
+
+    plan:
+      DialogueGenerationReferenceAudioPlanSnapshotSchema,
+  })
+    .strict()
+    .superRefine(
+      (
+        recovery,
+        context,
+      ) => {
+        if (
+          recovery.request
+            .input
+            .promptText !==
+          recovery.plan.text
+        ) {
+          context.addIssue({
+            code:
+              z.ZodIssueCode.custom,
+
+            path: [
+              "request",
+              "input",
+              "promptText",
+            ],
+
+            message:
+              "Dialogue reference-audio recovery request prompt text must match the immutable dialogue plan.",
+          });
+        }
+
+        if (
+          recovery.plan.voice.provider !==
+          "RUNWAY"
+        ) {
+          context.addIssue({
+            code:
+              z.ZodIssueCode.custom,
+
+            path: [
+              "plan",
+              "voice",
+              "provider",
+            ],
+
+            message:
+              "Dialogue reference-audio recovery plan must use the Runway voice provider.",
           });
         }
       },
@@ -305,15 +368,222 @@ const DialogueSubmissionBaseSchema =
   })
     .strict();
 
-export const DialogueSubmissionSchema =
+const DialogueSubmissionV1Schema =
   DialogueSubmissionBaseSchema
     .superRefine(
       addDialogueSubmissionIdentityValidation,
     );
 
+const DialogueSubmissionV2BaseSchema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "2.0",
+      ),
+
+    submittedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUBMITTED",
+      ),
+
+    reservationId:
+      DialogueSubmissionReservationIdSchema,
+
+    episodeId:
+      DialogueReservationEpisodeIdSchema,
+
+    sceneId:
+      DialogueReservationSceneIdSchema,
+
+    shotId:
+      DialogueReservationShotIdSchema,
+
+    dialogueLineId:
+      DialogueReservationLineIdSchema,
+
+    planKey:
+      DialogueReservationPlanKeySchema,
+
+    provider:
+      DialogueReservationProviderSchema,
+
+    providerExecutionId:
+      DialogueSubmissionProviderExecutionIdSchema,
+
+    providerEstimatedCredits:
+      DialogueGenerationProviderCreditSchema,
+
+    routing:
+      DialogueGenerationRoutingEvidenceSchema,
+
+    recoveryMetadata:
+      DialogueReferenceAudioGenerationRecoveryMetadataSchema,
+  })
+    .strict();
+
+function addDialogueSubmissionV2IdentityValidation(
+  value:
+    z.infer<
+      typeof DialogueSubmissionV2BaseSchema
+    >,
+
+  context:
+    z.RefinementCtx,
+): void {
+  if (
+    !dialogueReservationIdentityMatches(
+      value.episodeId,
+      value.sceneId,
+      value.shotId,
+      value.dialogueLineId,
+    )
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "dialogueLineId",
+      ],
+
+      message:
+        "Dialogue submission line identity does not match the selected episode, scene, and shot.",
+    });
+  }
+
+  const recoveryPlan =
+    value.recoveryMetadata.plan;
+
+  if (
+    recoveryPlan.episodeId !==
+      value.episodeId ||
+    recoveryPlan.sceneId !==
+      value.sceneId ||
+    recoveryPlan.shotId !==
+      value.shotId ||
+    recoveryPlan.dialogueLineId !==
+      value.dialogueLineId
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "recoveryMetadata",
+        "plan",
+      ],
+
+      message:
+        "Dialogue recovery plan identity does not match the submission identity.",
+    });
+  }
+
+  if (
+    recoveryPlan.planKey !==
+    value.planKey
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "recoveryMetadata",
+        "plan",
+        "planKey",
+      ],
+
+      message:
+        "Dialogue recovery planKey does not match the submission planKey.",
+    });
+  }
+
+  if (
+    recoveryPlan.voice.provider !==
+    value.provider
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "recoveryMetadata",
+        "plan",
+        "voice",
+        "provider",
+      ],
+
+      message:
+        "Dialogue recovery voice provider does not match the submission provider.",
+    });
+  }
+
+  if (
+    value.routing.configId !==
+    value.recoveryMetadata
+      .request
+      .configId
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "routing",
+        "configId",
+      ],
+
+      message:
+        "Dialogue reference-audio submission routing configId must match the immutable recovery request.",
+    });
+  }
+
+  if (
+    value.providerEstimatedCredits !==
+    value.routing
+      .estimatedCost
+      .credits
+  ) {
+    context.addIssue({
+      code:
+        z.ZodIssueCode.custom,
+
+      path: [
+        "providerEstimatedCredits",
+      ],
+
+      message:
+        "Dialogue reference-audio submission provider estimate must match accepted router evidence.",
+    });
+  }
+}
+
+export const DialogueSubmissionV2Schema =
+  DialogueSubmissionV2BaseSchema
+    .superRefine(
+      addDialogueSubmissionV2IdentityValidation,
+    );
+
+export const DialogueSubmissionSchema =
+  z.discriminatedUnion(
+    "schemaVersion",
+    [
+      DialogueSubmissionV1Schema,
+      DialogueSubmissionV2Schema,
+    ],
+  );
+
 export type DialogueSubmissionInput =
   z.infer<
     typeof DialogueSubmissionInputSchema
+  >;
+
+export type DialogueSubmissionV1 =
+  z.infer<
+    typeof DialogueSubmissionV1Schema
   >;
 
 export type DialogueSubmission =

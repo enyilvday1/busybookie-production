@@ -7,6 +7,7 @@ import {
 
 import type {
   DialogueGenerationRecord,
+  DialogueGenerationRecordV1,
 } from "../src/dialogue/dialogueGenerationRecord.schema.js";
 
 import {
@@ -22,9 +23,9 @@ const recordPath =
 function createRecord(
   overrides:
     Partial<
-      DialogueGenerationRecord
+      DialogueGenerationRecordV1
     > = {},
-): DialogueGenerationRecord {
+): DialogueGenerationRecordV1 {
   return {
     schemaVersion:
       "1.0",

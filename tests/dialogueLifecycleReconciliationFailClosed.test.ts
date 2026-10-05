@@ -200,6 +200,164 @@ const submission:
     recoveryMetadata,
   };
 
+const referenceAudioSubmission:
+  DialogueSubmission = {
+    schemaVersion:
+      "2.0",
+
+    submittedAt:
+      "2026-10-05T09:00:00.000Z",
+
+    status:
+      "SUBMITTED",
+
+    reservationId:
+      reservation.reservationId,
+
+    ...identity,
+
+    planKey,
+
+    provider:
+      "RUNWAY",
+
+    providerExecutionId:
+      "task-reference-audio-123",
+
+    providerEstimatedCredits:
+      2,
+
+    routing: {
+      configId:
+        "busybookie-reference-audio-test",
+
+      model:
+        "test-reference-audio-model",
+
+      provider:
+        "test-provider",
+
+      estimatedCost: {
+        credits:
+          2,
+      },
+
+      resolvedInput: {
+        type:
+          "speech",
+
+        voice:
+          "reference-audio",
+      },
+
+      resolvedSettings: {
+        optimizeFor:
+          "quality",
+
+        priceCeiling:
+          10,
+      },
+    },
+
+    recoveryMetadata: {
+      request: {
+        configId:
+          "busybookie-reference-audio-test",
+
+        input: {
+          type:
+            "speech",
+
+          promptText:
+            "Look what I found!",
+
+          voice: {
+            type:
+              "reference-audio",
+
+            audioUri:
+              "runway://uploads/reference-audio-test",
+          },
+        },
+      },
+
+      locallyExpectedCredits:
+        2,
+
+      plan: {
+        planKey,
+
+        ...identity,
+
+        lineNumber:
+          1,
+
+        characterId:
+          "OLLIE",
+
+        characterName:
+          "Ollie",
+
+        text:
+          "Look what I found!",
+
+        deliveryNotes:
+          "Curious, excited and gentle.",
+
+        voice: {
+          selectionStatus:
+            "LOCKED",
+
+          provider:
+            "RUNWAY",
+
+          voiceName:
+            "Ollie",
+
+          deliveryTraits: [
+            "young",
+            "curious",
+            "warm",
+            "friendly",
+            "natural",
+          ],
+
+          executionMode:
+            "RUNWAY_REFERENCE_AUDIO",
+
+          referenceAudio: {
+            assetId:
+              "OLLIE_VOICE_REFERENCE_V1",
+
+            mediaRootRelativePath:
+              "references/voices/OLLIE/ollie-reference-v1.mp3",
+
+            bytes:
+              231_593,
+
+            sha256:
+              "ad7bc6a50675bddc74a4885f290667fad1076c5cd3d9844eb7ff2d84b0f94a2f",
+
+            contentType:
+              "audio/mpeg",
+
+            durationSeconds:
+              14.4,
+
+            codecName:
+              "mp3",
+
+            sampleRateHz:
+              44_100,
+
+            channels:
+              1,
+          },
+        },
+      },
+    },
+  };
+
 const generationRecordPath =
   createDialogueGenerationRecordPath(
     mediaRoot,
@@ -541,6 +699,96 @@ function reconciliationInput() {
 describe(
   "Busybookie dialogue reconciliation fail-closed coverage",
   () => {
+    it(
+      "rejects a reference-audio v2 submission before invoking the Eleven v3 resume or recovery path",
+      async () => {
+        const inspectLifecycle =
+          vi.fn(
+            async () =>
+              ({
+                state:
+                  "SUBMITTED",
+
+                reservation,
+
+                submission:
+                  referenceAudioSubmission,
+              }) satisfies
+                DialogueLifecycleClassification,
+          );
+
+        const resumeRunwayTask =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Runway Eleven v3 resume adapter must not be invoked for a reference-audio submission.",
+              );
+            },
+          );
+
+        const recoverOutput =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Reference-audio reconciliation must not recover output through the Eleven v3 path.",
+              );
+            },
+          );
+
+        const recoverGenerationRecord =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Reference-audio reconciliation must not recover a generation record through the Eleven v3 path.",
+              );
+            },
+          );
+
+        const recoverCompletion =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Reference-audio reconciliation must not recover completion through the Eleven v3 path.",
+              );
+            },
+          );
+
+        const dependencies = {
+          inspectLifecycle,
+          resumeRunwayTask,
+          recoverOutput,
+          recoverGenerationRecord,
+          recoverCompletion,
+        } satisfies
+          DialogueLifecycleReconciliationDependencies;
+
+        await expect(
+          reconcileDialogueLifecycle(
+            reconciliationInput(),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          /does not yet support reference-audio submission schema version 2\.0/i,
+        );
+
+        expect(
+          resumeRunwayTask,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          recoverOutput,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          recoverGenerationRecord,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          recoverCompletion,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
     it(
       "rejects a completed lifecycle whose completion points to a non-canonical generation record",
       async () => {

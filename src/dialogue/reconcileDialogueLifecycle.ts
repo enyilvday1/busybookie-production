@@ -596,9 +596,9 @@ function assertDirectSeedAudioGenerationRecordMatchesSubmission(
   }
 
   if (
-    record.credits.locallyExpected !==
+    record.credits.localCeiling !==
       submission.recoveryMetadata
-        .locallyExpectedCredits ||
+        .localCreditCeiling ||
     record.credits.providerEstimated !==
       submission.providerEstimatedCredits
   ) {
@@ -1152,10 +1152,10 @@ export async function reconcileDialogueLifecycle(
                   .request,
 
               credits: {
-                locallyExpected:
+                localCeiling:
                   lifecycle.submission
                     .recoveryMetadata
-                    .locallyExpectedCredits,
+                    .localCreditCeiling,
 
                 providerEstimated:
                   lifecycle.submission

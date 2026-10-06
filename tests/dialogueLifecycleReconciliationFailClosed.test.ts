@@ -21,8 +21,9 @@ import {
   createDialogueGenerationRecordPath,
 } from "../src/dialogue/dialogueGenerationRecordPath.js";
 
-import type {
-  DialogueGenerationRecord,
+import {
+  DialogueGenerationRecordSchema,
+  type DialogueGenerationRecord,
 } from "../src/dialogue/dialogueGenerationRecord.schema.js";
 
 import type {
@@ -2930,20 +2931,22 @@ describe(
               _mediaRoot,
               inputRecord,
             ) => ({
-              record: {
-                ...inputRecord,
+                record:
+                  DialogueGenerationRecordSchema
+                    .parse({
+                      ...inputRecord,
 
-                credits: {
-                  ...inputRecord
-                    .credits,
+                      credits: {
+                        ...inputRecord
+                          .credits,
 
-                  providerFinal:
-                    inputRecord
-                      .credits
-                      .providerFinal +
-                    1,
-                },
-              },
+                        providerFinal:
+                          inputRecord
+                            .credits
+                            .providerFinal +
+                          1,
+                      },
+                    }),
 
               recordPath:
                 generationRecordPath,

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0",
+  "pricingReviewedOn": "2026-10-06",
+  "generation": {
+    "model": "seed_audio",
+    "creditsPerSecond": 0.25,
+    "minimumCredits": 5,
+    "maxGenerationSeconds": 120,
+    "maxCreditsPerGeneration": 30
+  },
+  "task": {
+    "waitTimeoutMs": 600000
+  }
+}

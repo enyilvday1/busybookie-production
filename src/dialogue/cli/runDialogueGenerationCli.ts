@@ -3,6 +3,10 @@ import {
 } from "../../validation/loadCharacterBible.js";
 
 import {
+  loadDialogueSeedAudioPolicy,
+} from "../../validation/loadDialogueSeedAudioPolicy.js";
+
+import {
   loadDialogueVoicePolicy,
 } from "../../validation/loadDialogueVoicePolicy.js";
 
@@ -40,6 +44,11 @@ import {
 } from "../createRunwayDialogueProductionExecutor.js";
 
 import {
+  createRunwayDirectSeedAudioProductionExecutor,
+  type RunwayDirectSeedAudioProductionExecutor,
+} from "../createRunwayDirectSeedAudioProductionExecutor.js";
+
+import {
   assertDialogueWithinBudget,
 } from "../dialogueVoiceBudget.js";
 
@@ -57,6 +66,9 @@ export type RunDialogueGenerationCliDependencies =
 
     loadDialogueVoicePolicy:
       typeof loadDialogueVoicePolicy;
+
+    loadDialogueSeedAudioPolicy:
+      typeof loadDialogueSeedAudioPolicy;
 
     loadCharacterBible:
       typeof loadCharacterBible;
@@ -79,6 +91,16 @@ export type RunDialogueGenerationCliDependencies =
           }>,
       ) =>
         RunwayDialogueProductionExecutor;
+
+    createSeedAudioExecutor:
+      (
+        credentialSource:
+          Readonly<{
+            RUNWAYML_API_SECRET:
+              string;
+          }>,
+      ) =>
+        RunwayDirectSeedAudioProductionExecutor;
   }>;
 
 const defaultDependencies:
@@ -90,6 +112,8 @@ const defaultDependencies:
 
       loadDialogueVoicePolicy,
 
+      loadDialogueSeedAudioPolicy,
+
       loadCharacterBible,
 
       loadEpisodeManifest,
@@ -100,6 +124,9 @@ const defaultDependencies:
 
       createExecutor:
         createRunwayDialogueProductionExecutor,
+
+      createSeedAudioExecutor:
+        createRunwayDirectSeedAudioProductionExecutor,
     });
 
 export async function runDialogueGenerationCli(
@@ -209,17 +236,70 @@ export async function runDialogueGenerationCli(
     );
   }
 
-  const locallyExpectedCredits =
-    assertDialogueWithinBudget(
-      line.text,
-      policy,
-    );
+  const usesReferenceAudio =
+    "executionMode" in
+      line.voice &&
+    line.voice.executionMode ===
+      "RUNWAY_REFERENCE_AUDIO";
 
-  const request =
-    buildRunwayElevenV3Request({
-      line,
-      policy,
-    });
+  const seedAudioPolicy =
+    usesReferenceAudio
+      ? await dependencies
+          .loadDialogueSeedAudioPolicy()
+      : null;
+
+  let model:
+    string;
+
+  let locallyExpectedCredits:
+    number | null;
+
+  let localCreditCeiling:
+    number;
+
+  if (
+    usesReferenceAudio
+  ) {
+    if (
+      !seedAudioPolicy
+    ) {
+      throw new Error(
+        "Dialogue generation CLI internal error: SeedAudio policy was not loaded for a reference-audio voice.",
+      );
+    }
+
+    model =
+      seedAudioPolicy
+        .generation
+        .model;
+
+    locallyExpectedCredits =
+      null;
+
+    localCreditCeiling =
+      seedAudioPolicy
+        .generation
+        .maxCreditsPerGeneration;
+  } else {
+    locallyExpectedCredits =
+      assertDialogueWithinBudget(
+        line.text,
+        policy,
+      );
+
+    const request =
+      buildRunwayElevenV3Request({
+        line,
+        policy,
+      });
+
+    model =
+      request.model;
+
+    localCreditCeiling =
+      policy.generation
+        .maxCreditsPerLine;
+  }
 
   console.log("");
   console.log(
@@ -255,7 +335,7 @@ export async function runDialogueGenerationCli(
   );
 
   console.log(
-    `Model: ${request.model}`,
+    `Model: ${model}`,
   );
 
   console.log(
@@ -263,11 +343,14 @@ export async function runDialogueGenerationCli(
   );
 
   console.log(
-    `Local expected credits: ${locallyExpectedCredits}`,
+    locallyExpectedCredits ===
+      null
+      ? "Local expected credits: provider-estimated after SeedAudio task creation"
+      : `Local expected credits: ${locallyExpectedCredits}`,
   );
 
   console.log(
-    `Local credit ceiling: ${policy.generation.maxCreditsPerLine}`,
+    `Local credit ceiling: ${localCreditCeiling}`,
   );
 
   console.log(
@@ -310,6 +393,69 @@ export async function runDialogueGenerationCli(
     throw new Error(
       "Paid dialogue generation blocked: RUNWAYML_API_SECRET is not configured.",
     );
+  }
+
+  if (
+    usesReferenceAudio
+  ) {
+    if (
+      !seedAudioPolicy
+    ) {
+      throw new Error(
+        "Dialogue generation CLI internal error: SeedAudio policy was not loaded for paid reference-audio execution.",
+      );
+    }
+
+    const ffprobeExecutable =
+      env.BUSYBOOKIE_FFPROBE_PATH
+        ?.trim() ||
+      "ffprobe";
+
+    const executor =
+      dependencies
+        .createSeedAudioExecutor({
+          RUNWAYML_API_SECRET:
+            runwayApiSecret,
+        });
+
+    console.log(
+      "PAID DIALOGUE GENERATION CONFIRMED. Submitting one Runway SeedAudio reference-audio task...",
+    );
+
+    const result =
+      await executor({
+        plan,
+
+        dialogueLineId:
+          line.dialogueLineId,
+
+        mediaRoot,
+
+        ffprobeExecutable,
+
+        localCreditCeiling:
+          seedAudioPolicy
+            .generation
+            .maxCreditsPerGeneration,
+
+        waitTimeoutMs:
+          seedAudioPolicy
+            .task
+            .waitTimeoutMs,
+
+        confirmPaidGeneration:
+          true,
+      });
+
+    console.log(
+      `Dialogue generation completed: ${result.providerExecution.record.providerExecutionId}`,
+    );
+
+    console.log(
+      `Completion record: ${result.completion.completionPath}`,
+    );
+
+    return;
   }
 
   const executor =

@@ -189,8 +189,8 @@ export const DialogueDirectSeedAudioGenerationRecoveryMetadataSchema =
     request:
       DialogueGenerationDirectSeedAudioRequestRecordSchema,
 
-    locallyExpectedCredits:
-      SafeNonnegativeIntegerSchema,
+    localCreditCeiling:
+      DialogueGenerationProviderCreditSchema,
 
     plan:
       DialogueGenerationReferenceAudioPlanSnapshotSchema,

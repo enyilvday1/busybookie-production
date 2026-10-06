@@ -704,6 +704,19 @@ const DialogueGenerationReferenceAudioCreditsSchema =
   })
     .strict();
 
+const DialogueGenerationDirectSeedAudioCreditsSchema =
+  z.object({
+    localCeiling:
+      DialogueGenerationProviderCreditSchema,
+
+    providerEstimated:
+      DialogueGenerationProviderCreditSchema,
+
+    providerFinal:
+      DialogueGenerationProviderCreditSchema,
+  })
+    .strict();
+
 export const DialogueGenerationRecordV1Schema =
   z.object({
     schemaVersion:
@@ -1032,7 +1045,7 @@ export const DialogueGenerationRecordV3Schema =
       DialogueGenerationDirectSeedAudioRequestRecordSchema,
 
     credits:
-      DialogueGenerationReferenceAudioCreditsSchema,
+      DialogueGenerationDirectSeedAudioCreditsSchema,
 
     plan:
       DialogueGenerationReferenceAudioPlanSnapshotSchema,

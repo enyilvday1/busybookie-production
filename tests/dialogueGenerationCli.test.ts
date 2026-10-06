@@ -10,6 +10,10 @@ import {
 } from "../src/validation/loadCharacterBible.js";
 
 import {
+  loadDialogueSeedAudioPolicy,
+} from "../src/validation/loadDialogueSeedAudioPolicy.js";
+
+import {
   loadDialogueVoicePolicy,
 } from "../src/validation/loadDialogueVoicePolicy.js";
 
@@ -24,6 +28,10 @@ import {
 import type {
   RunwayDialogueProductionExecutionInput,
 } from "../src/dialogue/createRunwayDialogueProductionExecutor.js";
+
+import type {
+  RunwayDirectSeedAudioProductionExecutionInput,
+} from "../src/dialogue/createRunwayDirectSeedAudioProductionExecutor.js";
 
 import {
   runDialogueGenerationCli,
@@ -105,6 +113,8 @@ function baseDependencies(
 
     loadDialogueVoicePolicy,
 
+    loadDialogueSeedAudioPolicy,
+
     loadCharacterBible:
       loadApprovedDialogueTestBible,
 
@@ -118,6 +128,17 @@ function baseDependencies(
       vi.fn(),
 
     createExecutor,
+
+    createSeedAudioExecutor:
+      () =>
+        async (
+          _input:
+            RunwayDirectSeedAudioProductionExecutionInput,
+        ): Promise<never> => {
+          throw new Error(
+            "Direct SeedAudio executor must not be selected by historical preset-voice CLI tests.",
+          );
+        },
   };
 }
 

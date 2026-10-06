@@ -204,7 +204,7 @@ function createDirectSeedAudioSubmission() {
         },
       },
 
-      locallyExpectedCredits:
+      localCreditCeiling:
         2,
 
       plan:
@@ -422,7 +422,7 @@ function createDirectSeedAudioGenerationRecord() {
     },
 
     credits: {
-      locallyExpected:
+      localCeiling:
         2,
 
       providerEstimated:
@@ -795,9 +795,9 @@ describe(
                 .request,
 
             credits: {
-              locallyExpected:
+              localCeiling:
                 submission.recoveryMetadata
-                  .locallyExpectedCredits,
+                  .localCreditCeiling,
 
               providerEstimated:
                 submission.providerEstimatedCredits,
@@ -1357,9 +1357,9 @@ describe(
                 .request,
 
             credits: {
-              locallyExpected:
+              localCeiling:
                 submission.recoveryMetadata
-                  .locallyExpectedCredits,
+                  .localCreditCeiling,
 
               providerEstimated:
                 submission.providerEstimatedCredits,
@@ -1885,9 +1885,9 @@ describe(
                 .request,
 
             credits: {
-              locallyExpected:
+              localCeiling:
                 submission.recoveryMetadata
-                  .locallyExpectedCredits,
+                  .localCreditCeiling,
 
               providerEstimated:
                 submission.providerEstimatedCredits,

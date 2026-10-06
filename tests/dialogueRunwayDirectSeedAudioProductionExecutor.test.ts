@@ -8,8 +8,8 @@ import {
 } from "vitest";
 
 import {
-  createDialogueReservation,
-} from "../src/dialogue/createDialogueReservation.js";
+  createDialogueDirectSeedAudioReservation,
+} from "../src/dialogue/createDialogueDirectSeedAudioReservation.js";
 
 import {
   createDialogueDirectSeedAudioSubmission,
@@ -32,8 +32,8 @@ import {
 } from "../src/dialogue/createRunwayDirectSeedAudioProductionExecutor.js";
 
 import {
-  recoverDialogueCompletion,
-} from "../src/dialogue/recoverDialogueCompletion.js";
+  recoverDialogueDirectSeedAudioCompletion,
+} from "../src/dialogue/recoverDialogueDirectSeedAudioCompletion.js";
 
 import {
   createRunwayClient,
@@ -167,7 +167,7 @@ describe(
 
           createReservation:
             createReservation as
-              typeof createDialogueReservation,
+              typeof createDialogueDirectSeedAudioReservation,
 
           createSubmission:
             createSubmission as
@@ -175,7 +175,7 @@ describe(
 
           recoverCompletion:
             recoverCompletion as
-              typeof recoverDialogueCompletion,
+              typeof recoverDialogueDirectSeedAudioCompletion,
 
           executeLifecycle:
             executeLifecycle as

@@ -4,9 +4,9 @@ import type {
 } from "./buildShotDialoguePlan.js";
 
 import {
-  createDialogueReservation,
-  type CreateDialogueReservationResult,
-} from "./createDialogueReservation.js";
+  createDialogueDirectSeedAudioReservation,
+  type CreateDialogueDirectSeedAudioReservationResult,
+} from "./createDialogueDirectSeedAudioReservation.js";
 
 import {
   createDialogueDirectSeedAudioSubmission,
@@ -22,9 +22,9 @@ import type {
 } from "./dialogueSubmission.schema.js";
 
 import {
-  recoverDialogueCompletion,
-  type RecoverDialogueCompletionResult,
-} from "./recoverDialogueCompletion.js";
+  recoverDialogueDirectSeedAudioCompletion,
+  type RecoverDialogueDirectSeedAudioCompletionResult,
+} from "./recoverDialogueDirectSeedAudioCompletion.js";
 
 import type {
   DialogueDirectSeedAudioGenerationRecoveryMetadata,
@@ -90,7 +90,7 @@ export type ExecuteDialogueDirectSeedAudioLineInput =
 export type ExecuteDialogueDirectSeedAudioLineDependencies =
   Readonly<{
     createReservation:
-      typeof createDialogueReservation;
+      typeof createDialogueDirectSeedAudioReservation;
 
     createSubmission:
       typeof createDialogueDirectSeedAudioSubmission;
@@ -99,13 +99,13 @@ export type ExecuteDialogueDirectSeedAudioLineDependencies =
       DialogueDirectSeedAudioLineTransactionRunner;
 
     recoverCompletion:
-      typeof recoverDialogueCompletion;
+      typeof recoverDialogueDirectSeedAudioCompletion;
   }>;
 
 export type ExecuteDialogueDirectSeedAudioLineResult =
   Readonly<{
     reservation:
-      CreateDialogueReservationResult;
+      CreateDialogueDirectSeedAudioReservationResult;
 
     submission:
       CreateDialogueDirectSeedAudioSubmissionResult;
@@ -114,7 +114,7 @@ export type ExecuteDialogueDirectSeedAudioLineResult =
       RunwayDirectSeedAudioDialogueTransactionResult;
 
     completion:
-      RecoverDialogueCompletionResult;
+      RecoverDialogueDirectSeedAudioCompletionResult;
   }>;
 
 function requireDialogueLine(

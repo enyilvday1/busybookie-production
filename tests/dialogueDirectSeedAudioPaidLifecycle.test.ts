@@ -10,8 +10,8 @@ import type {
 } from "../src/dialogue/buildShotDialoguePlan.js";
 
 import type {
-  CreateDialogueReservationResult,
-} from "../src/dialogue/createDialogueReservation.js";
+  CreateDialogueDirectSeedAudioReservationResult,
+} from "../src/dialogue/createDialogueDirectSeedAudioReservation.js";
 
 import type {
   CreateDialogueDirectSeedAudioSubmissionResult,
@@ -27,8 +27,8 @@ import type {
 } from "../src/dialogue/dialogueSubmission.schema.js";
 
 import type {
-  RecoverDialogueCompletionResult,
-} from "../src/dialogue/recoverDialogueCompletion.js";
+  RecoverDialogueDirectSeedAudioCompletionResult,
+} from "../src/dialogue/recoverDialogueDirectSeedAudioCompletion.js";
 
 import type {
   DialogueDirectSeedAudioGenerationRecoveryMetadata,
@@ -250,7 +250,7 @@ DialogueDirectSeedAudioGenerationRecoveryMetadata {
 }
 
 function createReservationResult():
-CreateDialogueReservationResult {
+CreateDialogueDirectSeedAudioReservationResult {
   return {
     record: {
       schemaVersion:
@@ -413,7 +413,7 @@ RunwayDirectSeedAudioDialogueTransactionResult {
 }
 
 function createCompletionResult():
-RecoverDialogueCompletionResult {
+RecoverDialogueDirectSeedAudioCompletionResult {
   return {
     record: {
       schemaVersion:

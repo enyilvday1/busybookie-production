@@ -7,8 +7,8 @@ import type {
 } from "../runway/runway.types.js";
 
 import {
-  createDialogueReservation,
-} from "./createDialogueReservation.js";
+  createDialogueDirectSeedAudioReservation,
+} from "./createDialogueDirectSeedAudioReservation.js";
 
 import {
   createDialogueDirectSeedAudioSubmission,
@@ -25,8 +25,8 @@ import {
 } from "./executeDialogueDirectSeedAudioLine.js";
 
 import {
-  recoverDialogueCompletion,
-} from "./recoverDialogueCompletion.js";
+  recoverDialogueDirectSeedAudioCompletion,
+} from "./recoverDialogueDirectSeedAudioCompletion.js";
 
 export type RunwayDirectSeedAudioProductionExecutionInput =
   ExecuteDialogueDirectSeedAudioLineInput;
@@ -49,13 +49,13 @@ export type RunwayDirectSeedAudioProductionExecutorDependencies =
       typeof createRunwayDirectSeedAudioProductionTransactionRunner;
 
     createReservation:
-      typeof createDialogueReservation;
+      typeof createDialogueDirectSeedAudioReservation;
 
     createSubmission:
       typeof createDialogueDirectSeedAudioSubmission;
 
     recoverCompletion:
-      typeof recoverDialogueCompletion;
+      typeof recoverDialogueDirectSeedAudioCompletion;
 
     executeLifecycle:
       typeof executeDialogueDirectSeedAudioLine;
@@ -71,13 +71,13 @@ const defaultDependencies:
         createRunwayDirectSeedAudioProductionTransactionRunner,
 
       createReservation:
-        createDialogueReservation,
+        createDialogueDirectSeedAudioReservation,
 
       createSubmission:
         createDialogueDirectSeedAudioSubmission,
 
       recoverCompletion:
-        recoverDialogueCompletion,
+        recoverDialogueDirectSeedAudioCompletion,
 
       executeLifecycle:
         executeDialogueDirectSeedAudioLine,

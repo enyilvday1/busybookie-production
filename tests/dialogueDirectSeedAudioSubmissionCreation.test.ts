@@ -17,16 +17,16 @@ import {
 } from "vitest";
 
 import {
-  createDialogueReservation,
-} from "../src/dialogue/createDialogueReservation.js";
+  createDialogueDirectSeedAudioReservation,
+} from "../src/dialogue/createDialogueDirectSeedAudioReservation.js";
 
 import {
   createDialogueDirectSeedAudioSubmission,
 } from "../src/dialogue/createDialogueDirectSeedAudioSubmission.js";
 
 import {
-  readDialogueSubmission,
-} from "../src/dialogue/readDialogueSubmission.js";
+  readDialogueDirectSeedAudioSubmission,
+} from "../src/dialogue/readDialogueDirectSeedAudioSubmission.js";
 
 const PLAN_KEY =
   "a".repeat(
@@ -203,7 +203,7 @@ async function createReservation(
   mediaRoot:
     string,
 ): Promise<void> {
-  await createDialogueReservation(
+  await createDialogueDirectSeedAudioReservation(
     mediaRoot,
     {
       episodeId:
@@ -286,13 +286,14 @@ describe(
         );
 
         await expect(
-          readDialogueSubmission(
-            mediaRoot,
-            "EP02",
-            "SC01",
-            "S02",
-            "EP02_SC01_S02_L01",
-          ),
+          readDialogueDirectSeedAudioSubmission(
+              mediaRoot,
+              "EP02",
+              "SC01",
+              "S02",
+              "EP02_SC01_S02_L01",
+              PLAN_KEY,
+            ),
         ).resolves.toEqual(
           result.record,
         );
@@ -311,7 +312,7 @@ describe(
             createSubmissionInput(),
           ),
         ).rejects.toThrow(
-          /requires an existing dialogue reservation/i,
+          /requires an existing plan-scoped SeedAudio reservation/i,
         );
       },
     );
@@ -322,7 +323,7 @@ describe(
         const mediaRoot =
           await makeTempDirectory();
 
-        await createDialogueReservation(
+        await createDialogueDirectSeedAudioReservation(
           mediaRoot,
           {
             episodeId:
@@ -366,12 +367,12 @@ describe(
     );
 
     it(
-      "fails closed when the direct SeedAudio plan key differs from durable reservation",
+      "does not allow a different plan-scoped reservation to satisfy the selected plan",
       async () => {
         const mediaRoot =
           await makeTempDirectory();
 
-        await createDialogueReservation(
+        await createDialogueDirectSeedAudioReservation(
           mediaRoot,
           {
             episodeId:
@@ -411,7 +412,7 @@ describe(
             createSubmissionInput(),
           ),
         ).rejects.toThrow(
-          /planKey does not match the durable reservation planKey/i,
+          /requires an existing plan-scoped SeedAudio reservation/i,
         );
       },
     );
@@ -442,7 +443,7 @@ describe(
             },
           ),
         ).rejects.toThrow(
-          /dialogue submission already exists/i,
+          /dialogue direct SeedAudio submission already exists/i,
         );
       },
     );

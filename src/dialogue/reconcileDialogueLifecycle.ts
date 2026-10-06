@@ -156,6 +156,28 @@ export type DialogueLifecycleReconciliationDependencies =
     recoverCompletion?:
       typeof recoverDialogueCompletion;
 
+    resolveCompletionPath?:
+      (
+        mediaRoot:
+          string,
+
+        episodeId:
+          string,
+
+        sceneId:
+          string,
+
+        shotId:
+          string,
+
+        dialogueLineId:
+          string,
+
+        planKey:
+          string,
+      ) =>
+        string;
+
     now?:
       () => string;
   }>;
@@ -800,6 +822,48 @@ export async function reconcileDialogueLifecycle(
     );
   }
 
+  const resolveCanonicalCompletionPath =
+    (
+      mediaRoot:
+        string,
+
+      episodeId:
+        string,
+
+      sceneId:
+        string,
+
+      shotId:
+        string,
+
+      dialogueLineId:
+        string,
+    ): string => {
+      const injectedResolver =
+        dependencies
+          .resolveCompletionPath;
+
+      if (injectedResolver) {
+        return injectedResolver(
+          mediaRoot,
+          episodeId,
+          sceneId,
+          shotId,
+          dialogueLineId,
+          lifecycle.submission
+            .planKey,
+        );
+      }
+
+      return createDialogueCompletionPath(
+        mediaRoot,
+        episodeId,
+        sceneId,
+        shotId,
+        dialogueLineId,
+      );
+    };
+
   if (
     lifecycle.submission.schemaVersion ===
     "2.0" ||
@@ -826,7 +890,7 @@ export async function reconcileDialogueLifecycle(
         );
 
       const canonicalCompletionPath =
-        createDialogueCompletionPath(
+        resolveCanonicalCompletionPath(
           input.mediaRoot,
           lifecycle.submission
             .episodeId,
@@ -1208,7 +1272,7 @@ export async function reconcileDialogueLifecycle(
     );
 
     const canonicalCompletionPath =
-      createDialogueCompletionPath(
+      resolveCanonicalCompletionPath(
         input.mediaRoot,
         lifecycle.submission
           .episodeId,
@@ -1316,7 +1380,7 @@ export async function reconcileDialogueLifecycle(
     );
 
   const canonicalCompletionPath =
-    createDialogueCompletionPath(
+    resolveCanonicalCompletionPath(
       input.mediaRoot,
       lifecycle.submission.episodeId,
       lifecycle.submission.sceneId,

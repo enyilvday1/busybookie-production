@@ -25,12 +25,12 @@ import {
 } from "./dialogueSubmission.schema.js";
 
 import {
-  createDialogueSubmissionPath,
-} from "./dialogueSubmissionPath.js";
+  createDialogueDirectSeedAudioSubmissionPath,
+} from "./dialogueDirectSeedAudioLifecyclePaths.js";
 
 import {
-  readDialogueReservation,
-} from "./readDialogueReservation.js";
+  readDialogueDirectSeedAudioReservation,
+} from "./readDialogueDirectSeedAudioReservation.js";
 
 export type DialogueDirectSeedAudioSubmissionDependencies =
   Readonly<{
@@ -66,17 +66,18 @@ export async function createDialogueDirectSeedAudioSubmission(
       );
 
   const reservation =
-    await readDialogueReservation(
+    await readDialogueDirectSeedAudioReservation(
       mediaRoot,
       validatedInput.episodeId,
       validatedInput.sceneId,
       validatedInput.shotId,
       validatedInput.dialogueLineId,
+      validatedInput.planKey,
     );
 
   if (!reservation) {
     throw new Error(
-      `Dialogue direct SeedAudio submission requires an existing dialogue reservation for ${validatedInput.dialogueLineId}.`,
+      `Dialogue direct SeedAudio submission requires an existing plan-scoped SeedAudio reservation for ${validatedInput.dialogueLineId}.`,
     );
   }
 
@@ -185,12 +186,13 @@ export async function createDialogueDirectSeedAudioSubmission(
       });
 
   const submissionPath =
-    createDialogueSubmissionPath(
+    createDialogueDirectSeedAudioSubmissionPath(
       mediaRoot,
       record.episodeId,
       record.sceneId,
       record.shotId,
       record.dialogueLineId,
+      record.planKey,
     );
 
   await mkdir(
@@ -247,19 +249,21 @@ export async function createDialogueDirectSeedAudioSubmission(
         "EEXIST"
       ) {
         throw new Error(
-          `Dialogue submission already exists: ${submissionPath}`,
+          `Dialogue direct SeedAudio submission already exists: ${submissionPath}`,
         );
       }
 
       throw error;
     }
 
-    return {
+    return Object.freeze({
       record,
       submissionPath,
-    };
+    });
   } finally {
-    if (temporaryCreated) {
+    if (
+      temporaryCreated
+    ) {
       try {
         await unlink(
           temporaryPath,

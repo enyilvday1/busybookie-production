@@ -8,6 +8,10 @@ import {
 } from "./probeDialogueAudio.js";
 
 import {
+  verifyCompletedDialogueDirectSeedAudioLineForTiming,
+} from "./verifyCompletedDialogueDirectSeedAudioLineForTiming.js";
+
+import {
   verifyCompletedDialogueLineForTiming,
   type VerifiedCompletedDialogueLineForTiming,
 } from "./verifyCompletedDialogueLineForTiming.js";
@@ -35,6 +39,9 @@ export type VerifyShotDialogueAudioTimingDependencies =
     verifyLine:
       typeof verifyCompletedDialogueLineForTiming;
 
+    verifyDirectSeedAudioLine?:
+      typeof verifyCompletedDialogueDirectSeedAudioLineForTiming;
+
     probeAudio:
       typeof probeDialogueAudio;
 
@@ -48,12 +55,27 @@ const defaultDependencies:
       verifyLine:
         verifyCompletedDialogueLineForTiming,
 
+      verifyDirectSeedAudioLine:
+        verifyCompletedDialogueDirectSeedAudioLineForTiming,
+
       probeAudio:
         probeDialogueAudio,
 
       verifyTiming:
         verifyShotDialogueTiming,
     });
+
+function usesRunwayReferenceAudio(
+  voice:
+    ShotDialoguePlan["lines"][number]["voice"],
+): boolean {
+  return (
+    "executionMode" in
+      voice &&
+    voice.executionMode ===
+      "RUNWAY_REFERENCE_AUDIO"
+  );
+}
 
 export async function verifyShotDialogueAudioTiming(
   input:
@@ -73,8 +95,48 @@ export async function verifyShotDialogueAudioTiming(
     const line
     of input.plan.lines
   ) {
-    const verified:
-      VerifiedCompletedDialogueLineForTiming =
+    let verified:
+      VerifiedCompletedDialogueLineForTiming;
+
+    if (
+      usesRunwayReferenceAudio(
+        line.voice,
+      )
+    ) {
+      const verifyDirectSeedAudioLine =
+        dependencies
+          .verifyDirectSeedAudioLine;
+
+      if (
+        !verifyDirectSeedAudioLine
+      ) {
+        throw new Error(
+          `Dialogue shot timing requires plan-scoped direct SeedAudio timing admission for reference-audio line ${line.dialogueLineId}.`,
+        );
+      }
+
+      verified =
+        await verifyDirectSeedAudioLine({
+          mediaRoot:
+            input.mediaRoot,
+
+          episodeId:
+            input.plan.episodeId,
+
+          sceneId:
+            input.plan.sceneId,
+
+          shotId:
+            input.plan.shotId,
+
+          dialogueLineId:
+            line.dialogueLineId,
+
+          planKey:
+            input.plan.planKey,
+        });
+    } else {
+      verified =
         await dependencies
           .verifyLine({
             mediaRoot:
@@ -92,6 +154,7 @@ export async function verifyShotDialogueAudioTiming(
             dialogueLineId:
               line.dialogueLineId,
           });
+    }
 
     const audio:
       DialogueAudioMetadata =

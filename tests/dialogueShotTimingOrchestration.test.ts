@@ -39,54 +39,53 @@ const planKey =
     64,
   );
 
-const plan =
-  Object.freeze({
-    schemaVersion:
-      "1.0",
+const plan = Object.freeze({
+  schemaVersion: "1.0" as const,
+  episodeId: "EP02",
+  sceneId: "SC01",
+  shotId: "S02",
+  shotDurationSeconds: 6,
 
-    episodeId:
-      "EP02",
+  videoGeneration: Object.freeze({
+    provider: "VEO" as const,
+    nativeAudio: true,
+  }),
 
-    sceneId:
-      "SC01",
+  // Synthetic preset-voice fixtures, not a change to Ollie's production voice.
+  lines: Object.freeze([
+    Object.freeze({
+      lineNumber: 1,
+      dialogueLineId: "EP02_SC01_S02_L01",
+      characterId: "OLLIE" as const,
+      characterName: "Ollie",
+      text: "First legacy timing test line.",
+      deliveryNotes: null,
 
-    shotId:
-      "S02",
-
-    shotDurationSeconds:
-      6,
-
-    videoGeneration:
-      Object.freeze({
-        provider:
-          "VEO",
-
-        nativeAudio:
-          true,
+      voice: Object.freeze({
+        provider: "RUNWAY" as const,
+        voiceName: "Chad",
+        deliveryTraits: Object.freeze(["warm", "friendly"]),
       }),
+    }),
 
-    lines:
-      Object.freeze([
-        Object.freeze({
-          lineNumber:
-            1,
+    Object.freeze({
+      lineNumber: 2,
+      dialogueLineId: "EP02_SC01_S02_L02",
+      characterId: "OLLIE" as const,
+      characterName: "Ollie",
+      text: "Second legacy timing test line.",
+      deliveryNotes: null,
 
-          dialogueLineId:
-            "EP02_SC01_S02_L01",
-        }),
+      voice: Object.freeze({
+        provider: "RUNWAY" as const,
+        voiceName: "Chad",
+        deliveryTraits: Object.freeze(["warm", "friendly"]),
+      }),
+    }),
+  ]),
 
-        Object.freeze({
-          lineNumber:
-            2,
-
-          dialogueLineId:
-            "EP02_SC01_S02_L02",
-        }),
-      ]),
-
-    planKey,
-  }) as unknown as
-    ShotDialoguePlan;
+  planKey,
+}) satisfies ShotDialoguePlan;
 
 function createVerifiedLine(
   dialogueLineId:

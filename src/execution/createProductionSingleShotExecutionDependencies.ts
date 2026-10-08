@@ -11,6 +11,10 @@ import {
 } from "./createExecutionSubmission.js";
 
 import {
+  readDialogueVisualAuthorization,
+} from "./readDialogueVisualAuthorization.js";
+
+import {
   prepareRunwaySingleShotProductionExecutor,
 } from "./providers/createRunwaySingleShotProductionExecutor.js";
 
@@ -34,6 +38,13 @@ export type ProductionSingleShotExecutionCredentialSource =
 
 export type ProductionSingleShotExecutionCompositionDependencies =
   Readonly<{
+    readDialogueVisualAuthorization?:
+      NonNullable<
+        SingleShotExecutionDependencies[
+          "readDialogueVisualAuthorization"
+        ]
+      >;
+
     createReservation:
       SingleShotExecutionDependencies[
         "createReservation"
@@ -59,6 +70,9 @@ export type ProductionSingleShotExecutionCompositionDependencies =
 const defaultDependencies:
   ProductionSingleShotExecutionCompositionDependencies =
   Object.freeze({
+    readDialogueVisualAuthorization:
+      readDialogueVisualAuthorization,
+
     createReservation:
       createExecutionReservation,
 
@@ -189,6 +203,11 @@ export function createProductionSingleShotExecutionDependencies(
     };
 
   return Object.freeze({
+    readDialogueVisualAuthorization:
+      dependencies
+        .readDialogueVisualAuthorization ??
+      readDialogueVisualAuthorization,
+
     createReservation,
 
     createSubmission:

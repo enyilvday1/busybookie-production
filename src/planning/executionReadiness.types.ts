@@ -13,6 +13,18 @@ export type ExecutionReadinessDisposition =
   | "CONFLICT"
   | "BLOCKED";
 
+export type ManualReviewExecutionResolution =
+  Readonly<{
+    provider:
+      Extract<
+        GenerationProvider,
+        "RUNWAY" | "VEO"
+      >;
+
+    source:
+      "DURABLE_DIALOGUE_VISUAL_AUTHORIZATION";
+  }>;
+
 export type ShotExecutionReadiness = Readonly<{
   disposition: ExecutionReadinessDisposition;
   executionProvider: GenerationProvider | null;

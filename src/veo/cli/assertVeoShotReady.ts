@@ -34,10 +34,27 @@ export function findVeoEpisodeShot(
   );
 }
 
+export type VeoShotReadinessMode =
+  | "CONNECTIVITY_CLI"
+  | "DURABLE_AUTHORIZED_DIALOGUE_VISUAL";
+
 export function assertVeoShotReady(
   episode: EpisodeManifest,
   shot: Shot,
+  mode:
+    VeoShotReadinessMode =
+      "CONNECTIVITY_CLI",
 ): void {
+  if (
+    mode !== "CONNECTIVITY_CLI" &&
+    mode !==
+      "DURABLE_AUTHORIZED_DIALOGUE_VISUAL"
+  ) {
+    throw new Error(
+      `Unsupported Veo shot readiness mode: ${String(mode)}.`,
+    );
+  }
+
   if (
     !LIVE_EPISODE_STATUSES.has(
       episode.status,
@@ -75,8 +92,10 @@ export function assertVeoShotReady(
   }
 
   if (
+    mode ===
+      "CONNECTIVITY_CLI" &&
     shot.dialogue.length >
-    0
+      0
   ) {
     throw new Error(
       `Veo connectivity CLI blocked: ${shot.id} contains dialogue. Dialogue generation remains disabled until Busybookie voice continuity is explicitly approved.`,

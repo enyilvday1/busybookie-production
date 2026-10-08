@@ -33,6 +33,7 @@ import {
 } from "../routing/evaluateShotProvider.js";
 
 import type {
+  ManualReviewExecutionResolution,
   ShotExecutionReadiness,
 } from "./executionReadiness.types.js";
 
@@ -50,6 +51,8 @@ export function evaluateShotExecutionReadiness(
   bible: CharacterBible,
   rules: ProductionRules,
   policy: ProviderRoutingPolicy,
+  manualReviewResolution?:
+    ManualReviewExecutionResolution,
 ): ShotExecutionReadiness {
   const routing =
     evaluateShotProvider(
@@ -83,20 +86,96 @@ export function evaluateShotExecutionReadiness(
     };
   }
 
+  let executionProvider =
+    routing.recommendedProvider;
+
+  const resolvedManualReview =
+    routing.disposition ===
+      "MANUAL_REVIEW" &&
+    manualReviewResolution !==
+      undefined;
+
   if (
-    routing.disposition === "MANUAL_REVIEW"
+    manualReviewResolution &&
+    routing.disposition !==
+      "MANUAL_REVIEW"
   ) {
     return {
-      disposition: "MANUAL_REVIEW",
+      disposition: "BLOCKED",
       executionProvider: null,
       routing,
       reasons: routing.reasons,
-      blockers: routing.blockers,
+      blockers: [
+        `${shot.id}: durable manual-review resolution cannot be applied when routing disposition is ${routing.disposition}.`,
+      ],
     };
   }
 
-  const executionProvider =
-    routing.recommendedProvider;
+  if (
+    routing.disposition === "MANUAL_REVIEW"
+  ) {
+    if (!manualReviewResolution) {
+      return {
+        disposition: "MANUAL_REVIEW",
+        executionProvider: null,
+        routing,
+        reasons: routing.reasons,
+        blockers: routing.blockers,
+      };
+    }
+
+    if (
+      routing.blockers.length >
+      0
+    ) {
+      return {
+        disposition: "BLOCKED",
+        executionProvider: null,
+        routing,
+        reasons: routing.reasons,
+        blockers: [
+          ...routing.blockers,
+          `${shot.id}: durable manual-review resolution cannot override routing blockers.`,
+        ],
+      };
+    }
+
+    if (
+      shot.generation.provider !==
+      manualReviewResolution.provider
+    ) {
+      return {
+        disposition: "CONFLICT",
+        executionProvider: null,
+        routing,
+        reasons: routing.reasons,
+        blockers: [
+          `${shot.id}: authorized provider ${manualReviewResolution.provider} does not match manifest generation provider ${shot.generation.provider}.`,
+        ],
+      };
+    }
+
+    if (
+      !rules.generation
+        .supportedProviders
+        .includes(
+          manualReviewResolution.provider,
+        )
+    ) {
+      return {
+        disposition: "BLOCKED",
+        executionProvider: null,
+        routing,
+        reasons: routing.reasons,
+        blockers: [
+          `${shot.id}: authorized provider ${manualReviewResolution.provider} is not enabled by production rules.`,
+        ],
+      };
+    }
+
+    executionProvider =
+      manualReviewResolution.provider;
+  }
 
   if (!executionProvider) {
     return {
@@ -146,6 +225,9 @@ export function evaluateShotExecutionReadiness(
         assertVeoShotReady(
           episode,
           shot,
+          resolvedManualReview
+            ? "DURABLE_AUTHORIZED_DIALOGUE_VISUAL"
+            : "CONNECTIVITY_CLI",
         );
         break;
 
@@ -205,6 +287,13 @@ export function evaluateShotExecutionReadiness(
     routing,
     reasons: [
       ...routing.reasons,
+      ...(
+        resolvedManualReview
+          ? [
+              `${shot.id}: dialogue visual provider ${executionProvider} was explicitly resolved by durable human authorization.`,
+            ]
+          : []
+      ),
       `${shot.id}: ${executionProvider} execution readiness checks passed.`,
     ],
     blockers: [],

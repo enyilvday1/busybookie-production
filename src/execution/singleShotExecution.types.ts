@@ -36,6 +36,10 @@ import type {
 } from "./executionCompletion.schema.js";
 
 import type {
+  DialogueVisualAuthorization,
+} from "./dialogueVisualAuthorization.schema.js";
+
+import type {
   ExecutionReservationInput,
 } from "./executionReservation.schema.js";
 
@@ -85,6 +89,19 @@ export type SingleShotSubmissionAcceptedHandler =
       SingleShotSubmissionAcceptance,
   ) =>
     Promise<void>;
+
+export type DialogueVisualAuthorizationReader =
+  (
+    mediaRoot:
+      string,
+    episodeId:
+      string,
+    shotId:
+      string,
+  ) =>
+    Promise<
+      DialogueVisualAuthorization | null
+    >;
 
 export type SingleShotExecutionRequest =
   Readonly<{
@@ -170,6 +187,9 @@ export type SingleShotProviderExecutor =
 
 export type SingleShotExecutionDependencies =
   Readonly<{
+    readDialogueVisualAuthorization?:
+      DialogueVisualAuthorizationReader;
+
     createReservation:
       ExecutionReservationCreator;
 

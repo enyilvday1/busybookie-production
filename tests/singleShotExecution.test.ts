@@ -475,6 +475,17 @@ function makeDependencies(
     );
 
   const dependencies = {
+    verifyVisualReference:
+      vi.fn(
+        async (
+          input,
+        ) =>
+          Object.freeze({
+            absolutePath:
+              input.sourceImagePath,
+          }),
+      ),
+
     createReservation,
     createSubmission,
     createCompletion,
@@ -1089,6 +1100,15 @@ describe(
           );
 
         const dependencies = {
+          verifyVisualReference:
+            async (
+              input,
+            ) =>
+              Object.freeze({
+                absolutePath:
+                  input.sourceImagePath,
+              }),
+
           createReservation:
             (
               root:
@@ -1295,6 +1315,461 @@ describe(
         ).toBe(
           "S02",
         );
+      },
+    );
+  },
+);
+
+describe(
+  "Busybookie single-shot visual-reference execution binding",
+  () => {
+    it(
+      "rejects a source image that fails visual-reference verification before creating a durable reservation",
+      async () => {
+        const [
+          episode,
+          context,
+        ] =
+          await Promise.all([
+            loadEpisodeManifest(
+              "EP91",
+            ),
+            loadExecutionContext(),
+          ]);
+
+        const events:
+          string[] = [];
+
+        const mocks =
+          makeDependencies(
+            events,
+          );
+
+        const verifyVisualReference =
+          vi.fn(
+            async (
+              input:
+                Readonly<{
+                  mediaRoot:
+                    string;
+
+                  sourceImagePath:
+                    string;
+
+                  approvedAssetIds:
+                    readonly string[];
+                }>,
+            ) => {
+              events.push(
+                "visual-reference-verification",
+              );
+
+              expect(
+                input,
+              ).toEqual({
+                mediaRoot:
+                  "D:/Busybookie/Production",
+
+                sourceImagePath:
+                  join(
+                    "D:/Busybookie/Production",
+                    "references",
+                    "test-reference.png",
+                  ),
+
+                approvedAssetIds: [
+                  "littleleaf-valley-storybook-village-v1",
+                ],
+              });
+
+              throw new Error(
+                "VISUAL_REFERENCE_REJECTED",
+              );
+            },
+          );
+
+        const dependencies = {
+          ...mocks.dependencies,
+          verifyVisualReference,
+        };
+
+        await expect(
+          executeSingleShot(
+            makeRequest(
+              episode,
+              "S01",
+              context,
+            ),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          "VISUAL_REFERENCE_REJECTED",
+        );
+
+        expect(
+          verifyVisualReference,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          events,
+        ).toEqual([
+          "visual-reference-verification",
+        ]);
+
+        expect(
+          mocks.createReservation,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeRunway,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeVeo,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "passes the verified canonical physical source path to the provider instead of the unverified caller path",
+      async () => {
+        const [
+          episode,
+          context,
+        ] =
+          await Promise.all([
+            loadEpisodeManifest(
+              "EP91",
+            ),
+            loadExecutionContext(),
+          ]);
+
+        const events:
+          string[] = [];
+
+        const mocks =
+          makeDependencies(
+            events,
+          );
+
+        const verifiedSourceImagePath =
+          join(
+            "D:/Busybookie/Production",
+            "references",
+            "littleleaf-valley",
+            "littleleaf_valley_storybook_village.png",
+          );
+
+        const verifyVisualReference =
+          vi.fn(
+            async (
+              input:
+                Readonly<{
+                  mediaRoot:
+                    string;
+
+                  sourceImagePath:
+                    string;
+
+                  approvedAssetIds:
+                    readonly string[];
+                }>,
+            ) => {
+              events.push(
+                "visual-reference-verification",
+              );
+
+              expect(
+                input.approvedAssetIds,
+              ).toEqual([
+                "littleleaf-valley-storybook-village-v1",
+              ]);
+
+              return Object.freeze({
+                assetId:
+                  "littleleaf-valley-storybook-village-v1",
+
+                mediaRootRelativePath:
+                  "references/littleleaf-valley/littleleaf_valley_storybook_village.png",
+
+                bytes:
+                  2_967_785,
+
+                sha256:
+                  "ed47ab4c69f918380e15290525411134bc023d8314bd9c77c3f9082f96a308f7",
+
+                contentType:
+                  "image/png" as const,
+
+                absolutePath:
+                  verifiedSourceImagePath,
+              });
+            },
+          );
+
+        const dependencies = {
+          ...mocks.dependencies,
+          verifyVisualReference,
+        };
+
+        await executeSingleShot(
+          makeRequest(
+            episode,
+            "S01",
+            context,
+          ),
+          dependencies,
+        );
+
+        expect(
+          verifyVisualReference,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          events,
+        ).toEqual([
+          "visual-reference-verification",
+          "reservation",
+          "veo",
+          "submission",
+          "completion",
+        ]);
+
+        expect(
+          mocks.executeVeo,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        const providerCall =
+          mocks.executeVeo
+            .mock
+            .calls[0];
+
+        expect(
+          providerCall,
+        ).toBeDefined();
+
+        expect(
+          providerCall?.[0]
+            .sourceImagePath,
+        ).toBe(
+          verifiedSourceImagePath,
+        );
+
+        expect(
+          providerCall?.[0]
+            .sourceImagePath,
+        ).not.toBe(
+          makeRequest(
+            episode,
+            "S01",
+            context,
+          ).sourceImagePath,
+        );
+      },
+    );
+
+    it(
+      "keeps explicit paid-generation confirmation ahead of visual-reference verification",
+      async () => {
+        const [
+          episode,
+          context,
+        ] =
+          await Promise.all([
+            loadEpisodeManifest(
+              "EP91",
+            ),
+            loadExecutionContext(),
+          ]);
+
+        const mocks =
+          makeDependencies();
+
+        const verifyVisualReference =
+          vi.fn(
+            async () => {
+              throw new Error(
+                "Visual verification must not run before paid confirmation.",
+              );
+            },
+          );
+
+        const dependencies = {
+          ...mocks.dependencies,
+          verifyVisualReference,
+        };
+
+        await expect(
+          executeSingleShot(
+            makeRequest(
+              episode,
+              "S01",
+              context,
+              false,
+            ),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          /paid.*confirmation/i,
+        );
+
+        expect(
+          verifyVisualReference,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.createReservation,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeRunway,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeVeo,
+        ).not.toHaveBeenCalled();
+      },
+    );
+  },
+);
+
+describe(
+  "Busybookie single-shot visual-reference fail-closed boundaries",
+  () => {
+    it(
+      "fails closed before reservation when the visual-reference verifier dependency is missing",
+      async () => {
+        const [
+          episode,
+          context,
+        ] =
+          await Promise.all([
+            loadEpisodeManifest(
+              "EP91",
+            ),
+            loadExecutionContext(),
+          ]);
+
+        const mocks =
+          makeDependencies();
+
+        const {
+          verifyVisualReference:
+            _verifyVisualReference,
+          ...dependenciesWithoutVisualVerifier
+        } =
+          mocks.dependencies;
+
+        await expect(
+          executeSingleShot(
+            makeRequest(
+              episode,
+              "S01",
+              context,
+            ),
+            dependenciesWithoutVisualVerifier,
+          ),
+        ).rejects.toThrow(
+          /verifyVisualReference.*required.*execution reservation/i,
+        );
+
+        expect(
+          mocks.createReservation,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeRunway,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeVeo,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "fails closed before reservation when visual verification returns an empty canonical source path",
+      async () => {
+        const [
+          episode,
+          context,
+        ] =
+          await Promise.all([
+            loadEpisodeManifest(
+              "EP91",
+            ),
+            loadExecutionContext(),
+          ]);
+
+        const events:
+          string[] = [];
+
+        const mocks =
+          makeDependencies(
+            events,
+          );
+
+        const verifyVisualReference =
+          vi.fn(
+            async () => {
+              events.push(
+                "visual-reference-verification",
+              );
+
+              return Object.freeze({
+                absolutePath:
+                  "   ",
+              });
+            },
+          );
+
+        const dependencies = {
+          ...mocks.dependencies,
+          verifyVisualReference,
+        };
+
+        await expect(
+          executeSingleShot(
+            makeRequest(
+              episode,
+              "S01",
+              context,
+            ),
+            dependencies,
+          ),
+        ).rejects.toThrow(
+          /empty canonical source image path/i,
+        );
+
+        expect(
+          verifyVisualReference,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          events,
+        ).toEqual([
+          "visual-reference-verification",
+        ]);
+
+        expect(
+          mocks.createReservation,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeRunway,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          mocks.executeVeo,
+        ).not.toHaveBeenCalled();
       },
     );
   },

@@ -38,6 +38,7 @@ import type {
 } from "../src/execution/executionSubmission.schema.js";
 
 import type {
+  SingleShotExecutionDependencies,
   SingleShotProviderExecutionInput,
   SingleShotProviderExecutionResult,
 } from "../src/execution/singleShotExecution.types.js";
@@ -352,7 +353,30 @@ describe(
             },
           );
 
+        const verifyVisualReference =
+          vi.fn<
+            NonNullable<
+              SingleShotExecutionDependencies[
+                "verifyVisualReference"
+              ]
+            >
+          >(
+            async (
+              input,
+            ) => {
+              events.push(
+                "visual-reference-verification",
+              );
+
+              return Object.freeze({
+                absolutePath:
+                  input.sourceImagePath,
+              });
+            },
+          );
+
         const dependencies = {
+          verifyVisualReference,
           createReservation,
           createSubmission,
           createCompletion,
@@ -390,6 +414,7 @@ describe(
         expect(
           events,
         ).toEqual([
+          "visual-reference-verification",
           "reservation",
           "provider-accepted",
           "submission",
@@ -797,8 +822,31 @@ function makeLifecycleFailureDependencies(
       },
     );
 
+  const verifyVisualReference =
+    vi.fn<
+      NonNullable<
+        SingleShotExecutionDependencies[
+          "verifyVisualReference"
+        ]
+      >
+    >(
+      async (
+        input,
+      ) => {
+        events.push(
+          "visual-reference-verification",
+        );
+
+        return Object.freeze({
+          absolutePath:
+            input.sourceImagePath,
+        });
+      },
+    );
+
   return {
     dependencies: {
+      verifyVisualReference,
       createReservation,
       createSubmission,
       createCompletion,
@@ -806,6 +854,7 @@ function makeLifecycleFailureDependencies(
       executeVeo,
     },
 
+    verifyVisualReference,
     createReservation,
     createSubmission,
     createCompletion,
@@ -884,6 +933,7 @@ describe(
         expect(
           events,
         ).toEqual([
+          "visual-reference-verification",
           "reservation",
           "provider-accepted",
           "submission",
@@ -974,6 +1024,7 @@ describe(
         expect(
           events,
         ).toEqual([
+          "visual-reference-verification",
           "reservation",
           "provider-accepted",
           "submission",

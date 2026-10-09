@@ -185,10 +185,40 @@ export type SingleShotProviderExecutor =
       SingleShotProviderExecutionResult
     >;
 
+export type SingleShotVisualReferenceVerificationInput =
+  Readonly<{
+    mediaRoot:
+      string;
+
+    sourceImagePath:
+      string;
+
+    approvedAssetIds:
+      readonly string[];
+  }>;
+
+export type SingleShotVisualReferenceVerificationResult =
+  Readonly<{
+    absolutePath:
+      string;
+  }>;
+
+export type SingleShotVisualReferenceVerifier =
+  (
+    input:
+      SingleShotVisualReferenceVerificationInput,
+  ) =>
+    Promise<
+      SingleShotVisualReferenceVerificationResult
+    >;
+
 export type SingleShotExecutionDependencies =
   Readonly<{
     readDialogueVisualAuthorization?:
       DialogueVisualAuthorizationReader;
+
+    verifyVisualReference?:
+      SingleShotVisualReferenceVerifier;
 
     createReservation:
       ExecutionReservationCreator;

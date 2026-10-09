@@ -76,7 +76,23 @@ function makeLifecycleCreatorMocks() {
       },
     );
 
+  const verifyVisualReference =
+    vi.fn<
+      NonNullable<
+        ProductionSingleShotExecutionCompositionDependencies[
+          "verifyVisualReference"
+        ]
+      >
+    >(
+      async () => {
+        throw new Error(
+          "Visual-reference verification must not run during production dependency composition tests.",
+        );
+      },
+    );
+
   return {
+    verifyVisualReference,
     createReservation,
     createSubmission,
     createCompletion,
@@ -86,6 +102,23 @@ function makeLifecycleCreatorMocks() {
 describe(
   "Busybookie production single-shot execution dependencies",
   () => {
+    it(
+      "exposes a visual-reference verifier in default production composition without touching providers or media",
+      () => {
+        const productionDependencies =
+          createProductionSingleShotExecutionDependencies(
+            {},
+          );
+
+        expect(
+          productionDependencies
+            .verifyVisualReference,
+        ).toBeTypeOf(
+          "function",
+        );
+      },
+    );
+
     it(
       "keeps Veo untouched when only the Runway executor is selected",
       async () => {
@@ -164,6 +197,19 @@ describe(
             },
             dependencies,
           );
+
+        expect(
+          productionDependencies
+            .verifyVisualReference,
+        ).toBe(
+          lifecycle
+            .verifyVisualReference,
+        );
+
+        expect(
+          lifecycle
+            .verifyVisualReference,
+        ).not.toHaveBeenCalled();
 
         expect(
           prepareRunwayExecutor,

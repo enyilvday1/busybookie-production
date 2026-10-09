@@ -15,6 +15,10 @@ import {
 } from "./readDialogueVisualAuthorization.js";
 
 import {
+  createProductionVisualReferenceVerifier,
+} from "./createProductionVisualReferenceVerifier.js";
+
+import {
   prepareRunwaySingleShotProductionExecutor,
 } from "./providers/createRunwaySingleShotProductionExecutor.js";
 
@@ -45,6 +49,13 @@ export type ProductionSingleShotExecutionCompositionDependencies =
         ]
       >;
 
+    verifyVisualReference?:
+      NonNullable<
+        SingleShotExecutionDependencies[
+          "verifyVisualReference"
+        ]
+      >;
+
     createReservation:
       SingleShotExecutionDependencies[
         "createReservation"
@@ -72,6 +83,9 @@ const defaultDependencies:
   Object.freeze({
     readDialogueVisualAuthorization:
       readDialogueVisualAuthorization,
+
+    verifyVisualReference:
+      createProductionVisualReferenceVerifier(),
 
     createReservation:
       createExecutionReservation,
@@ -207,6 +221,11 @@ export function createProductionSingleShotExecutionDependencies(
       dependencies
         .readDialogueVisualAuthorization ??
       readDialogueVisualAuthorization,
+
+    verifyVisualReference:
+      dependencies
+        .verifyVisualReference ??
+      createProductionVisualReferenceVerifier(),
 
     createReservation,
 

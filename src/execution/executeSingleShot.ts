@@ -188,6 +188,40 @@ export async function executeSingleShot(
     );
   }
 
+  const visualReferenceVerifier =
+    dependencies
+      .verifyVisualReference;
+
+  if (!visualReferenceVerifier) {
+    throw new Error(
+      "verifyVisualReference dependency is required before creating an execution reservation.",
+    );
+  }
+
+  const verifiedVisualReference =
+    await visualReferenceVerifier({
+      mediaRoot:
+        request.mediaRoot,
+
+      sourceImagePath:
+        request.sourceImagePath,
+
+      approvedAssetIds:
+        shot.references
+          .assetIds,
+    });
+
+  const verifiedSourceImagePath =
+    verifiedVisualReference
+      .absolutePath
+      .trim();
+
+  if (!verifiedSourceImagePath) {
+    throw new Error(
+      "Visual-reference verification returned an empty canonical source image path.",
+    );
+  }
+
   const reservation =
     await dependencies
       .createReservation(
@@ -333,7 +367,7 @@ export async function executeSingleShot(
         request.mediaRoot,
 
       sourceImagePath:
-        request.sourceImagePath,
+        verifiedSourceImagePath,
 
       reservation,
 

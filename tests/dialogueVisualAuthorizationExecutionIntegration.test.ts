@@ -284,6 +284,44 @@ function makeDependencies(
   events:
     string[] = [],
 ) {
+  const verifyVisualReference =
+    vi.fn<
+      NonNullable<
+        SingleShotExecutionDependencies[
+          "verifyVisualReference"
+        ]
+      >
+    >(
+      async (
+        input,
+      ) => {
+        events.push(
+          "visual-reference-verification",
+        );
+
+        expect(
+          input.approvedAssetIds,
+        ).toEqual([
+          "OLLIE_CHARACTER_MASTER_REFERENCE_V1",
+        ]);
+
+        expect(
+          input.sourceImagePath,
+        ).toBe(
+          join(
+            input.mediaRoot,
+            "references",
+            "ollie-master-character-reference-v1.png",
+          ),
+        );
+
+        return Object.freeze({
+          absolutePath:
+            input.sourceImagePath,
+        });
+      },
+    );
+
   const createReservation =
     vi.fn<
       SingleShotExecutionDependencies[
@@ -536,6 +574,7 @@ function makeDependencies(
     );
 
   const dependencies = {
+    verifyVisualReference,
     createReservation,
     createSubmission,
     createCompletion,
@@ -548,6 +587,7 @@ function makeDependencies(
 
   return {
     dependencies,
+    verifyVisualReference,
     createReservation,
     executeRunway,
     executeVeo,
@@ -677,11 +717,18 @@ describe(
         expect(
           events,
         ).toEqual([
+          "visual-reference-verification",
           "reservation",
           "veo",
           "submission",
           "completion",
         ]);
+
+        expect(
+          mocks.verifyVisualReference,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
 
         expect(
           mocks.executeRunway,

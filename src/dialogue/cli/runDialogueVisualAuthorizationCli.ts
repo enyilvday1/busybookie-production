@@ -15,6 +15,10 @@ import {
 } from "../../validation/loadProductionRules.js";
 
 import {
+  loadProviderRoutingPolicy,
+} from "../../validation/loadProviderRoutingPolicy.js";
+
+import {
   validateEpisodeProduction,
 } from "../../validation/validateEpisodeProduction.js";
 
@@ -25,6 +29,10 @@ import {
 import {
   createDialogueVisualAuthorization,
 } from "../../execution/createDialogueVisualAuthorization.js";
+
+import {
+  evaluateShotExecutionReadiness,
+} from "../../planning/evaluateShotExecutionReadiness.js";
 
 import {
   parseDialogueVisualAuthorizationCliArgs,
@@ -44,11 +52,17 @@ export type RunDialogueVisualAuthorizationCliDependencies =
     loadEpisodeManifest:
       typeof loadEpisodeManifest;
 
+    loadProviderRoutingPolicy:
+      typeof loadProviderRoutingPolicy;
+
     validateMediaRoot:
       typeof validateMediaRoot;
 
     validateEpisodeProduction:
       typeof validateEpisodeProduction;
+
+    evaluateShotExecutionReadiness:
+      typeof evaluateShotExecutionReadiness;
 
     createAuthorization:
       typeof createDialogueVisualAuthorization;
@@ -65,9 +79,13 @@ const defaultDependencies:
 
       loadEpisodeManifest,
 
+      loadProviderRoutingPolicy,
+
       validateMediaRoot,
 
       validateEpisodeProduction,
+
+      evaluateShotExecutionReadiness,
 
       createAuthorization:
         createDialogueVisualAuthorization,
@@ -106,6 +124,7 @@ export async function runDialogueVisualAuthorizationCli(
     rules,
     bible,
     episode,
+    policy,
   ] =
     await Promise.all([
       dependencies
@@ -118,6 +137,9 @@ export async function runDialogueVisualAuthorizationCli(
         .loadEpisodeManifest(
           options.episodeId,
         ),
+
+      dependencies
+        .loadProviderRoutingPolicy(),
     ]);
 
   if (
@@ -195,6 +217,52 @@ export async function runDialogueVisualAuthorizationCli(
   ) {
     throw new Error(
       `Dialogue visual authorization requires a dialogue shot; ${episode.episodeId}/${match.scene.id}/${match.shot.id} contains no dialogue.`,
+    );
+  }
+
+  // Authorization is create-once, so admit only a provider that execution
+  // would accept: the manifest provider, executable under the same readiness
+  // policy executeSingleShot applies to a durable authorization.
+  if (
+    options.provider !==
+    match.shot.generation.provider
+  ) {
+    throw new Error(
+      `Dialogue visual authorization requested provider ${options.provider} does not match canonical provider ${match.shot.generation.provider} for ${episode.episodeId}/${match.scene.id}/${match.shot.id}. No authorization was written.`,
+    );
+  }
+
+  const readiness =
+    dependencies
+      .evaluateShotExecutionReadiness(
+        episode,
+        match.shot,
+        bible,
+        rules,
+        policy,
+        {
+          provider:
+            options.provider,
+
+          source:
+            "DURABLE_DIALOGUE_VISUAL_AUTHORIZATION",
+        },
+      );
+
+  if (
+    readiness.disposition !==
+      "EXECUTABLE" ||
+    readiness.executionProvider !==
+      options.provider
+  ) {
+    const blockerDetail =
+      readiness.blockers.length >
+      0
+        ? ` Blockers: ${readiness.blockers.join(" | ")}`
+        : "";
+
+    throw new Error(
+      `Dialogue visual authorization blocked: ${episode.episodeId}/${match.scene.id}/${match.shot.id} with provider ${options.provider} is not executable under current production policy (readiness ${readiness.disposition}).${blockerDetail} No authorization was written.`,
     );
   }
 

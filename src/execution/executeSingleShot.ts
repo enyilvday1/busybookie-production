@@ -3,12 +3,8 @@ import type {
 } from "../schemas/episodeManifest.schema.js";
 
 import {
-  evaluateShotExecutionReadiness,
-} from "../planning/evaluateShotExecutionReadiness.js";
-
-import {
-  DialogueVisualAuthorizationSchema,
-} from "./dialogueVisualAuthorization.schema.js";
+  resolveDurableShotExecutionReadiness,
+} from "./resolveDurableShotExecutionReadiness.js";
 
 import type {
   PaidExecutionProvider,
@@ -74,90 +70,32 @@ export async function executeSingleShot(
       request,
     );
 
-  let readiness =
-    evaluateShotExecutionReadiness(
-      request.episode,
-      shot,
-      request.bible,
-      request.rules,
-      request.policy,
-    );
-
-  if (
-    readiness.disposition ===
-      "MANUAL_REVIEW" &&
-    readiness.routing.disposition ===
-      "MANUAL_REVIEW"
-  ) {
-    const authorizationReader =
-      dependencies
-        .readDialogueVisualAuthorization;
-
-    if (!authorizationReader) {
-      throw new Error(
-        "readDialogueVisualAuthorization dependency is required to resolve dialogue visual MANUAL_REVIEW.",
-      );
-    }
-
-    const rawAuthorization =
-      await authorizationReader(
-        request.mediaRoot,
-        request.episode
-          .episodeId,
-        shot.id,
-      );
-
-    if (rawAuthorization) {
-      const authorization =
-        DialogueVisualAuthorizationSchema
-          .parse(
-            rawAuthorization,
-          );
-
-      if (
-        authorization.episodeId !==
-        request.episode.episodeId
-      ) {
-        throw new Error(
-          `Dialogue visual authorization episode ${authorization.episodeId} does not match execution episode ${request.episode.episodeId}.`,
-        );
-      }
-
-      if (
-        authorization.shotId !==
-        shot.id
-      ) {
-        throw new Error(
-          `Dialogue visual authorization shot ${authorization.shotId} does not match execution shot ${shot.id}.`,
-        );
-      }
-
-      if (
-        authorization.provider !==
-        shot.generation.provider
-      ) {
-        throw new Error(
-          `Dialogue visual authorization provider ${authorization.provider} does not match manifest generation provider ${shot.generation.provider} for ${request.episode.episodeId}/${shot.id}.`,
-        );
-      }
-
-      readiness =
-        evaluateShotExecutionReadiness(
+  const readiness =
+    await resolveDurableShotExecutionReadiness(
+      {
+        episode:
           request.episode,
-          shot,
-          request.bible,
-          request.rules,
-          request.policy,
-          {
-            provider:
-              authorization.provider,
 
-            source:
-              "DURABLE_DIALOGUE_VISUAL_AUTHORIZATION",
-          },
-        );
-    }
-  }
+        shot,
+
+        bible:
+          request.bible,
+
+        rules:
+          request.rules,
+
+        policy:
+          request.policy,
+
+        mediaRoot:
+          request.mediaRoot,
+      },
+      {
+        readDialogueVisualAuthorization:
+          dependencies
+            .readDialogueVisualAuthorization,
+      },
+    );
 
   if (
     readiness.disposition !==

@@ -21,7 +21,8 @@
     "execution:reconcile": "tsx scripts/execution-reconcile.ts",
     "dialogue:generate": "tsx scripts/dialogue-generate.ts",
     "dialogue:reconcile": "tsx scripts/dialogue-reconcile.ts",
-    "dialogue:authorize-visual": "tsx scripts/dialogue-authorize-visual.ts"
+    "dialogue:authorize-visual": "tsx scripts/dialogue-authorize-visual.ts",
+    "dialogue:place": "tsx scripts/dialogue-place.ts"
   },
   "keywords": [],
   "author": "",

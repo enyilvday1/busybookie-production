@@ -93,6 +93,7 @@ const DIALOGUE_KEY_ORDER: readonly DialogueState[] = [
   "DIALOGUE_PLANNING_BLOCKED",
   "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
   "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED",
+  "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED",
   "DIALOGUE_RECONCILIATION_REQUIRED",
   "DIALOGUE_AUDIO_REQUIRED",
   "PLACEMENT_REQUIRED",
@@ -335,11 +336,11 @@ describe("C4 summary", () => {
     expect(result.summary.totalShots).toBe(2);
   });
 
-  it("K/L/M/N mixed nine-state dialogue fixture: exact objects and counts, including both planning-blocked states", async () => {
+  it("K/L/M/N mixed ten-state dialogue fixture: exact objects and counts, including both planning-blocked states", async () => {
     const inputs = await canonicalInputs();
     const base = structuredClone(inputs.episode);
     const template = base.scenes[0]!.shots[0]!;
-    // 12 shots: every C3 state once, plus the two planning-blocked states and AUDIO_REQUIRED again.
+    // 13 shots: every C3 state once, plus the two planning-blocked states and AUDIO_REQUIRED again.
     const dialogueByShot: readonly DialogueState[] = [
       ...DIALOGUE_KEY_ORDER,
       "DIALOGUE_PLANNING_BLOCKED",
@@ -375,6 +376,7 @@ describe("C4 summary", () => {
       DIALOGUE_PLANNING_BLOCKED: 2,
       DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED: 1,
       DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED: 1,
+      DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED: 1,
       DIALOGUE_RECONCILIATION_REQUIRED: 1,
       DIALOGUE_AUDIO_REQUIRED: 2,
       PLACEMENT_REQUIRED: 1,
@@ -386,12 +388,12 @@ describe("C4 summary", () => {
       SUBMITTED_RECONCILIATION_REQUIRED: 2,
       LIFECYCLE_COMPLETED: 2,
       CANONICAL_NOT_EXECUTABLE: 2,
-      VISUAL_AUTHORIZATION_REQUIRED: 1,
+      VISUAL_AUTHORIZATION_REQUIRED: 2,
       REFERENCE_UNAVAILABLE: 1,
       REFERENCE_SELECTION_REQUIRED: 1,
       READY_FOR_GENERATION: 1,
     });
-    expect(result.summary.totalShots).toBe(12);
+    expect(result.summary.totalShots).toBe(13);
     for (const shot of result.shots) {
       expect(shot.dialogueCompositionState).toBe(objects.get(shot.shotId));
     }
@@ -399,8 +401,13 @@ describe("C4 summary", () => {
     const blockedActive = result.shots.filter(
       (shot) => shot.dialogueCompositionState.state === "DIALOGUE_PLANNING_BLOCKED_ACTIVE_WORK_INTERVENTION_REQUIRED",
     );
-    expect(blocked.map((shot) => shot.shotId)).toEqual(["S03", "S10"]);
-    expect(blockedActive.map((shot) => shot.shotId)).toEqual(["S02", "S11"]);
+    expect(blocked.map((shot) => shot.shotId)).toEqual(["S03", "S11"]);
+    expect(blockedActive.map((shot) => shot.shotId)).toEqual(["S02", "S12"]);
+    // C6a: the open-admission intervention propagates unchanged, never collapsed.
+    const openAdmission = result.shots.filter(
+      (shot) => shot.dialogueCompositionState.state === "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED",
+    );
+    expect(openAdmission.map((shot) => shot.shotId)).toEqual(["S06"]);
   });
 
   it("N/O deterministic: identical inputs produce identical serialised reports", async () => {

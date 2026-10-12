@@ -72,6 +72,10 @@ import {
   type DialogueDirectSeedAudioPlanLifecycle,
 } from "../src/dialogue/inspectDialogueDirectSeedAudioPlanHistory.js";
 
+import {
+  inspectDialogueGenerationAdmissionLedger,
+} from "../src/dialogue/inspectDialogueGenerationAdmissionLedger.js";
+
 import type {
   inspectDialogueLifecycle,
 } from "../src/dialogue/inspectDialogueLifecycle.js";
@@ -278,11 +282,18 @@ function seams(planOrKey: ShotDialoguePlan | string, scenario: Scenario = {}) {
     async () => AUDIO_PLAN,
   );
 
+  // C6a: no shared admission ledger exists in these scenarios.
+  const inspectAdmissionLedger = vi.fn<typeof inspectDialogueGenerationAdmissionLedger>(
+    async (_mediaRoot, _episodeId, _sceneId, _shotId, lineId) =>
+      Object.freeze({ dialogueLineId: lineId, attempts: Object.freeze([]), latest: null }),
+  );
+
   const dependencies: ResolveDurableShotDialogueCompositionStateDependencies = {
     inspectLineLifecycle,
     inspectDirectSeedAudioPlanLifecycles,
     readLatestPlacementDecision,
     resolveCompositionAudioPlan,
+    inspectAdmissionLedger,
   };
 
   return {
@@ -291,6 +302,7 @@ function seams(planOrKey: ShotDialoguePlan | string, scenario: Scenario = {}) {
     inspectDirectSeedAudioPlanLifecycles,
     readLatestPlacementDecision,
     resolveCompositionAudioPlan,
+    inspectAdmissionLedger,
   };
 }
 
@@ -301,6 +313,7 @@ function expectNoReads(controlled: Seams): void {
   expect(controlled.inspectDirectSeedAudioPlanLifecycles).not.toHaveBeenCalled();
   expect(controlled.readLatestPlacementDecision).not.toHaveBeenCalled();
   expect(controlled.resolveCompositionAudioPlan).not.toHaveBeenCalled();
+  expect(controlled.inspectAdmissionLedger).not.toHaveBeenCalled();
 }
 
 function expectNoPlacementPhase(controlled: Seams): void {
@@ -1731,9 +1744,10 @@ describe("C3 contract and security boundary", () => {
       "../schemas/episodeManifest.schema.js:EpisodeManifest,",
       "./buildDialogueCompositionAudioPlan.js:DialogueCompositionAudioPlan,",
       "./buildShotDialoguePlan.js:buildShotDialoguePlan,",
-      "./classifyDialogueLifecycle.js:DialogueLifecycleClassification,",
-      "./inspectDialogueDirectSeedAudioPlanHistory.js:inspectDialogueDirectSeedAudioPlanLifecycles,typeDialogueDirectSeedAudioPlanLifecycle,",
+      "./inspectDialogueDirectSeedAudioPlanHistory.js:inspectDialogueDirectSeedAudioPlanLifecycles,",
+      "./inspectDialogueGenerationAdmissionLedger.js:inspectDialogueGenerationAdmissionLedger,",
       "./inspectDialogueLifecycle.js:inspectDialogueLifecycle,",
+      "./inspectDialogueLineGenerationEvidence.js:classifyDialogueLineGenerationEvidence,inspectDialogueLineActiveWork,typeDialogueActiveWork,typeDialogueDurableNamespace,typeDialogueStalePlanWork,",
       "./inspectShotDialoguePlanningBlockers.js:inspectShotDialoguePlanningBlockers,typeDialoguePlanningBlocker,",
       "./readDialoguePlacementDecision.js:readLatestDialoguePlacementDecision,",
       "./resolveDurableDialogueCompositionAudioPlan.js:resolveDurableDialogueCompositionAudioPlan,",
@@ -1751,13 +1765,14 @@ describe("C3 contract and security boundary", () => {
     expect(source).not.toMatch(/\btry\b|\bcatch\b|\.catch\s*\(|\.message\b|instanceof\s+Error/);
   });
 
-  it("AB-AE exposes exactly the four read-only dependency seams", () => {
+  it("AB-AE exposes exactly the five read-only dependency seams (C6a adds the admission ledger reader)", () => {
     expectTypeOf<ResolveDurableShotDialogueCompositionStateDependencies>().toEqualTypeOf<
       Readonly<{
         inspectLineLifecycle: typeof inspectDialogueLifecycle;
         inspectDirectSeedAudioPlanLifecycles: typeof inspectDialogueDirectSeedAudioPlanLifecycles;
         readLatestPlacementDecision: typeof readLatestDialoguePlacementDecision;
         resolveCompositionAudioPlan: typeof resolveDurableDialogueCompositionAudioPlan;
+        inspectAdmissionLedger: typeof inspectDialogueGenerationAdmissionLedger;
       }>
     >();
     expectTypeOf(resolveDurableShotDialogueCompositionState).parameters.toEqualTypeOf<
@@ -1768,13 +1783,14 @@ describe("C3 contract and security boundary", () => {
     >();
   });
 
-  it("AK exposes exactly the nine locked workflow states and payloads", () => {
+  it("AK exposes exactly the ten locked workflow states and payloads (C6a adds the open-admission state)", () => {
     expectTypeOf<DurableShotDialogueCompositionState["state"]>().toEqualTypeOf<
       | "NO_DIALOGUE"
       | "DIALOGUE_PLANNING_BLOCKED_ACTIVE_WORK_INTERVENTION_REQUIRED"
       | "DIALOGUE_PLANNING_BLOCKED"
       | "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED"
       | "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED"
+      | "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED"
       | "DIALOGUE_RECONCILIATION_REQUIRED"
       | "DIALOGUE_AUDIO_REQUIRED"
       | "PLACEMENT_REQUIRED"

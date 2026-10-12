@@ -85,6 +85,7 @@ const DIALOGUE_KEY_ORDER = [
   "DIALOGUE_PLANNING_BLOCKED",
   "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
   "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED",
+  "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED",
   "DIALOGUE_RECONCILIATION_REQUIRED",
   "DIALOGUE_AUDIO_REQUIRED",
   "PLACEMENT_REQUIRED",
@@ -277,7 +278,7 @@ describe("execution:status runner", () => {
     expect(controlled.writeStdout).not.toHaveBeenCalled();
   });
 
-  it("T/V/W/Q real loaders + real evaluator on a temp media root: deterministic JSON, nine dialogue keys in order, no files written", async () => {
+  it("T/V/W/Q real loaders + real evaluator on a temp media root: deterministic JSON, ten dialogue keys in order, no files written", async () => {
     const mediaRoot = await mkdtemp(join(tmpdir(), "busybookie-execution-status-"));
     roots.push(mediaRoot);
     const run = async () => {

@@ -7,6 +7,10 @@ import type {
 } from "../runway/runway.types.js";
 
 import {
+  admitDialogueLineGeneration,
+} from "./admitDialogueLineGeneration.js";
+
+import {
   createDialogueDirectSeedAudioReservation,
 } from "./createDialogueDirectSeedAudioReservation.js";
 
@@ -59,6 +63,9 @@ export type RunwayDirectSeedAudioProductionExecutorDependencies =
 
     executeLifecycle:
       typeof executeDialogueDirectSeedAudioLine;
+
+    admitGeneration:
+      typeof admitDialogueLineGeneration;
   }>;
 
 const defaultDependencies:
@@ -81,6 +88,9 @@ const defaultDependencies:
 
       executeLifecycle:
         executeDialogueDirectSeedAudioLine,
+
+      admitGeneration:
+        admitDialogueLineGeneration,
     });
 
 export async function prepareRunwayDirectSeedAudioProductionExecutor(
@@ -105,10 +115,30 @@ export async function prepareRunwayDirectSeedAudioProductionExecutor(
         client,
       );
 
+  // C6a: paid confirmation, then the shared per-line admission (new or exact
+  // resume), strictly before the unchanged namespace reservation and provider.
   return async (
     input,
-  ) =>
-    dependencies
+  ) => {
+    await dependencies
+      .admitGeneration({
+        mediaRoot:
+          input.mediaRoot,
+
+        plan:
+          input.plan,
+
+        dialogueLineId:
+          input.dialogueLineId,
+
+        generationNamespace:
+          "DIRECT_SEED_AUDIO",
+
+        confirmPaidGeneration:
+          input.confirmPaidGeneration,
+      });
+
+    return dependencies
       .executeLifecycle(
         input,
         {
@@ -127,6 +157,7 @@ export async function prepareRunwayDirectSeedAudioProductionExecutor(
               .recoverCompletion,
         },
       );
+  };
 }
 
 export function createRunwayDirectSeedAudioProductionExecutor(

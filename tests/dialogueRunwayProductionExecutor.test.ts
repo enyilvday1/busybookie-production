@@ -40,6 +40,11 @@ import {
   type ExecuteDialogueLineResult,
 } from "../src/dialogue/executeDialogueLine.js";
 
+import {
+  admitDialogueLineGeneration,
+  type DialogueLineGenerationAdmission,
+} from "../src/dialogue/admitDialogueLineGeneration.js";
+
 type RunwayDialogueProductionExecutionInput =
   Omit<
     ExecuteDialogueLineInput,
@@ -77,6 +82,9 @@ type RunwayDialogueProductionExecutorDependencies =
 
     executeLifecycle:
       typeof executeDialogueLine;
+
+    admitGeneration:
+      typeof admitDialogueLineGeneration;
   }>;
 
 function createProductionInput():
@@ -255,6 +263,20 @@ function createMocks() {
         expectedResult,
     );
 
+  // C6a admission seam: injected so no ledger is read under a media root.
+  const admitGeneration =
+    vi.fn<
+      RunwayDialogueProductionExecutorDependencies[
+        "admitGeneration"
+      ]
+    >(
+      async () =>
+        Object.freeze({
+          marker:
+            "mock-dialogue-admission",
+        }) as unknown as DialogueLineGenerationAdmission,
+    );
+
   const dependencies = {
     loadPolicy,
     createClient,
@@ -263,6 +285,7 @@ function createMocks() {
     createSubmission,
     recoverCompletion,
     executeLifecycle,
+    admitGeneration,
   } satisfies
     RunwayDialogueProductionExecutorDependencies;
 
@@ -279,6 +302,7 @@ function createMocks() {
     createSubmission,
     recoverCompletion,
     executeLifecycle,
+    admitGeneration,
   };
 }
 
@@ -379,6 +403,33 @@ describe(
           result,
         ).toBe(
           mocks.expectedResult,
+        );
+
+        expect(
+          mocks.admitGeneration,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          mocks.admitGeneration,
+        ).toHaveBeenCalledWith({
+          mediaRoot:
+            input.mediaRoot,
+          plan:
+            input.plan,
+          dialogueLineId:
+            input.dialogueLineId,
+          generationNamespace:
+            "LINE_SCOPED",
+          confirmPaidGeneration:
+            input.confirmPaidGeneration,
+        });
+
+        expect(
+          mocks.admitGeneration.mock.invocationCallOrder[0]!,
+        ).toBeLessThan(
+          mocks.executeLifecycle.mock.invocationCallOrder[0]!,
         );
       },
     );

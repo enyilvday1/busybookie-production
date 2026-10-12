@@ -35,6 +35,10 @@ import {
   recoverDialogueDirectSeedAudioCompletion,
 } from "../src/dialogue/recoverDialogueDirectSeedAudioCompletion.js";
 
+import type {
+  DialogueLineGenerationAdmission,
+} from "../src/dialogue/admitDialogueLineGeneration.js";
+
 import {
   createRunwayClient,
 } from "../src/runway/createRunwayClient.js";
@@ -161,7 +165,18 @@ describe(
             },
           );
 
+        // C6a admission seam: injected so no ledger is read under a media root.
+        const admitGeneration =
+          vi.fn(
+            async () =>
+              Object.freeze({
+                marker:
+                  "direct-seed-audio-admission",
+              }) as unknown as DialogueLineGenerationAdmission,
+          );
+
         const dependencies = {
+          admitGeneration,
           createClient,
           createTransactionRunner,
 
@@ -229,6 +244,35 @@ describe(
           executeLifecycle,
         ).toHaveBeenCalledTimes(
           2,
+        );
+
+        expect(
+          admitGeneration,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          admitGeneration.mock.calls[0],
+        ).toEqual([
+          {
+            mediaRoot:
+              input.mediaRoot,
+            plan:
+              input.plan,
+            dialogueLineId:
+              input.dialogueLineId,
+            generationNamespace:
+              "DIRECT_SEED_AUDIO",
+            confirmPaidGeneration:
+              input.confirmPaidGeneration,
+          },
+        ]);
+
+        expect(
+          admitGeneration.mock.invocationCallOrder[0]!,
+        ).toBeLessThan(
+          executeLifecycle.mock.invocationCallOrder[0]!,
         );
       },
     );

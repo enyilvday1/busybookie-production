@@ -11,6 +11,10 @@ import {
 } from "../validation/loadDialogueVoicePolicy.js";
 
 import {
+  admitDialogueLineGeneration,
+} from "./admitDialogueLineGeneration.js";
+
+import {
   createDialogueReservation,
 } from "./createDialogueReservation.js";
 
@@ -69,6 +73,9 @@ export type RunwayDialogueProductionExecutorDependencies =
 
     executeLifecycle:
       typeof executeDialogueLine;
+
+    admitGeneration:
+      typeof admitDialogueLineGeneration;
   }>;
 
 const defaultDependencies:
@@ -94,6 +101,9 @@ const defaultDependencies:
 
       executeLifecycle:
         executeDialogueLine,
+
+      admitGeneration:
+        admitDialogueLineGeneration,
     });
 
 export async function prepareRunwayDialogueProductionExecutor(
@@ -122,10 +132,30 @@ export async function prepareRunwayDialogueProductionExecutor(
         client,
       );
 
+  // C6a: paid confirmation, then the shared per-line admission (new or exact
+  // resume), strictly before the unchanged namespace reservation and provider.
   return async (
     input,
-  ) =>
-    dependencies
+  ) => {
+    await dependencies
+      .admitGeneration({
+        mediaRoot:
+          input.mediaRoot,
+
+        plan:
+          input.plan,
+
+        dialogueLineId:
+          input.dialogueLineId,
+
+        generationNamespace:
+          "LINE_SCOPED",
+
+        confirmPaidGeneration:
+          input.confirmPaidGeneration,
+      });
+
+    return dependencies
       .executeLifecycle(
         {
           ...input,
@@ -148,6 +178,7 @@ export async function prepareRunwayDialogueProductionExecutor(
               .recoverCompletion,
         },
       );
+  };
 }
 
 export function createRunwayDialogueProductionExecutor(

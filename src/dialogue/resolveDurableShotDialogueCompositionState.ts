@@ -14,18 +14,25 @@ import {
   buildShotDialoguePlan,
 } from "./buildShotDialoguePlan.js";
 
-import type {
-  DialogueLifecycleClassification,
-} from "./classifyDialogueLifecycle.js";
-
 import {
   inspectDialogueDirectSeedAudioPlanLifecycles,
-  type DialogueDirectSeedAudioPlanLifecycle,
 } from "./inspectDialogueDirectSeedAudioPlanHistory.js";
+
+import {
+  inspectDialogueGenerationAdmissionLedger,
+} from "./inspectDialogueGenerationAdmissionLedger.js";
 
 import {
   inspectDialogueLifecycle,
 } from "./inspectDialogueLifecycle.js";
+
+import {
+  classifyDialogueLineGenerationEvidence,
+  inspectDialogueLineActiveWork,
+  type DialogueActiveWork,
+  type DialogueDurableNamespace,
+  type DialogueStalePlanWork,
+} from "./inspectDialogueLineGenerationEvidence.js";
 
 import {
   inspectShotDialoguePlanningBlockers,
@@ -62,22 +69,29 @@ export type ResolveDurableShotDialogueCompositionStateDependencies =
 
     resolveCompositionAudioPlan:
       typeof resolveDurableDialogueCompositionAudioPlan;
+
+    inspectAdmissionLedger:
+      typeof inspectDialogueGenerationAdmissionLedger;
   }>;
 
-export type DialogueDurableNamespace =
-  | "LINE_SCOPED"
-  | "DIRECT_SEED_AUDIO";
+// The line rule types live with the shared read-only eligibility helper.
+export type {
+  DialogueActiveWork,
+  DialogueDurableNamespace,
+  DialogueStalePlanWork,
+};
 
-export type DialogueActiveWork =
+// A C6a shared admission whose bound namespace lifecycle is still NOTHING.
+// matchesCurrentCanonicalPlan is diagnostic only; it authorizes nothing.
+export type DialogueOpenGenerationAdmission =
   Readonly<{
     dialogueLineId: string;
-    namespace: DialogueDurableNamespace;
+    attemptNumber: number;
+    admissionId: string;
     planKey: string;
-    state: "RESERVED_ONLY" | "SUBMITTED";
+    generationNamespace: DialogueDurableNamespace;
+    matchesCurrentCanonicalPlan: boolean;
   }>;
-
-export type DialogueStalePlanWork =
-  DialogueActiveWork;
 
 export type DurableShotDialogueCompositionState =
   | Readonly<{
@@ -121,6 +135,13 @@ export type DurableShotDialogueCompositionState =
       reservedLineIds: readonly string[];
       submittedLineIds: readonly string[];
       missingLineIds: readonly string[];
+    }>
+  | Readonly<{
+      state: "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED";
+      episodeId: string;
+      sceneId: string;
+      shotId: string;
+      openAdmissions: readonly DialogueOpenGenerationAdmission[];
     }>
   | Readonly<{
       state: "DIALOGUE_RECONCILIATION_REQUIRED";
@@ -171,114 +192,36 @@ const defaultDependencies:
 
       resolveCompositionAudioPlan:
         resolveDurableDialogueCompositionAudioPlan,
+
+      inspectAdmissionLedger:
+        inspectDialogueGenerationAdmissionLedger,
     });
 
-type LineEvidence =
-  Readonly<{
-    lineScoped:
-      DialogueLifecycleClassification;
+function openAdmissionFor(
+  admission:
+    Readonly<{
+      dialogueLineId: string;
+      attemptNumber: number;
+      admissionId: string;
+      planKey: string;
+      generationNamespace: DialogueDurableNamespace;
+    }>,
 
-    directSeedAudioPlans:
-      readonly DialogueDirectSeedAudioPlanLifecycle[];
-  }>;
-
-// Both durable namespaces of one canonical line; every error propagates.
-async function inspectLineEvidence(
-  dependencies:
-    ResolveDurableShotDialogueCompositionStateDependencies,
-
-  mediaRoot:
-    string,
-
-  episodeId:
-    string,
-
-  sceneId:
-    string,
-
-  shotId:
-    string,
-
-  dialogueLineId:
-    string,
-): Promise<LineEvidence> {
-  const lineScoped =
-    await dependencies
-      .inspectLineLifecycle(
-        mediaRoot,
-        episodeId,
-        sceneId,
-        shotId,
-        dialogueLineId,
-      );
-
-  const directSeedAudioPlans =
-    await dependencies
-      .inspectDirectSeedAudioPlanLifecycles(
-        mediaRoot,
-        episodeId,
-        sceneId,
-        shotId,
-        dialogueLineId,
-      );
-
-  return {
-    lineScoped,
-    directSeedAudioPlans,
-  };
-}
-
-function activeLineScopedWork(
-  dialogueLineId:
-    string,
-
-  lifecycle:
-    DialogueLifecycleClassification,
-): DialogueActiveWork | null {
-  if (
-    lifecycle.state !==
-      "RESERVED_ONLY" &&
-    lifecycle.state !==
-      "SUBMITTED"
-  ) {
-    return null;
-  }
-
+  matchesCurrentCanonicalPlan:
+    boolean,
+): DialogueOpenGenerationAdmission {
   return Object.freeze({
-    dialogueLineId,
-    namespace:
-      "LINE_SCOPED",
+    dialogueLineId:
+      admission.dialogueLineId,
+    attemptNumber:
+      admission.attemptNumber,
+    admissionId:
+      admission.admissionId,
     planKey:
-      lifecycle.reservation.planKey,
-    state:
-      lifecycle.state,
-  });
-}
-
-function activeDirectSeedAudioWork(
-  dialogueLineId:
-    string,
-
-  plan:
-    DialogueDirectSeedAudioPlanLifecycle,
-): DialogueActiveWork | null {
-  if (
-    plan.lifecycle.state !==
-      "RESERVED_ONLY" &&
-    plan.lifecycle.state !==
-      "SUBMITTED"
-  ) {
-    return null;
-  }
-
-  return Object.freeze({
-    dialogueLineId,
-    namespace:
-      "DIRECT_SEED_AUDIO",
-    planKey:
-      plan.planKey,
-    state:
-      plan.lifecycle.state,
+      admission.planKey,
+    generationNamespace:
+      admission.generationNamespace,
+    matchesCurrentCanonicalPlan,
   });
 }
 
@@ -380,47 +323,46 @@ export async function resolveDurableShotDialogueCompositionState(
       DialogueActiveWork[] =
         [];
 
+    const openAdmissions:
+      DialogueOpenGenerationAdmission[] =
+        [];
+
     for (
       const line
       of planning.lines
     ) {
-      const evidence =
-        await inspectLineEvidence(
-          dependencies,
+      activeWork.push(
+        ...await inspectDialogueLineActiveWork(
           input.mediaRoot,
           episodeId,
           sceneId,
           shotId,
           line.dialogueLineId,
-        );
+          dependencies,
+        ),
+      );
 
-      const lineScopedWork =
-        activeLineScopedWork(
-          line.dialogueLineId,
-          evidence.lineScoped,
-        );
-
-      if (lineScopedWork) {
-        activeWork.push(
-          lineScopedWork,
-        );
-      }
-
-      for (
-        const plan
-        of evidence.directSeedAudioPlans
-      ) {
-        const planWork =
-          activeDirectSeedAudioWork(
+      const ledger =
+        await dependencies
+          .inspectAdmissionLedger(
+            input.mediaRoot,
+            episodeId,
+            sceneId,
+            shotId,
             line.dialogueLineId,
-            plan,
           );
 
-        if (planWork) {
-          activeWork.push(
-            planWork,
-          );
-        }
+      // No current plan exists, so no open admission can match it.
+      if (
+        ledger.latest?.attemptState ===
+        "PRE_RESERVATION_OPEN"
+      ) {
+        openAdmissions.push(
+          openAdmissionFor(
+            ledger.latest.admission,
+            false,
+          ),
+        );
       }
     }
 
@@ -439,6 +381,23 @@ export async function resolveDurableShotDialogueCompositionState(
         activeWork:
           Object.freeze([
             ...activeWork,
+          ]),
+      });
+    }
+
+    if (
+      openAdmissions.length >
+      0
+    ) {
+      return Object.freeze({
+        state:
+          "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED",
+        episodeId,
+        sceneId,
+        shotId,
+        openAdmissions:
+          Object.freeze([
+            ...openAdmissions,
           ]),
       });
     }
@@ -480,6 +439,10 @@ export async function resolveDurableShotDialogueCompositionState(
     string[] =
       [];
 
+  const openAdmissions:
+    DialogueOpenGenerationAdmission[] =
+      [];
+
   // Every canonical line and both durable namespaces are inspected before
   // any state is chosen, so corruption anywhere always throws.
   for (
@@ -490,108 +453,50 @@ export async function resolveDurableShotDialogueCompositionState(
       dialogueLineId,
     } = line;
 
-    const reference =
-      "executionMode" in
-        line.voice &&
-      line.voice.executionMode ===
-        "RUNWAY_REFERENCE_AUDIO";
-
+    // The shared read-only dual-namespace line rule (also used by the C6a
+    // admission gate), then this line's shared admission ledger.
     const evidence =
-      await inspectLineEvidence(
+      await classifyDialogueLineGenerationEvidence(
+        {
+          mediaRoot:
+            input.mediaRoot,
+          plan,
+          line,
+        },
         dependencies,
-        input.mediaRoot,
-        episodeId,
-        sceneId,
-        shotId,
-        dialogueLineId,
       );
 
-    let lifecycleState:
-      DialogueLifecycleClassification["state"];
+    staleWork.push(
+      ...evidence.staleWork,
+    );
 
-    if (reference) {
-      // The current Direct-SeedAudio plan is the current lifecycle; line-scoped
-      // evidence and every other plan are outside the current plan context.
-      const lineScopedWork =
-        activeLineScopedWork(
+    const ledger =
+      await dependencies
+        .inspectAdmissionLedger(
+          input.mediaRoot,
+          episodeId,
+          sceneId,
+          shotId,
           dialogueLineId,
-          evidence.lineScoped,
         );
 
-      if (lineScopedWork) {
-        staleWork.push(
-          lineScopedWork,
-        );
-      }
-
-      lifecycleState =
-        "NOTHING";
-
-      for (
-        const directSeedAudioPlan
-        of evidence.directSeedAudioPlans
-      ) {
-        if (
-          directSeedAudioPlan.planKey ===
-          plan.planKey
-        ) {
-          lifecycleState =
-            directSeedAudioPlan.lifecycle.state;
-
-          continue;
-        }
-
-        const planWork =
-          activeDirectSeedAudioWork(
-            dialogueLineId,
-            directSeedAudioPlan,
-          );
-
-        if (planWork) {
-          staleWork.push(
-            planWork,
-          );
-        }
-      }
-    } else {
-      const current =
-        evidence.lineScoped;
-
-      if (
-        current.state !==
-          "NOTHING" &&
-        current.reservation.planKey !==
-          plan.planKey
-      ) {
-        throw new Error(
-          `Dialogue lifecycle evidence for ${dialogueLineId} belongs to dialogue plan ${current.reservation.planKey}, not current canonical plan ${plan.planKey}.`,
-        );
-      }
-
-      lifecycleState =
-        current.state;
-
-      // Direct-SeedAudio work cannot belong to a line-scoped current plan.
-      for (
-        const directSeedAudioPlan
-        of evidence.directSeedAudioPlans
-      ) {
-        const planWork =
-          activeDirectSeedAudioWork(
-            dialogueLineId,
-            directSeedAudioPlan,
-          );
-
-        if (planWork) {
-          staleWork.push(
-            planWork,
-          );
-        }
-      }
+    if (
+      ledger.latest?.attemptState ===
+      "PRE_RESERVATION_OPEN"
+    ) {
+      openAdmissions.push(
+        openAdmissionFor(
+          ledger.latest.admission,
+          ledger.latest.admission.planKey ===
+            plan.planKey &&
+          ledger.latest.admission.generationNamespace ===
+            evidence.namespace,
+        ),
+      );
     }
 
     switch (
-      lifecycleState
+      evidence.lifecycleState
     ) {
       case "NOTHING":
         missingLineIds.push(
@@ -671,6 +576,25 @@ export async function resolveDurableShotDialogueCompositionState(
       missingLineIds:
         Object.freeze([
           ...missingLineIds,
+        ]),
+    });
+  }
+
+  // An open pre-reservation admission must never surface as reconcilable or
+  // as needing audio: a new paid attempt is not permitted while it is open.
+  if (
+    openAdmissions.length >
+    0
+  ) {
+    return Object.freeze({
+      state:
+        "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED",
+      episodeId,
+      sceneId,
+      shotId,
+      openAdmissions:
+        Object.freeze([
+          ...openAdmissions,
         ]),
     });
   }

@@ -34,9 +34,21 @@ import type {
   DialogueCompositionAudioPlan,
 } from "../src/dialogue/buildDialogueCompositionAudioPlan.js";
 
+import {
+  buildShotDialoguePlan,
+} from "../src/dialogue/buildShotDialoguePlan.js";
+
 import type {
   ProductionRules,
 } from "../src/schemas/productionRules.schema.js";
+
+import {
+  loadCharacterBible,
+} from "../src/validation/loadCharacterBible.js";
+
+import {
+  loadEpisodeManifest,
+} from "../src/validation/loadEpisodeManifest.js";
 
 const MEDIA_ROOT =
   "D:/Busybookie/Production";
@@ -355,6 +367,22 @@ describe(
             },
           );
 
+        const buildDialoguePlan =
+          vi.fn(
+            buildShotDialoguePlan,
+          );
+
+        const resolveDialogueAudioPlan =
+          vi.fn(
+            async () => {
+              events.push(
+                "resolve:S02",
+              );
+
+              return dialogueAudio;
+            },
+          );
+
         const prepareComposition =
           vi.fn(
             async (
@@ -378,6 +406,12 @@ describe(
 
                   ensureNormalizationCache:
                     ensureNormalizationCache as never,
+
+                  buildDialoguePlan:
+                    buildDialoguePlan as never,
+
+                  resolveDialogueAudioPlan:
+                    resolveDialogueAudioPlan as never,
 
                   buildDialogueNormalizationPlan:
                     buildDialogueNormalizationPlan as never,
@@ -452,15 +486,26 @@ describe(
             },
           );
 
+        const [
+          episode,
+          bible,
+        ] =
+          await Promise.all([
+            loadEpisodeManifest(
+              "EP02",
+            ),
+
+            loadCharacterBible(),
+          ]);
+
         const result =
           await composeEpisodeRoughCut(
             {
               compositionPlan,
 
-              dialogueAudioPlans:
-                Object.freeze([
-                  dialogueAudio,
-                ]),
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,
@@ -489,6 +534,7 @@ describe(
           events,
         ).toEqual([
           "prepare",
+          "resolve:S02",
           "probe:S02",
           "plan-v2:S02",
           "ensure-v2:S02",

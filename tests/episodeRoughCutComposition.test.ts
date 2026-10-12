@@ -29,6 +29,27 @@ import {
   composeEpisodeRoughCut,
 } from "../src/composition/composeEpisodeRoughCut.js";
 
+import type {
+  CharacterBible,
+} from "../src/schemas/character.schema.js";
+
+import type {
+  EpisodeManifest,
+} from "../src/schemas/episodeManifest.schema.js";
+
+// Opaque canonical inputs: composition only forwards them to preparation.
+const episode =
+  Object.freeze({
+    episodeId:
+      "EP02",
+  }) as unknown as EpisodeManifest;
+
+const bible =
+  Object.freeze({
+    characters:
+      [],
+  }) as unknown as CharacterBible;
+
 const MEDIA_ROOT =
   "D:/Busybookie/Production";
 
@@ -257,6 +278,10 @@ describe(
             {
               compositionPlan,
 
+              episode,
+
+              bible,
+
               mediaRoot:
                 MEDIA_ROOT,
 
@@ -292,6 +317,10 @@ describe(
           prepareComposition,
         ).toHaveBeenCalledWith({
           compositionPlan,
+
+          episode,
+
+          bible,
 
           mediaRoot:
             MEDIA_ROOT,
@@ -375,6 +404,10 @@ describe(
           composeEpisodeRoughCut(
             {
               compositionPlan,
+
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,

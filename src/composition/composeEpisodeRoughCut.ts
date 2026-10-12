@@ -1,6 +1,10 @@
 import type {
-  DialogueCompositionAudioPlan,
-} from "../dialogue/buildDialogueCompositionAudioPlan.js";
+  CharacterBible,
+} from "../schemas/character.schema.js";
+
+import type {
+  EpisodeManifest,
+} from "../schemas/episodeManifest.schema.js";
 
 import type {
   EpisodeCompositionPlan,
@@ -34,8 +38,11 @@ export type ComposeEpisodeRoughCutInput =
     compositionPlan:
       EpisodeCompositionPlan;
 
-    dialogueAudioPlans?:
-      readonly DialogueCompositionAudioPlan[];
+    episode:
+      EpisodeManifest;
+
+    bible:
+      CharacterBible;
 
     mediaRoot:
       string;
@@ -104,15 +111,11 @@ export async function composeEpisodeRoughCut(
         compositionPlan:
           input.compositionPlan,
 
-        ...(
-          input.dialogueAudioPlans ===
-            undefined
-            ? {}
-            : {
-                dialogueAudioPlans:
-                  input.dialogueAudioPlans,
-              }
-        ),
+        episode:
+          input.episode,
+
+        bible:
+          input.bible,
 
         mediaRoot:
           input.mediaRoot,

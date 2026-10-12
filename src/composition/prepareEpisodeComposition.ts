@@ -2,6 +2,23 @@ import type {
   DialogueCompositionAudioPlan,
 } from "../dialogue/buildDialogueCompositionAudioPlan.js";
 
+import {
+  buildShotDialoguePlan,
+} from "../dialogue/buildShotDialoguePlan.js";
+
+import {
+  resolveDurableDialogueCompositionAudioPlan,
+} from "../dialogue/resolveDurableDialogueCompositionAudioPlan.js";
+
+import type {
+  CharacterBible,
+} from "../schemas/character.schema.js";
+
+import type {
+  EpisodeManifest,
+  Shot,
+} from "../schemas/episodeManifest.schema.js";
+
 import type {
   ProductionRules,
 } from "../schemas/productionRules.schema.js";
@@ -85,8 +102,13 @@ export type PrepareEpisodeCompositionInput =
     compositionPlan:
       EpisodeCompositionPlan;
 
-    dialogueAudioPlans?:
-      readonly DialogueCompositionAudioPlan[];
+    // Canonical authority for which shots carry dialogue; dialogue
+    // composition audio is resolved from durable placement evidence.
+    episode:
+      EpisodeManifest;
+
+    bible:
+      CharacterBible;
 
     mediaRoot:
       string;
@@ -112,12 +134,19 @@ export type PrepareEpisodeCompositionDependencies =
     ensureNormalizationCache:
       typeof ensureCompositionShotNormalizationCache;
 
+    buildDialoguePlan:
+      typeof buildShotDialoguePlan;
+
+    resolveDialogueAudioPlan:
+      typeof resolveDurableDialogueCompositionAudioPlan;
+
     /*
      * Optional only to preserve the existing dependency-injection
      * contract for callers that prepare v1-only episodes.
      *
-     * Dialogue-aware preparation fails closed if either dependency
-     * is absent for a shot that has trusted dialogue audio evidence.
+     * Dialogue-aware preparation fails closed, before any normalization
+     * work, if either dependency is absent while the canonical episode
+     * has a dialogue-bearing shot.
      */
     buildDialogueNormalizationPlan?:
       typeof buildDialogueCompositionShotNormalizationPlan;
@@ -137,6 +166,12 @@ const defaultDependencies:
 
       ensureNormalizationCache:
         ensureCompositionShotNormalizationCache,
+
+      buildDialoguePlan:
+        buildShotDialoguePlan,
+
+      resolveDialogueAudioPlan:
+        resolveDurableDialogueCompositionAudioPlan,
 
       buildDialogueNormalizationPlan:
         buildDialogueCompositionShotNormalizationPlan,
@@ -158,29 +193,95 @@ function createShotIdentityKey(
   ]);
 }
 
-function indexDialogueAudioPlans(
-  input:
-    PrepareEpisodeCompositionInput,
+function indexCanonicalShots(
+  episode:
+    EpisodeManifest,
 ): ReadonlyMap<
   string,
-  DialogueCompositionAudioPlan
+  readonly Shot[]
 > {
-  const dialogueAudioPlans =
-    input.dialogueAudioPlans ??
-    [];
+  const canonicalByShot =
+    new Map<
+      string,
+      Shot[]
+    >();
+
+  for (
+    const scene
+    of episode.scenes
+  ) {
+    for (
+      const shot
+      of scene.shots
+    ) {
+      const shotKey =
+        createShotIdentityKey(
+          scene.id,
+          shot.id,
+        );
+
+      const matches =
+        canonicalByShot.get(
+          shotKey,
+        );
+
+      if (
+        matches
+      ) {
+        matches.push(
+          shot,
+        );
+      } else {
+        canonicalByShot.set(
+          shotKey,
+          [
+            shot,
+          ],
+        );
+      }
+    }
+  }
+
+  return canonicalByShot;
+}
+
+/*
+ * PASS 1: episode-wide, read-only admission. Every dialogue-bearing
+ * shot must resolve durable composition audio before any shot is
+ * normalized, so a later failure leaves no partial normalization work.
+ */
+async function resolveDialogueAudioByShot(
+  input:
+    PrepareEpisodeCompositionInput,
+
+  dependencies:
+    PrepareEpisodeCompositionDependencies,
+): Promise<
+  ReadonlyMap<
+    string,
+    DialogueCompositionAudioPlan
+  >
+> {
+  const episodeId =
+    input.compositionPlan
+      .episodeId;
+
+  if (
+    input.episode.episodeId !==
+    episodeId
+  ) {
+    throw new Error(
+      `Episode composition canonical episode identity does not match ${episodeId}; received ${input.episode.episodeId}.`,
+    );
+  }
+
+  const canonicalByShot =
+    indexCanonicalShots(
+      input.episode,
+    );
 
   const admittedShotKeys =
-    new Set(
-      input.compositionPlan.shots.map(
-        (
-          shot,
-        ) =>
-          createShotIdentityKey(
-            shot.sceneId,
-            shot.shotId,
-          ),
-      ),
-    );
+    new Set<string>();
 
   const dialogueByShot =
     new Map<
@@ -188,42 +289,109 @@ function indexDialogueAudioPlans(
       DialogueCompositionAudioPlan
     >();
 
+  // Sequential by design: shots are admitted in composition order.
   for (
-    const dialogueAudio
-    of dialogueAudioPlans
+    const shot
+    of input.compositionPlan.shots
   ) {
-    if (
-      dialogueAudio.episodeId !==
-      input.compositionPlan.episodeId
-    ) {
-      throw new Error(
-        `Episode composition dialogue audio episode identity does not match ${input.compositionPlan.episodeId}; received ${dialogueAudio.episodeId}.`,
-      );
-    }
+    const shotLabel =
+      `${episodeId}/${shot.sceneId}/${shot.shotId}`;
 
     const shotKey =
       createShotIdentityKey(
-        dialogueAudio.sceneId,
-        dialogueAudio.shotId,
+        shot.sceneId,
+        shot.shotId,
       );
 
     if (
-      !admittedShotKeys.has(
+      admittedShotKeys.has(
         shotKey,
       )
     ) {
       throw new Error(
-        `Episode composition dialogue audio references unknown admitted shot ${dialogueAudio.episodeId}/${dialogueAudio.sceneId}/${dialogueAudio.shotId}.`,
+        `Episode composition plan contains duplicate shot ${shotLabel}.`,
       );
     }
 
-    if (
-      dialogueByShot.has(
+    admittedShotKeys.add(
+      shotKey,
+    );
+
+    const matches =
+      canonicalByShot.get(
         shotKey,
-      )
+      ) ??
+      [];
+
+    if (
+      matches.length !==
+      1
     ) {
       throw new Error(
-        `Episode composition received duplicate dialogue audio evidence for ${dialogueAudio.episodeId}/${dialogueAudio.sceneId}/${dialogueAudio.shotId}.`,
+        matches.length === 0
+          ? `Episode composition shot ${shotLabel} has no canonical episode shot.`
+          : `Episode composition shot ${shotLabel} matches ${matches.length} canonical episode shots.`,
+      );
+    }
+
+    const canonicalShot =
+      matches[0]!;
+
+    if (
+      canonicalShot.dialogue.length ===
+      0
+    ) {
+      continue;
+    }
+
+    if (
+      !dependencies
+        .buildDialogueNormalizationPlan ||
+      !dependencies
+        .ensureDialogueNormalizationCache
+    ) {
+      throw new Error(
+        `Episode composition dialogue normalization dependencies are unavailable for ${shotLabel}.`,
+      );
+    }
+
+    const dialoguePlan =
+      dependencies
+        .buildDialoguePlan({
+          episodeId,
+
+          sceneId:
+            shot.sceneId,
+
+          shot:
+            canonicalShot,
+
+          bible:
+            input.bible,
+        });
+
+    const dialogueAudio =
+      await dependencies
+        .resolveDialogueAudioPlan({
+          mediaRoot:
+            input.mediaRoot,
+
+          ffprobeExecutable:
+            input.ffprobeExecutable,
+
+          dialoguePlan,
+        });
+
+    if (
+      dialogueAudio.episodeId !==
+        episodeId ||
+      dialogueAudio.sceneId !==
+        shot.sceneId ||
+      dialogueAudio.shotId !==
+        shot.shotId
+    ) {
+      throw new Error(
+        `Episode composition resolved dialogue audio identity ${dialogueAudio.episodeId}/${dialogueAudio.sceneId}/${dialogueAudio.shotId} does not match ${shotLabel}.`,
       );
     }
 
@@ -245,8 +413,9 @@ export async function prepareEpisodeComposition(
       defaultDependencies,
 ): Promise<PreparedEpisodeComposition> {
   const dialogueByShot =
-    indexDialogueAudioPlans(
+    await resolveDialogueAudioByShot(
       input,
+      dependencies,
     );
 
   const preparedShots:

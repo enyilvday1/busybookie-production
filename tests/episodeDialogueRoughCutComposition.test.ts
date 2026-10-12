@@ -14,8 +14,12 @@ import type {
 } from "../src/composition/buildEpisodeCompositionPlan.js";
 
 import type {
-  DialogueCompositionAudioPlan,
-} from "../src/dialogue/buildDialogueCompositionAudioPlan.js";
+  CharacterBible,
+} from "../src/schemas/character.schema.js";
+
+import type {
+  EpisodeManifest,
+} from "../src/schemas/episodeManifest.schema.js";
 
 import type {
   ProductionRules,
@@ -68,83 +72,24 @@ const compositionPlan:
         Object.freeze([]),
     });
 
-const dialogueAudio:
-  DialogueCompositionAudioPlan =
-    Object.freeze({
-      schemaVersion:
-        "1.0",
+// Opaque canonical inputs: composition only forwards them to preparation.
+const episode =
+  Object.freeze({
+    episodeId:
+      "EP02",
+  }) as unknown as EpisodeManifest;
 
-      audioMode:
-        "REPLACE_SOURCE_WITH_DIALOGUE",
-
-      mixNativeAudio:
-        false,
-
-      episodeId:
-        "EP02",
-
-      sceneId:
-        "SC01",
-
-      shotId:
-        "S01",
-
-      dialoguePlanKey:
-        "a".repeat(
-          64,
-        ),
-
-      shotDurationSeconds:
-        4,
-
-      sourceNativeAudio:
-        true,
-
-      sourceAudioDisposition:
-        "DISCARD_NATIVE_AUDIO",
-
-      lines:
-        Object.freeze([
-          Object.freeze({
-            lineNumber:
-              1,
-
-            dialogueLineId:
-              "EP02_SC01_S01_L01",
-
-            sourceAudioPath:
-              `${MEDIA_ROOT}/voices/EP02/S01/EP02_SC01_S01_L01/line.audio`,
-
-            sourceBytes:
-              12_345,
-
-            sourceSha256:
-              "b".repeat(
-                64,
-              ),
-
-            startSeconds:
-              0.5,
-
-            durationSeconds:
-              1.5,
-
-            endSeconds:
-              2,
-          }),
-        ]),
-
-      audioKey:
-        "c".repeat(
-          64,
-        ),
-    });
+const bible =
+  Object.freeze({
+    characters:
+      [],
+  }) as unknown as CharacterBible;
 
 describe(
   "Busybookie dialogue-aware rough-cut composition orchestration",
   () => {
     it(
-      "forwards trusted dialogue audio plans unchanged into episode composition preparation",
+      "forwards canonical episode and bible into preparation and forwards no caller-supplied dialogue audio plans",
       async () => {
         let capturedPrepareInput:
           unknown =
@@ -176,10 +121,9 @@ describe(
             {
               compositionPlan,
 
-              dialogueAudioPlans:
-                Object.freeze([
-                  dialogueAudio,
-                ]),
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,
@@ -191,10 +135,7 @@ describe(
 
               ffprobeExecutable:
                 FFPROBE_EXECUTABLE,
-            } as unknown as
-              Parameters<
-                typeof composeEpisodeRoughCut
-              >[0],
+            },
             {
               prepareComposition:
                 prepareComposition as never,
@@ -212,13 +153,12 @@ describe(
 
         expect(
           capturedPrepareInput,
-        ).toEqual({
+        ).toStrictEqual({
           compositionPlan,
 
-          dialogueAudioPlans:
-            Object.freeze([
-              dialogueAudio,
-            ]),
+          episode,
+
+          bible,
 
           mediaRoot:
             MEDIA_ROOT,
@@ -231,6 +171,34 @@ describe(
           ffprobeExecutable:
             FFPROBE_EXECUTABLE,
         });
+
+        expect(
+          capturedPrepareInput,
+        ).not.toHaveProperty(
+          "dialogueAudioPlans",
+        );
+
+        expect(
+          (
+            capturedPrepareInput as {
+              episode: unknown;
+              bible: unknown;
+            }
+          ).episode,
+        ).toBe(
+          episode,
+        );
+
+        expect(
+          (
+            capturedPrepareInput as {
+              episode: unknown;
+              bible: unknown;
+            }
+          ).bible,
+        ).toBe(
+          bible,
+        );
 
         expect(
           buildRenderPlan,

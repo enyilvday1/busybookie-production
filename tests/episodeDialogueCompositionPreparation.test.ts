@@ -34,9 +34,56 @@ import {
   prepareEpisodeComposition,
 } from "../src/composition/prepareEpisodeComposition.js";
 
+import {
+  buildShotDialoguePlan,
+} from "../src/dialogue/buildShotDialoguePlan.js";
+
+import type {
+  CharacterBible,
+} from "../src/schemas/character.schema.js";
+
+import type {
+  EpisodeManifest,
+} from "../src/schemas/episodeManifest.schema.js";
+
 import type {
   ProductionRules,
 } from "../src/schemas/productionRules.schema.js";
+
+import {
+  loadCharacterBible,
+} from "../src/validation/loadCharacterBible.js";
+
+import {
+  loadEpisodeManifest,
+} from "../src/validation/loadEpisodeManifest.js";
+
+async function loadCanonical(): Promise<
+  Readonly<{
+    episode:
+      EpisodeManifest;
+
+    bible:
+      CharacterBible;
+  }>
+> {
+  const [
+    episode,
+    bible,
+  ] =
+    await Promise.all([
+      loadEpisodeManifest(
+        "EP02",
+      ),
+
+      loadCharacterBible(),
+    ]);
+
+  return Object.freeze({
+    episode,
+    bible,
+  });
+}
 
 const MEDIA_ROOT =
   "D:/Busybookie/Production";
@@ -508,7 +555,7 @@ describe(
   "Busybookie dialogue-aware episode composition preparation",
   () => {
     it(
-      "keeps non-dialogue shots on v1 and routes exactly matching trusted dialogue audio through v2",
+      "keeps non-dialogue shots on v1 and routes canonical dialogue shots through v2 using durable composition audio",
       async () => {
         const shot1 =
           makeShot({
@@ -701,14 +748,44 @@ describe(
             },
           );
 
+        const {
+          episode,
+          bible,
+        } =
+          await loadCanonical();
+
+        const buildDialoguePlan =
+          vi.fn(
+            buildShotDialoguePlan,
+          );
+
+        const resolveDialogueAudioPlan =
+          vi.fn(
+            async (
+              input:
+                Readonly<{
+                  dialoguePlan:
+                    Readonly<{
+                      shotId:
+                        string;
+                    }>;
+                }>,
+            ) => {
+              events.push(
+                `resolve:${input.dialoguePlan.shotId}`,
+              );
+
+              return dialogueAudio;
+            },
+          );
+
         await prepareEpisodeComposition(
           {
             compositionPlan,
 
-            dialogueAudioPlans:
-              Object.freeze([
-                dialogueAudio,
-              ]),
+            episode,
+
+            bible,
 
             mediaRoot:
               MEDIA_ROOT,
@@ -720,14 +797,13 @@ describe(
 
             ffprobeExecutable:
               FFPROBE_EXECUTABLE,
-          } as unknown as
-            Parameters<
-              typeof prepareEpisodeComposition
-            >[0],
+          },
           {
             probeSource,
             buildNormalizationPlan,
             ensureNormalizationCache,
+            buildDialoguePlan,
+            resolveDialogueAudioPlan,
             buildDialogueNormalizationPlan,
             ensureDialogueNormalizationCache,
           } as unknown as
@@ -736,9 +812,61 @@ describe(
             >[1],
         );
 
+        const canonicalShot =
+          episode.scenes[0]!
+            .shots.find(
+              (
+                candidate,
+              ) =>
+                candidate.id ===
+                "S02",
+            )!;
+
+        expect(
+          buildDialoguePlan,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          buildDialoguePlan,
+        ).toHaveBeenCalledWith({
+          episodeId:
+            "EP02",
+
+          sceneId:
+            "SC01",
+
+          shot:
+            canonicalShot,
+
+          bible,
+        });
+
+        expect(
+          resolveDialogueAudioPlan,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          resolveDialogueAudioPlan,
+        ).toHaveBeenCalledWith({
+          mediaRoot:
+            MEDIA_ROOT,
+
+          ffprobeExecutable:
+            FFPROBE_EXECUTABLE,
+
+          dialoguePlan:
+            buildDialoguePlan.mock.results[0]!
+              .value,
+        });
+
         expect(
           events,
         ).toEqual([
+          "resolve:S02",
           "probe:S01",
           "plan-v1:S01",
           "ensure-v1:S01",
@@ -795,7 +923,7 @@ describe(
       },
     );
     it(
-      "rejects dialogue audio evidence for a different episode before probing media",
+      "rejects resolved dialogue audio for a different episode before probing media",
       async () => {
         const shot =
           makeShot({
@@ -844,6 +972,12 @@ describe(
               "EP99",
           }) as DialogueCompositionAudioPlan;
 
+        const {
+          episode,
+          bible,
+        } =
+          await loadCanonical();
+
         const probeSource =
           vi.fn();
 
@@ -852,10 +986,9 @@ describe(
             {
               compositionPlan,
 
-              dialogueAudioPlans:
-                Object.freeze([
-                  dialogueAudio,
-                ]),
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,
@@ -877,10 +1010,25 @@ describe(
 
               ensureNormalizationCache:
                 vi.fn() as never,
+
+              buildDialoguePlan:
+                buildShotDialoguePlan,
+
+              resolveDialogueAudioPlan:
+                vi.fn(
+                  async () =>
+                    dialogueAudio,
+                ),
+
+              buildDialogueNormalizationPlan:
+                vi.fn() as never,
+
+              ensureDialogueNormalizationCache:
+                vi.fn() as never,
             },
           ),
         ).rejects.toThrow(
-          /episode identity does not match/i,
+          /resolved dialogue audio identity EP99\/SC01\/S02 does not match EP02\/SC01\/S02/i,
         );
 
         expect(
@@ -890,24 +1038,29 @@ describe(
     );
 
     it(
-      "rejects dialogue audio evidence for an unknown admitted shot before probing media",
+      "rejects a composition shot without a canonical episode shot before probing media",
       async () => {
         const shot =
-          makeShot({
+          Object.freeze({
+            ...makeShot({
+              shotId:
+                "S01",
+
+              order:
+                1,
+
+              nativeAudio:
+                false,
+
+              provider:
+                "RUNWAY",
+
+              shaCharacter:
+                "2",
+            }),
+
             shotId:
-              "S01",
-
-            order:
-              1,
-
-            nativeAudio:
-              false,
-
-            provider:
-              "RUNWAY",
-
-            shaCharacter:
-              "2",
+              "S09",
           });
 
         const compositionPlan:
@@ -931,10 +1084,16 @@ describe(
                 ]),
             });
 
-        const dialogueAudio =
-          makeDialogueAudioPlan();
+        const {
+          episode,
+          bible,
+        } =
+          await loadCanonical();
 
         const probeSource =
+          vi.fn();
+
+        const resolveDialogueAudioPlan =
           vi.fn();
 
         await expect(
@@ -942,10 +1101,9 @@ describe(
             {
               compositionPlan,
 
-              dialogueAudioPlans:
-                Object.freeze([
-                  dialogueAudio,
-                ]),
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,
@@ -967,20 +1125,30 @@ describe(
 
               ensureNormalizationCache:
                 vi.fn() as never,
+
+              buildDialoguePlan:
+                vi.fn() as never,
+
+              resolveDialogueAudioPlan:
+                resolveDialogueAudioPlan as never,
             },
           ),
         ).rejects.toThrow(
-          /unknown admitted shot/i,
+          /EP02\/SC01\/S09 has no canonical episode shot/i,
         );
 
         expect(
           probeSource,
         ).not.toHaveBeenCalled();
+
+        expect(
+          resolveDialogueAudioPlan,
+        ).not.toHaveBeenCalled();
       },
     );
 
     it(
-      "rejects duplicate trusted dialogue audio evidence for the same shot before probing media",
+      "rejects a duplicate composition shot before resolving dialogue audio or probing media",
       async () => {
         const shot =
           makeShot({
@@ -1010,33 +1178,41 @@ describe(
                 "Fail closed episode",
 
               totalShots:
-                1,
+                2,
 
               totalDurationSeconds:
-                4,
+                8,
 
               shots:
                 Object.freeze([
                   shot,
+                  shot,
                 ]),
             });
 
-        const dialogueAudio =
-          makeDialogueAudioPlan();
+        const {
+          episode,
+          bible,
+        } =
+          await loadCanonical();
 
         const probeSource =
           vi.fn();
+
+        const resolveDialogueAudioPlan =
+          vi.fn(
+            async () =>
+              makeDialogueAudioPlan(),
+          );
 
         await expect(
           prepareEpisodeComposition(
             {
               compositionPlan,
 
-              dialogueAudioPlans:
-                Object.freeze([
-                  dialogueAudio,
-                  dialogueAudio,
-                ]),
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,
@@ -1058,10 +1234,27 @@ describe(
 
               ensureNormalizationCache:
                 vi.fn() as never,
+
+              buildDialoguePlan:
+                buildShotDialoguePlan,
+
+              resolveDialogueAudioPlan,
+
+              buildDialogueNormalizationPlan:
+                vi.fn() as never,
+
+              ensureDialogueNormalizationCache:
+                vi.fn() as never,
             },
           ),
         ).rejects.toThrow(
-          /duplicate dialogue audio evidence/i,
+          /duplicate shot EP02\/SC01\/S02/i,
+        );
+
+        expect(
+          resolveDialogueAudioPlan,
+        ).toHaveBeenCalledTimes(
+          1,
         );
 
         expect(

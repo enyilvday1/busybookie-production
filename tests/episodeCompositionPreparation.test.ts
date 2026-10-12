@@ -34,6 +34,44 @@ import {
   type PrepareEpisodeCompositionDependencies,
 } from "../src/composition/prepareEpisodeComposition.js";
 
+import type {
+  EpisodeManifest,
+} from "../src/schemas/episodeManifest.schema.js";
+
+import {
+  loadCharacterBible,
+} from "../src/validation/loadCharacterBible.js";
+
+import {
+  loadEpisodeManifest,
+} from "../src/validation/loadEpisodeManifest.js";
+
+// Canonical EP02 with every shot made non-dialogue, so the whole
+// episode stays on the v1 normalization path.
+async function loadNonDialogueEpisode(): Promise<EpisodeManifest> {
+  const episode =
+    structuredClone(
+      await loadEpisodeManifest(
+        "EP02",
+      ),
+    );
+
+  for (
+    const scene
+    of episode.scenes
+  ) {
+    for (
+      const shot
+      of scene.shots
+    ) {
+      shot.dialogue =
+        [];
+    }
+  }
+
+  return episode;
+}
+
 const MEDIA_ROOT =
   "D:/Busybookie/Production";
 
@@ -442,6 +480,12 @@ describe(
             },
           );
 
+        const buildDialoguePlan =
+          vi.fn();
+
+        const resolveDialogueAudioPlan =
+          vi.fn();
+
         const dependencies:
           PrepareEpisodeCompositionDependencies =
             {
@@ -462,12 +506,37 @@ describe(
                   PrepareEpisodeCompositionDependencies[
                     "ensureNormalizationCache"
                   ],
+
+              buildDialoguePlan:
+                buildDialoguePlan as unknown as
+                  PrepareEpisodeCompositionDependencies[
+                    "buildDialoguePlan"
+                  ],
+
+              resolveDialogueAudioPlan:
+                resolveDialogueAudioPlan as unknown as
+                  PrepareEpisodeCompositionDependencies[
+                    "resolveDialogueAudioPlan"
+                  ],
             };
+
+        const [
+          episode,
+          bible,
+        ] =
+          await Promise.all([
+            loadNonDialogueEpisode(),
+            loadCharacterBible(),
+          ]);
 
         const result =
           await prepareEpisodeComposition(
             {
               compositionPlan,
+
+              episode,
+
+              bible,
 
               mediaRoot:
                 MEDIA_ROOT,
@@ -493,6 +562,14 @@ describe(
           "plan:S02",
           "ensure:S02",
         ]);
+
+        expect(
+          buildDialoguePlan,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          resolveDialogueAudioPlan,
+        ).not.toHaveBeenCalled();
 
         expect(
           probeSource,

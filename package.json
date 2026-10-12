@@ -20,6 +20,7 @@
     "execution:generate": "tsx scripts/execution-generate.ts",
     "execution:reconcile": "tsx scripts/execution-reconcile.ts",
     "execution:status": "tsx scripts/execution-status.ts",
+    "episode:automate": "tsx scripts/episode-automation.ts",
     "dialogue:generate": "tsx scripts/dialogue-generate.ts",
     "dialogue:reconcile": "tsx scripts/dialogue-reconcile.ts",
     "dialogue:authorize-visual": "tsx scripts/dialogue-authorize-visual.ts",

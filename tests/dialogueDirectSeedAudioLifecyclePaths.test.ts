@@ -15,7 +15,16 @@ import {
 } from "../src/dialogue/dialogueSubmissionPath.js";
 
 import {
+  readFile,
+} from "node:fs/promises";
+
+import {
+  dirname,
+} from "node:path";
+
+import {
   createDialogueDirectSeedAudioCompletionPath,
+  createDialogueDirectSeedAudioLineDirectory,
   createDialogueDirectSeedAudioReservationPath,
   createDialogueDirectSeedAudioSubmissionPath,
 } from "../src/dialogue/dialogueDirectSeedAudioLifecyclePaths.js";
@@ -209,6 +218,135 @@ describe(
           historicalCompletion,
         ).toBe(
           `${MEDIA_ROOT}/voices/${EPISODE_ID}/${SHOT_ID}/${DIALOGUE_LINE_ID}/${DIALOGUE_LINE_ID}.dialogue-completion.json`,
+        );
+      },
+    );
+
+    it(
+      "resolves one line's direct SeedAudio directory without a planKey, as the parent of every plan directory",
+      () => {
+        const lineDirectory =
+          createDialogueDirectSeedAudioLineDirectory(
+            MEDIA_ROOT,
+            EPISODE_ID,
+            SCENE_ID,
+            SHOT_ID,
+            DIALOGUE_LINE_ID,
+          );
+
+        expect(
+          normalize(
+            lineDirectory,
+          ),
+        ).toBe(
+          `${MEDIA_ROOT}/voices/${EPISODE_ID}/${SHOT_ID}/${DIALOGUE_LINE_ID}/direct-seed-audio`,
+        );
+
+        expect(
+          dirname(
+            dirname(
+              createDialogueDirectSeedAudioReservationPath(
+                MEDIA_ROOT,
+                EPISODE_ID,
+                SCENE_ID,
+                SHOT_ID,
+                DIALOGUE_LINE_ID,
+                PLAN_KEY,
+              ),
+            ),
+          ),
+        ).toBe(
+          lineDirectory,
+        );
+
+        expect(
+          createDialogueDirectSeedAudioLineDirectory(
+            `  ${MEDIA_ROOT}  `,
+            EPISODE_ID,
+            SCENE_ID,
+            SHOT_ID,
+            DIALOGUE_LINE_ID,
+          ),
+        ).toBe(
+          lineDirectory,
+        );
+      },
+    );
+
+    it.each([
+      [
+        "empty media root",
+        ["   ", EPISODE_ID, SCENE_ID, SHOT_ID, DIALOGUE_LINE_ID],
+        /media root is required/,
+      ],
+      [
+        "relative media root",
+        ["relative/media", EPISODE_ID, SCENE_ID, SHOT_ID, DIALOGUE_LINE_ID],
+        /media root must be absolute/,
+      ],
+      [
+        "invalid episode id",
+        [MEDIA_ROOT, "../EP02", SCENE_ID, SHOT_ID, DIALOGUE_LINE_ID],
+        /episode id/,
+      ],
+      [
+        "invalid scene id",
+        [MEDIA_ROOT, EPISODE_ID, "SC1", SHOT_ID, DIALOGUE_LINE_ID],
+        /scene id/,
+      ],
+      [
+        "invalid shot id",
+        [MEDIA_ROOT, EPISODE_ID, SCENE_ID, "..", DIALOGUE_LINE_ID],
+        /shot id/,
+      ],
+      [
+        "path-traversal line id",
+        [MEDIA_ROOT, EPISODE_ID, SCENE_ID, SHOT_ID, "../EP02_SC01_S02_L01"],
+        /line id/,
+      ],
+      [
+        "line identity of another shot",
+        [MEDIA_ROOT, EPISODE_ID, SCENE_ID, SHOT_ID, "EP02_SC01_S03_L01"],
+        /line identity does not match/,
+      ],
+    ] as const)(
+      "rejects a %s for the line directory",
+      (
+        _label,
+        args,
+        message,
+      ) => {
+        expect(
+          () =>
+            createDialogueDirectSeedAudioLineDirectory(
+              args[0],
+              args[1],
+              args[2],
+              args[3],
+              args[4],
+            ),
+        ).toThrow(
+          message,
+        );
+      },
+    );
+
+    it(
+      "keeps the line directory helper free of filesystem access",
+      async () => {
+        const source =
+          await readFile(
+            new URL(
+              "../src/dialogue/dialogueDirectSeedAudioLifecyclePaths.ts",
+              import.meta.url,
+            ),
+            "utf8",
+          );
+
+        expect(
+          source,
+        ).not.toMatch(
+          /node:fs|readdir|writeFile|mkdir|\bstat\(/,
         );
       },
     );

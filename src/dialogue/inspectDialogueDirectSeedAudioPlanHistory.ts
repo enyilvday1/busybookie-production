@@ -18,6 +18,7 @@ import type {
 
 import {
   createDialogueDirectSeedAudioCompletionPath,
+  createDialogueDirectSeedAudioLineDirectory,
   createDialogueDirectSeedAudioReservationPath,
   createDialogueDirectSeedAudioSubmissionPath,
 } from "./dialogueDirectSeedAudioLifecyclePaths.js";
@@ -30,7 +31,7 @@ import {
   inspectDialogueDirectSeedAudioLifecycle,
 } from "./inspectDialogueDirectSeedAudioLifecycle.js";
 
-export type DialogueDirectSeedAudioHistoricalLifecycle =
+export type DialogueDirectSeedAudioPlanLifecycle =
   Readonly<{
     planKey:
       string;
@@ -38,6 +39,9 @@ export type DialogueDirectSeedAudioHistoricalLifecycle =
     lifecycle:
       DialogueLifecycleClassification;
   }>;
+
+export type DialogueDirectSeedAudioHistoricalLifecycle =
+  DialogueDirectSeedAudioPlanLifecycle;
 
 export type InspectDialogueDirectSeedAudioPlanHistoryDependencies =
   Readonly<{
@@ -143,9 +147,12 @@ function isCanonicalTemporaryLifecycleFileName(
   );
 }
 
-async function assertHistoricalPlanDirectoryEntries(
+async function assertPlanDirectoryEntries(
   readDirectory:
     typeof readdir,
+
+  directoryLabel:
+    string,
 
   mediaRoot:
     string,
@@ -245,7 +252,7 @@ async function assertHistoricalPlanDirectoryEntries(
       )
     ) {
       throw new Error(
-        `Unexpected entry in historical direct SeedAudio plan directory: ${join(planDirectory, entry.name)}`,
+        `Unexpected entry in ${directoryLabel}: ${join(planDirectory, entry.name)}`,
       );
     }
 
@@ -253,10 +260,173 @@ async function assertHistoricalPlanDirectoryEntries(
       !entry.isFile()
     ) {
       throw new Error(
-        `Unexpected non-file entry in historical direct SeedAudio plan directory: ${join(planDirectory, entry.name)}`,
+        `Unexpected non-file entry in ${directoryLabel}: ${join(planDirectory, entry.name)}`,
       );
     }
   }
+}
+
+// Single strict enumeration shared by the history and all-plan inspectors.
+// An excluded planKey directory is validated as a root entry but is never
+// enumerated or inspected.
+async function inspectPlanDirectories(
+  dependencies:
+    InspectDialogueDirectSeedAudioPlanHistoryDependencies,
+
+  mediaRoot:
+    string,
+
+  episodeId:
+    string,
+
+  sceneId:
+    string,
+
+  shotId:
+    string,
+
+  dialogueLineId:
+    string,
+
+  lineDirectory:
+    string,
+
+  excludedPlanKey:
+    string | null,
+
+  directoryLabel:
+    string,
+): Promise<
+  readonly DialogueDirectSeedAudioPlanLifecycle[]
+> {
+  let rootEntries:
+    Dirent<string>[];
+
+  try {
+    rootEntries =
+      await dependencies
+        .readDirectory(
+          lineDirectory,
+          {
+            withFileTypes:
+              true,
+          },
+        );
+  } catch (error) {
+    if (
+      hasErrorCode(
+        error,
+        "ENOENT",
+      )
+    ) {
+      return Object.freeze(
+        [],
+      );
+    }
+
+    throw error;
+  }
+
+  const planKeys:
+    string[] =
+      [];
+
+  for (
+    const entry
+    of rootEntries
+  ) {
+    if (
+      !entry.isDirectory()
+    ) {
+      throw new Error(
+        `Unexpected non-directory entry in direct SeedAudio history: ${join(lineDirectory, entry.name)}`,
+      );
+    }
+
+    if (
+      !DialogueReservationPlanKeySchema
+        .safeParse(
+          entry.name,
+        )
+        .success
+    ) {
+      throw new Error(
+        `Unexpected directory in direct SeedAudio history (not a planKey): ${join(lineDirectory, entry.name)}`,
+      );
+    }
+
+    if (
+      entry.name !==
+      excludedPlanKey
+    ) {
+      planKeys.push(
+        entry.name,
+      );
+    }
+  }
+
+  planKeys.sort(
+    (
+      left,
+      right,
+    ) =>
+      left <
+      right
+        ? -1
+        : left >
+            right
+          ? 1
+          : 0,
+  );
+
+  const plans:
+    DialogueDirectSeedAudioPlanLifecycle[] =
+      [];
+
+  for (
+    const planKey
+    of planKeys
+  ) {
+    await assertPlanDirectoryEntries(
+      dependencies
+        .readDirectory,
+      directoryLabel,
+      mediaRoot,
+      episodeId,
+      sceneId,
+      shotId,
+      dialogueLineId,
+      planKey,
+      join(
+        lineDirectory,
+        planKey,
+      ),
+    );
+
+    // Record parsing, identity, planKey and classification stay with the
+    // existing plan-scoped inspector; every error propagates unchanged.
+    const lifecycle =
+      await dependencies
+        .inspectLifecycle(
+          mediaRoot,
+          episodeId,
+          sceneId,
+          shotId,
+          dialogueLineId,
+          planKey,
+        );
+
+    plans.push(
+      Object.freeze({
+        planKey,
+        lifecycle,
+      }),
+    );
+  }
+
+  return Object.freeze(
+    plans,
+  );
 }
 
 export async function inspectDialogueDirectSeedAudioPlanHistory(
@@ -298,138 +468,61 @@ export async function inspectDialogueDirectSeedAudioPlanHistory(
       ),
     );
 
-  const historyRoot =
+  return inspectPlanDirectories(
+    dependencies,
+    mediaRoot,
+    episodeId,
+    sceneId,
+    shotId,
+    dialogueLineId,
     dirname(
       currentPlanDirectory,
-    );
-
-  let rootEntries:
-    Dirent<string>[];
-
-  try {
-    rootEntries =
-      await dependencies
-        .readDirectory(
-          historyRoot,
-          {
-            withFileTypes:
-              true,
-          },
-        );
-  } catch (error) {
-    if (
-      hasErrorCode(
-        error,
-        "ENOENT",
-      )
-    ) {
-      return Object.freeze(
-        [],
-      );
-    }
-
-    throw error;
-  }
-
-  const historicalPlanKeys:
-    string[] =
-      [];
-
-  for (
-    const entry
-    of rootEntries
-  ) {
-    if (
-      !entry.isDirectory()
-    ) {
-      throw new Error(
-        `Unexpected non-directory entry in direct SeedAudio history: ${join(historyRoot, entry.name)}`,
-      );
-    }
-
-    if (
-      !DialogueReservationPlanKeySchema
-        .safeParse(
-          entry.name,
-        )
-        .success
-    ) {
-      throw new Error(
-        `Unexpected directory in direct SeedAudio history (not a planKey): ${join(historyRoot, entry.name)}`,
-      );
-    }
-
-    if (
-      entry.name !==
-      basename(
-        currentPlanDirectory,
-      )
-    ) {
-      historicalPlanKeys.push(
-        entry.name,
-      );
-    }
-  }
-
-  historicalPlanKeys.sort(
-    (
-      left,
-      right,
-    ) =>
-      left <
-      right
-        ? -1
-        : left >
-            right
-          ? 1
-          : 0,
+    ),
+    basename(
+      currentPlanDirectory,
+    ),
+    "historical direct SeedAudio plan directory",
   );
+}
 
-  const history:
-    DialogueDirectSeedAudioHistoricalLifecycle[] =
-      [];
+// Every plan-scoped lifecycle of one canonical line, current or not.
+export async function inspectDialogueDirectSeedAudioPlanLifecycles(
+  mediaRoot:
+    string,
 
-  for (
-    const planKey
-    of historicalPlanKeys
-  ) {
-    await assertHistoricalPlanDirectoryEntries(
-      dependencies
-        .readDirectory,
+  episodeId:
+    string,
+
+  sceneId:
+    string,
+
+  shotId:
+    string,
+
+  dialogueLineId:
+    string,
+
+  dependencies:
+    InspectDialogueDirectSeedAudioPlanHistoryDependencies =
+      defaultDependencies,
+): Promise<
+  readonly DialogueDirectSeedAudioPlanLifecycle[]
+> {
+  return inspectPlanDirectories(
+    dependencies,
+    mediaRoot,
+    episodeId,
+    sceneId,
+    shotId,
+    dialogueLineId,
+    createDialogueDirectSeedAudioLineDirectory(
       mediaRoot,
       episodeId,
       sceneId,
       shotId,
       dialogueLineId,
-      planKey,
-      join(
-        historyRoot,
-        planKey,
-      ),
-    );
-
-    // Record parsing, identity, planKey and classification stay with the
-    // existing plan-scoped inspector; every error propagates unchanged.
-    const lifecycle =
-      await dependencies
-        .inspectLifecycle(
-          mediaRoot,
-          episodeId,
-          sceneId,
-          shotId,
-          dialogueLineId,
-          planKey,
-        );
-
-    history.push(
-      Object.freeze({
-        planKey,
-        lifecycle,
-      }),
-    );
-  }
-
-  return Object.freeze(
-    history,
+    ),
+    null,
+    "direct SeedAudio plan directory",
   );
 }

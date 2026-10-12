@@ -6,6 +6,7 @@ import {
 
 import {
   buildShotDialoguePlan,
+  createDialogueLineId,
 } from "../src/dialogue/buildShotDialoguePlan.js";
 
 import {
@@ -404,6 +405,89 @@ describe(
             }),
         ).toThrow(
           /dialogue line/i,
+        );
+      },
+    );
+
+    it(
+      "exports createDialogueLineId as the exact canonical line-id authority used by the planner",
+      async () => {
+        const {
+          episode,
+          bible,
+          scene,
+          shot,
+        } =
+          await loadEp02DialogueFixture();
+
+        const multiLineShot =
+          structuredClone(
+            shot,
+          );
+
+        multiLineShot.dialogue =
+          Array.from(
+            {
+              length:
+                12,
+            },
+            () =>
+              structuredClone(
+                shot.dialogue[0]!,
+              ),
+          );
+
+        const plan =
+          buildShotDialoguePlan({
+            episodeId:
+              episode.episodeId,
+
+            sceneId:
+              scene.id,
+
+            shot:
+              multiLineShot,
+
+            bible,
+          });
+
+        expect(
+          plan.lines.map(
+            (line) =>
+              createDialogueLineId(
+                episode.episodeId,
+                scene.id,
+                multiLineShot.id,
+                line.lineNumber,
+              ),
+          ),
+        ).toEqual(
+          plan.lines.map(
+            (line) =>
+              line.dialogueLineId,
+          ),
+        );
+
+        expect(
+          createDialogueLineId(
+            "EP02",
+            "SC01",
+            "S02",
+            1,
+          ),
+        ).toBe(
+          "EP02_SC01_S02_L01",
+        );
+
+        expect(
+          createDialogueLineId(
+            "EP02",
+            "SC01",
+            "S02",
+            12,
+          ),
+        ).toBe(
+          "EP02_SC01_S02_L12",
         );
       },
     );

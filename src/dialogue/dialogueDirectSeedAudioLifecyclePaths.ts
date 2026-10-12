@@ -93,6 +93,81 @@ function createDialogueDirectSeedAudioLifecycleRoot(
   );
 }
 
+// The directory holding every plan-scoped lifecycle directory of one canonical
+// line. Same validation as the plan-scoped root, without a planKey.
+export function createDialogueDirectSeedAudioLineDirectory(
+  mediaRoot: string,
+  episodeId: string,
+  sceneId: string,
+  shotId: string,
+  dialogueLineId: string,
+): string {
+  const normalizedMediaRoot =
+    mediaRoot.trim();
+
+  if (!normalizedMediaRoot) {
+    throw new Error(
+      "Direct SeedAudio dialogue lifecycle media root is required.",
+    );
+  }
+
+  if (
+    !isAbsolute(
+      normalizedMediaRoot,
+    )
+  ) {
+    throw new Error(
+      "Direct SeedAudio dialogue lifecycle media root must be absolute.",
+    );
+  }
+
+  const validatedEpisodeId =
+    DialogueReservationEpisodeIdSchema
+      .parse(
+        episodeId,
+      );
+
+  const validatedSceneId =
+    DialogueReservationSceneIdSchema
+      .parse(
+        sceneId,
+      );
+
+  const validatedShotId =
+    DialogueReservationShotIdSchema
+      .parse(
+        shotId,
+      );
+
+  const validatedDialogueLineId =
+    DialogueReservationLineIdSchema
+      .parse(
+        dialogueLineId,
+      );
+
+  if (
+    !dialogueReservationIdentityMatches(
+      validatedEpisodeId,
+      validatedSceneId,
+      validatedShotId,
+      validatedDialogueLineId,
+    )
+  ) {
+    throw new Error(
+      "Direct SeedAudio dialogue lifecycle line identity does not match the selected episode, scene, and shot.",
+    );
+  }
+
+  return resolve(
+    normalizedMediaRoot,
+    "voices",
+    validatedEpisodeId,
+    validatedShotId,
+    validatedDialogueLineId,
+    "direct-seed-audio",
+  );
+}
+
 export function createDialogueDirectSeedAudioReservationPath(
   mediaRoot: string,
   episodeId: string,

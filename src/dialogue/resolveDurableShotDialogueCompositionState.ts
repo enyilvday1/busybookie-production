@@ -14,17 +14,23 @@ import {
   buildShotDialoguePlan,
 } from "./buildShotDialoguePlan.js";
 
-import {
-  inspectDialogueDirectSeedAudioLifecycle,
-} from "./inspectDialogueDirectSeedAudioLifecycle.js";
+import type {
+  DialogueLifecycleClassification,
+} from "./classifyDialogueLifecycle.js";
 
 import {
-  inspectDialogueDirectSeedAudioPlanHistory,
+  inspectDialogueDirectSeedAudioPlanLifecycles,
+  type DialogueDirectSeedAudioPlanLifecycle,
 } from "./inspectDialogueDirectSeedAudioPlanHistory.js";
 
 import {
   inspectDialogueLifecycle,
 } from "./inspectDialogueLifecycle.js";
+
+import {
+  inspectShotDialoguePlanningBlockers,
+  type DialoguePlanningBlocker,
+} from "./inspectShotDialoguePlanningBlockers.js";
 
 import {
   readLatestDialoguePlacementDecision,
@@ -48,11 +54,8 @@ export type ResolveDurableShotDialogueCompositionStateDependencies =
     inspectLineLifecycle:
       typeof inspectDialogueLifecycle;
 
-    inspectDirectSeedAudioLineLifecycle:
-      typeof inspectDialogueDirectSeedAudioLifecycle;
-
-    inspectDirectSeedAudioPlanHistory:
-      typeof inspectDialogueDirectSeedAudioPlanHistory;
+    inspectDirectSeedAudioPlanLifecycles:
+      typeof inspectDialogueDirectSeedAudioPlanLifecycles;
 
     readLatestPlacementDecision:
       typeof readLatestDialoguePlacementDecision;
@@ -61,12 +64,20 @@ export type ResolveDurableShotDialogueCompositionStateDependencies =
       typeof resolveDurableDialogueCompositionAudioPlan;
   }>;
 
-export type DialogueStalePlanWork =
+export type DialogueDurableNamespace =
+  | "LINE_SCOPED"
+  | "DIRECT_SEED_AUDIO";
+
+export type DialogueActiveWork =
   Readonly<{
     dialogueLineId: string;
+    namespace: DialogueDurableNamespace;
     planKey: string;
     state: "RESERVED_ONLY" | "SUBMITTED";
   }>;
+
+export type DialogueStalePlanWork =
+  DialogueActiveWork;
 
 export type DurableShotDialogueCompositionState =
   | Readonly<{
@@ -74,6 +85,21 @@ export type DurableShotDialogueCompositionState =
       episodeId: string;
       sceneId: string;
       shotId: string;
+    }>
+  | Readonly<{
+      state: "DIALOGUE_PLANNING_BLOCKED_ACTIVE_WORK_INTERVENTION_REQUIRED";
+      episodeId: string;
+      sceneId: string;
+      shotId: string;
+      blockers: readonly DialoguePlanningBlocker[];
+      activeWork: readonly DialogueActiveWork[];
+    }>
+  | Readonly<{
+      state: "DIALOGUE_PLANNING_BLOCKED";
+      episodeId: string;
+      sceneId: string;
+      shotId: string;
+      blockers: readonly DialoguePlanningBlocker[];
     }>
   | Readonly<{
       state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED";
@@ -137,11 +163,8 @@ const defaultDependencies:
       inspectLineLifecycle:
         inspectDialogueLifecycle,
 
-      inspectDirectSeedAudioLineLifecycle:
-        inspectDialogueDirectSeedAudioLifecycle,
-
-      inspectDirectSeedAudioPlanHistory:
-        inspectDialogueDirectSeedAudioPlanHistory,
+      inspectDirectSeedAudioPlanLifecycles:
+        inspectDialogueDirectSeedAudioPlanLifecycles,
 
       readLatestPlacementDecision:
         readLatestDialoguePlacementDecision,
@@ -149,6 +172,115 @@ const defaultDependencies:
       resolveCompositionAudioPlan:
         resolveDurableDialogueCompositionAudioPlan,
     });
+
+type LineEvidence =
+  Readonly<{
+    lineScoped:
+      DialogueLifecycleClassification;
+
+    directSeedAudioPlans:
+      readonly DialogueDirectSeedAudioPlanLifecycle[];
+  }>;
+
+// Both durable namespaces of one canonical line; every error propagates.
+async function inspectLineEvidence(
+  dependencies:
+    ResolveDurableShotDialogueCompositionStateDependencies,
+
+  mediaRoot:
+    string,
+
+  episodeId:
+    string,
+
+  sceneId:
+    string,
+
+  shotId:
+    string,
+
+  dialogueLineId:
+    string,
+): Promise<LineEvidence> {
+  const lineScoped =
+    await dependencies
+      .inspectLineLifecycle(
+        mediaRoot,
+        episodeId,
+        sceneId,
+        shotId,
+        dialogueLineId,
+      );
+
+  const directSeedAudioPlans =
+    await dependencies
+      .inspectDirectSeedAudioPlanLifecycles(
+        mediaRoot,
+        episodeId,
+        sceneId,
+        shotId,
+        dialogueLineId,
+      );
+
+  return {
+    lineScoped,
+    directSeedAudioPlans,
+  };
+}
+
+function activeLineScopedWork(
+  dialogueLineId:
+    string,
+
+  lifecycle:
+    DialogueLifecycleClassification,
+): DialogueActiveWork | null {
+  if (
+    lifecycle.state !==
+      "RESERVED_ONLY" &&
+    lifecycle.state !==
+      "SUBMITTED"
+  ) {
+    return null;
+  }
+
+  return Object.freeze({
+    dialogueLineId,
+    namespace:
+      "LINE_SCOPED",
+    planKey:
+      lifecycle.reservation.planKey,
+    state:
+      lifecycle.state,
+  });
+}
+
+function activeDirectSeedAudioWork(
+  dialogueLineId:
+    string,
+
+  plan:
+    DialogueDirectSeedAudioPlanLifecycle,
+): DialogueActiveWork | null {
+  if (
+    plan.lifecycle.state !==
+      "RESERVED_ONLY" &&
+    plan.lifecycle.state !==
+      "SUBMITTED"
+  ) {
+    return null;
+  }
+
+  return Object.freeze({
+    dialogueLineId,
+    namespace:
+      "DIRECT_SEED_AUDIO",
+    planKey:
+      plan.planKey,
+    state:
+      plan.lifecycle.state,
+  });
+}
 
 export async function resolveDurableShotDialogueCompositionState(
   input:
@@ -227,6 +359,101 @@ export async function resolveDurableShotDialogueCompositionState(
     });
   }
 
+  // Typed planning blockers; the planner's own errors are never classified.
+  const planning =
+    inspectShotDialoguePlanningBlockers({
+      episodeId,
+      sceneId,
+      shot:
+        canonicalShot,
+      bible:
+        input.bible,
+    });
+
+  if (
+    planning.blockers.length >
+    0
+  ) {
+    // No current plan exists, so every namespace of every canonical line is
+    // treated as possible paid work before the blocker may be reported.
+    const activeWork:
+      DialogueActiveWork[] =
+        [];
+
+    for (
+      const line
+      of planning.lines
+    ) {
+      const evidence =
+        await inspectLineEvidence(
+          dependencies,
+          input.mediaRoot,
+          episodeId,
+          sceneId,
+          shotId,
+          line.dialogueLineId,
+        );
+
+      const lineScopedWork =
+        activeLineScopedWork(
+          line.dialogueLineId,
+          evidence.lineScoped,
+        );
+
+      if (lineScopedWork) {
+        activeWork.push(
+          lineScopedWork,
+        );
+      }
+
+      for (
+        const plan
+        of evidence.directSeedAudioPlans
+      ) {
+        const planWork =
+          activeDirectSeedAudioWork(
+            line.dialogueLineId,
+            plan,
+          );
+
+        if (planWork) {
+          activeWork.push(
+            planWork,
+          );
+        }
+      }
+    }
+
+    if (
+      activeWork.length >
+      0
+    ) {
+      return Object.freeze({
+        state:
+          "DIALOGUE_PLANNING_BLOCKED_ACTIVE_WORK_INTERVENTION_REQUIRED",
+        episodeId,
+        sceneId,
+        shotId,
+        blockers:
+          planning.blockers,
+        activeWork:
+          Object.freeze([
+            ...activeWork,
+          ]),
+      });
+    }
+
+    return Object.freeze({
+      state:
+        "DIALOGUE_PLANNING_BLOCKED",
+      episodeId,
+      sceneId,
+      shotId,
+      blockers:
+        planning.blockers,
+    });
+  }
+
   const plan =
     buildShotDialoguePlan({
       episodeId,
@@ -253,8 +480,8 @@ export async function resolveDurableShotDialogueCompositionState(
     string[] =
       [];
 
-  // Every canonical line and every Direct-SeedAudio history is inspected
-  // before any state is chosen, so corruption anywhere always throws.
+  // Every canonical line and both durable namespaces are inspected before
+  // any state is chosen, so corruption anywhere always throws.
   for (
     const line
     of plan.lines
@@ -269,68 +496,66 @@ export async function resolveDurableShotDialogueCompositionState(
       line.voice.executionMode ===
         "RUNWAY_REFERENCE_AUDIO";
 
+    const evidence =
+      await inspectLineEvidence(
+        dependencies,
+        input.mediaRoot,
+        episodeId,
+        sceneId,
+        shotId,
+        dialogueLineId,
+      );
+
     let lifecycleState:
-      "NOTHING" | "RESERVED_ONLY" | "SUBMITTED" | "COMPLETED";
+      DialogueLifecycleClassification["state"];
 
     if (reference) {
-      const current =
-        await dependencies
-          .inspectDirectSeedAudioLineLifecycle(
-            input.mediaRoot,
-            episodeId,
-            sceneId,
-            shotId,
-            dialogueLineId,
-            plan.planKey,
-          );
+      // The current Direct-SeedAudio plan is the current lifecycle; line-scoped
+      // evidence and every other plan are outside the current plan context.
+      const lineScopedWork =
+        activeLineScopedWork(
+          dialogueLineId,
+          evidence.lineScoped,
+        );
 
-      // Old-plan active work is outside the current plan directory and
-      // outside dialogue:reconcile; it must never read as missing audio.
-      const history =
-        await dependencies
-          .inspectDirectSeedAudioPlanHistory(
-            input.mediaRoot,
-            episodeId,
-            sceneId,
-            shotId,
-            dialogueLineId,
-            plan.planKey,
-          );
-
-      for (
-        const historical
-        of history
-      ) {
-        if (
-          historical.lifecycle.state ===
-            "RESERVED_ONLY" ||
-          historical.lifecycle.state ===
-            "SUBMITTED"
-        ) {
-          staleWork.push(
-            Object.freeze({
-              dialogueLineId,
-              planKey:
-                historical.planKey,
-              state:
-                historical.lifecycle.state,
-            }),
-          );
-        }
+      if (lineScopedWork) {
+        staleWork.push(
+          lineScopedWork,
+        );
       }
 
       lifecycleState =
-        current.state;
+        "NOTHING";
+
+      for (
+        const directSeedAudioPlan
+        of evidence.directSeedAudioPlans
+      ) {
+        if (
+          directSeedAudioPlan.planKey ===
+          plan.planKey
+        ) {
+          lifecycleState =
+            directSeedAudioPlan.lifecycle.state;
+
+          continue;
+        }
+
+        const planWork =
+          activeDirectSeedAudioWork(
+            dialogueLineId,
+            directSeedAudioPlan,
+          );
+
+        if (planWork) {
+          staleWork.push(
+            planWork,
+          );
+        }
+      }
     } else {
       const current =
-        await dependencies
-          .inspectLineLifecycle(
-            input.mediaRoot,
-            episodeId,
-            sceneId,
-            shotId,
-            dialogueLineId,
-          );
+        evidence.lineScoped;
 
       if (
         current.state !==
@@ -345,6 +570,24 @@ export async function resolveDurableShotDialogueCompositionState(
 
       lifecycleState =
         current.state;
+
+      // Direct-SeedAudio work cannot belong to a line-scoped current plan.
+      for (
+        const directSeedAudioPlan
+        of evidence.directSeedAudioPlans
+      ) {
+        const planWork =
+          activeDirectSeedAudioWork(
+            dialogueLineId,
+            directSeedAudioPlan,
+          );
+
+        if (planWork) {
+          staleWork.push(
+            planWork,
+          );
+        }
+      }
     }
 
     switch (

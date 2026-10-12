@@ -182,7 +182,7 @@ function requireIdentity(
   return normalized;
 }
 
-function createDialogueLineId(
+export function createDialogueLineId(
   episodeId:
     string,
 

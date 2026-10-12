@@ -54,7 +54,9 @@ import {
 
 import {
   inspectDialogueDirectSeedAudioPlanHistory,
+  inspectDialogueDirectSeedAudioPlanLifecycles,
   type DialogueDirectSeedAudioHistoricalLifecycle,
+  type DialogueDirectSeedAudioPlanLifecycle,
   type InspectDialogueDirectSeedAudioPlanHistoryDependencies,
 } from "../src/dialogue/inspectDialogueDirectSeedAudioPlanHistory.js";
 
@@ -717,7 +719,7 @@ describe("BusyBookie direct SeedAudio plan-history inspection", () => {
       "node:fs/promises:readdir,",
       "node:path:basename,dirname,join,",
       "./classifyDialogueLifecycle.js:DialogueLifecycleClassification,",
-      "./dialogueDirectSeedAudioLifecyclePaths.js:createDialogueDirectSeedAudioCompletionPath,createDialogueDirectSeedAudioReservationPath,createDialogueDirectSeedAudioSubmissionPath,",
+      "./dialogueDirectSeedAudioLifecyclePaths.js:createDialogueDirectSeedAudioCompletionPath,createDialogueDirectSeedAudioLineDirectory,createDialogueDirectSeedAudioReservationPath,createDialogueDirectSeedAudioSubmissionPath,",
       "./dialogueReservation.schema.js:DialogueReservationPlanKeySchema,",
       "./inspectDialogueDirectSeedAudioLifecycle.js:inspectDialogueDirectSeedAudioLifecycle,",
     ]);
@@ -751,5 +753,275 @@ describe("BusyBookie direct SeedAudio plan-history inspection", () => {
         inspectLifecycle: typeof inspectDialogueDirectSeedAudioLifecycle;
       }>
     >();
+  });
+});
+
+describe("BusyBookie direct SeedAudio all-plan inspection", () => {
+  function inspectAllPlans(
+    mediaRoot: string,
+    dependencies?: InspectDialogueDirectSeedAudioPlanHistoryDependencies,
+  ): Promise<readonly DialogueDirectSeedAudioPlanLifecycle[]> {
+    return inspectDialogueDirectSeedAudioPlanLifecycles(
+      mediaRoot,
+      EPISODE_ID,
+      SCENE_ID,
+      SHOT_ID,
+      LINE_ID,
+      dependencies,
+    );
+  }
+
+  it("A returns a frozen empty result when the line directory does not exist", async () => {
+    const mediaRoot = await createMediaRoot();
+
+    const plans = await inspectAllPlans(mediaRoot);
+
+    expect(plans).toEqual([]);
+    expect(Object.isFrozen(plans)).toBe(true);
+  });
+
+  it("B-H returns every plan, including NOTHING and the would-be current plan, sorted ascending", async () => {
+    const mediaRoot = await createMediaRoot();
+    await complete(mediaRoot, PLAN_D);
+    await reserve(mediaRoot, PLAN_B);
+    await mkdir(planDirectory(mediaRoot, PLAN_E), { recursive: true });
+    await submit(mediaRoot, PLAN_A);
+    await reserve(mediaRoot, CURRENT_PLAN);
+
+    const plans = await inspectAllPlans(mediaRoot);
+
+    expect(plans.map((entry) => [entry.planKey, entry.lifecycle.state])).toEqual([
+      [PLAN_A, "SUBMITTED"],
+      [PLAN_B, "RESERVED_ONLY"],
+      [PLAN_D, "COMPLETED"],
+      [PLAN_E, "NOTHING"],
+      [CURRENT_PLAN, "RESERVED_ONLY"],
+    ]);
+    expect(Object.isFrozen(plans)).toBe(true);
+    for (const entry of plans) {
+      expect(Object.isFrozen(entry)).toBe(true);
+    }
+  });
+
+  it("I rejects an invalid planKey directory in the line directory", async () => {
+    const mediaRoot = await createMediaRoot();
+    await mkdir(join(historyRoot(mediaRoot), "old-plan"), { recursive: true });
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(
+      /Unexpected directory in direct SeedAudio history \(not a planKey\)/,
+    );
+  });
+
+  it("J rejects a non-directory entry in the line directory", async () => {
+    const mediaRoot = await createMediaRoot();
+    await mkdir(historyRoot(mediaRoot), { recursive: true });
+    await writeFile(join(historyRoot(mediaRoot), "notes.txt"), "x", "utf8");
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(
+      /Unexpected non-directory entry in direct SeedAudio history/,
+    );
+  });
+
+  it.each([
+    ["unexpected file", "notes.txt", false],
+    ["directory named like a canonical file", `${LINE_ID}.dialogue-reservation.json`, true],
+  ])("K rejects an %s inside any plan directory", async (_label, name, directory) => {
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, PLAN_A);
+    if (directory) {
+      await mkdir(join(planDirectory(mediaRoot, PLAN_B), name), { recursive: true });
+    } else {
+      await writeFile(join(planDirectory(mediaRoot, PLAN_A), name), "x", "utf8");
+    }
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(
+      /Unexpected (non-file )?entry in direct SeedAudio plan directory/,
+    );
+  });
+
+  it("T an unexpected file in the plan the caller treats as current also fails (no exclusion)", async () => {
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, CURRENT_PLAN);
+    await writeFile(join(planDirectory(mediaRoot, CURRENT_PLAN), "notes.txt"), "x", "utf8");
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(
+      /Unexpected entry in direct SeedAudio plan directory/,
+    );
+  });
+
+  it("canonical .part temp files are accepted", async () => {
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, PLAN_A);
+    await writeFile(
+      join(planDirectory(mediaRoot, PLAN_A), `${LINE_ID}.dialogue-submission.json${TEMP_SUFFIX}`),
+      "{",
+      "utf8",
+    );
+
+    const plans = await inspectAllPlans(mediaRoot);
+
+    expect(plans.map((entry) => entry.lifecycle.state)).toEqual(["RESERVED_ONLY"]);
+  });
+
+  it("L malformed lifecycle record fails hard", async () => {
+    const mediaRoot = await createMediaRoot();
+    const reservationPath = createDialogueDirectSeedAudioReservationPath(
+      mediaRoot,
+      EPISODE_ID,
+      SCENE_ID,
+      SHOT_ID,
+      LINE_ID,
+      PLAN_A,
+    );
+    await mkdir(dirname(reservationPath), { recursive: true });
+    await writeFile(reservationPath, "{not json", "utf8");
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(/not valid JSON/);
+  });
+
+  it("M orphan lifecycle chain fails hard", async () => {
+    const mediaRoot = await createMediaRoot();
+    await submit(mediaRoot, PLAN_A);
+    await rm(
+      createDialogueDirectSeedAudioReservationPath(mediaRoot, EPISODE_ID, SCENE_ID, SHOT_ID, LINE_ID, PLAN_A),
+    );
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(
+      "Dialogue lifecycle submission exists without a durable reservation.",
+    );
+  });
+
+  it("N identity contradiction with the plan-scoped path fails hard", async () => {
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, PLAN_A);
+    await mkdir(planDirectory(mediaRoot, PLAN_B), { recursive: true });
+    await writeFile(
+      createDialogueDirectSeedAudioReservationPath(mediaRoot, EPISODE_ID, SCENE_ID, SHOT_ID, LINE_ID, PLAN_B),
+      await readFile(
+        createDialogueDirectSeedAudioReservationPath(mediaRoot, EPISODE_ID, SCENE_ID, SHOT_ID, LINE_ID, PLAN_A),
+        "utf8",
+      ),
+      "utf8",
+    );
+
+    await expect(inspectAllPlans(mediaRoot)).rejects.toThrow(
+      /identity does not match its deterministic plan-scoped path/,
+    );
+  });
+
+  it("O/P history still excludes currentPlanKey and never inspects or enumerates its contents", async () => {
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, PLAN_A);
+    await reserve(mediaRoot, CURRENT_PLAN);
+    await writeFile(join(planDirectory(mediaRoot, CURRENT_PLAN), "notes.txt"), "x", "utf8");
+
+    const readDirectory = vi.fn(readdir);
+    const inspectLifecycle = vi.fn(inspectDialogueDirectSeedAudioLifecycle);
+    const history = await inspectHistory(mediaRoot, {
+      readDirectory: asReadDirectory(readDirectory),
+      inspectLifecycle,
+    });
+
+    expect(history.map((entry) => [entry.planKey, entry.lifecycle.state])).toEqual([[PLAN_A, "RESERVED_ONLY"]]);
+    expect(readDirectory.mock.calls.map((call) => call[0])).toEqual([
+      historyRoot(mediaRoot),
+      planDirectory(mediaRoot, PLAN_A),
+    ]);
+    expect(inspectLifecycle.mock.calls.map((call) => call[5])).toEqual([PLAN_A]);
+  });
+
+  it("Q/R/S history ordering, ENOENT and included-plan corruption behaviour are unchanged", async () => {
+    const empty = await createMediaRoot();
+    await expect(inspectHistory(empty)).resolves.toEqual([]);
+
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, PLAN_C);
+    await submit(mediaRoot, PLAN_A);
+    await reserve(mediaRoot, CURRENT_PLAN);
+    expect((await inspectHistory(mediaRoot)).map((entry) => entry.planKey)).toEqual([PLAN_A, PLAN_C]);
+
+    await writeFile(join(planDirectory(mediaRoot, PLAN_C), "notes.txt"), "x", "utf8");
+    await expect(inspectHistory(mediaRoot)).rejects.toThrow(
+      /Unexpected entry in historical direct SeedAudio plan directory/,
+    );
+  });
+
+  it("uses the injected seams with the line directory and every planKey, none excluded", async () => {
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, PLAN_B);
+    await reserve(mediaRoot, CURRENT_PLAN);
+    const readDirectory = vi.fn(readdir);
+    const classification = Object.freeze({ state: "NOTHING" as const });
+    const inspectLifecycle = vi.fn<
+      InspectDialogueDirectSeedAudioPlanHistoryDependencies["inspectLifecycle"]
+    >(async () => classification);
+
+    await inspectAllPlans(mediaRoot, { readDirectory: asReadDirectory(readDirectory), inspectLifecycle });
+
+    expect(readDirectory.mock.calls[0]![0]).toBe(
+      join(mediaRoot, "voices", EPISODE_ID, SHOT_ID, LINE_ID, "direct-seed-audio"),
+    );
+    expect(inspectLifecycle.mock.calls).toEqual([
+      [mediaRoot, EPISODE_ID, SCENE_ID, SHOT_ID, LINE_ID, PLAN_B],
+      [mediaRoot, EPISODE_ID, SCENE_ID, SHOT_ID, LINE_ID, CURRENT_PLAN],
+    ]);
+  });
+
+  it("propagates a non-ENOENT line-directory read failure unchanged", async () => {
+    const mediaRoot = await createMediaRoot();
+    const failure = Object.assign(new Error("controlled EACCES"), { code: "EACCES" });
+    const readDirectory = vi
+      .fn<InspectDialogueDirectSeedAudioPlanHistoryDependencies["readDirectory"]>()
+      .mockRejectedValue(failure);
+
+    await expect(
+      inspectAllPlans(mediaRoot, {
+        readDirectory: asReadDirectory(readDirectory),
+        inspectLifecycle: inspectDialogueDirectSeedAudioLifecycle,
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  it("validates identity before any read and never scans sibling lines", async () => {
+    const mediaRoot = await createMediaRoot();
+    const readDirectory = vi.fn(readdir);
+
+    await expect(
+      inspectDialogueDirectSeedAudioPlanLifecycles(mediaRoot, EPISODE_ID, SCENE_ID, SHOT_ID, "EP02_SC01_S03_L01", {
+        readDirectory: asReadDirectory(readDirectory),
+        inspectLifecycle: inspectDialogueDirectSeedAudioLifecycle,
+      }),
+    ).rejects.toThrow(/line identity does not match/);
+    expect(readDirectory).not.toHaveBeenCalled();
+
+    await mkdir(join(mediaRoot, "voices", EPISODE_ID, SHOT_ID, "EP02_SC01_S02_L02", "direct-seed-audio", "junk"), {
+      recursive: true,
+    });
+    await expect(inspectAllPlans(mediaRoot)).resolves.toEqual([]);
+  });
+
+  it("U performs no writes", async () => {
+    const mediaRoot = await createMediaRoot();
+    await complete(mediaRoot, PLAN_A);
+    await submit(mediaRoot, PLAN_B);
+    await mkdir(planDirectory(mediaRoot, PLAN_C), { recursive: true });
+    const before = await listTree(mediaRoot);
+
+    await inspectAllPlans(mediaRoot);
+
+    expect(await listTree(mediaRoot)).toEqual(before);
+  });
+
+  it("exposes the locked all-plan signature and result type", () => {
+    expectTypeOf(inspectDialogueDirectSeedAudioPlanLifecycles).parameters.toEqualTypeOf<
+      [string, string, string, string, string, (InspectDialogueDirectSeedAudioPlanHistoryDependencies | undefined)?]
+    >();
+    expectTypeOf(inspectDialogueDirectSeedAudioPlanLifecycles).returns.toEqualTypeOf<
+      Promise<readonly DialogueDirectSeedAudioPlanLifecycle[]>
+    >();
+    expectTypeOf<DialogueDirectSeedAudioPlanLifecycle>().toEqualTypeOf<
+      Readonly<{ planKey: string; lifecycle: DialogueLifecycleClassification }>
+    >();
+    expectTypeOf<DialogueDirectSeedAudioHistoricalLifecycle>().toEqualTypeOf<DialogueDirectSeedAudioPlanLifecycle>();
   });
 });

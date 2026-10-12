@@ -1,0 +1,1290 @@
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+
+import {
+  tmpdir,
+} from "node:os";
+
+import {
+  dirname,
+  join,
+} from "node:path";
+
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest";
+
+import type {
+  DialogueCompositionAudioPlan,
+} from "../src/dialogue/buildDialogueCompositionAudioPlan.js";
+
+import {
+  buildShotDialoguePlan,
+  type ShotDialoguePlan,
+} from "../src/dialogue/buildShotDialoguePlan.js";
+
+import type {
+  DialogueLifecycleClassification,
+} from "../src/dialogue/classifyDialogueLifecycle.js";
+
+import {
+  createDialogueDirectSeedAudioReservation,
+} from "../src/dialogue/createDialogueDirectSeedAudioReservation.js";
+
+import {
+  createDialogueDirectSeedAudioSubmission,
+} from "../src/dialogue/createDialogueDirectSeedAudioSubmission.js";
+
+import {
+  createDialoguePlacementDecision,
+} from "../src/dialogue/createDialoguePlacementDecision.js";
+
+import {
+  createDialogueDirectSeedAudioReservationPath,
+} from "../src/dialogue/dialogueDirectSeedAudioLifecyclePaths.js";
+
+import type {
+  DialoguePlacementDecision,
+} from "../src/dialogue/dialoguePlacementDecision.schema.js";
+
+import type {
+  inspectDialogueDirectSeedAudioLifecycle,
+} from "../src/dialogue/inspectDialogueDirectSeedAudioLifecycle.js";
+
+import {
+  inspectDialogueDirectSeedAudioPlanHistory,
+  type DialogueDirectSeedAudioHistoricalLifecycle,
+} from "../src/dialogue/inspectDialogueDirectSeedAudioPlanHistory.js";
+
+import type {
+  inspectDialogueLifecycle,
+} from "../src/dialogue/inspectDialogueLifecycle.js";
+
+import {
+  readLatestDialoguePlacementDecision,
+} from "../src/dialogue/readDialoguePlacementDecision.js";
+
+import {
+  resolveDurableDialogueCompositionAudioPlan,
+} from "../src/dialogue/resolveDurableDialogueCompositionAudioPlan.js";
+
+import {
+  resolveDurableShotDialogueCompositionState,
+  type DialogueStalePlanWork,
+  type DurableShotDialogueCompositionState,
+  type ResolveDurableShotDialogueCompositionStateDependencies,
+  type ResolveDurableShotDialogueCompositionStateInput,
+} from "../src/dialogue/resolveDurableShotDialogueCompositionState.js";
+
+import type {
+  VerifiedShotDialogueTiming,
+} from "../src/dialogue/verifyShotDialogueTiming.js";
+
+import type {
+  CharacterBible,
+} from "../src/schemas/character.schema.js";
+
+import type {
+  EpisodeManifest,
+} from "../src/schemas/episodeManifest.schema.js";
+
+import {
+  loadCharacterBible,
+} from "../src/validation/loadCharacterBible.js";
+
+import {
+  loadEpisodeManifest,
+} from "../src/validation/loadEpisodeManifest.js";
+
+// Pass-through spy: the real canonical planner runs, and calls are observable.
+vi.mock("../src/dialogue/buildShotDialoguePlan.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/dialogue/buildShotDialoguePlan.js")>();
+  return { ...actual, buildShotDialoguePlan: vi.fn(actual.buildShotDialoguePlan) };
+});
+
+const planBuilder = vi.mocked(buildShotDialoguePlan);
+
+type LifecycleState = DialogueLifecycleClassification["state"];
+type HistoryEntry = readonly [planKey: string, state: LifecycleState];
+
+const ffprobeExecutable = "controlled-ffprobe";
+const OLD_PLAN_A = "0".repeat(64);
+const OLD_PLAN_B = "1".repeat(64);
+const OLD_PLAN_C = "2".repeat(64);
+const L01 = "EP02_SC01_S02_L01";
+const L02 = "EP02_SC01_S02_L02";
+const L03 = "EP02_SC01_S02_L03";
+
+const roots: string[] = [];
+
+async function createMediaRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "busybookie-shot-dialogue-composition-state-"));
+  roots.push(root);
+  return root;
+}
+
+beforeEach(() => {
+  planBuilder.mockClear();
+});
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function fixtures(): Promise<{ episode: EpisodeManifest; bible: CharacterBible }> {
+  const [episode, bible] = await Promise.all([loadEpisodeManifest("EP02"), loadCharacterBible()]);
+  return { episode, bible };
+}
+
+// OLLIE is a RUNWAY_REFERENCE_AUDIO (Direct-SeedAudio) voice; KACEY and MONT are presets.
+function episodeWithDialogue(
+  base: EpisodeManifest,
+  characters: readonly ("OLLIE" | "KACEY" | "MONT")[],
+): EpisodeManifest {
+  const episode = structuredClone(base);
+  const shot = episode.scenes[0]!.shots[1]!;
+  const template = shot.dialogue[0]!;
+  shot.dialogue = characters.map((characterId, index) => ({
+    ...template,
+    characterId,
+    text: `Line ${index + 1} spoken by ${characterId}.`,
+  }));
+  shot.characters = [...new Set(characters)];
+  return episode;
+}
+
+async function canonicalPlanFor(
+  episode: EpisodeManifest,
+  bible: CharacterBible,
+  sceneIndex = 0,
+  shotIndex = 1,
+): Promise<ShotDialoguePlan> {
+  const actual = await vi.importActual<typeof import("../src/dialogue/buildShotDialoguePlan.js")>(
+    "../src/dialogue/buildShotDialoguePlan.js",
+  );
+  const scene = episode.scenes[sceneIndex]!;
+  return actual.buildShotDialoguePlan({
+    episodeId: episode.episodeId,
+    sceneId: scene.id,
+    shot: scene.shots[shotIndex]!,
+    bible,
+  });
+}
+
+function classification(
+  state: LifecycleState,
+  planKey: string,
+): DialogueLifecycleClassification {
+  if (state === "NOTHING") {
+    return Object.freeze({ state });
+  }
+  return Object.freeze({
+    state,
+    reservation: Object.freeze({ planKey, marker: `reservation-${planKey.slice(0, 4)}` }),
+    submission: Object.freeze({ marker: "submission" }),
+    completion: Object.freeze({ marker: "completion" }),
+  }) as unknown as DialogueLifecycleClassification;
+}
+
+const AUDIO_PLAN = Object.freeze({ marker: "b2d-audio-plan" }) as unknown as DialogueCompositionAudioPlan;
+const DECISION = Object.freeze({ marker: "placement-decision" }) as unknown as DialoguePlacementDecision;
+
+type Scenario = Readonly<{
+  current?: Readonly<Record<string, LifecycleState | DialogueLifecycleClassification>>;
+  history?: Readonly<Record<string, readonly HistoryEntry[]>>;
+  decision?: DialoguePlacementDecision | null;
+}>;
+
+function seams(planKey: string, scenario: Scenario = {}) {
+  const currentFor = (lineId: string): DialogueLifecycleClassification => {
+    const value = scenario.current?.[lineId] ?? "NOTHING";
+    return typeof value === "string" ? classification(value, planKey) : value;
+  };
+
+  const inspectLineLifecycle = vi.fn<typeof inspectDialogueLifecycle>(
+    async (_mediaRoot, _episodeId, _sceneId, _shotId, lineId) => currentFor(lineId),
+  );
+  const inspectDirectSeedAudioLineLifecycle = vi.fn<typeof inspectDialogueDirectSeedAudioLifecycle>(
+    async (_mediaRoot, _episodeId, _sceneId, _shotId, lineId) => currentFor(lineId),
+  );
+  const inspectDirectSeedAudioPlanHistory = vi.fn<typeof inspectDialogueDirectSeedAudioPlanHistory>(
+    async (_mediaRoot, _episodeId, _sceneId, _shotId, lineId) =>
+      Object.freeze(
+        (scenario.history?.[lineId] ?? []).map(([historicalPlanKey, state]) =>
+          Object.freeze({ planKey: historicalPlanKey, lifecycle: classification(state, historicalPlanKey) }),
+        ),
+      ),
+  );
+  const readLatestPlacementDecision = vi.fn<typeof readLatestDialoguePlacementDecision>(
+    async () => (scenario.decision === undefined ? null : scenario.decision),
+  );
+  const resolveCompositionAudioPlan = vi.fn<typeof resolveDurableDialogueCompositionAudioPlan>(
+    async () => AUDIO_PLAN,
+  );
+
+  const dependencies: ResolveDurableShotDialogueCompositionStateDependencies = {
+    inspectLineLifecycle,
+    inspectDirectSeedAudioLineLifecycle,
+    inspectDirectSeedAudioPlanHistory,
+    readLatestPlacementDecision,
+    resolveCompositionAudioPlan,
+  };
+
+  return {
+    dependencies,
+    inspectLineLifecycle,
+    inspectDirectSeedAudioLineLifecycle,
+    inspectDirectSeedAudioPlanHistory,
+    readLatestPlacementDecision,
+    resolveCompositionAudioPlan,
+  };
+}
+
+type Seams = ReturnType<typeof seams>;
+
+function expectNoReads(controlled: Seams): void {
+  expect(controlled.inspectLineLifecycle).not.toHaveBeenCalled();
+  expect(controlled.inspectDirectSeedAudioLineLifecycle).not.toHaveBeenCalled();
+  expect(controlled.inspectDirectSeedAudioPlanHistory).not.toHaveBeenCalled();
+  expect(controlled.readLatestPlacementDecision).not.toHaveBeenCalled();
+  expect(controlled.resolveCompositionAudioPlan).not.toHaveBeenCalled();
+}
+
+function expectNoPlacementPhase(controlled: Seams): void {
+  expect(controlled.readLatestPlacementDecision).not.toHaveBeenCalled();
+  expect(controlled.resolveCompositionAudioPlan).not.toHaveBeenCalled();
+}
+
+function input(
+  episode: EpisodeManifest,
+  bible: CharacterBible,
+  mediaRoot = "C:/controlled-media-root",
+  shotId = "S02",
+): ResolveDurableShotDialogueCompositionStateInput {
+  return { episode, shotId, bible, mediaRoot, ffprobeExecutable };
+}
+
+function expectFrozenArrays(state: DurableShotDialogueCompositionState): void {
+  expect(Object.isFrozen(state)).toBe(true);
+  for (const key of ["staleWork", "reservedLineIds", "submittedLineIds", "missingLineIds"] as const) {
+    if (key in state) {
+      const value = (state as Record<string, unknown>)[key] as readonly unknown[];
+      expect(Object.isFrozen(value)).toBe(true);
+      for (const item of value) {
+        if (typeof item === "object") {
+          expect(Object.isFrozen(item)).toBe(true);
+        }
+      }
+    }
+  }
+}
+
+// Shot-level precedence written as the Step-906 rule table (used by the
+// exhaustive table-driven case).
+function expectedStateFor(
+  states: readonly LifecycleState[],
+  stale: boolean,
+): DurableShotDialogueCompositionState["state"] {
+  if (stale) return "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED";
+  if (states.includes("RESERVED_ONLY")) return "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED";
+  if (states.includes("SUBMITTED")) return "DIALOGUE_RECONCILIATION_REQUIRED";
+  if (states.includes("NOTHING")) return "DIALOGUE_AUDIO_REQUIRED";
+  return "PLACEMENT_REQUIRED";
+}
+
+describe("C3 canonical shot authority", () => {
+  it("A fails hard when the shot id is absent from the episode", async () => {
+    const { episode, bible } = await fixtures();
+    const controlled = seams("f".repeat(64));
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible, undefined, "S99"), controlled.dependencies),
+    ).rejects.toThrow("Shot S99 was not found in episode EP02.");
+    expect(planBuilder).not.toHaveBeenCalled();
+    expectNoReads(controlled);
+  });
+
+  it("B fails hard when the shot id appears in more than one scene", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = structuredClone(base);
+    episode.scenes.push({ ...structuredClone(episode.scenes[0]!), id: "SC02", shots: [structuredClone(episode.scenes[0]!.shots[1]!)] });
+    const controlled = seams("f".repeat(64));
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toThrow("Shot S02 appears in more than one scene of episode EP02.");
+    expect(planBuilder).not.toHaveBeenCalled();
+    expectNoReads(controlled);
+  });
+
+  it("C returns NO_DIALOGUE from the canonical non-dialogue shot without planning or reads", async () => {
+    const { episode, bible } = await fixtures();
+    const controlled = seams("f".repeat(64));
+
+    const state = await resolveDurableShotDialogueCompositionState(
+      input(episode, bible, undefined, "S01"),
+      controlled.dependencies,
+    );
+
+    expect(state).toEqual({ state: "NO_DIALOGUE", episodeId: "EP02", sceneId: "SC01", shotId: "S01" });
+    expect(Object.isFrozen(state)).toBe(true);
+    expect(planBuilder).not.toHaveBeenCalled();
+    expectNoReads(controlled);
+  });
+
+  it("C/D derives NO_DIALOGUE from the episode's copy of the shot, not from any other shot content", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = structuredClone(base);
+    episode.scenes[0]!.shots[1]!.dialogue = [];
+    const controlled = seams("f".repeat(64));
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state.state).toBe("NO_DIALOGUE");
+    expect(planBuilder).not.toHaveBeenCalled();
+    expectNoReads(controlled);
+  });
+
+  it("D builds the plan from the canonical scene and Shot object stored in the episode", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["KACEY", "OLLIE"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey);
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(planBuilder).toHaveBeenCalledTimes(1);
+    const [planInput] = planBuilder.mock.calls[0]!;
+    expect(planInput.episodeId).toBe("EP02");
+    expect(planInput.sceneId).toBe("SC01");
+    expect(planInput.shot).toBe(episode.scenes[0]!.shots[1]);
+    expect(planInput.bible).toBe(bible);
+    expect(state).toMatchObject({ dialoguePlanKey: plan.planKey, missingLineIds: [L01, L02] });
+  });
+
+  it("D derives the scene id from the episode, including for a shot in a later scene", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = structuredClone(base);
+    const moved = episode.scenes[0]!.shots.splice(1, 1)[0]!;
+    episode.scenes.push({ ...structuredClone(episode.scenes[0]!), id: "SC03", shots: [moved] });
+    const plan = await canonicalPlanFor(episode, bible, 1, 0);
+    const controlled = seams(plan.planKey);
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(planBuilder.mock.calls[0]![0].sceneId).toBe("SC03");
+    expect(planBuilder.mock.calls[0]![0].shot).toBe(moved);
+    expect(state).toEqual({
+      state: "DIALOGUE_AUDIO_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC03",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      missingLineIds: ["EP02_SC03_S02_L01"],
+    });
+    expect(controlled.inspectDirectSeedAudioLineLifecycle).toHaveBeenCalledWith(
+      "C:/controlled-media-root",
+      "EP02",
+      "SC03",
+      "S02",
+      "EP02_SC03_S02_L01",
+      plan.planKey,
+    );
+  });
+
+  it("D exposes no Shot, scene, plan or lifecycle input", () => {
+    expectTypeOf<ResolveDurableShotDialogueCompositionStateInput>().toEqualTypeOf<
+      Readonly<{
+        episode: EpisodeManifest;
+        shotId: string;
+        bible: CharacterBible;
+        mediaRoot: string;
+        ffprobeExecutable: string;
+      }>
+    >();
+  });
+
+  it("E propagates canonical planning failures such as an unlocked voice", async () => {
+    const { episode: base, bible: baseBible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY"]);
+    const bible = structuredClone(baseBible);
+    const kacey = bible.characters.find((character) => character.id === "KACEY")!;
+    (kacey as { voice: unknown }).voice = {
+      selectionStatus: "PENDING",
+      provider: "RUNWAY",
+      voiceName: null,
+      deliveryTraits: ["young"],
+    };
+    const controlled = seams("f".repeat(64));
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toThrow();
+    expect(planBuilder).toHaveBeenCalledTimes(1);
+    expectNoReads(controlled);
+  });
+});
+
+describe("C3 current-plan lifecycle buckets", () => {
+  it("F all current lines NOTHING with no history -> DIALOGUE_AUDIO_REQUIRED in canonical order", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY", "OLLIE"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey);
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_AUDIO_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      missingLineIds: [L01, L02, L03],
+    });
+    expectFrozenArrays(state);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("G COMPLETED + NOTHING -> DIALOGUE_AUDIO_REQUIRED listing only NOTHING lines", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY", "MONT"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: "COMPLETED", [L03]: "COMPLETED" } });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_AUDIO_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      missingLineIds: [L02],
+    });
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("H current RESERVED_ONLY -> DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["KACEY", "OLLIE"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: "RESERVED_ONLY", [L02]: "COMPLETED" } });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      reservedLineIds: [L01],
+      submittedLineIds: [],
+      missingLineIds: [],
+    });
+    expectFrozenArrays(state);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("I current SUBMITTED without reserved -> DIALOGUE_RECONCILIATION_REQUIRED", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY", "MONT"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: "COMPLETED", [L02]: "SUBMITTED" } });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_RECONCILIATION_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      submittedLineIds: [L02],
+      missingLineIds: [L03],
+    });
+    expectFrozenArrays(state);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("J SUBMITTED + RESERVED_ONLY + NOTHING -> RESERVED state carrying every bucket", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY", "MONT"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: "SUBMITTED", [L02]: "NOTHING", [L03]: "RESERVED_ONLY" } });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      reservedLineIds: [L03],
+      submittedLineIds: [L01],
+      missingLineIds: [L02],
+    });
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("K corruption on a later line throws even when an earlier line is RESERVED_ONLY", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["KACEY", "MONT"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: "RESERVED_ONLY" } });
+    const corruption = new Error("Dialogue lifecycle submission exists without a durable reservation.");
+    controlled.inspectLineLifecycle.mockImplementation(async (_m, _e, _s, _sh, lineId) => {
+      if (lineId === L02) throw corruption;
+      return classification("RESERVED_ONLY", plan.planKey);
+    });
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toBe(corruption);
+    expect(controlled.inspectLineLifecycle.mock.calls.map((call) => call[4])).toEqual([L01, L02]);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("K corruption in a later Direct-SeedAudio current plan throws after an earlier SUBMITTED line", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["KACEY", "OLLIE"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: "SUBMITTED" } });
+    const corruption = new Error("controlled direct SeedAudio corruption");
+    controlled.inspectDirectSeedAudioLineLifecycle.mockRejectedValue(corruption);
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toBe(corruption);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("L preset lifecycle evidence with a stale reservation planKey fails hard", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["KACEY"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, { current: { [L01]: classification("COMPLETED", OLD_PLAN_A) } });
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toThrow(
+      `Dialogue lifecycle evidence for ${L01} belongs to dialogue plan ${OLD_PLAN_A}, not current canonical plan ${plan.planKey}.`,
+    );
+    expectNoPlacementPhase(controlled);
+  });
+
+  it.each(["RESERVED_ONLY", "SUBMITTED"] as const)(
+    "L stale preset %s evidence fails hard instead of becoming an intervention state",
+    async (stateName) => {
+      const { episode: base, bible } = await fixtures();
+      const episode = episodeWithDialogue(base, ["MONT", "KACEY"]);
+      const plan = await canonicalPlanFor(episode, bible);
+      const controlled = seams(plan.planKey, { current: { [L02]: classification(stateName, OLD_PLAN_B) } });
+
+      await expect(
+        resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+      ).rejects.toThrow(/belongs to dialogue plan/);
+    },
+  );
+
+  it("M/N dispatches Direct-SeedAudio lines to the plan-scoped and history inspectors, presets to the line inspector", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const mediaRoot = "C:/dispatch-media-root";
+    const controlled = seams(plan.planKey);
+
+    await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot), controlled.dependencies);
+
+    expect(controlled.inspectDirectSeedAudioLineLifecycle.mock.calls).toEqual([
+      [mediaRoot, "EP02", "SC01", "S02", L01, plan.planKey],
+    ]);
+    expect(controlled.inspectDirectSeedAudioPlanHistory.mock.calls).toEqual([
+      [mediaRoot, "EP02", "SC01", "S02", L01, plan.planKey],
+    ]);
+    expect(controlled.inspectLineLifecycle.mock.calls).toEqual([[mediaRoot, "EP02", "SC01", "S02", L02]]);
+  });
+
+  it("AH exhaustive mixed current states across three lines follow the locked precedence", async () => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY", "MONT"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const all: readonly LifecycleState[] = ["NOTHING", "RESERVED_ONLY", "SUBMITTED", "COMPLETED"];
+    const lineIds = [L01, L02, L03];
+    let cases = 0;
+
+    for (const stale of [false, true]) {
+      for (const a of all) {
+        for (const b of all) {
+          for (const c of all) {
+            const states = [a, b, c];
+            const controlled = seams(plan.planKey, {
+              current: { [L01]: a, [L02]: b, [L03]: c },
+              history: stale ? { [L01]: [[OLD_PLAN_A, "SUBMITTED"]] } : {},
+            });
+
+            const result = await resolveDurableShotDialogueCompositionState(
+              input(episode, bible),
+              controlled.dependencies,
+            );
+
+            const expected = expectedStateFor(states, stale);
+            expect(result.state, `${states.join(",")} stale=${stale}`).toBe(expected);
+
+            const idsIn = (target: LifecycleState) => lineIds.filter((_id, index) => states[index] === target);
+            if ("missingLineIds" in result) {
+              expect(result.missingLineIds).toEqual(idsIn("NOTHING"));
+            }
+            if ("submittedLineIds" in result) {
+              expect(result.submittedLineIds).toEqual(idsIn("SUBMITTED"));
+            }
+            if ("reservedLineIds" in result) {
+              expect(result.reservedLineIds).toEqual(idsIn("RESERVED_ONLY"));
+            }
+            if (result.state === "DIALOGUE_AUDIO_REQUIRED") {
+              expect(states.every((state) => state === "NOTHING" || state === "COMPLETED")).toBe(true);
+              expect(stale).toBe(false);
+            }
+            expect(controlled.inspectLineLifecycle).toHaveBeenCalledTimes(2);
+            expect(controlled.inspectDirectSeedAudioLineLifecycle).toHaveBeenCalledTimes(1);
+            expect(controlled.inspectDirectSeedAudioPlanHistory).toHaveBeenCalledTimes(1);
+            expect(controlled.readLatestPlacementDecision).toHaveBeenCalledTimes(
+              expected === "PLACEMENT_REQUIRED" ? 1 : 0,
+            );
+            expect(controlled.resolveCompositionAudioPlan).not.toHaveBeenCalled();
+            cases += 1;
+          }
+        }
+      }
+    }
+
+    expect(cases).toBe(128);
+  });
+});
+
+describe("C3 cross-plan Direct-SeedAudio guard", () => {
+  async function directSeedShot() {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY", "OLLIE"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    return { episode, bible, plan };
+  }
+
+  it.each(["RESERVED_ONLY", "SUBMITTED"] as const)(
+    "O/P historical %s + current NOTHING -> STALE, never DIALOGUE_AUDIO_REQUIRED",
+    async (historicalState) => {
+      const { episode, bible, plan } = await directSeedShot();
+      const controlled = seams(plan.planKey, { history: { [L01]: [[OLD_PLAN_A, historicalState]] } });
+
+      const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+      expect(state).toEqual({
+        state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
+        episodeId: "EP02",
+        sceneId: "SC01",
+        shotId: "S02",
+        dialoguePlanKey: plan.planKey,
+        staleWork: [{ dialogueLineId: L01, planKey: OLD_PLAN_A, state: historicalState }],
+        reservedLineIds: [],
+        submittedLineIds: [],
+        missingLineIds: [L01, L02, L03],
+      });
+      expectFrozenArrays(state);
+      expectNoPlacementPhase(controlled);
+    },
+  );
+
+  it("Q historical COMPLETED only + current NOTHING -> DIALOGUE_AUDIO_REQUIRED, history not reported", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey, {
+      history: { [L01]: [[OLD_PLAN_A, "COMPLETED"]], [L03]: [[OLD_PLAN_B, "COMPLETED"], [OLD_PLAN_C, "NOTHING"]] },
+    });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_AUDIO_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      missingLineIds: [L01, L02, L03],
+    });
+  });
+
+  it("R historical SUBMITTED + current RESERVED_ONLY -> STALE carrying the current reserved line", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey, {
+      current: { [L01]: "RESERVED_ONLY", [L02]: "COMPLETED", [L03]: "COMPLETED" },
+      history: { [L01]: [[OLD_PLAN_A, "SUBMITTED"]] },
+    });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toMatchObject({
+      state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
+      staleWork: [{ dialogueLineId: L01, planKey: OLD_PLAN_A, state: "SUBMITTED" }],
+      reservedLineIds: [L01],
+      submittedLineIds: [],
+      missingLineIds: [],
+    });
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("S historical active + current SUBMITTED -> STALE outranks reconciliation", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey, {
+      current: { [L01]: "COMPLETED", [L02]: "SUBMITTED", [L03]: "SUBMITTED" },
+      history: { [L03]: [[OLD_PLAN_B, "RESERVED_ONLY"]] },
+    });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toMatchObject({
+      state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
+      staleWork: [{ dialogueLineId: L03, planKey: OLD_PLAN_B, state: "RESERVED_ONLY" }],
+      reservedLineIds: [],
+      submittedLineIds: [L02, L03],
+      missingLineIds: [],
+    });
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("T/AI reports every historical active plan in canonical-line then planKey order; COMPLETED hides nothing", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey, {
+      current: { [L01]: "COMPLETED", [L02]: "COMPLETED", [L03]: "COMPLETED" },
+      history: {
+        [L01]: [
+          [OLD_PLAN_A, "COMPLETED"],
+          [OLD_PLAN_B, "SUBMITTED"],
+          [OLD_PLAN_C, "RESERVED_ONLY"],
+        ],
+        [L03]: [
+          [OLD_PLAN_A, "RESERVED_ONLY"],
+          [OLD_PLAN_B, "COMPLETED"],
+          [OLD_PLAN_C, "SUBMITTED"],
+        ],
+      },
+      decision: DECISION,
+    });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      staleWork: [
+        { dialogueLineId: L01, planKey: OLD_PLAN_B, state: "SUBMITTED" },
+        { dialogueLineId: L01, planKey: OLD_PLAN_C, state: "RESERVED_ONLY" },
+        { dialogueLineId: L03, planKey: OLD_PLAN_A, state: "RESERVED_ONLY" },
+        { dialogueLineId: L03, planKey: OLD_PLAN_C, state: "SUBMITTED" },
+      ],
+      reservedLineIds: [],
+      submittedLineIds: [],
+      missingLineIds: [],
+    });
+    expectFrozenArrays(state);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("U historical active work on a later line is never hidden by an earlier ordinary line", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey, {
+      current: { [L01]: "RESERVED_ONLY", [L02]: "SUBMITTED" },
+      history: { [L03]: [[OLD_PLAN_A, "SUBMITTED"]] },
+    });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state).toMatchObject({
+      state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
+      staleWork: [{ dialogueLineId: L03, planKey: OLD_PLAN_A, state: "SUBMITTED" }],
+      reservedLineIds: [L01],
+      submittedLineIds: [L02],
+      missingLineIds: [L03],
+    });
+  });
+
+  it("V a history-inspector failure is a hard failure, never an ordinary state", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey, { current: { [L01]: "RESERVED_ONLY" } });
+    const corruption = new Error("Unexpected entry in historical direct SeedAudio plan directory: x");
+    controlled.inspectDirectSeedAudioPlanHistory.mockImplementation(async (_m, _e, _s, _sh, lineId) => {
+      if (lineId === L03) throw corruption;
+      return Object.freeze([]);
+    });
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toBe(corruption);
+    expect(controlled.inspectDirectSeedAudioPlanHistory).toHaveBeenCalledTimes(2);
+    expectNoPlacementPhase(controlled);
+  });
+
+  it("G inspects every history even when the current plan is NOTHING before deciding", async () => {
+    const { episode, bible, plan } = await directSeedShot();
+    const controlled = seams(plan.planKey);
+
+    await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(controlled.inspectDirectSeedAudioPlanHistory.mock.calls.map((call) => call[4])).toEqual([L01, L03]);
+    expect(controlled.inspectDirectSeedAudioLineLifecycle.mock.calls.map((call) => call[4])).toEqual([L01, L03]);
+  });
+});
+
+// Real lifecycle creators, real readers and the real history helper on a
+// temporary media root; the canonical EP02/S02 line is Direct-SeedAudio.
+describe("C3 cross-plan guard with real durable evidence", () => {
+  const REFERENCE_AUDIO_SHA256 = "ad7bc6a50675bddc74a4885f290667fad1076c5cd3d9844eb7ff2d84b0f94a2f";
+
+  function planSnapshot(planKey: string) {
+    return {
+      planKey,
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialogueLineId: L01,
+      lineNumber: 1,
+      characterId: "OLLIE",
+      characterName: "Ollie",
+      text: "Look what I found!",
+      deliveryNotes: "Curious, excited and gentle.",
+      voice: {
+        selectionStatus: "LOCKED",
+        provider: "RUNWAY",
+        voiceName: "Ollie",
+        deliveryTraits: ["young", "curious", "warm", "friendly", "natural"] as string[],
+        executionMode: "RUNWAY_REFERENCE_AUDIO",
+        referenceAudio: {
+          assetId: "OLLIE_VOICE_REFERENCE_V1",
+          mediaRootRelativePath: "references/voices/OLLIE/ollie-reference-v1.mp3",
+          bytes: 231_593,
+          sha256: REFERENCE_AUDIO_SHA256,
+          contentType: "audio/mpeg",
+          durationSeconds: 14.4,
+          codecName: "mp3",
+          sampleRateHz: 44_100,
+          channels: 1,
+        },
+      },
+    } as const;
+  }
+
+  async function reserve(mediaRoot: string, planKey: string): Promise<void> {
+    await createDialogueDirectSeedAudioReservation(
+      mediaRoot,
+      { episodeId: "EP02", sceneId: "SC01", shotId: "S02", dialogueLineId: L01, planKey, provider: "RUNWAY" },
+      {
+        now: () => "2026-10-06T17:00:00.000Z",
+        createReservationId: () => `22222222-2222-4222-8222-${planKey.slice(0, 12)}`,
+      },
+    );
+  }
+
+  async function submit(mediaRoot: string, planKey: string): Promise<void> {
+    await reserve(mediaRoot, planKey);
+    await createDialogueDirectSeedAudioSubmission(
+      mediaRoot,
+      {
+        reservationId: `22222222-2222-4222-8222-${planKey.slice(0, 12)}`,
+        episodeId: "EP02",
+        sceneId: "SC01",
+        shotId: "S02",
+        dialogueLineId: L01,
+        planKey,
+        provider: "RUNWAY",
+        providerExecutionId: `task-c3-${planKey.slice(0, 8)}`,
+        providerEstimatedCredits: 5.25,
+        recoveryMetadata: {
+          request: {
+            model: "seed_audio",
+            promptText: "Look what I found!",
+            outputFormat: "mp3",
+            sampleRate: 44_100,
+            voice: { type: "reference-audio", audioUri: "runway://uploads/ollie-reference-v1" },
+          },
+          localCreditCeiling: 30,
+          plan: planSnapshot(planKey),
+        },
+      },
+      { now: () => "2026-10-06T17:01:00.000Z" },
+    );
+  }
+
+  it.each([
+    ["RESERVED_ONLY", reserve],
+    ["SUBMITTED", submit],
+  ] as const)("O/P real historical %s + current NOTHING -> STALE through default dependencies", async (stateName, create) => {
+    const { episode, bible } = await fixtures();
+    const plan = await canonicalPlanFor(episode, bible);
+    const mediaRoot = await createMediaRoot();
+    await create(mediaRoot, OLD_PLAN_A);
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot));
+
+    expect(state).toEqual({
+      state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      staleWork: [{ dialogueLineId: L01, planKey: OLD_PLAN_A, state: stateName }],
+      reservedLineIds: [],
+      submittedLineIds: [],
+      missingLineIds: [L01],
+    });
+  });
+
+  it("real current-plan RESERVED_ONLY with no history -> RESERVED intervention", async () => {
+    const { episode, bible } = await fixtures();
+    const plan = await canonicalPlanFor(episode, bible);
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, plan.planKey);
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot));
+
+    expect(state).toMatchObject({
+      state: "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED",
+      reservedLineIds: [L01],
+      missingLineIds: [],
+    });
+  });
+
+  it("real empty historical plan directory (NOTHING) does not block current generation", async () => {
+    const { episode, bible } = await fixtures();
+    const plan = await canonicalPlanFor(episode, bible);
+    const mediaRoot = await createMediaRoot();
+    await mkdir(
+      dirname(createDialogueDirectSeedAudioReservationPath(mediaRoot, "EP02", "SC01", "S02", L01, OLD_PLAN_A)),
+      { recursive: true },
+    );
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot));
+
+    expect(state).toEqual({
+      state: "DIALOGUE_AUDIO_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      missingLineIds: [L01],
+    });
+  });
+
+  it("V real corrupt historical evidence throws instead of DIALOGUE_AUDIO_REQUIRED", async () => {
+    const { episode, bible } = await fixtures();
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, OLD_PLAN_A);
+    const reservationPath = createDialogueDirectSeedAudioReservationPath(mediaRoot, "EP02", "SC01", "S02", L01, OLD_PLAN_A);
+    await writeFile(reservationPath, "{corrupt", "utf8");
+
+    await expect(resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot))).rejects.toThrow(
+      /not valid JSON/,
+    );
+  });
+
+  it("V real stray entry in the history root throws", async () => {
+    const { episode, bible } = await fixtures();
+    const mediaRoot = await createMediaRoot();
+    await reserve(mediaRoot, OLD_PLAN_A);
+    const historyRoot = dirname(
+      dirname(createDialogueDirectSeedAudioReservationPath(mediaRoot, "EP02", "SC01", "S02", L01, OLD_PLAN_A)),
+    );
+    await writeFile(join(historyRoot, "stray.json"), "{}", "utf8");
+
+    await expect(resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot))).rejects.toThrow(
+      /Unexpected non-directory entry in direct SeedAudio history/,
+    );
+  });
+
+  it("R real resolution performs no writes", async () => {
+    const { episode, bible } = await fixtures();
+    const mediaRoot = await createMediaRoot();
+    await submit(mediaRoot, OLD_PLAN_A);
+    const list = async () =>
+      (await readdir(mediaRoot, { recursive: true, withFileTypes: true }))
+        .map((entry) => join(entry.parentPath, entry.name))
+        .sort();
+    const before = await list();
+
+    await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot));
+
+    expect(await list()).toEqual(before);
+  });
+});
+
+describe("C3 placement and B2d phase", () => {
+  async function allCompleted(characters: readonly ("OLLIE" | "KACEY" | "MONT")[], scenario: Scenario = {}) {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, characters);
+    const plan = await canonicalPlanFor(episode, bible);
+    const current = Object.fromEntries(plan.lines.map((line) => [line.dialogueLineId, "COMPLETED" as const]));
+    const controlled = seams(plan.planKey, { current, ...scenario });
+    return { episode, bible, plan, controlled };
+  }
+
+  it.each([
+    ["preset", ["KACEY", "MONT"]],
+    ["Direct-SeedAudio", ["OLLIE"]],
+    ["mixed", ["OLLIE", "KACEY"]],
+  ] as const)("W all current %s lines COMPLETED + no placement -> PLACEMENT_REQUIRED without B2d", async (_label, characters) => {
+    const { episode, bible, plan, controlled } = await allCompleted(characters);
+    const mediaRoot = "C:/placement-media-root";
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "PLACEMENT_REQUIRED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+    });
+    expect(Object.isFrozen(state)).toBe(true);
+    expect(controlled.readLatestPlacementDecision.mock.calls).toEqual([[mediaRoot, "EP02", "SC01", "S02"]]);
+    expect(controlled.resolveCompositionAudioPlan).not.toHaveBeenCalled();
+  });
+
+  it("X a placement-reader failure is a hard failure", async () => {
+    const { episode, bible, controlled } = await allCompleted(["OLLIE", "KACEY"]);
+    const corruption = new Error("Dialogue placement decision revision sequence is not contiguous");
+    controlled.readLatestPlacementDecision.mockRejectedValue(corruption);
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toBe(corruption);
+    expect(controlled.resolveCompositionAudioPlan).not.toHaveBeenCalled();
+  });
+
+  it("Y placement exists -> B2d with the exact current plan -> COMPOSITION_AUDIO_RESOLVED with B2d's object", async () => {
+    const { episode, bible, plan, controlled } = await allCompleted(["OLLIE", "KACEY"], { decision: DECISION });
+    const mediaRoot = "C:/b2d-media-root";
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot), controlled.dependencies);
+
+    expect(state).toEqual({
+      state: "COMPOSITION_AUDIO_RESOLVED",
+      episodeId: "EP02",
+      sceneId: "SC01",
+      shotId: "S02",
+      dialoguePlanKey: plan.planKey,
+      audioPlan: AUDIO_PLAN,
+    });
+    expect(state.state === "COMPOSITION_AUDIO_RESOLVED" && state.audioPlan).toBe(AUDIO_PLAN);
+    expect(Object.isFrozen(state)).toBe(true);
+    expect(controlled.resolveCompositionAudioPlan).toHaveBeenCalledTimes(1);
+    expect(controlled.resolveCompositionAudioPlan.mock.calls[0]).toEqual([
+      { mediaRoot, ffprobeExecutable, dialoguePlan: plan },
+    ]);
+    expect(Object.keys(controlled.resolveCompositionAudioPlan.mock.calls[0]![0]).sort()).toEqual([
+      "dialoguePlan",
+      "ffprobeExecutable",
+      "mediaRoot",
+    ]);
+  });
+
+  it("Z every B2d failure propagates unchanged and never becomes PLACEMENT_REQUIRED", async () => {
+    const { episode, bible, controlled } = await allCompleted(["KACEY"], { decision: DECISION });
+    const failure = new Error("Durable dialogue placement decision revision 1 for EP02/SC01/S02 is stale");
+    controlled.resolveCompositionAudioPlan.mockRejectedValue(failure);
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies),
+    ).rejects.toBe(failure);
+  });
+
+  it("Z real B2d rejects a durable placement decision for a stale dialogue plan", async () => {
+    const { episode, bible, plan, controlled } = await allCompleted(["OLLIE"]);
+    const mediaRoot = await createMediaRoot();
+    const stalePlan = await canonicalPlanFor(episodeWithDialogue(episode, ["OLLIE", "OLLIE"]), bible);
+    const timing: VerifiedShotDialogueTiming = {
+      schemaVersion: "1.0",
+      timingMode: "AGGREGATE_ONLY",
+      episodeId: stalePlan.episodeId,
+      sceneId: stalePlan.sceneId,
+      shotId: stalePlan.shotId,
+      planKey: stalePlan.planKey,
+      shotDurationSeconds: stalePlan.shotDurationSeconds,
+      durationToleranceSeconds: 0.000001,
+      totalSpeechDurationSeconds: 3,
+      remainingDurationSeconds: stalePlan.shotDurationSeconds - 3,
+      lines: stalePlan.lines.map((line, index) => ({
+        lineNumber: line.lineNumber,
+        dialogueLineId: line.dialogueLineId,
+        sourceAudioPath: `controlled-media-root/voices/${line.dialogueLineId}.audio`,
+        sourceBytes: 1000 + index,
+        sourceSha256: String(index + 1).repeat(64),
+        durationSeconds: 1.5,
+      })),
+    };
+    await createDialoguePlacementDecision(
+      mediaRoot,
+      {
+        dialoguePlan: stalePlan,
+        timing,
+        placements: stalePlan.lines.map((line, index) => ({
+          dialogueLineId: line.dialogueLineId,
+          startSeconds: 0.5 + index * 2,
+        })),
+      },
+      { now: () => "2026-10-11T12:00:00.000Z" },
+    );
+    expect(stalePlan.planKey).not.toBe(plan.planKey);
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot), {
+        ...controlled.dependencies,
+        readLatestPlacementDecision: readLatestDialoguePlacementDecision,
+        resolveCompositionAudioPlan: resolveDurableDialogueCompositionAudioPlan,
+      }),
+    ).rejects.toThrow(/is stale: dialoguePlanKey/);
+  });
+
+  it("Z real B2d failure when its own re-read finds no decision is not downgraded", async () => {
+    const { episode, bible, controlled } = await allCompleted(["KACEY"], { decision: DECISION });
+    const mediaRoot = await createMediaRoot();
+
+    await expect(
+      resolveDurableShotDialogueCompositionState(input(episode, bible, mediaRoot), {
+        ...controlled.dependencies,
+        resolveCompositionAudioPlan: resolveDurableDialogueCompositionAudioPlan,
+      }),
+    ).rejects.toThrow(/requires a placement decision for EP02\/SC01\/S02; none exists/);
+  });
+
+  it.each([
+    ["stale", { history: { [L01]: [[OLD_PLAN_A, "RESERVED_ONLY"]] as const } }],
+    ["reserved", { current: { [L01]: "RESERVED_ONLY" } }],
+    ["submitted", { current: { [L01]: "SUBMITTED" } }],
+    ["missing", { current: { [L01]: "NOTHING" } }],
+  ] as const)("AA placement and B2d are never reached with %s work", async (_label, override) => {
+    const { episode: base, bible } = await fixtures();
+    const episode = episodeWithDialogue(base, ["OLLIE", "KACEY"]);
+    const plan = await canonicalPlanFor(episode, bible);
+    const controlled = seams(plan.planKey, {
+      decision: DECISION,
+      ...override,
+      current: { [L01]: "COMPLETED", [L02]: "COMPLETED", ...("current" in override ? override.current : {}) },
+    });
+
+    const state = await resolveDurableShotDialogueCompositionState(input(episode, bible), controlled.dependencies);
+
+    expect(state.state).not.toBe("PLACEMENT_REQUIRED");
+    expect(state.state).not.toBe("COMPOSITION_AUDIO_RESOLVED");
+    expectNoPlacementPhase(controlled);
+  });
+});
+
+describe("C3 contract and security boundary", () => {
+  const sourceUrl = new URL("../src/dialogue/resolveDurableShotDialogueCompositionState.ts", import.meta.url);
+
+  it("AB-AF imports only the locked read-only components", async () => {
+    const source = await readFile(sourceUrl, "utf8");
+    const imports = [...source.matchAll(/import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"([^"]+)"/g)].map(
+      (match) => `${match[2]}:${match[1]!.replace(/\s+/g, "")}`,
+    );
+
+    expect(imports).toEqual([
+      "../schemas/character.schema.js:CharacterBible,",
+      "../schemas/episodeManifest.schema.js:EpisodeManifest,",
+      "./buildDialogueCompositionAudioPlan.js:DialogueCompositionAudioPlan,",
+      "./buildShotDialoguePlan.js:buildShotDialoguePlan,",
+      "./inspectDialogueDirectSeedAudioLifecycle.js:inspectDialogueDirectSeedAudioLifecycle,",
+      "./inspectDialogueDirectSeedAudioPlanHistory.js:inspectDialogueDirectSeedAudioPlanHistory,",
+      "./inspectDialogueLifecycle.js:inspectDialogueLifecycle,",
+      "./readDialoguePlacementDecision.js:readLatestDialoguePlacementDecision,",
+      "./resolveDurableDialogueCompositionAudioPlan.js:resolveDurableDialogueCompositionAudioPlan,",
+    ]);
+    expect(source).not.toMatch(/\bimport\s*\(/);
+    expect(source).not.toMatch(/node:child_process|node:fs|\bspawn\b|\bexecFile\b|\bfetch\s*\(/);
+    expect(source).not.toMatch(
+      /create(Dialogue|Runway)\w*|reconcile\w*\s*\(|recover\w*\s*\(|confirm\w*|executeDialogue\w*|render\w*\s*\(|writeFile|mkdir|unlink|coordinat\w*/i,
+    );
+  });
+
+  it("AG has no catch blocks and never inspects error messages", async () => {
+    const source = await readFile(sourceUrl, "utf8");
+
+    expect(source).not.toMatch(/\btry\b|\bcatch\b|\.catch\s*\(|\.message\b|instanceof\s+Error/);
+  });
+
+  it("AB-AE exposes exactly the five read-only dependency seams", () => {
+    expectTypeOf<ResolveDurableShotDialogueCompositionStateDependencies>().toEqualTypeOf<
+      Readonly<{
+        inspectLineLifecycle: typeof inspectDialogueLifecycle;
+        inspectDirectSeedAudioLineLifecycle: typeof inspectDialogueDirectSeedAudioLifecycle;
+        inspectDirectSeedAudioPlanHistory: typeof inspectDialogueDirectSeedAudioPlanHistory;
+        readLatestPlacementDecision: typeof readLatestDialoguePlacementDecision;
+        resolveCompositionAudioPlan: typeof resolveDurableDialogueCompositionAudioPlan;
+      }>
+    >();
+    expectTypeOf(resolveDurableShotDialogueCompositionState).parameters.toEqualTypeOf<
+      [
+        ResolveDurableShotDialogueCompositionStateInput,
+        (ResolveDurableShotDialogueCompositionStateDependencies | undefined)?,
+      ]
+    >();
+  });
+
+  it("AK exposes exactly the seven locked workflow states and payloads", () => {
+    expectTypeOf<DurableShotDialogueCompositionState["state"]>().toEqualTypeOf<
+      | "NO_DIALOGUE"
+      | "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED"
+      | "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED"
+      | "DIALOGUE_RECONCILIATION_REQUIRED"
+      | "DIALOGUE_AUDIO_REQUIRED"
+      | "PLACEMENT_REQUIRED"
+      | "COMPOSITION_AUDIO_RESOLVED"
+    >();
+    expectTypeOf<DialogueStalePlanWork>().toEqualTypeOf<
+      Readonly<{ dialogueLineId: string; planKey: string; state: "RESERVED_ONLY" | "SUBMITTED" }>
+    >();
+    expectTypeOf<Extract<DurableShotDialogueCompositionState, { state: "DIALOGUE_AUDIO_REQUIRED" }>>().toEqualTypeOf<
+      Readonly<{
+        state: "DIALOGUE_AUDIO_REQUIRED";
+        episodeId: string;
+        sceneId: string;
+        shotId: string;
+        dialoguePlanKey: string;
+        missingLineIds: readonly string[];
+      }>
+    >();
+    expectTypeOf<
+      Extract<DurableShotDialogueCompositionState, { state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED" }>
+    >().toEqualTypeOf<
+      Readonly<{
+        state: "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED";
+        episodeId: string;
+        sceneId: string;
+        shotId: string;
+        dialoguePlanKey: string;
+        staleWork: readonly DialogueStalePlanWork[];
+        reservedLineIds: readonly string[];
+        submittedLineIds: readonly string[];
+        missingLineIds: readonly string[];
+      }>
+    >();
+    expectTypeOf<
+      Extract<DurableShotDialogueCompositionState, { state: "COMPOSITION_AUDIO_RESOLVED" }>["audioPlan"]
+    >().toEqualTypeOf<DialogueCompositionAudioPlan>();
+    expectTypeOf<DialogueDirectSeedAudioHistoricalLifecycle["lifecycle"]>().toEqualTypeOf<DialogueLifecycleClassification>();
+  });
+});

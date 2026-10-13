@@ -1,0 +1,16 @@
+.pageHeader {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-7);
+}
+
+.title {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-xl);
+}
+
+.description {
+  max-width: 48rem;
+  color: var(--color-text-secondary);
+}

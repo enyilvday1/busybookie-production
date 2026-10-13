@@ -1,0 +1,55 @@
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "header"
+    "main";
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.header {
+  grid-area: header;
+  min-width: 0;
+}
+
+.sidebar {
+  display: none;
+  grid-area: sidebar;
+}
+
+.main {
+  grid-area: main;
+  min-width: 0;
+  outline: none;
+}
+
+.main:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.content {
+  max-width: var(--content-max-width);
+  padding: var(--space-6) var(--space-5);
+}
+
+@media (min-width: 64rem) {
+  .shell {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    grid-template-areas:
+      "sidebar header"
+      "sidebar main";
+  }
+
+  .sidebar {
+    display: block;
+    border-right: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+
+  .content {
+    padding: var(--space-8) var(--space-8);
+  }
+}

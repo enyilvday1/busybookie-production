@@ -1,0 +1,38 @@
+.nav {
+  padding: var(--space-4) var(--space-3);
+}
+
+.list {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+}
+
+.link:hover {
+  background: var(--color-neutral-bg);
+  color: var(--color-text);
+}
+
+/* Current location (interaction accent), never a production status. */
+.link[aria-current="page"] {
+  background: var(--color-neutral-bg);
+  color: var(--color-accent);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+@media (pointer: coarse) {
+  .link {
+    min-height: var(--touch-target);
+  }
+}

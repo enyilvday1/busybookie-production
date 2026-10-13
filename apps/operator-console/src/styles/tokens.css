@@ -1,0 +1,117 @@
+/*
+ * Operator console design tokens: the single source for color, type,
+ * spacing, radius, depth and motion. Component styles consume only these
+ * custom properties.
+ *
+ * Accent and focus are INTERACTION-ONLY: links, the active navigation item,
+ * primary/selected control emphasis and the focus ring. They are never a
+ * production status tone. Status uses only the success, warning, danger and
+ * info families (plus neutral text tokens).
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --color-canvas: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-border: #d9dde3;
+  --color-border-strong: #7d8794;
+  --color-text: #14181f;
+  --color-text-secondary: #3d4654;
+  --color-text-muted: #5f6b7a;
+  --color-accent: #2952cc;
+  --color-accent-contrast: #ffffff;
+  --color-focus: #2952cc;
+  --color-success: #1e7a46;
+  --color-success-bg: #e8f5ee;
+  --color-warning: #8a5a00;
+  --color-warning-bg: #fff4d6;
+  --color-danger: #b42318;
+  --color-danger-bg: #fdecea;
+  --color-info: #1f5fad;
+  --color-info-bg: #e8f0fb;
+  --color-neutral-bg: #eef0f3;
+  --color-disabled: #7d8794;
+  --color-scrim: rgb(15 18 22 / 0.48);
+
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --leading-xs: 1rem;
+  --text-sm: 0.8125rem;
+  --leading-sm: 1.25rem;
+  --text-base: 0.875rem;
+  --leading-base: 1.25rem;
+  --text-md: 1rem;
+  --leading-md: 1.5rem;
+  --text-lg: 1.125rem;
+  --leading-lg: 1.5rem;
+  --text-xl: 1.375rem;
+  --leading-xl: 1.75rem;
+  --text-2xl: 1.75rem;
+  --leading-2xl: 2.25rem;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --space-0: 0;
+  --space-1: 0.125rem;
+  --space-2: 0.25rem;
+  --space-3: 0.5rem;
+  --space-4: 0.75rem;
+  --space-5: 1rem;
+  --space-6: 1.25rem;
+  --space-7: 1.5rem;
+  --space-8: 2rem;
+  --space-9: 2.5rem;
+  --space-10: 3rem;
+
+  --control-height: 2rem;
+  --control-height-primary: 2.25rem;
+  --touch-target: 2.75rem;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-full: 999px;
+
+  --shadow-overlay: 0 1px 2px rgb(15 18 22 / 0.08), 0 8px 24px rgb(15 18 22 / 0.16);
+
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  --sidebar-width: 15rem;
+  --content-max-width: 90rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: #0f1216;
+    --color-surface: #161a20;
+    --color-surface-raised: #1c2129;
+    --color-border: #2a313c;
+    --color-border-strong: #6a7483;
+    --color-text: #e8ebf0;
+    --color-text-secondary: #b7bfca;
+    --color-text-muted: #8c96a3;
+    --color-accent: #7fa2ff;
+    --color-accent-contrast: #0f1216;
+    --color-focus: #7fa2ff;
+    --color-success: #4cc38a;
+    --color-success-bg: #15281e;
+    --color-warning: #e5b54a;
+    --color-warning-bg: #2c2412;
+    --color-danger: #f27a6e;
+    --color-danger-bg: #301a18;
+    --color-info: #6fa8f0;
+    --color-info-bg: #15233a;
+    --color-neutral-bg: #222832;
+    --color-disabled: #66707e;
+    --color-scrim: rgb(0 0 0 / 0.6);
+
+    --shadow-overlay: none;
+  }
+}

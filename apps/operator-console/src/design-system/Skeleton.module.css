@@ -1,0 +1,36 @@
+.skeleton {
+  display: block;
+  height: 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-neutral-bg);
+  animation: pulse 1.6s var(--easing-standard) infinite;
+}
+
+.full {
+  width: 100%;
+}
+
+.half {
+  width: 50%;
+}
+
+.quarter {
+  width: 25%;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}

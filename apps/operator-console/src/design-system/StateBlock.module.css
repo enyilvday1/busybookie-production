@@ -1,0 +1,55 @@
+.stateBlock {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.icon {
+  color: var(--color-text-muted);
+}
+
+.title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-md);
+}
+
+.description {
+  max-width: 44rem;
+  color: var(--color-text-secondary);
+}
+
+.error .icon {
+  color: var(--color-danger);
+}
+
+.detailList {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+
+.detailList dt {
+  color: var(--color-text-muted);
+}
+
+.detailList dd {
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.skeletonGroup {
+  display: grid;
+  gap: var(--space-3);
+  width: 100%;
+}

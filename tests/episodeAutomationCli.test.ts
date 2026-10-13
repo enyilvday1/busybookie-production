@@ -542,6 +542,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
       "execution:reconcile",
       "execution:status",
       "episode:automate",
+      "episode:rough-cut",
       "dialogue:generate",
       "dialogue:reconcile",
       "dialogue:authorize-visual",

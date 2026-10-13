@@ -547,6 +547,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
       "dialogue:reconcile",
       "dialogue:authorize-visual",
       "dialogue:place",
+      "operator:serve",
     ]);
     expect(pkg.dependencies).toEqual({
       "@google/genai": "^2.24.0",

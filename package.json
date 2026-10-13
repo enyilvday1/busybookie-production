@@ -25,7 +25,8 @@
     "dialogue:generate": "tsx scripts/dialogue-generate.ts",
     "dialogue:reconcile": "tsx scripts/dialogue-reconcile.ts",
     "dialogue:authorize-visual": "tsx scripts/dialogue-authorize-visual.ts",
-    "dialogue:place": "tsx scripts/dialogue-place.ts"
+    "dialogue:place": "tsx scripts/dialogue-place.ts",
+    "operator:serve": "tsx scripts/operator-server.ts"
   },
   "keywords": [],
   "author": "",

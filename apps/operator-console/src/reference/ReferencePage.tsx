@@ -11,6 +11,7 @@ import {
   Skeleton,
   STATUS_TONES,
   StatusIndicator,
+  TextField,
 } from "../design-system";
 
 // Development-only design-system reference (reference.html, not a production
@@ -37,6 +38,13 @@ export function ReferencePage() {
               Disabled
             </Button>
             <IconButton label="Example icon button" icon={Menu} />
+          </div>
+        </Panel>
+
+        <Panel title="Text fields">
+          <div>
+            <TextField label="Example text field" description="Static example with a description." />
+            <TextField label="Example field with an error" error="Example validation message." />
           </div>
         </Panel>
 

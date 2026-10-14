@@ -54,17 +54,24 @@ describe("application shell", () => {
     expect(within(banner).getByText("Read-only")).toBeTruthy();
   });
 
-  it("renders the exact frozen Overview empty-state copy and no call to action", () => {
+  it("starts LOCKED with the frozen connect copy, one Connect action and no links", () => {
     render(<App />);
     const main = screen.getByRole("main");
-    expect(within(main).getByRole("heading", { level: 2 }).textContent).toBe("Production views aren't connected yet");
+    expect(within(main).getByRole("heading", { level: 2 }).textContent).toBe("Connect to the operator server");
     expect(
       within(main).getByText(
-        "This interface foundation is ready. Episode and production data will appear here after the read-only operator connection is introduced in the next milestone.",
+        "Paste the operator token printed in the terminal where the operator server was started. The token stays in this tab's memory only and is cleared when you lock the console or reload the page.",
       ),
     ).toBeTruthy();
-    expect(within(main).queryAllByRole("button")).toHaveLength(0);
+    expect(within(main).getByLabelText("Operator token")).toBeTruthy();
+    expect(within(main).getAllByRole("button").map((button) => button.textContent)).toEqual(["Connect"]);
     expect(within(main).queryAllByRole("link")).toHaveLength(0);
+  });
+
+  it("no longer shows the D2 placeholder copy", () => {
+    const { container } = render(<App />);
+    expect(container.textContent).not.toContain("Production views aren't connected yet");
+    expect(container.textContent).not.toContain("This interface foundation is ready.");
   });
 
   it("offers Overview as the only navigation destination, marked as the current page", () => {
@@ -76,7 +83,9 @@ describe("application shell", () => {
     expect(nav.textContent).not.toMatch(/episode|generation|dialogue|automation|rough cut|settings|admin/i);
   });
 
-  it("never claims production truth anywhere in the rendered shell", () => {
+  // Applies to the LOCKED shell (L5): the connected EMPTY state legitimately
+  // says "No episodes" and is asserted in dashboard.test.tsx.
+  it("never claims production truth anywhere in the LOCKED shell", () => {
     const { container } = render(<App />);
     expect(container.textContent).not.toMatch(
       /\b(healthy|completed?|finished|ready to publish|loaded|0 episodes|no episodes|unavailable|automation (is )?active)\b/i,

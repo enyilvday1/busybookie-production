@@ -10,4 +10,5 @@ export { PageHeader, type PageHeaderProps } from "./PageHeader";
 export { Panel, type PanelProps } from "./Panel";
 export { Skeleton, type SkeletonWidth } from "./Skeleton";
 export { STATUS_TONES, StatusIndicator, type StatusIndicatorProps, type StatusTone } from "./StatusIndicator";
+export { TextField, type TextFieldProps } from "./TextField";
 export { VisuallyHidden } from "./VisuallyHidden";

@@ -32,22 +32,64 @@ function sourceOf(suffix: string): string {
   return entry[1];
 }
 
-describe("frontend security boundary (D2 makes no production API connection)", () => {
+// The only module allowed to reach the operator API (Step 1018 section 7).
+const OPERATOR_CLIENT_PATH = "src/api/operatorClient.ts";
+const isOperatorClient = (path: string) => path.endsWith(OPERATOR_CLIENT_PATH);
+
+describe("frontend security boundary (D3B: one read-only API module)", () => {
   it("scans the whole source tree", () => {
     expect(CODE.length).toBeGreaterThan(20);
   });
 
-  it("contains no network, API or auth code", () => {
-    for (const [path, code] of CODE) {
+  // `["'\`]\/api\/` matches API URL strings; module paths such as
+  // "./api/operatorClient" are relative imports, not requests.
+  it("contains no network, API or auth code outside the operator client", () => {
+    for (const [path, code] of CODE.filter(([path]) => !isOperatorClient(path))) {
       expect(code, path).not.toMatch(
-        /\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|axios|\/api\/|Authorization|Bearer/,
+        /\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|axios|["'`]\/api\/|Authorization|Bearer/,
       );
     }
   });
 
+  it("lets the operator client make exactly one read-only request to the episode list", () => {
+    const client = stripComments(sourceOf(OPERATOR_CLIENT_PATH));
+    expect(client.match(/\bfetch\s*\(/g)).toHaveLength(1);
+    expect(client.match(/"\/api\/[^"]*"/g)).toEqual(['"/api/v1/operator/episodes"']);
+    expect(client).toMatch(/credentials:\s*"omit"/);
+    expect(client).toMatch(/cache:\s*"no-store"/);
+    expect(client).toMatch(/mode:\s*"same-origin"/);
+    expect(client).toMatch(/method:\s*"GET"/);
+    expect(client).not.toMatch(/XMLHttpRequest|WebSocket|EventSource|sendBeacon|axios|"(POST|PUT|PATCH|DELETE)"/);
+    expect(client).not.toMatch(/\/health|\/episodes\/|setTimeout\([^)]*fetch/);
+  });
+
   it("never touches browser storage or cookies", () => {
     for (const [path, code] of CODE) {
-      expect(code, path).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie/);
+      expect(code, path).not.toMatch(/localStorage|sessionStorage|indexedDB|\bcaches\b|document\.cookie/);
+    }
+  });
+
+  it("never persists through history or the URL, logs, polls or uses a service worker", () => {
+    for (const [path, code] of CODE) {
+      expect(code, path).not.toMatch(
+        /history\.(pushState|replaceState)|location\.(hash|search|href)\s*=|location\.(assign|replace)\s*\(|\bconsole\.|setInterval|serviceWorker/,
+      );
+    }
+  });
+
+  it("never requests the health or episode-detail endpoints and embeds no token", () => {
+    for (const [path, code] of CODE) {
+      expect(code, path).not.toMatch(/\/operator\/health|\/episodes\/|\b[0-9a-f]{64}\b/);
+    }
+  });
+
+  it("never imports backend or Node modules", () => {
+    for (const [path, code] of CODE) {
+      for (const match of code.matchAll(/(?:from|import)\s+"([^"]+)"/g)) {
+        const specifier = match[1] as string;
+        expect(specifier.startsWith("../../") || specifier.startsWith("node:"), `${path} -> ${specifier}`).toBe(false);
+      }
+      expect(code, path).not.toMatch(/\bprocess\.|\brequire\s*\(/);
     }
   });
 

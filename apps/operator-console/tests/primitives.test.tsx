@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { Menu } from "lucide-react";
+import { createRef } from "react";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,6 +14,7 @@ import {
   Skeleton,
   STATUS_TONES,
   StatusIndicator,
+  TextField,
   VisuallyHidden,
 } from "../src/design-system";
 
@@ -107,5 +109,35 @@ describe("loading, empty and error states", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("b")).toBeNull();
     expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeTruthy();
+  });
+});
+
+describe("TextField", () => {
+  it("associates its visible label with the input", () => {
+    render(<TextField label="Display name" />);
+    const input = screen.getByLabelText("Display name");
+    expect(input.tagName).toBe("INPUT");
+    expect(input.getAttribute("type")).toBe("text");
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+    expect(input.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("links the description and the error and marks the input invalid", () => {
+    render(<TextField label="Name" description="Shown to operators." error="Enter a name." />);
+    const input = screen.getByLabelText("Name");
+    const describedBy = (input.getAttribute("aria-describedby") ?? "").split(" ");
+    expect(describedBy).toHaveLength(2);
+    expect(describedBy.map((id) => document.getElementById(id)?.textContent)).toEqual(["Shown to operators.", "Enter a name."]);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByRole("alert").textContent).toBe("Enter a name.");
+  });
+
+  it("supports password type and forwards its ref to the input", () => {
+    const ref = createRef<HTMLInputElement>();
+    render(<TextField label="Secret" type="password" ref={ref} autoComplete="off" />);
+    const input = screen.getByLabelText("Secret");
+    expect(ref.current).toBe(input);
+    expect(input.getAttribute("type")).toBe("password");
+    expect(input.getAttribute("autocomplete")).toBe("off");
   });
 });

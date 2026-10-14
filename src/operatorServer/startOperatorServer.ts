@@ -7,6 +7,10 @@ import {
   generateOperatorLaunchToken,
 } from "./operatorRequestSecurity.js";
 
+import type {
+  OperatorConsoleAssets,
+} from "./operatorConsoleAssets.js";
+
 // The only bind address. It is not configurable: D1 is loopback-only, and a
 // failed bind is never retried on another interface or port.
 export const OPERATOR_SERVER_HOST =
@@ -27,6 +31,10 @@ export type StartOperatorServerOptions =
 
     log?:
       (text: string) => void;
+
+    // Loaded by the caller before listening (the CLI fails fast without it).
+    consoleAssets?:
+      OperatorConsoleAssets;
   }>;
 
 export type RunningOperatorServer =
@@ -82,6 +90,14 @@ export async function startOperatorServer(
         : {
             log:
               options.log,
+          }),
+
+      ...(options.consoleAssets ===
+        undefined
+        ? {}
+        : {
+            consoleAssets:
+              options.consoleAssets,
           }),
     });
 

@@ -6,6 +6,11 @@ import {
   startOperatorServer,
 } from "../startOperatorServer.js";
 
+import {
+  loadOperatorConsoleAssets,
+  type OperatorConsoleAssets,
+} from "../operatorConsoleAssets.js";
+
 export const DEFAULT_OPERATOR_SERVER_PORT =
   4381;
 
@@ -24,6 +29,9 @@ export type RunOperatorServerCliDependencies =
   Readonly<{
     startServer:
       typeof startOperatorServer;
+
+    loadConsoleAssets:
+      () => Promise<OperatorConsoleAssets>;
 
     writeStdout:
       (text: string) => void;
@@ -163,6 +171,10 @@ const defaultDependencies:
       startServer:
         startOperatorServer,
 
+      loadConsoleAssets:
+        () =>
+          loadOperatorConsoleAssets(),
+
       writeStdout:
         (text: string) => {
           process.stdout.write(
@@ -190,11 +202,19 @@ export async function runOperatorServerCli(
       args,
     );
 
+  // The built console is validated and loaded before listening; a missing or
+  // invalid build fails here and nothing listens.
+  const consoleAssets =
+    await dependencies
+      .loadConsoleAssets();
+
   const running =
     await dependencies
       .startServer({
         port:
           options.port,
+
+        consoleAssets,
       });
 
   // The one-time bootstrap: the token is shown once, on the launching
@@ -203,6 +223,7 @@ export async function runOperatorServerCli(
     .writeStdout(
       [
         `BusyBookie operator API (read-only) listening on ${running.origin}`,
+        `Operator console: ${running.origin}/`,
         `Operator token for this launch: ${running.token}`,
         "Press Ctrl+C to stop.",
       ].join(

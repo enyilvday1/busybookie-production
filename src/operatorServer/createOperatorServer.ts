@@ -34,9 +34,17 @@ import {
   type OperatorRequestContext,
 } from "./operatorRequestSecurity.js";
 
+import type {
+  OperatorConsoleAssets,
+  OperatorConsoleResource,
+} from "./operatorConsoleAssets.js";
+
 // D1 read-only operator HTTP adapter (Step 981). Three GET routes over the
 // transport-agnostic application services; no mutation, no CLI, no provider,
 // no FFmpeg. Nothing listens until startOperatorServer is called.
+// D3A (Step 1005): paths outside the /api namespace serve the built operator
+// console from an in-memory map, without the bearer token; the /api namespace
+// keeps the D1 pipeline unchanged.
 
 export type OperatorServerDependencies =
   Readonly<{
@@ -65,6 +73,11 @@ export type CreateOperatorServerOptions =
     // request headers or response bodies.
     log?:
       (text: string) => void;
+
+    // Built console served outside the /api namespace. Absent: API-only
+    // server (every non-API path is 404).
+    consoleAssets?:
+      OperatorConsoleAssets;
   }>;
 
 type ErrorCode =
@@ -126,6 +139,9 @@ const API_PREFIX =
 
 const EPISODES_PATH =
   `${API_PREFIX}/episodes`;
+
+const OPERATOR_API_NAMESPACE =
+  "/api";
 
 const SECURITY_HEADERS =
   Object.freeze({
@@ -522,6 +538,19 @@ function matchRoute(
   return null;
 }
 
+// The undecoded path component (before the first "?"), compared literally:
+// "/api" and everything below "/api/" is API territory; "/apiXYZ" is not.
+function isOperatorApiPath(
+  pathname:
+    string,
+): boolean {
+  return pathname ===
+      OPERATOR_API_NAMESPACE ||
+    pathname.startsWith(
+      `${OPERATOR_API_NAMESPACE}/`,
+    );
+}
+
 function boundPortOf(
   server:
     Server,
@@ -644,6 +673,39 @@ export function createOperatorServer(
 
     response.end(
       payload,
+    );
+  }
+
+  // Console success responses use the console header policy only (never the
+  // JSON SECURITY_HEADERS map).
+  function respondConsoleResource(
+    response:
+      ServerResponse,
+
+    requestId:
+      string,
+
+    resource:
+      OperatorConsoleResource,
+  ): void {
+    if (
+      response.headersSent
+    ) {
+      response.end();
+      return;
+    }
+
+    response.writeHead(
+      200,
+      {
+        ...resource.headers,
+        "X-Request-Id":
+          requestId,
+      },
+    );
+
+    response.end(
+      resource.body,
     );
   }
 
@@ -907,7 +969,100 @@ export function createOperatorServer(
         return;
       }
 
-      // 4. Authenticate once; only the opaque context continues.
+      // 4. Classify the undecoded path component (before the first "?").
+      const target =
+        request.url as string;
+
+      const queryIndex =
+        target.indexOf(
+          "?",
+        );
+
+      const pathname =
+        queryIndex ===
+          -1
+          ? target
+          : target.slice(
+              0,
+              queryIndex,
+            );
+
+      if (
+        !isOperatorApiPath(
+          pathname,
+        )
+      ) {
+        // 5. Console UI: no authentication and no API handler is reachable
+        //    from here; exact in-memory lookup only.
+        if (
+          options.consoleAssets ===
+          undefined
+        ) {
+          respondError(
+            response,
+            requestId,
+            "NOT_FOUND",
+          );
+          return;
+        }
+
+        if (
+          request.method !==
+          "GET"
+        ) {
+          respondError(
+            response,
+            requestId,
+            "METHOD_NOT_ALLOWED",
+          );
+          return;
+        }
+
+        if (
+          queryIndex !==
+            -1 ||
+          pathname.includes(
+            "%",
+          ) ||
+          checkNoRequestBody(
+            rawHeaders,
+          )
+        ) {
+          respondError(
+            response,
+            requestId,
+            "BAD_REQUEST",
+          );
+          return;
+        }
+
+        const resource =
+          options.consoleAssets.lookup(
+            pathname,
+          );
+
+        if (
+          resource ===
+          undefined
+        ) {
+          respondError(
+            response,
+            requestId,
+            "NOT_FOUND",
+          );
+          return;
+        }
+
+        respondConsoleResource(
+          response,
+          requestId,
+          resource,
+        );
+        return;
+      }
+
+      // 6. API namespace: authenticate once; only the opaque context
+      //    continues. Never falls through to the console.
       const context =
         authenticate(
           headerValues(
@@ -928,24 +1083,7 @@ export function createOperatorServer(
         return;
       }
 
-      const target =
-        request.url as string;
-
-      const queryIndex =
-        target.indexOf(
-          "?",
-        );
-
-      const pathname =
-        queryIndex ===
-          -1
-          ? target
-          : target.slice(
-              0,
-              queryIndex,
-            );
-
-      // 5. Route, 6. method, 7. query/percent/body.
+      // 7. Route, 8. method, 9. query/percent/body.
       const route =
         matchRoute(
           pathname,

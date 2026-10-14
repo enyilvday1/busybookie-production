@@ -21,8 +21,10 @@ import {
   runOperatorServerCli,
   type RunOperatorServerCliDependencies,
 } from "../src/operatorServer/cli/runOperatorServerCli.js";
+import { OperatorConsoleBuildError, type OperatorConsoleAssets } from "../src/operatorServer/operatorConsoleAssets.js";
 
 const TOKEN = "c".repeat(64);
+const CONSOLE_ASSETS: OperatorConsoleAssets = Object.freeze({ lookup: () => undefined });
 
 function deferred() {
   let resolve!: () => void;
@@ -39,10 +41,16 @@ function harness() {
     token: TOKEN,
     close,
   }));
+  const loadConsoleAssets = vi.fn(async () => CONSOLE_ASSETS);
   const writeStdout = vi.fn((_text: string) => undefined);
   const waitForShutdownSignal = vi.fn(() => signal.promise);
-  const deps = { startServer, writeStdout, waitForShutdownSignal } as unknown as RunOperatorServerCliDependencies;
-  return { deps, startServer, writeStdout, close, signal, waitForShutdownSignal };
+  const deps = {
+    startServer,
+    loadConsoleAssets,
+    writeStdout,
+    waitForShutdownSignal,
+  } as unknown as RunOperatorServerCliDependencies;
+  return { deps, startServer, loadConsoleAssets, writeStdout, close, signal, waitForShutdownSignal };
 }
 
 const flush = () => new Promise((resolveTick) => setTimeout(resolveTick, 0));
@@ -82,15 +90,18 @@ describe("D1 operator server CLI arguments", () => {
 
 describe("D1 operator server CLI runner", () => {
   it("starts on loopback, prints the one-time bootstrap, then closes only after a shutdown signal", async () => {
-    const { deps, startServer, writeStdout, close, signal } = harness();
+    const { deps, startServer, loadConsoleAssets, writeStdout, close, signal } = harness();
     const running = runOperatorServerCli(["--port", "5001"], deps);
     await flush();
 
-    expect(startServer.mock.calls).toEqual([[{ port: 5001 }]]);
+    expect(loadConsoleAssets).toHaveBeenCalledTimes(1);
+    expect(loadConsoleAssets.mock.invocationCallOrder[0]).toBeLessThan(startServer.mock.invocationCallOrder[0]!);
+    expect(startServer.mock.calls).toEqual([[{ port: 5001, consoleAssets: CONSOLE_ASSETS }]]);
     expect(writeStdout).toHaveBeenCalledTimes(1);
     const lines = writeStdout.mock.calls[0]![0].split("\n");
     expect(lines).toEqual([
       "BusyBookie operator API (read-only) listening on http://127.0.0.1:5001",
+      "Operator console: http://127.0.0.1:5001/",
       `Operator token for this launch: ${TOKEN}`,
       "Press Ctrl+C to stop.",
       "",
@@ -108,14 +119,30 @@ describe("D1 operator server CLI runner", () => {
     const failure = Object.assign(new Error("listen EADDRINUSE: address already in use 127.0.0.1:4381"), { code: "EADDRINUSE" });
     startServer.mockRejectedValueOnce(failure);
     await expect(runOperatorServerCli([], deps)).rejects.toBe(failure);
-    expect(startServer.mock.calls).toEqual([[{ port: 4381 }]]);
+    expect(startServer.mock.calls).toEqual([[{ port: 4381, consoleAssets: CONSOLE_ASSETS }]]);
     expect(writeStdout).not.toHaveBeenCalled();
   });
 
   it("an argument failure starts nothing", async () => {
-    const { deps, startServer } = harness();
+    const { deps, startServer, loadConsoleAssets } = harness();
     await expect(runOperatorServerCli(["--host", "0.0.0.0"], deps)).rejects.toThrow("Unknown operator server CLI argument: --host");
+    expect(loadConsoleAssets).not.toHaveBeenCalled();
     expect(startServer).not.toHaveBeenCalled();
+  });
+
+  it("a missing or invalid console build fails before listening, with no bootstrap output", async () => {
+    const { deps, startServer, loadConsoleAssets, writeStdout } = harness();
+    const failure = new OperatorConsoleBuildError("BUILD_DIRECTORY_MISSING");
+    loadConsoleAssets.mockRejectedValueOnce(failure);
+    await expect(runOperatorServerCli([], deps)).rejects.toBe(failure);
+    expect(startServer).not.toHaveBeenCalled();
+    expect(writeStdout).not.toHaveBeenCalled();
+  });
+
+  it("a console build failure formats to one bounded, path-free line", () => {
+    expect(formatOperatorServerCliError(new OperatorConsoleBuildError("INDEX_HTML_MISSING"))).toBe(
+      "Operator server failed. Reason: Operator console build is missing or invalid (INDEX_HTML_MISSING). Build it with: npm --prefix apps/operator-console run build\n",
+    );
   });
 
   it("startup errors format to one bounded line with no stack or object dump", () => {
@@ -208,16 +235,26 @@ describe("D1 source boundary, package and portability", () => {
       "./readEpisodeProductionStatus.js",
     ],
     "src/operatorServer/operatorRequestSecurity.ts": ["node:crypto"],
+    "src/operatorServer/operatorConsoleAssets.ts": ["node:fs/promises"],
     "src/operatorServer/createOperatorServer.ts": [
       "../application/listCanonicalEpisodes.js",
       "../application/operatorDtos.js",
       "../application/readEpisodeProductionStatus.js",
+      "./operatorConsoleAssets.js",
       "./operatorRequestSecurity.js",
       "node:crypto",
       "node:http",
     ],
-    "src/operatorServer/startOperatorServer.ts": ["./createOperatorServer.js", "./operatorRequestSecurity.js"],
-    "src/operatorServer/cli/runOperatorServerCli.ts": ["../createOperatorServer.js", "../startOperatorServer.js"],
+    "src/operatorServer/startOperatorServer.ts": [
+      "./createOperatorServer.js",
+      "./operatorConsoleAssets.js",
+      "./operatorRequestSecurity.js",
+    ],
+    "src/operatorServer/cli/runOperatorServerCli.ts": [
+      "../createOperatorServer.js",
+      "../operatorConsoleAssets.js",
+      "../startOperatorServer.js",
+    ],
     "scripts/operator-server.ts": ["../src/operatorServer/cli/runOperatorServerCli.js"],
   };
 

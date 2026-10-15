@@ -197,15 +197,19 @@ describe("E2 coexistence: existing production path untouched", () => {
   it("T22 editorial modules are pure: no fs, process, env, child process or tool launch", () => {
     const editorial = sourceFiles(join(srcRoot, "editorial"));
     expect(editorial.map((path) => path.slice(path.lastIndexOf(sep) + 1)).sort()).toStrictEqual([
-      "buildEditorialPlan.ts", "buildEditorialRoughCutRenderPlan.ts", "canonicalizeEditorialPlan.ts",
-      "editorialPlan.schema.ts", "resolveEditorialAssetPath.ts", "validateEditorialPlan.ts",
-      "validateEditorialPlanAgainstSource.ts",
+      "buildEditorialEditFfmpegCommand.ts", "buildEditorialEditRenderPlan.ts", "buildEditorialPlan.ts",
+      "buildEditorialPlanV2.ts", "buildEditorialRoughCutRenderPlan.ts", "canonicalizeEditorialPlan.ts",
+      "canonicalizeEditorialPlanV2.ts", "deriveEditorialTimeline.ts", "editorialDecisions.schema.ts",
+      "editorialEditRenderPreflight.ts", "editorialPlan.schema.ts", "editorialPlanV2.schema.ts",
+      "migrateEditorialPlan.ts", "resolveEditorialAssetPath.ts", "resolveEditorialAssetPathV2.ts",
+      "validateEditorialDecisions.ts", "validateEditorialPlan.ts", "validateEditorialPlanAgainstSource.ts",
+      "validateEditorialPlanV2.ts", "validateEditorialPlanV2AgainstSource.ts",
     ]);
     for (const path of editorial) {
       const text = readFileSync(path, "utf8");
       expect(text, path).not.toMatch(/node:fs|from\s+["']fs|child_process|process\.|dotenv|import\(|spawn|exec[A-Z(]/);
       for (const specifier of text.matchAll(/from\s+["']([^"']+)["']/g)) {
-        expect(specifier[1], path).toMatch(/^(zod|node:crypto|node:path|\.\/[A-Za-z.]+\.js|\.\.\/(schemas|composition)\/[A-Za-z.]+\.js)$/);
+        expect(specifier[1], path).toMatch(/^(zod|node:crypto|node:path|\.\/[A-Za-z0-9.]+\.js|\.\.\/(schemas|composition)\/[A-Za-z.]+\.js)$/);
       }
       for (const specifier of text.matchAll(/import\s+(type\s+)?\{[^}]*\}\s+from\s+["'](\.\.\/composition\/[^"']+)["']/g)) {
         expect(specifier[1], `${path} must import composition types only`).toBe("type ");

@@ -197,13 +197,18 @@ describe("E2 coexistence: existing production path untouched", () => {
   it("T22 editorial modules are pure: no fs, process, env, child process or tool launch", () => {
     const editorial = sourceFiles(join(srcRoot, "editorial"));
     expect(editorial.map((path) => path.slice(path.lastIndexOf(sep) + 1)).sort()).toStrictEqual([
-      "buildEditorialEditFfmpegCommand.ts", "buildEditorialEditRenderPlan.ts", "buildEditorialPlan.ts",
-      "buildEditorialPlanV2.ts", "buildEditorialRoughCutRenderPlan.ts", "canonicalizeEditorialPlan.ts",
-      "canonicalizeEditorialPlanV2.ts", "deriveEditorialTimeline.ts", "editorialDecisions.schema.ts",
-      "editorialEditRenderPreflight.ts", "editorialPlan.schema.ts", "editorialPlanV2.schema.ts",
-      "migrateEditorialPlan.ts", "resolveEditorialAssetPath.ts", "resolveEditorialAssetPathV2.ts",
+      "audioMixDecisions.schema.ts", "buildEditorialEditFfmpegCommand.ts", "buildEditorialEditRenderPlan.ts",
+      "buildEditorialMixAnalysisFfmpegCommand.ts", "buildEditorialMixAudioGraph.ts", "buildEditorialMixFfmpegCommand.ts",
+      "buildEditorialMixRenderPlan.ts", "buildEditorialPlan.ts", "buildEditorialPlanV2.ts", "buildEditorialPlanV3.ts",
+      "buildEditorialRoughCutRenderPlan.ts", "canonicalizeEditorialPlan.ts", "canonicalizeEditorialPlanV2.ts",
+      "canonicalizeEditorialPlanV3.ts", "deriveEditorialAudioMix.ts", "deriveEditorialTimeline.ts",
+      "editorialDecisions.schema.ts", "editorialEditRenderPreflight.ts", "editorialMixRenderPreflight.ts",
+      "editorialPlan.schema.ts", "editorialPlanV2.schema.ts", "editorialPlanV3.schema.ts",
+      "migrateEditorialPlan.ts", "migrateEditorialPlanV3.ts", "resolveEditorialAssetPath.ts",
+      "resolveEditorialAssetPathV2.ts", "resolveExternalAudioAssetPath.ts", "validateAudioMixDecisions.ts",
       "validateEditorialDecisions.ts", "validateEditorialPlan.ts", "validateEditorialPlanAgainstSource.ts",
-      "validateEditorialPlanV2.ts", "validateEditorialPlanV2AgainstSource.ts",
+      "validateEditorialPlanV2.ts", "validateEditorialPlanV2AgainstSource.ts", "validateEditorialPlanV3.ts",
+      "validateEditorialPlanV3AgainstSource.ts",
     ]);
     for (const path of editorial) {
       const text = readFileSync(path, "utf8");

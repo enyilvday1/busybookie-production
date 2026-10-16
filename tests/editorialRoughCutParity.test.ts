@@ -197,15 +197,16 @@ describe("E2 coexistence: existing production path untouched", () => {
   it("T22 editorial modules are pure: no fs, process, env, child process or tool launch", () => {
     const editorial = sourceFiles(join(srcRoot, "editorial"));
     expect(editorial.map((path) => path.slice(path.lastIndexOf(sep) + 1)).sort()).toStrictEqual([
-      "audioDeliveryPolicy.schema.ts", "audioMasteringDecisions.schema.ts", "audioMasteringEvidence.schema.ts",
+      "applyEditorialProposal.ts", "audioDeliveryPolicy.schema.ts", "audioMasteringDecisions.schema.ts", "audioMasteringEvidence.schema.ts",
       "audioMixDecisions.schema.ts", "buildAudioMasteringFfmpegCommands.ts", "buildAudioMasteringPlan.ts",
       "buildEditorialEditFfmpegCommand.ts", "buildEditorialEditRenderPlan.ts",
       "buildEditorialMixAnalysisFfmpegCommand.ts", "buildEditorialMixAudioGraph.ts", "buildEditorialMixFfmpegCommand.ts",
       "buildEditorialMixRenderPlan.ts", "buildEditorialPlan.ts", "buildEditorialPlanV2.ts", "buildEditorialPlanV3.ts",
       "buildEditorialRoughCutRenderPlan.ts", "canonicalizeEditorialPlan.ts", "canonicalizeEditorialPlanV2.ts",
-      "canonicalizeEditorialPlanV3.ts", "deriveAudioMasteringUpstream.ts", "deriveEditorialAudioMix.ts", "deriveEditorialTimeline.ts",
-      "editorialDecisions.schema.ts", "editorialEditRenderPreflight.ts", "editorialMixRenderPreflight.ts",
-      "editorialPlan.schema.ts", "editorialPlanV2.schema.ts", "editorialPlanV3.schema.ts",
+      "canonicalizeEditorialPlanV3.ts", "deriveAudioMasteringUpstream.ts", "deriveEditorialAudioMix.ts", "deriveEditorialGovernanceState.ts",
+      "deriveEditorialTimeline.ts", "editorialDecisions.schema.ts", "editorialEditRenderPreflight.ts", "editorialMixRenderPreflight.ts",
+      "editorialPlan.schema.ts", "editorialPlanV2.schema.ts", "editorialPlanV3.schema.ts", "editorialProposal.schema.ts",
+      "editorialReview.schema.ts", "editorialRevision.schema.ts",
       "migrateEditorialPlan.ts", "migrateEditorialPlanV3.ts", "parseLoudnormMeasurement.ts", "resolveEditorialAssetPath.ts",
       "resolveEditorialAssetPathV2.ts", "resolveExternalAudioAssetPath.ts", "validateAudioMixDecisions.ts",
       "validateEditorialDecisions.ts", "validateEditorialPlan.ts", "validateEditorialPlanAgainstSource.ts",

@@ -258,7 +258,7 @@ describe("E4 architecture and commercial-core guards", () => {
   it("T4-71 new E4 modules are flat, pure, import-clean, inventoried and have no outside importer", () => {
     const editorialDirectory = join(srcRoot, "editorial");
     const editorial = sourceFiles(editorialDirectory).map((path) => path.slice(path.lastIndexOf(sep) + 1));
-    expect(editorial).toHaveLength(48);
+    expect(editorial).toHaveLength(51);
     for (const name of E4_SOURCES) expect(editorial, name).toContain(name);
     for (const name of E4_SOURCES) {
       const text = readFileSync(join(editorialDirectory, name), "utf8");

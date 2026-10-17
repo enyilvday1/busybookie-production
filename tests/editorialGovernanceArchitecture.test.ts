@@ -89,10 +89,10 @@ describe("E6 dedicated src/editorialGovernance guard (category 21)", () => {
   });
 });
 
-describe("E6 pure modules: inventory 48, purity and roadmap boundaries (category 21)", () => {
-  it("the five pure E6 modules are in src/editorial and the editorial inventory is exactly 48", () => {
+describe("E6 pure modules: inventory 51, purity and roadmap boundaries (category 21)", () => {
+  it("the five pure E6 modules are in src/editorial and the editorial inventory is exactly 51", () => {
     const names = sourceFiles(editorialDirectory).map((path) => path.slice(path.lastIndexOf(sep) + 1));
-    expect(names).toHaveLength(48);
+    expect(names).toHaveLength(51);
     for (const name of E6_PURE_SOURCES) expect(names, name).toContain(name);
     expect(sourceFiles(editorialDirectory).some((path) => within(governanceDirectory, path))).toBe(false);
   });

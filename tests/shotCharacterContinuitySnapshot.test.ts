@@ -975,23 +975,126 @@ describe(
       },
     );
 
+    // Step 1137D1 replaced the former readdir + file-count(5) assertion with a capability-based
+    // classification: every module under src/characterIdentity/ is either pure (rules unchanged) or an
+    // explicitly authorised I/O module (stricter rules below). An unclassified module fails the build.
+    const characterIdentityDirectory =
+      new URL(
+        "../src/characterIdentity/",
+        import.meta.url,
+      );
+
+    const PURE_CHARACTER_IDENTITY_MODULES = [
+      "buildShotCharacterContinuitySnapshot.ts",
+      "canonicalCharacterIdentityJson.ts",
+      "shotCharacterContinuitySnapshot.schema.ts",
+      "characterVisualIdentityApproval.schema.ts",
+      "characterVisualIdentityApprovalAmbiguity.ts",
+      "characterVisualIdentityApprovalSource.ts",
+    ];
+
+    const AUTHORISED_IO_CHARACTER_IDENTITY_MODULES = [
+      "characterVisualIdentityApprovalPath.ts",
+      "readCharacterVisualIdentityApproval.ts",
+      "createCharacterVisualIdentityApproval.ts",
+      "validateCharacterVisualIdentityApproval.ts",
+      "onboardCharacterVisualIdentity.ts",
+      "cli/characterReferenceOnboarding.ts",
+    ];
+
+    function listCharacterIdentityModules(
+      relativeDirectory = "",
+    ): string[] {
+      return readdirSync(
+        new URL(
+          relativeDirectory,
+          characterIdentityDirectory,
+        ),
+        {
+          withFileTypes: true,
+        },
+      ).flatMap(
+        (entry) =>
+          entry.isDirectory()
+            ? listCharacterIdentityModules(
+              `${relativeDirectory}${entry.name}/`,
+            )
+            : [
+              `${relativeDirectory}${entry.name}`,
+            ],
+      );
+    }
+
+    it(
+      "classifies every src/characterIdentity module as pure or authorised I/O",
+      () => {
+        expect(
+          listCharacterIdentityModules().sort(),
+        ).toEqual(
+          [
+            ...PURE_CHARACTER_IDENTITY_MODULES,
+            ...AUTHORISED_IO_CHARACTER_IDENTITY_MODULES,
+          ].sort(),
+        );
+      },
+    );
+
+    it(
+      "keeps authorised E9 I/O modules provider-neutral, git-free and independent of editorial modules",
+      () => {
+        for (
+          const name
+          of AUTHORISED_IO_CHARACTER_IDENTITY_MODULES
+        ) {
+          const text =
+            readFileSync(
+              new URL(
+                name,
+                characterIdentityDirectory,
+              ),
+              "utf8",
+            );
+
+          expect(
+            text,
+            name,
+          ).not.toMatch(
+            /child_process|fetch\(|dotenv|import\(|require\(|process\.env|@google\/genai|@runwayml|\bveo\b|\brunway\b|\bgit\b|BUSYBOOKIE_MEDIA_ROOT|D:[\\/]/i,
+          );
+
+          for (
+            const specifier
+            of text.matchAll(
+              /from\s+["']([^"']+)["']/g,
+            )
+          ) {
+            expect(
+              specifier[1],
+              name,
+            ).toMatch(
+              /^(zod|node:(crypto|fs|fs\/promises|path|url)|\.\.?\/[A-Za-z.]+\.js|\.\.\/(schemas|characterIdentity|execution|validation)\/[A-Za-z.]+\.js|\.\.\/\.\.\/(schemas|characterIdentity|execution|validation)\/[A-Za-z.]+\.js)$/,
+            );
+
+            expect(
+              specifier[1],
+              name,
+            ).not.toMatch(
+              /editorial|providers|veo|runway|dialogue/i,
+            );
+          }
+        }
+      },
+    );
+
     it(
       "keeps E9 modules pure, provider-neutral and independent of editorial modules",
       () => {
-        const directory =
-          new URL(
-            "../src/characterIdentity/",
-            import.meta.url,
-          );
-
         const files = [
-          ...readdirSync(
-            directory,
-          ).map(
+          ...PURE_CHARACTER_IDENTITY_MODULES.map(
             (name) =>
               new URL(
                 name,
-                directory,
+                characterIdentityDirectory,
               ),
           ),
           new URL(
@@ -1006,7 +1109,7 @@ describe(
 
         expect(
           files.length,
-        ).toBe(5);
+        ).toBe(8);
 
         for (const file of files) {
           const text =

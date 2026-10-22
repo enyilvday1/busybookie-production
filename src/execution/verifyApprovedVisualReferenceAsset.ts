@@ -127,7 +127,9 @@ async function resolvePhysicalPath(
   }
 }
 
-function detectImageContentType(
+// Exported for appendVisualReferenceAssetRegistry, which derives a candidate entry's content type with
+// this same signature check before verifyApprovedVisualReferenceAsset re-verifies it.
+export function detectImageContentType(
   bytes:
     Buffer,
 ): VisualReferenceAsset[

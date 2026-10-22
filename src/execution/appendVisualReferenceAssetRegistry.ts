@@ -303,7 +303,8 @@ export async function appendVisualReferenceAssetRegistry(
 
 // Close and unlink are attempted independently: a close failure must not skip removing the lock this
 // invocation created. The caller contains either failure so it never hides the primary result.
-async function releaseOwnedRegistryLock(lock: FileHandle, lockPath: string): Promise<void> {
+// Shared with bootstrapVisualReferenceAssetRegistry, which uses the same sibling lock.
+export async function releaseOwnedRegistryLock(lock: FileHandle, lockPath: string): Promise<void> {
   try {
     await lock.close();
   } finally {

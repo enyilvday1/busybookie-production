@@ -1,9 +1,16 @@
 import { z } from "zod";
 
-export const CharacterIdSchema = z.string().regex(
-  /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/,
-  "Character id must use uppercase letters, numbers, and single underscores only.",
-);
+import {
+  CharacterIdSchema,
+} from "./characterId.schema.js";
+
+import {
+  CharacterVisualIdentityV1Schema,
+} from "./characterVisualIdentity.schema.js";
+
+export {
+  CharacterIdSchema,
+};
 
 export const CharacterGenderSchema = z.enum([
   "BOY",
@@ -218,6 +225,11 @@ export const CharacterSchema = z.object({
   voice: CharacterVoiceSchema,
 
   promptAnchor: z.string().trim().min(1),
+
+  // E9 migration boundary (Step 1136): optional until every canonical character has
+  // registry-approved reference assets. Activation makes this mandatory with a
+  // schemaVersion change. Until then, shot continuity snapshots fail closed when absent.
+  visualIdentity: CharacterVisualIdentityV1Schema.optional(),
 }).strict();
 
 export const CharacterBibleSchema = z.object({
@@ -243,6 +255,18 @@ export const CharacterBibleSchema = z.object({
         code: "custom",
         path: ["characters", index, "name"],
         message: `Duplicate character name: ${character.name}`,
+      });
+    }
+
+    if (
+      character.visualIdentity &&
+      character.visualIdentity.characterId !== character.id
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["characters", index, "visualIdentity", "characterId"],
+        message:
+          `Visual identity characterId ${character.visualIdentity.characterId} does not match character ${character.id}.`,
       });
     }
 

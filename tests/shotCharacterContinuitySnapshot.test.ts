@@ -4,13 +4,18 @@ import {
 } from "node:fs";
 
 import {
+  rm,
+} from "node:fs/promises";
+
+import {
+  afterEach,
   describe,
   expect,
   it,
 } from "vitest";
 
 import {
-  buildShotCharacterContinuitySnapshotV1,
+  buildShotCharacterContinuitySnapshotV2,
 } from "../src/characterIdentity/buildShotCharacterContinuitySnapshot.js";
 
 import {
@@ -24,881 +29,356 @@ import {
 } from "../src/editorial/canonicalizeEditorialPlan.js";
 
 import {
-  hashShotCharacterContinuitySnapshotV1,
-  parseShotCharacterContinuitySnapshotV1,
+  hashShotCharacterContinuitySnapshotV2,
+  parseShotCharacterContinuitySnapshotV2,
 } from "../src/characterIdentity/shotCharacterContinuitySnapshot.schema.js";
+
+import {
+  verifyCharacterVisualIdentityApprovalForConsumption,
+} from "../src/characterIdentity/verifyCharacterVisualIdentityApprovalForConsumption.js";
+
+import {
+  createConsumptionFixture,
+  type ConsumptionFixture,
+} from "./fixtures/characterIdentityConsumptionFixture.js";
 
 type JsonRecord =
   Record<string, any>;
 
-function readJson(
-  relativePath:
-    string,
-): JsonRecord {
-  return JSON.parse(
-    readFileSync(
-      new URL(
-        relativePath,
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
+const roots: string[] = [];
+
+afterEach(async () => {
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+function readJson(relativePath: string): JsonRecord {
+  return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), "utf8"));
 }
 
-function identityFor(
-  characterId:
-    string,
-  overrides:
-    JsonRecord = {},
-): JsonRecord {
-  const slug =
-    characterId.toLowerCase();
+function multiCharacterEpisode(characters: readonly string[] = ["OLLIE", "MONT", "KACEY"]): JsonRecord {
+  const episode = readJson("../episodes/EP02/episode.json");
 
-  return {
-    schemaVersion:
-      "1.0",
-    status:
-      "LOCKED",
-    characterId,
-    identityVersion:
-      1,
-    // Deliberately not in canonical role order; the builder canonicalizes.
-    referenceBindings: [
-      {
-        role:
-          "PROFILE",
-        assetId:
-          `${slug}-profile-v1`,
-      },
-      {
-        role:
-          "MASTER_IDENTITY",
-        assetId:
-          `${slug}-master-v1`,
-      },
-    ],
-    invariantTraits: [
-      `${slug} approved face identity`,
-      `${slug} child-friendly body proportions`,
-    ],
-    prohibitedVariations: [
-      "a different species",
-      "adult proportions",
-    ],
-    ...overrides,
-  };
-}
-
-function activatedBible(): JsonRecord {
-  const bible =
-    readJson(
-      "../config/characters.json",
-    );
-
-  bible.characters =
-    bible.characters.map(
-      (character: JsonRecord) => ({
-        ...character,
-        visualIdentity:
-          identityFor(
-            character.id,
-          ),
-      }),
-    );
-
-  return bible;
-}
-
-function registryFor(
-  assetIds:
-    readonly string[],
-): JsonRecord {
-  return {
-    schemaVersion:
-      "1.0",
-    assets:
-      assetIds.map(
-        (assetId) => ({
-          assetId,
-          mediaRootRelativePath:
-            `references/characters/${assetId}.png`,
-          bytes:
-            1024,
-          sha256:
-            "0".repeat(64),
-          contentType:
-            "image/png",
-        }),
-      ),
-  };
-}
-
-const ALL_ASSETS =
-  [
-    "OLLIE",
-    "KACEY",
-    "MONT",
-  ].flatMap(
-    (id) => [
-      `${id.toLowerCase()}-master-v1`,
-      `${id.toLowerCase()}-profile-v1`,
-    ],
-  );
-
-function multiCharacterEpisode(
-  characters:
-    readonly string[] = [
-      "OLLIE",
-      "MONT",
-      "KACEY",
-    ],
-): JsonRecord {
-  const episode =
-    readJson(
-      "../episodes/EP02/episode.json",
-    );
-
-  episode.scenes[0].shots[1].characters =
-    [...characters];
+  episode.scenes[0].shots[1].characters = [...characters];
 
   return episode;
 }
 
-function build(
-  overrides:
-    JsonRecord = {},
-) {
-  return buildShotCharacterContinuitySnapshotV1({
-    episode:
-      multiCharacterEpisode(),
-    sceneId:
-      "SC01",
-    shotId:
-      "S02",
-    bible:
-      activatedBible(),
-    visualReferenceRegistry:
-      registryFor(
-        ALL_ASSETS,
-      ),
+async function verifiedFixture(): Promise<{ f: ConsumptionFixture; verified: unknown[] }> {
+  const f = await createConsumptionFixture();
+  roots.push(f.mediaRoot);
+
+  const verified = [];
+
+  for (const characterId of ["OLLIE", "KACEY", "MONT"]) {
+    verified.push(await verifyCharacterVisualIdentityApprovalForConsumption({ mediaRoot: f.mediaRoot, bible: f.bible, characterId }));
+  }
+
+  return { f, verified };
+}
+
+async function build(overrides: JsonRecord = {}) {
+  const { f, verified } = await verifiedFixture();
+
+  return buildShotCharacterContinuitySnapshotV2({
+    episode: multiCharacterEpisode(),
+    sceneId: "SC01",
+    shotId: "S02",
+    bible: f.bible,
+    visualReferenceRegistry: f.registry,
+    verifiedIdentities: verified,
     ...overrides,
   });
 }
 
-function collectKeys(
-  value:
-    unknown,
-  keys =
-    new Set<string>(),
-): Set<string> {
-  if (
-    value &&
-    typeof value ===
-      "object"
-  ) {
-    for (
-      const [key, child]
-      of Object.entries(
-        value,
-      )
-    ) {
-      if (
-        !Array.isArray(
-          value,
-        )
-      ) {
-        keys.add(
-          key,
-        );
-      }
-
-      collectKeys(
-        child,
-        keys,
-      );
+function collectKeys(value: unknown, keys = new Set<string>()): Set<string> {
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      if (!Array.isArray(value)) keys.add(key);
+      collectKeys(child, keys);
     }
   }
 
   return keys;
 }
 
-function reverseObjectKeys(
-  value:
-    unknown,
-): unknown {
-  if (
-    Array.isArray(
-      value,
-    )
-  ) {
-    return value.map(
-      reverseObjectKeys,
-    );
-  }
-
-  if (
-    value &&
-    typeof value ===
-      "object"
-  ) {
-    return Object.fromEntries(
-      Object.entries(
-        value,
-      )
-        .reverse()
-        .map(
-          ([key, child]) => [
-            key,
-            reverseObjectKeys(
-              child,
-            ),
-          ],
-        ),
-    );
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
   }
 
   return value;
 }
 
+function reverseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reverseKeys);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).reverse().map(([key, child]) => [key, reverseKeys(child)]));
+  }
+
+  return value;
+}
+
+function input(f: ConsumptionFixture, verified: unknown[], characters: readonly string[] = ["OLLIE"]) {
+  return { episode: multiCharacterEpisode(characters), sceneId: "SC01", shotId: "S02", bible: f.bible, visualReferenceRegistry: f.registry, verifiedIdentities: verified };
+}
+
+function bibleCharacter(bible: JsonRecord, id: string): JsonRecord {
+  return bible.characters.find((character: JsonRecord) => character.id === id);
+}
+
 describe(
-  "E9 ShotCharacterContinuitySnapshotV1",
+  "E9 ShotCharacterContinuitySnapshotV2 (Step 1137E)",
   () => {
-    it(
-      "builds a snapshot for a shot with multiple characters in canonical order",
-      () => {
-        const {
-          snapshot,
-          snapshotSha256,
-        } =
-          build();
+    it("builds a snapshot from active v2 authority for multiple characters in canonical order", async () => {
+      const { snapshot, snapshotSha256 } = await build();
 
-        expect(
-          snapshot.recordType,
-        ).toBe(
-          "BUSYBOOKIE_SHOT_CHARACTER_CONTINUITY_SNAPSHOT",
-        );
+      expect(snapshot.recordVersion).toBe("2");
+      expect(snapshot.characters.map((character) => character.characterId)).toEqual(["KACEY", "MONT", "OLLIE"]);
+      expect(snapshotSha256).toBe(hashShotCharacterContinuitySnapshotV2(snapshot));
 
-        expect(
-          [
-            snapshot.episodeId,
-            snapshot.sceneId,
-            snapshot.shotId,
-          ],
-        ).toEqual([
-          "EP02",
-          "SC01",
-          "S02",
-        ]);
+      const ollie = snapshot.characters.find((character) => character.characterId === "OLLIE")!;
 
-        expect(
-          snapshot.characters.map(
-            (character) =>
-              character.characterId,
-          ),
-        ).toEqual([
-          "KACEY",
-          "MONT",
-          "OLLIE",
-        ]);
+      expect(ollie.identityVersion).toBe(1);
+      expect(ollie.approval.approvalId).toBe("371599c1-35d3-4893-913b-9c4f63730cb8");
+      expect(ollie.immutableIdentity.referenceBindings).toEqual([{ role: "MASTER_IDENTITY", assetId: "ollie-master-identity-reference-v1" }]);
+      expect(ollie.immutableIdentity.approvedTraitDecisions.map((decision) => `${decision.traitKey}=${decision.valueCode}`))
+        .toEqual(["PAW_FUR_COLOUR=BROWN", "PAW_PAD_COLOUR=DARK_BROWN", "PINK_PAWS=PROHIBITED"]);
+      expect(ollie.continuityState).toEqual({
+        source: "CHARACTER_BIBLE_DEFAULT",
+        items: [
+          { itemKey: "BACKPACK", description: "teal explorer backpack", resolutions: [] },
+          { itemKey: "PENDANT", description: "small compass pendant", resolutions: [] },
+        ],
+      });
 
-        const ollie =
-          snapshot.characters[2]!;
+      const kacey = snapshot.characters.find((character) => character.characterId === "KACEY")!;
+      expect(kacey.continuityState.items.map((item) => item.resolutions)).toEqual([
+        [{ attribute: "COLOUR", valueCode: "PINK" }],
+        [{ attribute: "COLOUR", valueCode: "PINK" }],
+        [{ attribute: "FORM", valueCode: "FLOWER" }],
+      ]);
+      expect(JSON.stringify(snapshot)).not.toMatch(/satchel|green explorer accents|pink or purple|flower or leaf/i);
+      expect(snapshot.shotContinuityNotes).toEqual(multiCharacterEpisode().scenes[0].shots[1].continuityNotes);
+    });
 
-        expect(
-          ollie.immutableIdentity.referenceBindings,
-        ).toEqual([
-          {
-            role:
-              "MASTER_IDENTITY",
-            assetId:
-              "ollie-master-v1",
-          },
-          {
-            role:
-              "PROFILE",
-            assetId:
-              "ollie-profile-v1",
-          },
-        ]);
+    it("does not carry promptAnchor, and a promptAnchor-only change keeps the verification valid and the digest unchanged", async () => {
+      const { f, verified } = await verifiedFixture();
+      const first = buildShotCharacterContinuitySnapshotV2(input(f, verified, ["OLLIE", "MONT", "KACEY"]));
 
-        expect(
-          ollie.immutableIdentity.species,
-        ).toBe(
-          "young otter",
-        );
+      for (const character of f.bible.characters) character.promptAnchor = "Overridden legacy prose: a purple dragon.";
 
-        expect(
-          ollie.continuityState,
-        ).toEqual({
-          source:
-            "CHARACTER_BIBLE_DEFAULT",
-          outfit: [
-            "teal explorer backpack",
-          ],
-          accessories: [
-            "small compass pendant",
-            "explorer satchel when required by the approved shot reference",
-          ],
-        });
+      const second = buildShotCharacterContinuitySnapshotV2(input(f, verified, ["OLLIE", "MONT", "KACEY"]));
 
-        expect(
-          ollie.promptAnchor,
-        ).toMatch(
-          /^Ollie is a young boy otter/,
-        );
+      expect(collectKeys(first.snapshot).has("promptAnchor")).toBe(false);
+      expect(second.snapshotSha256).toBe(first.snapshotSha256);
+    });
 
-        expect(
-          snapshot.shotContinuityNotes.length,
-        ).toBeGreaterThan(0);
+    it("contains no provider, model, prompt or byte-authority fields", async () => {
+      const keys = collectKeys((await build()).snapshot);
 
-        expect(
-          snapshotSha256,
-        ).toMatch(
-          /^[0-9a-f]{64}$/,
-        );
+      for (const forbidden of ["provider", "model", "seed", "prompt", "promptAnchor", "sha256", "bytes", "mediaRootRelativePath", "absolutePath", "voice", "camera", "audio"]) {
+        expect(keys.has(forbidden), forbidden).toBe(false);
+      }
+    });
 
-        expect(
-          Object.isFrozen(
-            snapshot,
-          ) &&
-            Object.isFrozen(
-              snapshot.characters[0]!.immutableIdentity.referenceBindings,
-            ),
-        ).toBe(true);
+    it("rejects an old verification once authoritative CharacterBible state changes (M1 regression)", async () => {
+      const mutations: Array<[string, (bible: JsonRecord) => void]> = [
+        ["approved trait", (bible) => { bibleCharacter(bible, "OLLIE").visualIdentity.approvedTraitDecisions[0].valueCode = "PINK"; }],
+        ["default continuity item", (bible) => { bibleCharacter(bible, "OLLIE").defaultContinuityState.items[0].description = "pink or purple backpack"; }],
+        ["master binding", (bible) => { bibleCharacter(bible, "OLLIE").visualIdentity.referenceBindings[0].assetId = "ollie-master-identity-reference-v2"; }],
+        ["invariant trait", (bible) => { bibleCharacter(bible, "OLLIE").visualIdentity.invariantTraits.push("pink or purple paws"); }],
+        ["species", (bible) => { bibleCharacter(bible, "OLLIE").species = "owl"; }],
+        ["prohibited variation", (bible) => { bibleCharacter(bible, "OLLIE").visualIdentity.prohibitedVariations.pop(); }],
+      ];
+
+      for (const [label, mutate] of mutations) {
+        const { f, verified } = await verifiedFixture();
+        const registry = structuredClone(f.registry);
+
+        if (label === "master binding") registry.assets.push({ ...registry.assets[0], assetId: "ollie-master-identity-reference-v2", mediaRootRelativePath: "references/characters/OLLIE/ollie-master-identity-reference-v2.png" });
+
+        mutate(f.bible);
+
+        expect(() => buildShotCharacterContinuitySnapshotV2({ ...input(f, verified), visualReferenceRegistry: registry }), label)
+          .toThrow(/no matching consumption-verified approval[\s\S]*stale or belongs to another character/);
+      }
+    });
+
+    it.each(["OLLIE", "KACEY", "MONT"])(
+      "cannot snapshot %s with all approved trait decisions stripped (M1137E2A2-1)",
+      async (id) => {
+        const { f, verified } = await verifiedFixture();
+        bibleCharacter(f.bible, id).visualIdentity.approvedTraitDecisions = [];
+
+        // The genuine verification of the full authority is stale for the stripped authority (S02 keeps its OLLIE
+        // dialogue speaker in the shot)...
+        expect(() => buildShotCharacterContinuitySnapshotV2(input(f, verified, [...new Set(["OLLIE", id])])))
+          .toThrow(new RegExp(`character ${id} has no matching consumption-verified approval[\\s\\S]*stale`));
+
+        // ...and no new verification can be obtained for it.
+        await expect(verifyCharacterVisualIdentityApprovalForConsumption({ mediaRoot: f.mediaRoot, bible: f.bible, characterId: id }))
+          .rejects.toThrow(/approvedTraitDecisions do not exactly equal the allowlisted legacy IV1 decisions/);
       },
     );
 
-    it(
-      "does not mutate caller inputs",
-      () => {
-        const episode =
-          multiCharacterEpisode();
+    it("changes the digest when immutable identity changes, each state with its own valid verification", async () => {
+      const a = await verifiedFixture();
+      const digestA = buildShotCharacterContinuitySnapshotV2(input(a.f, a.verified)).snapshotSha256;
 
-        const bible =
-          activatedBible();
+      const b = await verifiedFixture();
+      bibleCharacter(b.f.bible, "OLLIE").visualIdentity.invariantTraits.push("soft rounded paws");
+      const verifiedB = [await verifyCharacterVisualIdentityApprovalForConsumption({ mediaRoot: b.f.mediaRoot, bible: b.f.bible, characterId: "OLLIE" })];
+      const digestB = buildShotCharacterContinuitySnapshotV2(input(b.f, verifiedB)).snapshotSha256;
 
-        const before =
-          JSON.stringify([
-            episode,
-            bible,
-          ]);
+      expect(digestB).not.toBe(digestA);
+      expect(buildShotCharacterContinuitySnapshotV2(input(a.f, a.verified)).snapshotSha256).toBe(digestA);
 
-        buildShotCharacterContinuitySnapshotV1({
-          episode,
-          sceneId:
-            "SC01",
-          shotId:
-            "S02",
-          bible,
-          visualReferenceRegistry:
-            registryFor(
-              ALL_ASSETS,
-            ),
-        });
+      // A's genuine verification is stale for authority B.
+      expect(() => buildShotCharacterContinuitySnapshotV2(input(b.f, b.verified))).toThrow(/stale or belongs to another character/);
+    });
 
-        expect(
-          JSON.stringify([
-            episode,
-            bible,
-          ]),
-        ).toBe(
-          before,
-        );
-      },
-    );
+    it("is independent of shot membership, verification, CharacterBible character and property insertion order", async () => {
+      const { f, verified } = await verifiedFixture();
+      const reference = buildShotCharacterContinuitySnapshotV2(input(f, verified, ["OLLIE", "MONT", "KACEY"])).snapshotSha256;
 
-    it(
-      "builds an empty character set for a shot without characters",
-      () => {
-        const {
-          snapshot,
-        } =
-          build({
-            shotId:
-              "S01",
-          });
+      const reordered = buildShotCharacterContinuitySnapshotV2({
+        ...input(f, [...verified].reverse(), ["KACEY", "OLLIE", "MONT"]),
+        bible: reverseKeys({ ...f.bible, characters: [...f.bible.characters].reverse() }),
+        visualReferenceRegistry: reverseKeys(f.registry),
+      });
 
-        expect(
-          snapshot.characters,
-        ).toEqual([]);
-      },
-    );
+      expect(reordered.snapshotSha256).toBe(reference);
+      expect(reordered.snapshot.characters.map((character) => character.characterId)).toEqual(["KACEY", "MONT", "OLLIE"]);
+    });
 
-    it(
-      "produces the same digest for the same canonical snapshot",
-      () => {
-        const first =
-          build();
+    it("does not mutate caller inputs", async () => {
+      const { f, verified } = await verifiedFixture();
+      const episode = multiCharacterEpisode(["OLLIE", "MONT", "KACEY"]);
+      const verifiedList = [...verified];
+      const before = JSON.stringify({ episode, bible: f.bible, registry: f.registry, verified: verifiedList });
 
-        const second =
-          build();
+      deepFreeze(episode);
+      deepFreeze(f.bible);
+      deepFreeze(f.registry);
+      deepFreeze(verifiedList);
 
-        expect(
-          second.snapshotSha256,
-        ).toBe(
-          first.snapshotSha256,
-        );
+      const result = buildShotCharacterContinuitySnapshotV2({ episode, sceneId: "SC01", shotId: "S02", bible: f.bible, visualReferenceRegistry: f.registry, verifiedIdentities: verifiedList });
 
-        expect(
-          hashShotCharacterContinuitySnapshotV1(
-            first.snapshot,
-          ),
-        ).toBe(
-          first.snapshotSha256,
-        );
-      },
-    );
+      expect(result.snapshot.characters).toHaveLength(3);
+      expect(JSON.stringify({ episode, bible: f.bible, registry: f.registry, verified: verifiedList })).toBe(before);
+      expect(Object.isFrozen(result.snapshot)).toBe(true);
+    });
 
-    it(
-      "is independent of shot membership order and property insertion order",
-      () => {
-        const base =
-          build();
+    it("fails closed without a verification, with a forged one, with another character's or with duplicates", async () => {
+      const { f, verified } = await verifiedFixture();
+      const base = input(f, verified);
+      const ollie = verified.find((value) => (value as JsonRecord).characterId === "OLLIE") as JsonRecord;
+      const kacey = verified.find((value) => (value as JsonRecord).characterId === "KACEY")!;
 
-        const reordered =
-          build({
-            episode:
-              multiCharacterEpisode([
-                "KACEY",
-                "OLLIE",
-                "MONT",
-              ]),
-          });
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, verifiedIdentities: [] })).toThrow(/no matching consumption-verified approval/);
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, verifiedIdentities: [kacey] })).toThrow(/no matching consumption-verified approval/);
 
-        expect(
-          reordered.snapshotSha256,
-        ).toBe(
-          base.snapshotSha256,
-        );
+      for (const forged of [{ ...ollie }, Object.freeze({ ...ollie }), structuredClone(ollie), JSON.parse(JSON.stringify(ollie))]) {
+        expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, verifiedIdentities: [forged] })).toThrow(/not issued by the consumption verifier/);
+      }
 
-        expect(
-          hashShotCharacterContinuitySnapshotV1(
-            reverseObjectKeys(
-              base.snapshot,
-            ),
-          ),
-        ).toBe(
-          base.snapshotSha256,
-        );
-      },
-    );
+      const second = await verifyCharacterVisualIdentityApprovalForConsumption({ mediaRoot: f.mediaRoot, bible: f.bible, characterId: "OLLIE" });
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, verifiedIdentities: [ollie, second] })).toThrow(/more than one verification for OLLIE/);
 
-    it(
-      "changes the digest when immutable identity changes",
-      () => {
-        const base =
-          build();
+      f.bible.characters[0].visualIdentity.approval.receiptSha256 = "0".repeat(64);
+      expect(() => buildShotCharacterContinuitySnapshotV2(base)).toThrow(/no matching consumption-verified approval/);
+    });
 
-        const bible =
-          activatedBible();
+    it("fails closed on a PENDING identity, an unregistered binding, an unknown character or an invalid registry", async () => {
+      const { f, verified } = await verifiedFixture();
+      const base = { episode: multiCharacterEpisode(["OLLIE"]), sceneId: "SC01", shotId: "S02", visualReferenceRegistry: f.registry, verifiedIdentities: verified };
 
-        bible.characters[0].visualIdentity =
-          identityFor(
-            "OLLIE",
-            {
-              identityVersion:
-                2,
-            },
-          );
+      const pendingBible = structuredClone(f.bible);
+      const { approval: _link, ...rest } = pendingBible.characters[0].visualIdentity;
+      pendingBible.characters[0].visualIdentity = { ...rest, status: "PENDING" };
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, bible: pendingBible })).toThrow(/PENDING, not LOCKED/);
 
-        const versionBumped =
-          build({
-            bible,
-          });
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, bible: f.bible, visualReferenceRegistry: { schemaVersion: "1.0", assets: [] } }))
+        .toThrow(/not in the visual reference asset registry/);
 
-        const traitBible =
-          activatedBible();
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, bible: f.bible, episode: multiCharacterEpisode(["OLLIE", "TEST_GUEST"]) }))
+        .toThrow(/unknown character TEST_GUEST/);
 
-        traitBible.characters[1].visualIdentity.invariantTraits =
-          [
-            "kacey approved face identity",
-            "kacey longer fluffy tail",
-          ];
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, bible: f.bible, visualReferenceRegistry: { schemaVersion: "9" } }))
+        .toThrow(/registry is invalid/);
 
-        const traitChanged =
-          build({
-            bible:
-              traitBible,
-          });
+      expect(() => buildShotCharacterContinuitySnapshotV2({ ...base, bible: f.bible, shotId: "S99" })).toThrow(/was not found/);
+    });
 
-        expect(
-          versionBumped.snapshotSha256,
-        ).not.toBe(
-          base.snapshotSha256,
-        );
+    it("rejects duplicate shot characters instead of deduplicating them", async () => {
+      const { f, verified } = await verifiedFixture();
 
-        expect(
-          traitChanged.snapshotSha256,
-        ).not.toBe(
-          base.snapshotSha256,
-        );
-      },
-    );
+      expect(() => buildShotCharacterContinuitySnapshotV2(input(f, verified, ["OLLIE", "MONT", "OLLIE"])))
+        .toThrow(/episode manifest is invalid[\s\S]*Duplicate character in shot: OLLIE/);
 
-    it(
-      "changes the digest when shot continuity state changes",
-      () => {
-        const base =
-          build();
+      const { snapshot } = await build();
+      const duplicated = structuredClone(snapshot) as JsonRecord;
+      duplicated.characters = [duplicated.characters[0], duplicated.characters[0], duplicated.characters[1]];
+      expect(() => parseShotCharacterContinuitySnapshotV2(duplicated)).toThrow(/Duplicate snapshot character: KACEY/);
+    });
 
-        const bible =
-          activatedBible();
+    it("builds an empty character set for a shot without characters", async () => {
+      const episode = multiCharacterEpisode([]);
+      episode.scenes[0].shots[1].dialogue = [];
 
-        bible.characters[2].appearance.outfit =
-          [
-            "green explorer backpack",
-            "red rain cap",
-          ];
+      const { snapshot } = await build({ episode });
 
-        const outfitChanged =
-          build({
-            bible,
-          });
+      expect(snapshot.characters).toEqual([]);
+    });
 
-        const episode =
-          multiCharacterEpisode();
+    it("rejects malformed snapshots at the schema boundary", async () => {
+      const { snapshot } = await build();
+      const value = structuredClone(snapshot) as JsonRecord;
 
-        episode.scenes[0].shots[1].continuityNotes.push(
-          "Mont now carries the lantern from the previous shot.",
-        );
+      value.characters.reverse();
+      expect(() => parseShotCharacterContinuitySnapshotV2(value)).toThrow(/ascending characterId order/);
 
-        const notesChanged =
-          build({
-            episode,
-          });
+      const v1 = structuredClone(snapshot) as JsonRecord;
+      v1.recordVersion = "1";
+      expect(() => parseShotCharacterContinuitySnapshotV2(v1)).toThrow();
 
-        expect(
-          outfitChanged.snapshotSha256,
-        ).not.toBe(
-          base.snapshotSha256,
-        );
-
-        expect(
-          notesChanged.snapshotSha256,
-        ).not.toBe(
-          base.snapshotSha256,
-        );
-      },
-    );
-
-    it(
-      "contains no provider, model or byte-authority fields",
-      () => {
-        const keys =
-          collectKeys(
-            build().snapshot,
-          );
-
-        for (
-          const forbidden
-          of [
-            "provider",
-            "model",
-            "seed",
-            "sha256",
-            "bytes",
-            "mediaRootRelativePath",
-            "absolutePath",
-            "voice",
-            "camera",
-            "audio",
-          ]
-        ) {
-          expect(
-            keys.has(
-              forbidden,
-            ),
-          ).toBe(false);
-        }
-      },
-    );
+      const withPrompt = structuredClone(snapshot) as JsonRecord;
+      withPrompt.characters[0].promptAnchor = "legacy";
+      expect(() => parseShotCharacterContinuitySnapshotV2(withPrompt)).toThrow();
+    });
 
     it.each([
-      [
-        "top level",
-        (snapshot: JsonRecord) => {
-          snapshot.provider =
-            "VEO";
-        },
-      ],
-      [
-        "character",
-        (snapshot: JsonRecord) => {
-          snapshot.characters[0].model =
-            "veo-3.1";
-        },
-      ],
-      [
-        "immutable identity",
-        (snapshot: JsonRecord) => {
-          snapshot.characters[0].immutableIdentity.seed =
-            42;
-        },
-      ],
-      [
-        "continuity state",
-        (snapshot: JsonRecord) => {
-          snapshot.characters[0].continuityState.expression =
-            "happy";
-        },
-      ],
-      [
-        "self digest",
-        (snapshot: JsonRecord) => {
-          snapshot.snapshotSha256 =
-            "0".repeat(64);
-        },
-      ],
-    ])(
-      "rejects unknown fields at %s",
-      (
-        _label,
-        mutate,
-      ) => {
-        const snapshot =
-          structuredClone(
-            build().snapshot,
-          ) as JsonRecord;
+      ["snapshot", (s: JsonRecord) => { s.extra = true; }],
+      ["character", (s: JsonRecord) => { s.characters[0].extra = true; }],
+      ["approval", (s: JsonRecord) => { s.characters[0].approval.extra = true; }],
+      ["immutable identity", (s: JsonRecord) => { s.characters[0].immutableIdentity.extra = true; }],
+      ["trait decision", (s: JsonRecord) => { s.characters[0].immutableIdentity.approvedTraitDecisions[0].legacyIv1ReceiptNoteCorroboration = "x"; }],
+      ["reference binding", (s: JsonRecord) => { s.characters[0].immutableIdentity.referenceBindings[0].sha256 = "a".repeat(64); }],
+      ["continuity state", (s: JsonRecord) => { s.characters[0].continuityState.extra = true; }],
+      ["continuity item", (s: JsonRecord) => { s.characters[0].continuityState.items[0].extra = true; }],
+      ["item resolution", (s: JsonRecord) => { s.characters[0].continuityState.items[0].resolutions[0].extra = true; }],
+    ])("rejects unknown fields at %s", async (_label, mutate) => {
+      const { snapshot } = await build();
+      const value = structuredClone(snapshot) as JsonRecord;
 
-        mutate(
-          snapshot,
-        );
+      mutate(value);
+      expect(() => parseShotCharacterContinuitySnapshotV2(value)).toThrow(/Shot character continuity snapshot is invalid/);
+    });
 
-        expect(() =>
-          parseShotCharacterContinuitySnapshotV1(
-            snapshot,
-          ),
-        ).toThrow(
-          /invalid/,
-        );
-      },
-    );
+    it("rejects unknown nested CharacterBible fields before snapshot construction", async () => {
+      const { f, verified } = await verifiedFixture();
 
-    it(
-      "rejects duplicate or non-canonically ordered characters",
-      () => {
-        const snapshot =
-          structuredClone(
-            build().snapshot,
-          ) as JsonRecord;
-
-        const duplicated =
-          structuredClone(
-            snapshot,
-          );
-
-        duplicated.characters[1] =
-          duplicated.characters[0];
-
-        expect(() =>
-          parseShotCharacterContinuitySnapshotV1(
-            duplicated,
-          ),
-        ).toThrow(
-          /Duplicate snapshot character/,
-        );
-
-        snapshot.characters.reverse();
-
-        expect(() =>
-          parseShotCharacterContinuitySnapshotV1(
-            snapshot,
-          ),
-        ).toThrow(
-          /ascending characterId order/,
-        );
-      },
-    );
-
-    it(
-      "rejects non-canonical, duplicate or master-less snapshot bindings",
-      () => {
-        const base =
-          build().snapshot;
-
-        const reordered =
-          structuredClone(
-            base,
-          ) as JsonRecord;
-
-        reordered.characters[0].immutableIdentity.referenceBindings.reverse();
-
-        expect(() =>
-          parseShotCharacterContinuitySnapshotV1(
-            reordered,
-          ),
-        ).toThrow(
-          /canonical role order/,
-        );
-
-        const masterless =
-          structuredClone(
-            base,
-          ) as JsonRecord;
-
-        masterless.characters[0].immutableIdentity.referenceBindings =
-          [
-            {
-              role:
-                "PROFILE",
-              assetId:
-                "kacey-profile-v1",
-            },
-          ];
-
-        expect(() =>
-          parseShotCharacterContinuitySnapshotV1(
-            masterless,
-          ),
-        ).toThrow(
-          /MASTER_IDENTITY/,
-        );
-      },
-    );
-
-    it(
-      "fails closed when a shot character has no CharacterBible visual identity",
-      () => {
-        expect(() =>
-          build({
-            bible:
-              readJson(
-                "../config/characters.json",
-              ),
-          }),
-        ).toThrow(
-          /no CharacterBible visualIdentity \(E9 activation pending\)/,
-        );
-      },
-    );
-
-    it(
-      "fails closed when a shot character identity is PENDING",
-      () => {
-        const bible =
-          activatedBible();
-
-        bible.characters[1].visualIdentity =
-          identityFor(
-            "KACEY",
-            {
-              status:
-                "PENDING",
-            },
-          );
-
-        expect(() =>
-          build({
-            bible,
-          }),
-        ).toThrow(
-          /KACEY visual identity is PENDING, not LOCKED/,
-        );
-      },
-    );
-
-    it(
-      "fails closed when a bound asset is not in the visual reference registry",
-      () => {
-        expect(() =>
-          build({
-            visualReferenceRegistry:
-              registryFor(
-                ALL_ASSETS.filter(
-                  (assetId) =>
-                    assetId !==
-                    "mont-profile-v1",
-                ),
-              ),
-          }),
-        ).toThrow(
-          /MONT PROFILE asset mont-profile-v1 is not in the visual reference asset registry/,
-        );
-      },
-    );
-
-    it(
-      "fails closed on an invalid registry, unknown scene or unknown shot",
-      () => {
-        expect(() =>
-          build({
-            visualReferenceRegistry: {
-              schemaVersion:
-                "1.0",
-              assets: [
-                {
-                  assetId:
-                    "x",
-                  mediaRootRelativePath:
-                    "../escape.png",
-                  bytes:
-                    1,
-                  sha256:
-                    "0".repeat(64),
-                  contentType:
-                    "image/png",
-                },
-              ],
-            },
-          }),
-        ).toThrow(
-          /visual reference asset registry is invalid/,
-        );
-
-        expect(() =>
-          build({
-            sceneId:
-              "SC09",
-          }),
-        ).toThrow(
-          /scene SC09 was not found/,
-        );
-
-        expect(() =>
-          build({
-            shotId:
-              "S09",
-          }),
-        ).toThrow(
-          /shot S09 was not found/,
-        );
-      },
-    );
-
-    it(
-      "rejects a shot that repeats a character before building",
-      () => {
-        expect(() =>
-          build({
-            episode:
-              multiCharacterEpisode([
-                "OLLIE",
-                "OLLIE",
-              ]),
-          }),
-        ).toThrow(
-          /episode manifest is invalid/,
-        );
-      },
-    );
-
-    it(
-      "rejects a shot character unknown to the CharacterBible",
-      () => {
-        expect(() =>
-          build({
-            episode:
-              multiCharacterEpisode([
-                "OLLIE",
-                "TEST_GUEST",
-              ]),
-          }),
-        ).toThrow(
-          /unknown character TEST_GUEST/,
-        );
-      },
-    );
+      for (const mutate of [
+        (bible: JsonRecord) => { bibleCharacter(bible, "OLLIE").visualIdentity.extra = true; },
+        (bible: JsonRecord) => { bibleCharacter(bible, "OLLIE").defaultContinuityState.items[0].extra = true; },
+        (bible: JsonRecord) => { bibleCharacter(bible, "OLLIE").visualIdentity.approvedTraitDecisions[0].extra = true; },
+      ]) {
+        const bible = structuredClone(f.bible);
+        mutate(bible);
+        expect(() => buildShotCharacterContinuitySnapshotV2({ ...input(f, verified), bible })).toThrow(/character bible is invalid/);
+      }
+    });
   },
 );
 
@@ -907,9 +387,9 @@ describe(
   () => {
     it(
       "matches the repository canonical editorial JSON byte-for-byte",
-      () => {
+      async () => {
         const samples: unknown[] = [
-          build().snapshot,
+          (await build()).snapshot,
           {
             b: 1,
             a: [
@@ -1000,6 +480,7 @@ describe(
       "validateCharacterVisualIdentityApproval.ts",
       "onboardCharacterVisualIdentity.ts",
       "cli/characterReferenceOnboarding.ts",
+      "verifyCharacterVisualIdentityApprovalForConsumption.ts",
     ];
 
     function listCharacterIdentityModules(

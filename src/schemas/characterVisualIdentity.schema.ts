@@ -249,11 +249,262 @@ export function addReferenceBindingIssues(
   }
 }
 
+// E9 Step 1137E: machine codes and the structured state/trait contracts of CharacterBible v2.
+export const CharacterMachineCodeSchema =
+  z.string()
+    .regex(
+      /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/,
+      "Character machine codes must use uppercase letters, numbers and single underscores.",
+    );
+
+const CharacterSha256Schema =
+  z.string()
+    .regex(
+      /^[0-9a-f]{64}$/,
+      "Character evidence digests must be lowercase 64-character hexadecimal SHA-256.",
+    );
+
+export const CharacterStateResolutionSchema =
+  z.object({
+    attribute:
+      z.enum([
+        "COLOUR",
+        "FORM",
+      ]),
+
+    valueCode:
+      CharacterMachineCodeSchema,
+  })
+    .strict();
+
+function addUniqueKeyIssues(
+  values:
+    readonly string[],
+  label:
+    string,
+  ctx:
+    z.RefinementCtx,
+): void {
+  const seen =
+    new Set<string>();
+
+  values.forEach(
+    (
+      value,
+      index,
+    ) => {
+      if (
+        seen.has(
+          value,
+        )
+      ) {
+        ctx.addIssue({
+          code:
+            "custom",
+
+          path: [
+            index,
+          ],
+
+          message:
+            `Duplicate ${label}: ${value}`,
+        });
+      }
+
+      seen.add(
+        value,
+      );
+    },
+  );
+}
+
+// Default continuity state: removable items a character wears or carries by default. Never identity.
+export const CharacterDefaultContinuityStateSchema =
+  z.object({
+    items:
+      z.array(
+        z.object({
+          itemKey:
+            CharacterMachineCodeSchema,
+
+          description:
+            CharacterIdentityTextSchema,
+
+          resolutions:
+            z.array(
+              CharacterStateResolutionSchema,
+            )
+              .max(2),
+        })
+          .strict(),
+      )
+        .max(64)
+        .superRefine(
+          (
+            items,
+            ctx,
+          ) =>
+            addUniqueKeyIssues(
+              items.map(
+                (item) =>
+                  item.itemKey,
+              ),
+              "default state itemKey",
+              ctx,
+            ),
+        ),
+  })
+    .strict();
+
+// Conditional items that may appear only when explicit shot or story state requires them.
+export const CharacterShotOrStoryStateItemsSchema =
+  z.array(
+    z.object({
+      itemKey:
+        CharacterMachineCodeSchema,
+
+      description:
+        CharacterIdentityTextSchema,
+
+      classification:
+        z.literal(
+          "SHOT_OR_STORY_STATE",
+        ),
+    })
+      .strict(),
+  )
+    .max(64)
+    .superRefine(
+      (
+        items,
+        ctx,
+      ) =>
+        addUniqueKeyIssues(
+          items.map(
+            (item) =>
+              item.itemKey,
+          ),
+          "shot or story state itemKey",
+          ctx,
+        ),
+    );
+
+// Presentation guidance: styling direction only; never a state item and never identity.
+export const CharacterPresentationGuidanceSchema =
+  z.array(
+    z.object({
+      guidanceKey:
+        CharacterMachineCodeSchema,
+
+      text:
+        CharacterIdentityTextSchema,
+    })
+      .strict(),
+  )
+    .max(64)
+    .superRefine(
+      (
+        items,
+        ctx,
+      ) =>
+        addUniqueKeyIssues(
+          items.map(
+            (item) =>
+              item.guidanceKey,
+          ),
+          "presentation guidanceKey",
+          ctx,
+        ),
+    );
+
+// Structured stable visual trait decisions. HUMAN_APPROVED_VISUAL_IDENTITY_DECISION entries made during the IV1
+// onboarding exist in their receipts only as free text; legacyIv1ReceiptNoteCorroboration names the exact phrase of
+// the pinned receipt's operatorNotes that corroborates them (FREE_TEXT_ONLY_SUPPLEMENTAL_DECISION_PATH =
+// LEGACY_IV1_MIGRATION_EXCEPTION). CHARACTER_BIBLE_SOURCE entries quote the exact identity prose they come from.
+export const CharacterApprovedTraitDecisionSchema =
+  z.discriminatedUnion(
+    "provenance",
+    [
+      z.object({
+        traitKey:
+          CharacterMachineCodeSchema,
+
+        valueCode:
+          CharacterMachineCodeSchema,
+
+        description:
+          CharacterIdentityTextSchema,
+
+        provenance:
+          z.literal(
+            "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+          ),
+
+        legacyIv1ReceiptNoteCorroboration:
+          CharacterIdentityTextSchema,
+      })
+        .strict(),
+
+      z.object({
+        traitKey:
+          CharacterMachineCodeSchema,
+
+        valueCode:
+          CharacterMachineCodeSchema,
+
+        description:
+          CharacterIdentityTextSchema,
+
+        provenance:
+          z.literal(
+            "CHARACTER_BIBLE_SOURCE",
+          ),
+
+        characterBibleSourceText:
+          CharacterIdentityTextSchema,
+      })
+        .strict(),
+    ],
+  );
+
+const ApprovedTraitDecisionListSchema =
+  z.array(
+    CharacterApprovedTraitDecisionSchema,
+  )
+    .max(64)
+    .superRefine(
+      (
+        decisions,
+        ctx,
+      ) =>
+        addUniqueKeyIssues(
+          decisions.map(
+            (decision) =>
+              decision.traitKey,
+          ),
+          "approved trait traitKey",
+          ctx,
+        ),
+    );
+
+// Minimal evidence link from an active identity to its immutable approval receipt. The receipt path is derived
+// from characterId + identityVersion; receiptSha256 pins the exact receipt bytes.
+export const CharacterVisualIdentityApprovalLinkSchema =
+  z.object({
+    approvalId:
+      z.string()
+        .uuid(),
+
+    receiptSha256:
+      CharacterSha256Schema,
+  })
+    .strict();
+
 const LockedCharacterVisualIdentityV1Schema =
   z.object({
     schemaVersion:
       z.literal(
-        "1.0",
+        "2.0",
       ),
 
     status:
@@ -285,15 +536,21 @@ const LockedCharacterVisualIdentityV1Schema =
       createUniqueIdentityTextListSchema(
         1,
       ),
+
+    approvedTraitDecisions:
+      ApprovedTraitDecisionListSchema,
+
+    approval:
+      CharacterVisualIdentityApprovalLinkSchema,
   })
     .strict();
 
-// PENDING records work in progress; it can never produce a shot continuity snapshot.
+// PENDING records work in progress; it can never produce a shot continuity snapshot and carries no approval link.
 const PendingCharacterVisualIdentityV1Schema =
   z.object({
     schemaVersion:
       z.literal(
-        "1.0",
+        "2.0",
       ),
 
     status:
@@ -324,6 +581,9 @@ const PendingCharacterVisualIdentityV1Schema =
       createUniqueIdentityTextListSchema(
         0,
       ),
+
+    approvedTraitDecisions:
+      ApprovedTraitDecisionListSchema,
   })
     .strict();
 
@@ -365,6 +625,16 @@ export type CharacterVisualReferenceBindingV1 =
 export type CharacterVisualIdentityV1 =
   z.infer<
     typeof CharacterVisualIdentityV1Schema
+  >;
+
+export type CharacterApprovedTraitDecision =
+  z.infer<
+    typeof CharacterApprovedTraitDecisionSchema
+  >;
+
+export type CharacterDefaultContinuityState =
+  z.infer<
+    typeof CharacterDefaultContinuityStateSchema
   >;
 
 export type LockedCharacterVisualIdentityV1 =

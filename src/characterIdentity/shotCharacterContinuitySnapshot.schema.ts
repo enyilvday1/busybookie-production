@@ -13,18 +13,41 @@ import {
 import {
   addReferenceBindingIssues,
   CHARACTER_VISUAL_REFERENCE_ROLES,
+  CharacterDefaultContinuityStateSchema,
   CharacterIdentityTextSchema,
   CharacterIdentityVersionSchema,
+  CharacterMachineCodeSchema,
+  CharacterVisualIdentityApprovalLinkSchema,
   CharacterVisualReferenceBindingV1Schema,
   compareCharacterVisualReferenceRoles,
   createUniqueIdentityTextListSchema,
 } from "../schemas/characterVisualIdentity.schema.js";
 
-// E9 Step 1136: the immutable, provider-neutral character identity state for one shot.
-// It is not an episode manifest: no camera, audio, editorial, provider or model data.
-// Immutable identity and mutable shot continuity state are kept in separate sub-objects.
+// E9 Step 1137E: shot character continuity snapshot recordVersion "2". The immutable, provider-neutral character
+// identity state for one shot, derived only from the active CharacterBible v2 structures (visualIdentity +
+// defaultContinuityState); promptAnchor and legacy appearance prose are never read. It is not an episode manifest: no
+// camera, audio, editorial, provider or model data. Immutable identity and default continuity state stay separate.
 
-const SnapshotImmutableIdentityV1Schema =
+const SnapshotTraitDecisionV2Schema =
+  z.object({
+    traitKey:
+      CharacterMachineCodeSchema,
+
+    valueCode:
+      CharacterMachineCodeSchema,
+
+    description:
+      CharacterIdentityTextSchema,
+
+    provenance:
+      z.enum([
+        "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+        "CHARACTER_BIBLE_SOURCE",
+      ]),
+  })
+    .strict();
+
+const SnapshotImmutableIdentityV2Schema =
   z.object({
     species:
       CharacterIdentityTextSchema,
@@ -38,6 +61,12 @@ const SnapshotImmutableIdentityV1Schema =
       createUniqueIdentityTextListSchema(
         1,
       ),
+
+    approvedTraitDecisions:
+      z.array(
+        SnapshotTraitDecisionV2Schema,
+      )
+        .max(64),
 
     referenceBindings:
       z.array(
@@ -99,9 +128,8 @@ const SnapshotImmutableIdentityV1Schema =
       },
     );
 
-// v1 has one state source: the CharacterBible default appearance. Shot overrides and
-// state inherited from a previous shot are future members of this discriminated union.
-const SnapshotContinuityStateV1Schema =
+// v2 has one state source: the CharacterBible default continuity state. Shot overrides are future members.
+const SnapshotContinuityStateV2Schema =
   z.discriminatedUnion(
     "source",
     [
@@ -111,21 +139,14 @@ const SnapshotContinuityStateV1Schema =
             "CHARACTER_BIBLE_DEFAULT",
           ),
 
-        outfit:
-          createUniqueIdentityTextListSchema(
-            1,
-          ),
-
-        accessories:
-          createUniqueIdentityTextListSchema(
-            0,
-          ),
+        items:
+          CharacterDefaultContinuityStateSchema.shape.items,
       })
         .strict(),
     ],
   );
 
-const SnapshotCharacterV1Schema =
+const SnapshotCharacterV2Schema =
   z.object({
     characterId:
       CharacterIdSchema,
@@ -133,18 +154,18 @@ const SnapshotCharacterV1Schema =
     identityVersion:
       CharacterIdentityVersionSchema,
 
-    promptAnchor:
-      CharacterIdentityTextSchema,
+    approval:
+      CharacterVisualIdentityApprovalLinkSchema,
 
     immutableIdentity:
-      SnapshotImmutableIdentityV1Schema,
+      SnapshotImmutableIdentityV2Schema,
 
     continuityState:
-      SnapshotContinuityStateV1Schema,
+      SnapshotContinuityStateV2Schema,
   })
     .strict();
 
-export const ShotCharacterContinuitySnapshotV1Schema =
+export const ShotCharacterContinuitySnapshotV2Schema =
   z.object({
     recordType:
       z.literal(
@@ -153,7 +174,7 @@ export const ShotCharacterContinuitySnapshotV1Schema =
 
     recordVersion:
       z.literal(
-        "1",
+        "2",
       ),
 
     episodeId:
@@ -183,7 +204,7 @@ export const ShotCharacterContinuitySnapshotV1Schema =
 
     characters:
       z.array(
-        SnapshotCharacterV1Schema,
+        SnapshotCharacterV2Schema,
       )
         .max(64),
   })
@@ -231,20 +252,20 @@ export const ShotCharacterContinuitySnapshotV1Schema =
       },
     );
 
-export type ShotCharacterContinuitySnapshotV1 =
+export type ShotCharacterContinuitySnapshotV2 =
   z.infer<
-    typeof ShotCharacterContinuitySnapshotV1Schema
+    typeof ShotCharacterContinuitySnapshotV2Schema
   >;
 
-export type ShotCharacterContinuitySnapshotCharacterV1 =
-  ShotCharacterContinuitySnapshotV1["characters"][number];
+export type ShotCharacterContinuitySnapshotCharacterV2 =
+  ShotCharacterContinuitySnapshotV2["characters"][number];
 
-export function parseShotCharacterContinuitySnapshotV1(
+export function parseShotCharacterContinuitySnapshotV2(
   input:
     unknown,
-): ShotCharacterContinuitySnapshotV1 {
+): ShotCharacterContinuitySnapshotV2 {
   const parsed =
-    ShotCharacterContinuitySnapshotV1Schema
+    ShotCharacterContinuitySnapshotV2Schema
       .safeParse(
         input,
       );
@@ -261,13 +282,13 @@ export function parseShotCharacterContinuitySnapshotV1(
 }
 
 // The digest is never part of the hashed payload; callers keep them side by side.
-export function hashShotCharacterContinuitySnapshotV1(
+export function hashShotCharacterContinuitySnapshotV2(
   input:
     unknown,
 ): string {
   return characterIdentitySha256(
     canonicalCharacterIdentityJson(
-      parseShotCharacterContinuitySnapshotV1(
+      parseShotCharacterContinuitySnapshotV2(
         input,
       ),
     ),

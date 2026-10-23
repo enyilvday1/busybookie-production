@@ -19,12 +19,17 @@ import {
 } from "../schemas/episodeManifest.schema.js";
 
 import {
-  hashShotCharacterContinuitySnapshotV1,
-  parseShotCharacterContinuitySnapshotV1,
-  type ShotCharacterContinuitySnapshotV1,
+  hashShotCharacterContinuitySnapshotV2,
+  parseShotCharacterContinuitySnapshotV2,
+  type ShotCharacterContinuitySnapshotV2,
 } from "./shotCharacterContinuitySnapshot.schema.js";
 
-export type BuildShotCharacterContinuitySnapshotV1Input =
+import {
+  assertCharacterVisualIdentityConsumptionVerificationMatchesAuthority,
+  isVerifiedCharacterIdentityConsumption,
+} from "./verifyCharacterVisualIdentityApprovalForConsumption.js";
+
+export type BuildShotCharacterContinuitySnapshotV2Input =
   Readonly<{
     episode:
       unknown;
@@ -41,12 +46,18 @@ export type BuildShotCharacterContinuitySnapshotV1Input =
     // An already-read registry document; it is re-validated here, never trusted as typed.
     visualReferenceRegistry:
       unknown;
+
+    // Results of verifyCharacterVisualIdentityApprovalForConsumption for every shot character. Only results produced
+    // by that verifier, for exactly the current authority of the character, are accepted; one per character. This
+    // module stays pure and performs no I/O itself.
+    verifiedIdentities:
+      readonly unknown[];
   }>;
 
-export type ShotCharacterContinuitySnapshotV1Result =
+export type ShotCharacterContinuitySnapshotV2Result =
   Readonly<{
     snapshot:
-      ShotCharacterContinuitySnapshotV1;
+      ShotCharacterContinuitySnapshotV2;
 
     snapshotSha256:
       string;
@@ -77,13 +88,12 @@ function parseOrBlock<T>(
   return result.data;
 }
 
-// Membership comes only from shot.characters; identity only from CharacterBible.visualIdentity.
-// The registry check is referential only: it confirms each bound asset is registered, while
-// byte-level verification stays with verifyApprovedVisualReferenceAsset at execution time.
-export function buildShotCharacterContinuitySnapshotV1(
+// Membership comes only from shot.characters; identity only from CharacterBible v2 visualIdentity and default state
+// only from defaultContinuityState. promptAnchor is legacy, non-authoritative text and is never read.
+export function buildShotCharacterContinuitySnapshotV2(
   input:
-    BuildShotCharacterContinuitySnapshotV1Input,
-): ShotCharacterContinuitySnapshotV1Result {
+    BuildShotCharacterContinuitySnapshotV2Input,
+): ShotCharacterContinuitySnapshotV2Result {
   // Parsing yields fresh copies, so caller inputs are never mutated.
   const episode =
     parseOrBlock(
@@ -129,6 +139,42 @@ export function buildShotCharacterContinuitySnapshotV1(
       `shot ${input.shotId} was not found in ${episode.episodeId}/${scene.id}.`,
     );
 
+  const verifiedByCharacter =
+    new Map<
+      string,
+      unknown
+    >();
+
+  for (
+    const candidate
+    of input.verifiedIdentities
+  ) {
+    if (
+      !isVerifiedCharacterIdentityConsumption(
+        candidate,
+      )
+    ) {
+      blocked(
+        "verifiedIdentities contains a value that was not issued by the consumption verifier.",
+      );
+    }
+
+    if (
+      verifiedByCharacter.has(
+        candidate.characterId,
+      )
+    ) {
+      blocked(
+        `verifiedIdentities contains more than one verification for ${candidate.characterId}.`,
+      );
+    }
+
+    verifiedByCharacter.set(
+      candidate.characterId,
+      candidate,
+    );
+  }
+
   const registeredAssetIds =
     new Set(
       registry.assets.map(
@@ -155,12 +201,6 @@ export function buildShotCharacterContinuitySnapshotV1(
           const identity =
             character.visualIdentity;
 
-          if (!identity) {
-            blocked(
-              `character ${characterId} has no CharacterBible visualIdentity (E9 activation pending).`,
-            );
-          }
-
           if (
             identity.status !==
             "LOCKED"
@@ -185,14 +225,55 @@ export function buildShotCharacterContinuitySnapshotV1(
             }
           }
 
+          const master =
+            identity.referenceBindings.find(
+              (binding) =>
+                binding.role ===
+                "MASTER_IDENTITY",
+            ) ??
+            blocked(
+              `character ${characterId} has no MASTER_IDENTITY binding.`,
+            );
+
+          const verified =
+            verifiedByCharacter.get(
+              characterId,
+            );
+
+          if (
+            verified ===
+            undefined
+          ) {
+            blocked(
+              `character ${characterId} has no matching consumption-verified approval for identity version ${identity.identityVersion}.`,
+            );
+          }
+
+          // Binds the genuine verification to the exact current authority (stale or foreign results fail).
+          try {
+            assertCharacterVisualIdentityConsumptionVerificationMatchesAuthority(
+              verified,
+              character,
+            );
+          } catch (error) {
+            blocked(
+              `character ${characterId} has no matching consumption-verified approval for identity version ${identity.identityVersion}: ${(error as Error).message}`,
+            );
+          }
+
           return {
             characterId,
 
             identityVersion:
               identity.identityVersion,
 
-            promptAnchor:
-              character.promptAnchor,
+            approval: {
+              approvalId:
+                identity.approval.approvalId,
+
+              receiptSha256:
+                identity.approval.receiptSha256,
+            },
 
             immutableIdentity: {
               species:
@@ -205,6 +286,23 @@ export function buildShotCharacterContinuitySnapshotV1(
               prohibitedVariations: [
                 ...identity.prohibitedVariations,
               ],
+
+              approvedTraitDecisions:
+                identity.approvedTraitDecisions.map(
+                  (decision) => ({
+                    traitKey:
+                      decision.traitKey,
+
+                    valueCode:
+                      decision.valueCode,
+
+                    description:
+                      decision.description,
+
+                    provenance:
+                      decision.provenance,
+                  }),
+                ),
 
               referenceBindings:
                 identity.referenceBindings
@@ -233,25 +331,35 @@ export function buildShotCharacterContinuitySnapshotV1(
               source:
                 "CHARACTER_BIBLE_DEFAULT" as const,
 
-              outfit: [
-                ...character.appearance.outfit,
-              ],
+              items:
+                character.defaultContinuityState.items.map(
+                  (item) => ({
+                    itemKey:
+                      item.itemKey,
 
-              accessories: [
-                ...character.appearance.accessories,
-              ],
+                    description:
+                      item.description,
+
+                    resolutions:
+                      item.resolutions.map(
+                        (resolution) => ({
+                          ...resolution,
+                        }),
+                      ),
+                  }),
+                ),
             },
           };
         },
       );
 
   const snapshot =
-    parseShotCharacterContinuitySnapshotV1({
+    parseShotCharacterContinuitySnapshotV2({
       recordType:
         "BUSYBOOKIE_SHOT_CHARACTER_CONTINUITY_SNAPSHOT",
 
       recordVersion:
-        "1",
+        "2",
 
       episodeId:
         episode.episodeId,
@@ -273,7 +381,7 @@ export function buildShotCharacterContinuitySnapshotV1(
     snapshot,
 
     snapshotSha256:
-      hashShotCharacterContinuitySnapshotV1(
+      hashShotCharacterContinuitySnapshotV2(
         snapshot,
       ),
   });

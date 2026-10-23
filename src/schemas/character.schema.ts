@@ -5,6 +5,9 @@ import {
 } from "./characterId.schema.js";
 
 import {
+  CharacterDefaultContinuityStateSchema,
+  CharacterPresentationGuidanceSchema,
+  CharacterShotOrStoryStateItemsSchema,
   CharacterVisualIdentityV1Schema,
 } from "./characterVisualIdentity.schema.js";
 
@@ -189,20 +192,16 @@ export const CharacterVoiceSchema =
     PendingCharacterVoiceSchema,
   ]);
 
+// CharacterBible v2 (E9 Step 1137E): appearance holds immutable identity prose only. Removable default items moved to
+// defaultContinuityState, conditional items to shotOrStoryStateItems and styling direction to presentationGuidance.
+// The v1 shape (appearance.outfit/accessories, continuity) survives only in historicalCharacterBible.schema.ts.
 export const CharacterAppearanceSchema = z.object({
   body: z.string().trim().min(1),
   face: z.string().trim().min(1),
   eyes: z.string().trim().min(1),
-  outfit: z.array(z.string().trim().min(1)).min(1),
-  accessories: z.array(z.string().trim().min(1)),
   distinguishingFeatures: z.array(
     z.string().trim().min(1),
   ).min(1),
-}).strict();
-
-export const CharacterContinuitySchema = z.object({
-  mustPreserve: z.array(z.string().trim().min(1)).min(1),
-  mustNotChange: z.array(z.string().trim().min(1)).min(1),
 }).strict();
 
 export const CharacterSchema = z.object({
@@ -221,19 +220,24 @@ export const CharacterSchema = z.object({
   ).min(1),
 
   appearance: CharacterAppearanceSchema,
-  continuity: CharacterContinuitySchema,
   voice: CharacterVoiceSchema,
 
+  // LEGACY / NON-AUTHORITATIVE (Step 1137E, decision D-3): retained verbatim for compatibility only. It has no
+  // authority over visual identity, default or shot state, presentation guidance, snapshots or generation identity
+  // constraints, and no production builder or verifier may read it.
   promptAnchor: z.string().trim().min(1),
 
-  // E9 migration boundary (Step 1136): optional until every canonical character has
-  // registry-approved reference assets. Activation makes this mandatory with a
-  // schemaVersion change. Until then, shot continuity snapshots fail closed when absent.
-  visualIdentity: CharacterVisualIdentityV1Schema.optional(),
+  // Canonical stable visual authority. Required in v2; PENDING for characters not yet approved, LOCKED (with an
+  // approval link) for approved ones.
+  visualIdentity: CharacterVisualIdentityV1Schema,
+
+  defaultContinuityState: CharacterDefaultContinuityStateSchema,
+  shotOrStoryStateItems: CharacterShotOrStoryStateItemsSchema,
+  presentationGuidance: CharacterPresentationGuidanceSchema,
 }).strict();
 
 export const CharacterBibleSchema = z.object({
-  schemaVersion: z.literal("1.0"),
+  schemaVersion: z.literal("2.0"),
   characters: z.array(CharacterSchema).min(1),
 }).strict().superRefine((value, ctx) => {
   const ids = new Set<string>();
@@ -268,6 +272,22 @@ export const CharacterBibleSchema = z.object({
         message:
           `Visual identity characterId ${character.visualIdentity.characterId} does not match character ${character.id}.`,
       });
+    }
+
+    // One classification per key: a default item can never also be shot/story state or presentation guidance.
+    const defaultKeys = new Set(character.defaultContinuityState.items.map((item) => item.itemKey));
+
+    for (const key of [
+      ...character.shotOrStoryStateItems.map((item) => item.itemKey),
+      ...character.presentationGuidance.map((item) => item.guidanceKey),
+    ]) {
+      if (defaultKeys.has(key)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["characters", index, "defaultContinuityState"],
+          message: `${character.id} key ${key} is classified both as default state and as shot state or guidance.`,
+        });
+      }
     }
 
     ids.add(character.id);

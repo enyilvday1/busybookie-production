@@ -27,14 +27,18 @@ import {
   validateCharacterVisualIdentityApprovalDecisions,
 } from "../src/characterIdentity/validateCharacterVisualIdentityApproval.js";
 
-import { CharacterBibleSchema, type Character } from "../src/schemas/character.schema.js";
+import {
+  HistoricalCharacterBibleV1Schema as CharacterBibleSchema,
+  type HistoricalCharacterV1 as Character,
+} from "../src/schemas/historicalCharacterBible.schema.js";
 import { CharacterVisualReferenceAssetIdSchema } from "../src/schemas/characterVisualIdentity.schema.js";
 import { VisualReferenceAssetSchema } from "../src/execution/visualReferenceAsset.schema.js";
 
 type Json = Record<string, any>;
 
+// D1 creation-time contract (D-2): the frozen pre-1137E v1 CharacterBible, byte copy of the config before activation.
 const bible = CharacterBibleSchema.parse(
-  JSON.parse(readFileSync(new URL("../config/characters.json", import.meta.url), "utf8")),
+  JSON.parse(readFileSync(new URL("./fixtures/characterBible.pre1137e.v1.json", import.meta.url), "utf8")),
 );
 
 function character(id: string): Character {

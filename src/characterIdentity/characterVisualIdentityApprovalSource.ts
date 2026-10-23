@@ -8,12 +8,14 @@ import {
 } from "./characterVisualIdentityApprovalAmbiguity.js";
 
 import type {
-  Character,
-  CharacterBible,
-} from "../schemas/character.schema.js";
+  HistoricalCharacterBibleV1 as CharacterBible,
+  HistoricalCharacterV1 as Character,
+} from "../schemas/historicalCharacterBible.schema.js";
 
 // E9 Step 1137D1 (Step 1137C r1137c-1): approval decisions point at CharacterBible source strings by
 // field + index + sourceTextSha256. The source prose itself is never copied into a receipt.
+// Step 1137E (D-2): these source locations exist only in CharacterBible v1, so this module is bound to the frozen
+// historical v1 contract. It is the creation-time contract; post-activation consumption never uses it.
 
 export const CHARACTER_APPROVAL_SOURCE_FIELDS = [
   "appearance.outfit",

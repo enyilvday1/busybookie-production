@@ -39,9 +39,23 @@ function lockedIdentity(
   overrides:
     Record<string, unknown> = {},
 ) {
+  const identity: Record<string, unknown> = {
+    ...lockedIdentityBase(),
+    ...overrides,
+  };
+
+  // PENDING identities carry no approval link (strict schema).
+  if (identity.status === "PENDING" && !("approval" in overrides)) {
+    delete identity.approval;
+  }
+
+  return identity;
+}
+
+function lockedIdentityBase() {
   return {
     schemaVersion:
-      "1.0",
+      "2.0",
     status:
       "LOCKED",
     characterId:
@@ -70,7 +84,14 @@ function lockedIdentity(
       "human anatomy",
       "a different species",
     ],
-    ...overrides,
+    approvedTraitDecisions:
+      [] as unknown[],
+    approval: {
+      approvalId:
+        "371599c1-35d3-4893-913b-9c4f63730cb8",
+      receiptSha256:
+        "a".repeat(64),
+    },
   };
 }
 
@@ -454,7 +475,7 @@ describe(
   "E9 CharacterBible visualIdentity slot",
   () => {
     it(
-      "keeps the canonical CharacterBible unactivated (E9 activation deferred)",
+      "activates the canonical CharacterBible v2 with LOCKED, approval-linked identities (Step 1137E)",
       async () => {
         const bible =
           await loadCharacterBible();
@@ -462,19 +483,90 @@ describe(
         expect(
           bible.schemaVersion,
         ).toBe(
-          "1.0",
+          "2.0",
         );
 
         expect(
           bible.characters.map(
-            (character) =>
-              character.visualIdentity,
+            (character) => [
+              character.id,
+              character.visualIdentity.status,
+              character.visualIdentity.status === "LOCKED"
+                ? character.visualIdentity.approval.approvalId
+                : null,
+            ],
           ),
         ).toEqual([
-          undefined,
-          undefined,
-          undefined,
+          ["OLLIE", "LOCKED", "371599c1-35d3-4893-913b-9c4f63730cb8"],
+          ["KACEY", "LOCKED", "ecc47e91-26a7-4687-b7fa-5b6661370028"],
+          ["MONT", "LOCKED", "eb043e11-f533-443a-a368-54babc680d0f"],
         ]);
+      },
+    );
+
+    it(
+      "requires an approval link on LOCKED and forbids one on PENDING",
+      () => {
+        const locked =
+          lockedIdentity();
+
+        delete locked.approval;
+
+        expect(
+          CharacterVisualIdentityV1Schema.safeParse(
+            locked,
+          ).success,
+        ).toBe(false);
+
+        expect(
+          CharacterVisualIdentityV1Schema.safeParse(
+            lockedIdentity({
+              status:
+                "PENDING",
+              approval:
+                lockedIdentityBase().approval,
+            }),
+          ).success,
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "requires provenance-specific evidence on structured trait decisions",
+      () => {
+        const human = {
+          traitKey: "PAW_PAD_COLOUR",
+          valueCode: "DARK_BROWN",
+          description: "dark-brown paw pads",
+          provenance: "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+          legacyIv1ReceiptNoteCorroboration: "DARK_BROWN paw pads",
+        };
+
+        expect(CharacterVisualIdentityV1Schema.safeParse(lockedIdentity({ approvedTraitDecisions: [human] })).success).toBe(true);
+
+        const { legacyIv1ReceiptNoteCorroboration: _omitted, ...withoutCorroboration } = human;
+        expect(CharacterVisualIdentityV1Schema.safeParse(lockedIdentity({ approvedTraitDecisions: [withoutCorroboration] })).success).toBe(false);
+        expect(CharacterVisualIdentityV1Schema.safeParse(lockedIdentity({ approvedTraitDecisions: [{ ...human, provenance: "PROMPT_ANCHOR" }] })).success).toBe(false);
+        expect(CharacterVisualIdentityV1Schema.safeParse(lockedIdentity({ approvedTraitDecisions: [human, human] })).success).toBe(false);
+      },
+    );
+
+    it(
+      "rejects a key classified both as default state and as shot state or guidance",
+      () => {
+        const source =
+          readCanonicalBible();
+
+        const ollie = source.characters[0] as Record<string, unknown>;
+
+        source.characters[0] = {
+          ...ollie,
+          shotOrStoryStateItems: [
+            { itemKey: "BACKPACK", description: "explorer satchel", classification: "SHOT_OR_STORY_STATE" },
+          ],
+        };
+
+        expect(CharacterBibleSchema.safeParse(source).error?.message).toMatch(/classified both as default state/);
       },
     );
 
@@ -554,7 +646,7 @@ describe(
     );
 
     it(
-      "still accepts a registered future character with or without a visual identity",
+      "requires a visual identity for a registered future character and accepts it PENDING",
       () => {
         const source =
           readCanonicalBible();
@@ -562,9 +654,11 @@ describe(
         const template =
           source.characters[0]!;
 
+        const { visualIdentity: _ollieIdentity, ...withoutIdentity } = template;
+
         const guest =
           {
-            ...template,
+            ...withoutIdentity,
             id:
               "TEST_GUEST",
             name:
@@ -579,7 +673,7 @@ describe(
               guest,
             ],
           }).success,
-        ).toBe(true);
+        ).toBe(false);
 
         expect(
           CharacterBibleSchema.safeParse({

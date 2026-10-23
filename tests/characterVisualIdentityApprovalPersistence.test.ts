@@ -33,7 +33,9 @@ const RELATIVE = `references/characters/OLLIE/${ASSET_ID}.png`;
 const APPROVAL_ID = "9b1f6a3e-2c4d-4e5f-8a7b-1c2d3e4f5a6b";
 const APPROVED_AT = "2026-10-22T12:00:00.000Z";
 
-const bible = JSON.parse(readFileSync(new URL("../config/characters.json", import.meta.url), "utf8"));
+// D1 creation-time contract (D-2): the frozen pre-1137E v1 CharacterBible fixture.
+const bible = JSON.parse(readFileSync(new URL("./fixtures/characterBible.pre1137e.v1.json", import.meta.url), "utf8"));
+const liveV2Bible = JSON.parse(readFileSync(new URL("../config/characters.json", import.meta.url), "utf8"));
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -88,6 +90,18 @@ async function approvalDirectoryFiles(mediaRoot: string): Promise<string[]> {
 }
 
 describe("approval create-once publication", () => {
+  it("refuses CharacterBible v2 input explicitly and writes nothing (D-2 creation contract is v1 only)", async () => {
+    const f = await fixture();
+
+    await expect(createCharacterVisualIdentityApproval(
+      f.mediaRoot,
+      { bible: liveV2Bible, characterId: "OLLIE", targetIdentityVersion: 1, request: request() },
+      { now: () => APPROVED_AT, createApprovalId: () => APPROVAL_ID },
+    )).rejects.toThrow(/supports CharacterBible v1 only/);
+
+    await expect(readFile(createCharacterVisualIdentityApprovalPath(f.mediaRoot, "OLLIE", 1))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("publishes a validated receipt at the canonical path with derived provenance", async () => {
     const f = await fixture();
     const result = await create(f.mediaRoot);

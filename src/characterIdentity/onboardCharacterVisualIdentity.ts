@@ -1,4 +1,8 @@
 import {
+  readFile,
+} from "node:fs/promises";
+
+import {
   extname,
   isAbsolute,
   resolve,
@@ -29,7 +33,7 @@ import type {
 } from "../execution/visualReferenceAsset.schema.js";
 
 import {
-  loadCharacterBible,
+  DEFAULT_CHARACTER_BIBLE_PATH,
 } from "../validation/loadCharacterBible.js";
 
 // E9 Step 1137D1 onboarding layer. Two deliberately separate operations: registering a reference asset
@@ -120,16 +124,28 @@ export type ApproveCharacterVisualIdentityInput =
     characterId: string;
     targetIdentityVersion: number;
     request: unknown;
-    // Defaults to the canonical config/characters.json through the existing loader.
+    // Defaults to the canonical config/characters.json.
     characterBiblePath?: string;
   }>;
 
 export type ApproveCharacterVisualIdentityDependencies =
   Readonly<{
-    loadCharacterBible?: typeof loadCharacterBible;
+    // Returns the raw CharacterBible document; the IV1 creation contract (v1 only, D-2) decides whether it is
+    // acceptable, so a v2 document is refused with an explicit message rather than a generic loader failure.
+    readCharacterBibleDocument?: (path: string) => Promise<unknown>;
     createApproval?: typeof createCharacterVisualIdentityApproval;
     createApprovalDependencies?: CreateCharacterVisualIdentityApprovalDependencies;
   }>;
+
+async function readCharacterBibleDocument(path: string): Promise<unknown> {
+  const raw = await readFile(path, "utf8");
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Character Bible contains invalid JSON: ${path}`, { cause: error });
+  }
+}
 
 // Operation B: create the immutable human approval receipt for already registered references.
 export async function approveCharacterVisualIdentity(
@@ -142,8 +158,9 @@ export async function approveCharacterVisualIdentity(
     throw new Error("approve-identity requires an absolute --media-root.");
   }
 
-  const load = dependencies.loadCharacterBible ?? loadCharacterBible;
-  const bible = input.characterBiblePath === undefined ? await load() : await load(input.characterBiblePath);
+  const bible = await (dependencies.readCharacterBibleDocument ?? readCharacterBibleDocument)(
+    input.characterBiblePath ?? DEFAULT_CHARACTER_BIBLE_PATH,
+  );
 
   return (dependencies.createApproval ?? createCharacterVisualIdentityApproval)(
     mediaRoot,

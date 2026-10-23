@@ -16,14 +16,24 @@ import {
   registerCharacterReferenceAsset,
 } from "../onboardCharacterVisualIdentity.js";
 
+import {
+  verifyCharacterVisualIdentityApprovalForConsumption,
+} from "../verifyCharacterVisualIdentityApprovalForConsumption.js";
+
+import {
+  loadCharacterBible,
+} from "../../validation/loadCharacterBible.js";
+
 // E9 Step 1137D1 operator CLI. Run with: npx tsx src/characterIdentity/cli/characterReferenceOnboarding.ts
 //   register-reference --media-root <abs> --source-file <abs> --asset-id <id> --expected-registry-sha256 <hex>
 //   approve-identity --media-root <abs> --character-id <ID> --identity-version <n> --request <request.json>
+//   verify-identity --media-root <abs> --character-id <ID>   (read-only consumption verification, Step 1137E)
 // --media-root is always explicit: the CLI never reads the environment or defaults to a production media root.
 
 const SUBCOMMAND_FLAGS = {
   "register-reference": ["--media-root", "--source-file", "--asset-id", "--expected-registry-sha256"],
   "approve-identity": ["--media-root", "--character-id", "--identity-version", "--request"],
+  "verify-identity": ["--media-root", "--character-id"],
 } as const;
 
 type Subcommand = keyof typeof SUBCOMMAND_FLAGS;
@@ -42,10 +52,15 @@ export type CharacterReferenceOnboardingCliOptions =
     characterId: string;
     identityVersion: number;
     requestPath: string;
+  }>
+  | Readonly<{
+    subcommand: "verify-identity";
+    mediaRoot: string;
+    characterId: string;
   }>;
 
 function isSubcommand(value: string | undefined): value is Subcommand {
-  return value === "register-reference" || value === "approve-identity";
+  return value === "register-reference" || value === "approve-identity" || value === "verify-identity";
 }
 
 export function parseCharacterReferenceOnboardingCliArgs(
@@ -55,7 +70,7 @@ export function parseCharacterReferenceOnboardingCliArgs(
 
   if (!isSubcommand(subcommand)) {
     throw new Error(
-      `Unknown character reference onboarding subcommand: ${subcommand ?? "(none)"}. Use register-reference or approve-identity.`,
+      `Unknown character reference onboarding subcommand: ${subcommand ?? "(none)"}. Use register-reference, approve-identity or verify-identity.`,
     );
   }
 
@@ -108,6 +123,14 @@ export function parseCharacterReferenceOnboardingCliArgs(
     });
   }
 
+  if (subcommand === "verify-identity") {
+    return Object.freeze({
+      subcommand,
+      mediaRoot,
+      characterId: required("--character-id"),
+    });
+  }
+
   const versionText = required("--identity-version");
 
   if (!/^[1-9][0-9]*$/.test(versionText) || !Number.isSafeInteger(Number(versionText))) {
@@ -127,6 +150,8 @@ export type RunCharacterReferenceOnboardingCliDependencies =
   Readonly<{
     registerReference: typeof registerCharacterReferenceAsset;
     approveIdentity: typeof approveCharacterVisualIdentity;
+    verifyIdentity: typeof verifyCharacterVisualIdentityApprovalForConsumption;
+    loadCharacterBible: () => Promise<unknown>;
     readRequest: (path: string) => Promise<unknown>;
     log: (line: string) => void;
   }>;
@@ -144,6 +169,8 @@ async function readRequestJson(path: string): Promise<unknown> {
 const defaultDependencies: RunCharacterReferenceOnboardingCliDependencies = Object.freeze({
   registerReference: registerCharacterReferenceAsset,
   approveIdentity: approveCharacterVisualIdentity,
+  verifyIdentity: verifyCharacterVisualIdentityApprovalForConsumption,
+  loadCharacterBible: () => loadCharacterBible(),
   readRequest: readRequestJson,
   log: (line: string) => console.log(line),
 });
@@ -168,6 +195,33 @@ export async function runCharacterReferenceOnboardingCli(
       registryPath: result.registryPath,
       previousRegistrySha256: result.previousRegistrySha256,
       registrySha256: result.registrySha256,
+    }, null, 2));
+
+    return;
+  }
+
+  if (options.subcommand === "verify-identity") {
+    // Read-only: no receipt, registry, asset, lock or CharacterBible write. Failure throws (non-zero exit).
+    const verified = await dependencies.verifyIdentity({
+      mediaRoot: options.mediaRoot,
+      bible: await dependencies.loadCharacterBible(),
+      characterId: options.characterId,
+    });
+
+    dependencies.log(JSON.stringify({
+      result: verified.result,
+      characterId: verified.characterId,
+      identityVersion: verified.identityVersion,
+      approvalId: verified.approvalId,
+      receiptRelativePath: verified.receiptRelativePath,
+      receiptSha256: verified.receiptSha256,
+      masterAssetId: verified.masterAssetId,
+      registryEntries: verified.registryEntries,
+      physicalVerification: verified.physicalVerification,
+      historicalSourceCharacterBible: verified.historicalSourceCharacterBible,
+      historicalSourceDigestEqualityRequired: verified.historicalSourceDigestEqualityRequired,
+      currentCharacterBibleCanonicalSha256: verified.currentCharacterBibleCanonicalSha256,
+      traitDecisionEvidence: verified.traitDecisionEvidence,
     }, null, 2));
 
     return;

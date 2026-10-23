@@ -6,7 +6,7 @@ describe("Busybookie Character Bible", () => {
   it("loads the authoritative core character configuration", async () => {
     const bible = await loadCharacterBible();
 
-    expect(bible.schemaVersion).toBe("1.0");
+    expect(bible.schemaVersion).toBe("2.0");
 
     expect(
       bible.characters.map((character) => character.id),

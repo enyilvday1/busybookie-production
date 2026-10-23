@@ -50,8 +50,9 @@ import {
 } from "./validateCharacterVisualIdentityApproval.js";
 
 import {
-  CharacterBibleSchema,
-} from "../schemas/character.schema.js";
+  assertHistoricalCharacterBibleV1Input,
+  HistoricalCharacterBibleV1Schema as CharacterBibleSchema,
+} from "../schemas/historicalCharacterBible.schema.js";
 
 import {
   CharacterIdSchema,
@@ -117,6 +118,13 @@ export async function createCharacterVisualIdentityApproval(
   }
 
   const request = requestResult.data;
+
+  // D-2: the IV1 creation contract accepts CharacterBible v1 only; v2 is refused, never mapped backwards.
+  try {
+    assertHistoricalCharacterBibleV1Input(input.bible);
+  } catch (error) {
+    blocked((error as Error).message);
+  }
 
   const bibleResult = CharacterBibleSchema.safeParse(input.bible);
 

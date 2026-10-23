@@ -331,7 +331,11 @@ describe("registry authority boundaries", () => {
   });
 
   it("leaves config/characters.json untouched", () => {
-    expect(sha(readFileSync(new URL("../config/characters.json", import.meta.url))))
+    // The bootstrap never writes the CharacterBible. Step 1137E migrated it intentionally (v1 bytes preserved as the
+    // historical fixture); the live file is pinned to the reviewed v2 bytes.
+    expect(sha(readFileSync(new URL("./fixtures/characterBible.pre1137e.v1.json", import.meta.url))))
       .toBe("cbb68ce6e5ad758636cdd3adeeae340f890f5745df4e8e7cbd9ec2e88352c96f");
+    expect(sha(readFileSync(new URL("../config/characters.json", import.meta.url))))
+      .toBe("86b010c97e0af20037d63073aacfa376bd35f7f012fd41bcbd4cec3e0149629d");
   });
 });

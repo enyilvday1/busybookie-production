@@ -66,6 +66,25 @@ function createGuestBibleCandidate(
           "synthetic character extensibility fixture",
         promptAnchor:
           "Synthetic test-only Busybookie guest character.",
+        // A future character starts PENDING (CharacterBible v2 requires visualIdentity; LOCKED needs an approval).
+        visualIdentity: {
+          schemaVersion:
+            "2.0" as const,
+          status:
+            "PENDING" as const,
+          characterId:
+            "TEST_GUEST",
+          identityVersion:
+            1,
+          referenceBindings:
+            [],
+          invariantTraits:
+            [],
+          prohibitedVariations:
+            [],
+          approvedTraitDecisions:
+            [],
+        },
         voice: {
           selectionStatus:
             "LOCKED",

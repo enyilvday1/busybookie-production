@@ -27,10 +27,11 @@ import {
 } from "./characterVisualIdentityApprovalSource.js";
 
 import {
-  CharacterBibleSchema,
-  type Character,
-  type CharacterBible,
-} from "../schemas/character.schema.js";
+  assertHistoricalCharacterBibleV1Input,
+  HistoricalCharacterBibleV1Schema as CharacterBibleSchema,
+  type HistoricalCharacterBibleV1 as CharacterBible,
+  type HistoricalCharacterV1 as Character,
+} from "../schemas/historicalCharacterBible.schema.js";
 
 import {
   VisualReferenceAssetRegistrySchema,
@@ -64,8 +65,9 @@ export function validateCharacterVisualIdentityApprovalDecisions(
     invalid(`source CharacterBible schemaVersion ${approval.sourceCharacterBible.schemaVersion} does not match ${bible.schemaVersion}.`);
   }
 
-  // Creation-time precondition: the receipt must identify the exact Bible being approved. After the 1137E
-  // migration this digest is historical provenance; 1137E needs its own consumption verifier, not this check.
+  // Creation-time precondition (CREATION_VALIDATOR_SOURCE_DIGEST_EQUALITY_REQUIRED=YES): the receipt must identify
+  // the exact v1 Bible being approved. Post-activation consumption uses
+  // verifyCharacterVisualIdentityApprovalForConsumption, which treats this digest as historical provenance only.
   if (approval.sourceCharacterBible.canonicalSha256 !== computeCharacterBibleCanonicalSha256(bible)) {
     invalid("source CharacterBible canonical SHA-256 does not match the validated CharacterBible.");
   }
@@ -191,6 +193,13 @@ export async function validateCharacterVisualIdentityApproval(
 
   if (!approvalResult.success) {
     invalid(`schema validation failed: ${approvalResult.error.message}`);
+  }
+
+  // Creation-time contract (D-2): v1 only. A v2 bible is refused, never reinterpreted through the v1 model.
+  try {
+    assertHistoricalCharacterBibleV1Input(input.bible);
+  } catch (error) {
+    invalid((error as Error).message);
   }
 
   const bibleResult = CharacterBibleSchema.safeParse(input.bible);

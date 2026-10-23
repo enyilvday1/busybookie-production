@@ -17,12 +17,16 @@ import {
 
 import { readVisualReferenceRegistrySha256 } from "../src/execution/appendVisualReferenceAssetRegistry.js";
 import { createVisualReferenceAssetRegistryPath } from "../src/execution/visualReferenceAssetRegistryPath.js";
-import { CharacterBibleSchema } from "../src/schemas/character.schema.js";
+import { computeCharacterBibleCanonicalSha256 } from "../src/characterIdentity/characterVisualIdentityApprovalSource.js";
+import { HistoricalCharacterBibleV1Schema as CharacterBibleSchema } from "../src/schemas/historicalCharacterBible.schema.js";
 
 type Json = Record<string, any>;
 
-const BIBLE_URL = new URL("../config/characters.json", import.meta.url);
+// D1 creation-time contract (D-2): the frozen pre-1137E v1 CharacterBible. It is a byte copy of config/characters.json
+// as it stood at the D2 approvals (raw sha cbb68ce6..., canonical a4825c43... = every IV1 receipt's source digest).
+const BIBLE_URL = new URL("./fixtures/characterBible.pre1137e.v1.json", import.meta.url);
 const BIBLE_BYTES_SHA256 = "cbb68ce6e5ad758636cdd3adeeae340f890f5745df4e8e7cbd9ec2e88352c96f";
+const BIBLE_CANONICAL_SHA256 = "a4825c432fdecbf7415d714689fbe5efb1783a09bf628e3b238c68b2730b524d";
 const bible = CharacterBibleSchema.parse(JSON.parse(readFileSync(BIBLE_URL, "utf8")));
 
 const roots: string[] = [];
@@ -108,7 +112,7 @@ async function register(mediaRoot: string, characterId: string, seed: number) {
 function approve(mediaRoot: string, characterId: string, body: Json = request(characterId)) {
   return approveCharacterVisualIdentity(
     { mediaRoot, characterId, targetIdentityVersion: 1, request: body },
-    { loadCharacterBible: async () => bible },
+    { readCharacterBibleDocument: async () => bible },
   );
 }
 
@@ -275,8 +279,19 @@ describe("Operation B: approve character identity evidence", () => {
     await expect(approve(mediaRoot, "OLLIE", sourceText)).rejects.toThrow(/operator request is invalid/);
   });
 
-  it("leaves the canonical CharacterBible byte-for-byte unchanged (G1)", () => {
+  it("keeps the frozen v1 fixture byte-identical to the pre-1137E config and to the IV1 source digest", () => {
     expect(createHash("sha256").update(readFileSync(BIBLE_URL)).digest("hex")).toBe(BIBLE_BYTES_SHA256);
-    expect(bible.characters.every((character) => character.visualIdentity === undefined)).toBe(true);
+    expect(computeCharacterBibleCanonicalSha256(bible)).toBe(BIBLE_CANONICAL_SHA256);
+  });
+
+  it("refuses to create an IV1 approval from the live CharacterBible v2 (D-2)", async () => {
+    const mediaRoot = await mediaRootWithRegistry();
+    await register(mediaRoot, "OLLIE", 12);
+
+    // Default path: the canonical config/characters.json, which is v2 after activation.
+    await expect(approveCharacterVisualIdentity({ mediaRoot, characterId: "OLLIE", targetIdentityVersion: 1, request: request("OLLIE") }))
+      .rejects.toThrow(/supports CharacterBible v1 only[\s\S]*later identity-version approval contract/);
+    await expect(readFile(join(mediaRoot, "references", "character-identity-approvals", "OLLIE", "OLLIE_IV1.character-visual-identity-approval.json")))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 });

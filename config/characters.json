@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "2.0",
   "characters": [
     {
       "id": "OLLIE",
@@ -26,35 +26,11 @@
         "body": "warm brown otter fur with a cream muzzle, chest and belly",
         "face": "round friendly otter face with a small dark nose and expressive features",
         "eyes": "large expressive warm brown eyes",
-        "outfit": [
-          "teal explorer backpack"
-        ],
-        "accessories": [
-          "small compass pendant",
-          "explorer satchel when required by the approved shot reference"
-        ],
         "distinguishingFeatures": [
           "clearly identifiable as an otter",
           "rounded otter ears",
           "long otter tail",
           "warm brown and cream colour palette"
-        ]
-      },
-      "continuity": {
-        "mustPreserve": [
-          "otter species",
-          "warm brown and cream fur",
-          "large brown eyes",
-          "teal explorer backpack",
-          "compass pendant",
-          "child-friendly proportions"
-        ],
-        "mustNotChange": [
-          "do not turn Ollie into a human",
-          "do not turn Ollie into an owl or another animal",
-          "do not change his core fur colours",
-          "do not replace his teal explorer identity with unrelated clothing",
-          "do not alter his approved facial identity between shots"
         ]
       },
       "voice": {
@@ -81,7 +57,87 @@
           "channels": 1
         }
       },
-      "promptAnchor": "Ollie is a young boy otter with warm brown and cream fur, large expressive brown eyes, a teal explorer backpack and a small compass pendant. He is curious, friendly, energetic and gentle. Preserve his approved Busybookie character design exactly."
+      "promptAnchor": "Ollie is a young boy otter with warm brown and cream fur, large expressive brown eyes, a teal explorer backpack and a small compass pendant. He is curious, friendly, energetic and gentle. Preserve his approved Busybookie character design exactly.",
+      "visualIdentity": {
+        "schemaVersion": "2.0",
+        "status": "LOCKED",
+        "characterId": "OLLIE",
+        "identityVersion": 1,
+        "referenceBindings": [
+          {
+            "role": "MASTER_IDENTITY",
+            "assetId": "ollie-master-identity-reference-v1"
+          }
+        ],
+        "invariantTraits": [
+          "warm brown otter fur with a cream muzzle, chest and belly",
+          "round friendly otter face with a small dark nose and expressive features",
+          "large expressive warm brown eyes",
+          "clearly identifiable as an otter",
+          "rounded otter ears",
+          "long otter tail",
+          "warm brown and cream colour palette",
+          "otter species",
+          "warm brown and cream fur",
+          "large brown eyes",
+          "child-friendly proportions"
+        ],
+        "prohibitedVariations": [
+          "do not turn Ollie into a human",
+          "do not turn Ollie into an owl or another animal",
+          "do not change his core fur colours",
+          "do not alter his approved facial identity between shots"
+        ],
+        "approvedTraitDecisions": [
+          {
+            "traitKey": "PAW_FUR_COLOUR",
+            "valueCode": "BROWN",
+            "description": "brown paw fur",
+            "provenance": "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+            "legacyIv1ReceiptNoteCorroboration": "BROWN paw fur"
+          },
+          {
+            "traitKey": "PAW_PAD_COLOUR",
+            "valueCode": "DARK_BROWN",
+            "description": "dark-brown paw pads",
+            "provenance": "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+            "legacyIv1ReceiptNoteCorroboration": "DARK_BROWN paw pads"
+          },
+          {
+            "traitKey": "PINK_PAWS",
+            "valueCode": "PROHIBITED",
+            "description": "pink paws are prohibited",
+            "provenance": "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+            "legacyIv1ReceiptNoteCorroboration": "pink paws prohibited"
+          }
+        ],
+        "approval": {
+          "approvalId": "371599c1-35d3-4893-913b-9c4f63730cb8",
+          "receiptSha256": "84e0fdf306e8172ffd39baf901b3e90d11deddd3a5b7e5b6354351da03a5a7ef"
+        }
+      },
+      "defaultContinuityState": {
+        "items": [
+          {
+            "itemKey": "BACKPACK",
+            "description": "teal explorer backpack",
+            "resolutions": []
+          },
+          {
+            "itemKey": "PENDANT",
+            "description": "small compass pendant",
+            "resolutions": []
+          }
+        ]
+      },
+      "shotOrStoryStateItems": [
+        {
+          "itemKey": "SATCHEL",
+          "description": "explorer satchel",
+          "classification": "SHOT_OR_STORY_STATE"
+        }
+      ],
+      "presentationGuidance": []
     },
     {
       "id": "KACEY",
@@ -108,37 +164,11 @@
         "body": "warm orange fox fur with cream facial markings, chest and tail tip",
         "face": "friendly fox face with large upright ears and soft expressive features",
         "eyes": "large expressive warm brown eyes",
-        "outfit": [
-          "pink or purple backpack",
-          "pink or purple neck scarf"
-        ],
-        "accessories": [
-          "small flower or leaf hair accessory"
-        ],
         "distinguishingFeatures": [
           "clearly identifiable as a fox",
           "large upright fox ears",
           "large fluffy white-tipped tail",
           "warm orange and cream colour palette"
-        ]
-      },
-      "continuity": {
-        "mustPreserve": [
-          "fox species",
-          "orange and cream fur",
-          "large upright ears",
-          "large fluffy white-tipped tail",
-          "pink or purple backpack",
-          "pink or purple scarf",
-          "small flower or leaf hair accessory",
-          "child-friendly proportions"
-        ],
-        "mustNotChange": [
-          "do not turn Kacey into another animal",
-          "do not remove her fox tail",
-          "do not change her core orange and cream colours",
-          "do not replace her established pink or purple accessories",
-          "do not alter her approved facial identity between shots"
         ]
       },
       "voice": {
@@ -153,7 +183,87 @@
           "clear"
         ]
       },
-      "promptAnchor": "Kacey is a young girl fox with warm orange and cream fur, large expressive brown eyes, large upright ears, a fluffy white-tipped tail, pink or purple explorer accessories and a small flower or leaf hair accessory. She is thoughtful, observant, friendly and playful. Preserve her approved Busybookie character design exactly."
+      "promptAnchor": "Kacey is a young girl fox with warm orange and cream fur, large expressive brown eyes, large upright ears, a fluffy white-tipped tail, pink or purple explorer accessories and a small flower or leaf hair accessory. She is thoughtful, observant, friendly and playful. Preserve her approved Busybookie character design exactly.",
+      "visualIdentity": {
+        "schemaVersion": "2.0",
+        "status": "LOCKED",
+        "characterId": "KACEY",
+        "identityVersion": 1,
+        "referenceBindings": [
+          {
+            "role": "MASTER_IDENTITY",
+            "assetId": "kacey-master-identity-reference-v1"
+          }
+        ],
+        "invariantTraits": [
+          "warm orange fox fur with cream facial markings, chest and tail tip",
+          "friendly fox face with large upright ears and soft expressive features",
+          "large expressive warm brown eyes",
+          "clearly identifiable as a fox",
+          "large upright fox ears",
+          "large fluffy white-tipped tail",
+          "warm orange and cream colour palette",
+          "fox species",
+          "orange and cream fur",
+          "large upright ears",
+          "child-friendly proportions"
+        ],
+        "prohibitedVariations": [
+          "do not turn Kacey into another animal",
+          "do not remove her fox tail",
+          "do not change her core orange and cream colours",
+          "do not alter her approved facial identity between shots"
+        ],
+        "approvedTraitDecisions": [
+          {
+            "traitKey": "PAW_FUR_COLOUR",
+            "valueCode": "DARK_BROWN",
+            "description": "dark-brown paw fur",
+            "provenance": "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+            "legacyIv1ReceiptNoteCorroboration": "DARK_BROWN paw fur"
+          }
+        ],
+        "approval": {
+          "approvalId": "ecc47e91-26a7-4687-b7fa-5b6661370028",
+          "receiptSha256": "9f435355322e968eaf0de77c9647829a8db5119fcc147ed0872751a4d9338f0a"
+        }
+      },
+      "defaultContinuityState": {
+        "items": [
+          {
+            "itemKey": "BACKPACK",
+            "description": "pink backpack",
+            "resolutions": [
+              {
+                "attribute": "COLOUR",
+                "valueCode": "PINK"
+              }
+            ]
+          },
+          {
+            "itemKey": "SCARF",
+            "description": "pink neck scarf",
+            "resolutions": [
+              {
+                "attribute": "COLOUR",
+                "valueCode": "PINK"
+              }
+            ]
+          },
+          {
+            "itemKey": "HAIR_ACCESSORY",
+            "description": "small flower hair accessory",
+            "resolutions": [
+              {
+                "attribute": "FORM",
+                "valueCode": "FLOWER"
+              }
+            ]
+          }
+        ]
+      },
+      "shotOrStoryStateItems": [],
+      "presentationGuidance": []
     },
     {
       "id": "MONT",
@@ -181,36 +291,11 @@
         "body": "soft pale grey-blue elephant skin with child-friendly rounded proportions",
         "face": "gentle young elephant face with a short expressive trunk",
         "eyes": "large expressive blue eyes",
-        "outfit": [
-          "green explorer backpack",
-          "yellow cap with a leaf emblem"
-        ],
-        "accessories": [
-          "green explorer accents"
-        ],
         "distinguishingFeatures": [
           "clearly identifiable as an elephant",
           "large rounded ears with soft pink inner ears",
           "short expressive trunk",
           "pale grey-blue colour palette"
-        ]
-      },
-      "continuity": {
-        "mustPreserve": [
-          "elephant species",
-          "pale grey-blue body colour",
-          "large rounded ears with pink inner ears",
-          "short expressive trunk",
-          "yellow leaf-emblem cap",
-          "green explorer backpack",
-          "child-friendly proportions"
-        ],
-        "mustNotChange": [
-          "do not turn Mont into another animal",
-          "do not remove or radically lengthen his trunk",
-          "do not change his core pale grey-blue colour",
-          "do not replace his yellow cap or green explorer identity",
-          "do not alter his approved facial identity between shots"
         ]
       },
       "voice": {
@@ -227,7 +312,86 @@
           "natural"
         ]
       },
-      "promptAnchor": "Mont is a young boy elephant with soft pale grey-blue colouring, large expressive blue eyes, large rounded pink-inner ears, a short expressive trunk, a yellow cap with a leaf emblem and a green explorer backpack. He is gentle, calm, kind, slightly shy and dependable. Preserve his approved Busybookie character design exactly."
+      "promptAnchor": "Mont is a young boy elephant with soft pale grey-blue colouring, large expressive blue eyes, large rounded pink-inner ears, a short expressive trunk, a yellow cap with a leaf emblem and a green explorer backpack. He is gentle, calm, kind, slightly shy and dependable. Preserve his approved Busybookie character design exactly.",
+      "visualIdentity": {
+        "schemaVersion": "2.0",
+        "status": "LOCKED",
+        "characterId": "MONT",
+        "identityVersion": 1,
+        "referenceBindings": [
+          {
+            "role": "MASTER_IDENTITY",
+            "assetId": "mont-master-identity-reference-v1"
+          }
+        ],
+        "invariantTraits": [
+          "soft pale grey-blue elephant skin with child-friendly rounded proportions",
+          "gentle young elephant face with a short expressive trunk",
+          "large expressive blue eyes",
+          "clearly identifiable as an elephant",
+          "large rounded ears with soft pink inner ears",
+          "short expressive trunk",
+          "pale grey-blue colour palette",
+          "elephant species",
+          "pale grey-blue body colour",
+          "large rounded ears with pink inner ears",
+          "child-friendly proportions"
+        ],
+        "prohibitedVariations": [
+          "do not turn Mont into another animal",
+          "do not remove or radically lengthen his trunk",
+          "do not change his core pale grey-blue colour",
+          "do not alter his approved facial identity between shots"
+        ],
+        "approvedTraitDecisions": [
+          {
+            "traitKey": "BODY_HAND_FOOT_COLOUR",
+            "valueCode": "BLUE_GREY",
+            "description": "blue-grey body, hands and feet",
+            "provenance": "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+            "legacyIv1ReceiptNoteCorroboration": "blue-grey body, hands and feet"
+          },
+          {
+            "traitKey": "INNER_EAR_COLOUR",
+            "valueCode": "PINK",
+            "description": "soft pink inner ears",
+            "provenance": "CHARACTER_BIBLE_SOURCE",
+            "characterBibleSourceText": "large rounded ears with soft pink inner ears"
+          },
+          {
+            "traitKey": "NAIL_COLOUR",
+            "valueCode": "LIGHT_CREAM_IVORY",
+            "description": "light cream ivory nails",
+            "provenance": "HUMAN_APPROVED_VISUAL_IDENTITY_DECISION",
+            "legacyIv1ReceiptNoteCorroboration": "light cream ivory nails"
+          }
+        ],
+        "approval": {
+          "approvalId": "eb043e11-f533-443a-a368-54babc680d0f",
+          "receiptSha256": "cce84088b5cb3c4ba2233abaef0f7a947076a71106647a7af2f0612cb48d7e8b"
+        }
+      },
+      "defaultContinuityState": {
+        "items": [
+          {
+            "itemKey": "BACKPACK",
+            "description": "green explorer backpack",
+            "resolutions": []
+          },
+          {
+            "itemKey": "CAP",
+            "description": "yellow cap with a leaf emblem",
+            "resolutions": []
+          }
+        ]
+      },
+      "shotOrStoryStateItems": [],
+      "presentationGuidance": [
+        {
+          "guidanceKey": "GREEN_EXPLORER_ACCENTS",
+          "text": "green explorer accents"
+        }
+      ]
     }
   ]
 }

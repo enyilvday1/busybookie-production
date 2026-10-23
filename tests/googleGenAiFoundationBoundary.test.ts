@@ -118,6 +118,7 @@ describe(
           ).sort(),
         ).toEqual([
           "src/googleGenai/googleGenAi.types.ts",
+          "src/googleGenai/googleGenAiInteractionContract.ts",
           "src/googleGenai/googleGenAiPricing.ts",
         ]);
       },

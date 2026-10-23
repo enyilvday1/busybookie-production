@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "provider": "GOOGLE_GENAI",
+  "model": "gemini-omni-1.1-flash",
+  "pricingReviewedOn": "2026-10-23",
+  "pricingProvenance": {
+    "pricingSource": "GOOGLE_GEMINI_API_OFFICIAL_PRICING_PAGE",
+    "modelLifecycleSource": "GOOGLE_GEMINI_API_OFFICIAL_DEPRECATIONS_PAGE",
+    "verifiedOn": "2026-10-23"
+  },
+  "pricing": {
+    "currency": "USD",
+    "fixedPointUnit": "MICRO_USD",
+    "tokensPerPricingUnit": 1000000,
+    "inputMicroUsdPerMillionTokens": 1500000,
+    "videoOutputMicroUsdPerMillionTokens": 17500000,
+    "videoOutput720pTokensPerSecond": 5792,
+    "knownVideoOutput720pMicroUsdPerSecond": 101360
+  },
+  "costCompleteness": {
+    "costScope": "KNOWN_VIDEO_OUTPUT_PLUS_SEPARATE_INPUT_COMPONENT",
+    "preReservationTotalCostExactlyKnown": false,
+    "inputTokenComponentIncludedInKnownCost": false
+  }
+}

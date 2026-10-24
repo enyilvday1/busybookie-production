@@ -39,8 +39,34 @@ const FOUNDATION_MODULE_PATTERN =
 
 const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
+
+const GOOGLE_RECOVERY_ADAPTER =
+  "src/execution/providers/recoverGoogleGenAiSingleShot.ts";
+
+const GOOGLE_RECOVERY_ADAPTER_FOUNDATION_IMPORTS = [
+  "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/googleGenAiInteractionContract.js",
+] as const;
+
+const GOOGLE_RECOVERY_ADAPTER_IMPORTS = [
+  "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/googleGenAiInteractionContract.js",
+  "../readExecutionSubmission.js",
+] as const;
+
+const GOOGLE_PRODUCTION_INTERACTION_GETTER =
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts";
+
+const GOOGLE_PRODUCTION_INTERACTION_GETTER_IMPORTS = [
+  "./recoverGoogleGenAiSingleShot.js",
+  "@google/genai",
+] as const;
+
+const GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN =
+  /loadGoogleGenAiPolicy|loadEnvironment|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|executeSingleShot|\/routing\/|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/;
 
 const APPROVED_CONSUMER_FOUNDATION_IMPORTS = [
   "../googleGenai/googleGenAi.types.js",
@@ -78,11 +104,14 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
+  "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
 
 const APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS = [
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
   "src/veo/createVeoClient.ts",
   "src/veo/execution/resumeVeoOperation.ts",
 ] as const;
@@ -360,6 +389,18 @@ describe(
         ).toEqual([
           ...GOOGLE_SUBMISSION_ADAPTER_FOUNDATION_IMPORTS,
         ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_RECOVERY_ADAPTER,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_RECOVERY_ADAPTER_FOUNDATION_IMPORTS,
+        ]);
       },
     );
 
@@ -531,6 +572,94 @@ describe(
           source,
         ).not.toMatch(
           /loadGoogleGenAiPolicy|loadEnvironment|googleGenai\/|googleGenAiPolicy\.schema|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|executeSingleShot|\/veo\/|\/runway\/|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant same-ID recovery adapter on its exact minimal import set with no SDK or create machinery",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_RECOVERY_ADAPTER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_RECOVERY_ADAPTER_IMPORTS,
+        ]);
+
+        expect(
+          RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          source,
+        ).not.toMatch(
+          /@google\/genai|createGoogleGenAiSingleShotProductionInteractionCreator|createGoogleGenAiSingleShotProductionInteractionGetter|submitGoogleGenAiSingleShot|createInteraction|\.create\(|\.cancel\(|\.delete\(|\/veo\/|\/runway\//,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant production interaction getter on its exact minimal import set",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_PRODUCTION_INTERACTION_GETTER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_PRODUCTION_INTERACTION_GETTER_IMPORTS,
+        ]);
+
+        expect(
+          GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          source,
+        ).not.toMatch(
+          /googleGenai\/|googleGenAiPolicy\.schema|createGoogleGenAiSingleShotProductionInteractionCreator|submitGoogleGenAiSingleShot|\.create\(|\.cancel\(|\.delete\(|\/veo\/|\/runway\//,
         );
       },
     );

@@ -65,12 +65,30 @@ const GOOGLE_SUBMISSION_ADAPTER_IMPORTS = [
   "node:path",
 ] as const;
 
+const GOOGLE_PRODUCTION_INTERACTION_CREATOR =
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts";
+
+const GOOGLE_PRODUCTION_INTERACTION_CREATOR_IMPORTS = [
+  "./submitGoogleGenAiSingleShot.js",
+  "@google/genai",
+] as const;
+
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/createExecutionSubmission.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
+
+const APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS = [
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
+  "src/veo/createVeoClient.ts",
+  "src/veo/execution/resumeVeoOperation.ts",
+] as const;
+
+const RUNTIME_GOOGLE_SDK_IMPORT_PATTERN =
+  /(?:^|\n)\s*(?:import|export)\s+(?!type\b)[^;]*?from\s*["']@google\/genai["']|import\(\s*["']@google\/genai["']\s*\)|require\(\s*["']@google\/genai["']\s*\)/;
 
 const DURABLE_SUBMISSION_WRITER =
   "src/execution/createExecutionSubmission.ts";
@@ -427,6 +445,9 @@ describe(
           if (
             GOOGLE_REFERENCE_PATTERN.test(
               source,
+            ) ||
+            RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+              source,
             )
           ) {
             references.push(
@@ -440,6 +461,77 @@ describe(
         ).toEqual([
           ...APPROVED_EXECUTION_GOOGLE_REFERENCES,
         ]);
+      },
+    );
+
+    it(
+      "limits runtime @google/genai imports in src to the legacy Veo client paths and the dormant production binding",
+      async () => {
+        const runtimeImporters: string[] =
+          [];
+
+        for (
+          const file of await listTypeScriptFiles(
+            "src",
+          )
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          if (
+            RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+              source,
+            )
+          ) {
+            runtimeImporters.push(
+              file,
+            );
+          }
+        }
+
+        expect(
+          runtimeImporters.sort(),
+        ).toEqual([
+          ...APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS,
+        ]);
+      },
+    );
+
+    it(
+      "keeps the dormant production interaction creator on its exact minimal import set",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_PRODUCTION_INTERACTION_CREATOR,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_PRODUCTION_INTERACTION_CREATOR_IMPORTS,
+        ]);
+
+        expect(
+          source,
+        ).not.toMatch(
+          /loadGoogleGenAiPolicy|loadEnvironment|googleGenai\/|googleGenAiPolicy\.schema|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|executeSingleShot|\/veo\/|\/runway\/|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/,
+        );
       },
     );
 

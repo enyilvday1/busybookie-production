@@ -109,10 +109,13 @@ export async function createExecutionSubmission(
   const submittedAt =
     now();
 
-  const record =
-    validatedInput.provider ===
-      "RUNWAY"
-      ? ExecutionSubmissionSchema
+  let record:
+    ExecutionSubmission;
+
+  switch (validatedInput.provider) {
+    case "RUNWAY":
+      record =
+        ExecutionSubmissionSchema
           .parse({
             schemaVersion:
               "1.2",
@@ -145,8 +148,12 @@ export async function createExecutionSubmission(
             recoveryMetadata:
               validatedInput
                 .recoveryMetadata,
-          })
-      : ExecutionSubmissionSchema
+          });
+      break;
+
+    case "VEO":
+      record =
+        ExecutionSubmissionSchema
           .parse({
             schemaVersion:
               "1.3",
@@ -176,6 +183,56 @@ export async function createExecutionSubmission(
               validatedInput
                 .recoveryMetadata,
           });
+      break;
+
+    case "GOOGLE_GENAI":
+      record =
+        ExecutionSubmissionSchema
+          .parse({
+            schemaVersion:
+              "1.4",
+
+            submittedAt,
+
+            status:
+              "SUBMITTED",
+
+            reservationId:
+              reservation.reservationId,
+
+            episodeId:
+              reservation.episodeId,
+
+            shotId:
+              reservation.shotId,
+
+            provider:
+              "GOOGLE_GENAI",
+
+            providerExecutionId:
+              validatedInput
+                .providerExecutionId,
+
+            recoveryMetadata:
+              validatedInput
+                .recoveryMetadata,
+          });
+      break;
+
+    default: {
+      const unsupportedInput:
+        never =
+          validatedInput;
+
+      throw new Error(
+        "Execution submission provider is not supported.",
+        {
+          cause:
+            unsupportedInput,
+        },
+      );
+    }
+  }
 
   const submissionPath =
     createExecutionSubmissionPath(

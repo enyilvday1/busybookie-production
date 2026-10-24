@@ -155,6 +155,15 @@ describe(
                 "submission",
               );
 
+              if (
+                input.provider ===
+                  "GOOGLE_GENAI"
+              ) {
+                throw new Error(
+                  "Legacy RUNWAY/VEO submission test fixture does not support GOOGLE_GENAI.",
+                );
+              }
+
               return {
                 record: {
                   schemaVersion:
@@ -624,6 +633,15 @@ function makeLifecycleFailureDependencies(
         ) {
           throw new Error(
             "Mock submission persistence failure.",
+          );
+        }
+
+        if (
+          input.provider ===
+            "GOOGLE_GENAI"
+        ) {
+          throw new Error(
+            "Legacy RUNWAY/VEO submission test fixture does not support GOOGLE_GENAI.",
           );
         }
 

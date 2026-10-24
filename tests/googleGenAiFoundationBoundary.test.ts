@@ -47,8 +47,22 @@ const APPROVED_CONSUMER_FOUNDATION_IMPORTS = [
 ] as const;
 
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
+  "src/execution/createExecutionSubmission.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
+] as const;
+
+const DURABLE_SUBMISSION_WRITER =
+  "src/execution/createExecutionSubmission.ts";
+
+const DURABLE_SUBMISSION_WRITER_IMPORTS = [
+  "./executionSubmission.schema.js",
+  "./executionSubmissionPath.js",
+  "./readExecutionReservation.js",
+  "node:crypto",
+  "node:fs",
+  "node:fs/promises",
+  "node:path",
 ] as const;
 
 const GOOGLE_REFERENCE_PATTERN =
@@ -394,6 +408,38 @@ describe(
         ).toEqual([
           ...APPROVED_EXECUTION_GOOGLE_REFERENCES,
         ]);
+      },
+    );
+
+    it(
+      "keeps the durable submission writer free of Google runtime, loader, network, and provider imports",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              DURABLE_SUBMISSION_WRITER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...DURABLE_SUBMISSION_WRITER_IMPORTS,
+        ]);
+
+        expect(
+          source,
+        ).not.toMatch(
+          /@google\/genai|loadGoogleGenAiPolicy|\bfetch\s*\(|node:https?|node:net|\/providers\/|\/veo\/|\/runway\//,
+        );
       },
     );
   },

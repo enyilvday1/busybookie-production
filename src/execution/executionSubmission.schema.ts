@@ -250,12 +250,39 @@ const VeoExecutionSubmissionInputSchema =
   })
     .strict();
 
+// providerExecutionId holds the Google Interaction.id; there is no
+// separate interactionId field.
+const GoogleGenAiExecutionSubmissionInputSchema =
+  z.object({
+    reservationId:
+      ExecutionSubmissionReservationIdSchema,
+
+    episodeId:
+      ExecutionReservationEpisodeIdSchema,
+
+    shotId:
+      ExecutionReservationShotIdSchema,
+
+    provider:
+      z.literal(
+        GOOGLE_GENAI_PROVIDER,
+      ),
+
+    providerExecutionId:
+      ExecutionSubmissionProviderExecutionIdSchema,
+
+    recoveryMetadata:
+      GoogleGenAiRecoveryMetadataSchema,
+  })
+    .strict();
+
 export const ExecutionSubmissionInputSchema =
   z.discriminatedUnion(
     "provider",
     [
       RunwayExecutionSubmissionInputSchema,
       VeoExecutionSubmissionInputSchema,
+      GoogleGenAiExecutionSubmissionInputSchema,
     ],
   );
 

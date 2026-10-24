@@ -33,6 +33,7 @@ import {
 import {
   ExecutionSubmissionInputSchema,
   ExecutionSubmissionSchema,
+  type ExecutionSubmissionInput,
 } from "../src/execution/executionSubmission.schema.js";
 
 import {
@@ -1290,7 +1291,7 @@ describe(
     );
 
     it(
-      "rejects GOOGLE_GENAI through current submission write admission",
+      "admits GOOGLE_GENAI write input only with Google recovery metadata",
       () => {
         const {
           schemaVersion: _schemaVersion,
@@ -1307,7 +1308,7 @@ describe(
             )
             .success,
         ).toBe(
-          false,
+          true,
         );
 
         expect(
@@ -2034,6 +2035,762 @@ describe(
         ).toBe(
           false,
         );
+      },
+    );
+  },
+);
+
+const {
+  schemaVersion: _googleSchemaVersion,
+  submittedAt: _googleSubmittedAt,
+  status: _googleStatus,
+  ...googleSubmissionInput
+} =
+  googleSubmissionRecord;
+
+const googleWriteInput:
+  Extract<
+    ExecutionSubmissionInput,
+    { provider: "GOOGLE_GENAI" }
+  > = {
+    reservationId:
+      "11111111-1111-4111-8111-111111111111",
+
+    episodeId:
+      "EP92",
+
+    shotId:
+      "S01",
+
+    provider:
+      "GOOGLE_GENAI",
+
+    providerExecutionId:
+      googleInteractionId,
+
+    recoveryMetadata: {
+      request: {
+        model:
+          "gemini-omni-1.1-flash",
+
+        background:
+          true,
+
+        store:
+          true,
+
+        stream:
+          false,
+
+        promptText:
+          googleRecoveryMetadata.request
+            .promptText,
+
+        sourceImagePath:
+          googleRecoveryMetadata.request
+            .sourceImagePath,
+      },
+
+      policySnapshot:
+        GoogleGenAiPolicySchema
+          .parse(
+            googlePolicySnapshot,
+          ),
+    },
+  };
+
+const veoWriteRecoveryMetadata:
+  Extract<
+    ExecutionSubmissionInput,
+    { provider: "VEO" }
+  >["recoveryMetadata"] = {
+    request: {
+      durationSeconds:
+        4,
+
+      aspectRatio:
+        "16:9",
+
+      resolution:
+        "720p",
+
+      numberOfVideos:
+        1,
+
+      nativeAudioExpected:
+        true,
+
+      expectedOutputFps:
+        24,
+
+      promptText:
+        "Busybookie Veo execution submission test.",
+
+      sourceImagePath:
+        "D:/Busybookie/Production/references/EP91/S01/reference.png",
+
+      imageMimeType:
+        "image/png",
+    },
+
+    costPolicy: {
+      pricingReviewedOn:
+        "2026-09-22",
+
+      centsPerSecond:
+        10,
+
+      locallyExpectedCents:
+        40,
+    },
+  };
+
+describe(
+  "Busybookie Google GenAI durable execution submission write",
+  () => {
+    it(
+      "accepts a valid strict GOOGLE_GENAI submission input",
+      () => {
+        expect(
+          ExecutionSubmissionInputSchema
+            .parse(
+              googleSubmissionInput,
+            ),
+        ).toEqual(
+          googleSubmissionInput,
+        );
+      },
+    );
+
+    it(
+      "rejects a top-level interactionId on GOOGLE_GENAI input",
+      () => {
+        expect(
+          ExecutionSubmissionInputSchema
+            .safeParse({
+              ...googleSubmissionInput,
+
+              interactionId:
+                googleInteractionId,
+            })
+            .success,
+        ).toBe(
+          false,
+        );
+      },
+    );
+
+    it.each([
+      "providerEstimatedCredits",
+      "apiKey",
+      "credentials",
+      "authorization",
+      "accessToken",
+    ])(
+      "rejects unknown top-level %s on GOOGLE_GENAI input",
+      (field) => {
+        expect(
+          ExecutionSubmissionInputSchema
+            .safeParse({
+              ...googleSubmissionInput,
+
+              [field]:
+                field ===
+                  "providerEstimatedCredits"
+                  ? 60
+                  : "redacted-test-value",
+            })
+            .success,
+        ).toBe(
+          false,
+        );
+      },
+    );
+
+    it.each([
+      [
+        [
+          "request",
+          "model",
+        ],
+        "gemini-omni-1.1-pro",
+      ],
+      [
+        [
+          "request",
+          "background",
+        ],
+        false,
+      ],
+      [
+        [
+          "request",
+          "store",
+        ],
+        false,
+      ],
+      [
+        [
+          "request",
+          "stream",
+        ],
+        true,
+      ],
+      [
+        [
+          "request",
+          "promptText",
+        ],
+        "   ",
+      ],
+      [
+        [
+          "request",
+          "sourceImagePath",
+        ],
+        "",
+      ],
+      [
+        [
+          "request",
+        ],
+        undefined,
+      ],
+      [
+        [
+          "policySnapshot",
+        ],
+        undefined,
+      ],
+      [
+        [
+          "policySnapshot",
+          "model",
+        ],
+        "gemini-omni-1.1-pro",
+      ],
+      [
+        [
+          "apiKey",
+        ],
+        "redacted-test-value",
+      ],
+    ])(
+      "rejects invalid GOOGLE_GENAI input recoveryMetadata at %j",
+      (
+        path,
+        value,
+      ) => {
+        expect(
+          ExecutionSubmissionInputSchema
+            .safeParse(
+              withPath(
+                googleSubmissionInput,
+                [
+                  "recoveryMetadata",
+                  ...path,
+                ],
+                value,
+              ),
+            )
+            .success,
+        ).toBe(
+          false,
+        );
+      },
+    );
+
+    it(
+      "writes and reads a durable GOOGLE_GENAI submission as schemaVersion 1.4",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const reservation =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                "GOOGLE_GENAI",
+            },
+            reservationDependencies,
+          );
+
+        const result =
+          await createExecutionSubmission(
+            mediaRoot,
+            {
+              ...googleWriteInput,
+
+              reservationId:
+                reservation.record
+                  .reservationId,
+            },
+            submissionDependencies,
+          );
+
+        expect(
+          result.record,
+        ).toEqual({
+          schemaVersion:
+            "1.4",
+
+          submittedAt:
+            "2026-09-24T12:01:00.000Z",
+
+          status:
+            "SUBMITTED",
+
+          reservationId:
+            "11111111-1111-4111-8111-111111111111",
+
+          episodeId:
+            "EP92",
+
+          shotId:
+            "S01",
+
+          provider:
+            "GOOGLE_GENAI",
+
+          providerExecutionId:
+            googleInteractionId,
+
+          recoveryMetadata:
+            googleRecoveryMetadata,
+        });
+
+        expect(
+          Object.keys(
+            result.record,
+          ),
+        ).not.toContain(
+          "interactionId",
+        );
+
+        expect(
+          result.submissionPath,
+        ).toBe(
+          createExecutionSubmissionPath(
+            mediaRoot,
+            "EP92",
+            "S01",
+          ),
+        );
+
+        const raw =
+          await readFile(
+            result.submissionPath,
+            "utf8",
+          );
+
+        expect(
+          raw,
+        ).not.toMatch(
+          /interactionId|apiKey|credential|authorization/i,
+        );
+
+        expect(
+          JSON.parse(
+            raw,
+          ),
+        ).toEqual(
+          result.record,
+        );
+
+        const stored =
+          await readExecutionSubmission(
+            mediaRoot,
+            "EP92",
+            "S01",
+          );
+
+        expect(
+          stored,
+        ).toEqual(
+          result.record,
+        );
+
+        expect(
+          stored?.schemaVersion,
+        ).toBe(
+          "1.4",
+        );
+      },
+    );
+
+    it(
+      "rejects invalid Google recovery metadata before writing a submission",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const reservation =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                "GOOGLE_GENAI",
+            },
+            reservationDependencies,
+          );
+
+        await expect(
+          createExecutionSubmission(
+            mediaRoot,
+            {
+              ...googleWriteInput,
+
+              reservationId:
+                reservation.record
+                  .reservationId,
+
+              recoveryMetadata: {
+                ...googleWriteInput.recoveryMetadata,
+
+                request: {
+                  ...googleWriteInput.recoveryMetadata
+                    .request,
+
+                  promptText:
+                    "   ",
+                },
+              },
+            },
+            submissionDependencies,
+          ),
+        ).rejects.toThrow();
+
+        await expect(
+          readExecutionSubmission(
+            mediaRoot,
+            "EP92",
+            "S01",
+          ),
+        ).resolves.toBeNull();
+      },
+    );
+
+    it.each([
+      "RUNWAY",
+      "VEO",
+    ] as const)(
+      "fails closed when a GOOGLE_GENAI submission targets a %s reservation",
+      async (reservedProvider) => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const reservation =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                reservedProvider,
+            },
+            reservationDependencies,
+          );
+
+        await expect(
+          createExecutionSubmission(
+            mediaRoot,
+            {
+              ...googleWriteInput,
+
+              reservationId:
+                reservation.record
+                  .reservationId,
+            },
+            submissionDependencies,
+          ),
+        ).rejects.toThrow(
+          /provider/i,
+        );
+
+        await expect(
+          readExecutionSubmission(
+            mediaRoot,
+            "EP92",
+            "S01",
+          ),
+        ).resolves.toBeNull();
+      },
+    );
+
+    it(
+      "fails closed when RUNWAY or VEO submissions target a GOOGLE_GENAI reservation",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const reservation =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                "GOOGLE_GENAI",
+            },
+            reservationDependencies,
+          );
+
+        await expect(
+          createExecutionSubmission(
+            mediaRoot,
+            {
+              reservationId:
+                reservation.record
+                  .reservationId,
+
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                "RUNWAY",
+
+              providerExecutionId:
+                "task-runway-against-google",
+
+              providerEstimatedCredits:
+                60,
+
+              recoveryMetadata:
+                runwayRecoveryMetadata,
+            },
+            submissionDependencies,
+          ),
+        ).rejects.toThrow(
+          /provider/i,
+        );
+
+        await expect(
+          createExecutionSubmission(
+            mediaRoot,
+            {
+              reservationId:
+                reservation.record
+                  .reservationId,
+
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                "VEO",
+
+              providerExecutionId:
+                "models/veo/operations/against-google",
+
+              recoveryMetadata:
+                veoWriteRecoveryMetadata,
+            },
+            submissionDependencies,
+          ),
+        ).rejects.toThrow(
+          /provider/i,
+        );
+
+        await expect(
+          readExecutionSubmission(
+            mediaRoot,
+            "EP92",
+            "S01",
+          ),
+        ).resolves.toBeNull();
+      },
+    );
+
+    it(
+      "rejects a GOOGLE_GENAI submission whose reservation ID does not match",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        await createExecutionReservation(
+          mediaRoot,
+          {
+            episodeId:
+              "EP92",
+
+            shotId:
+              "S01",
+
+            provider:
+              "GOOGLE_GENAI",
+          },
+          reservationDependencies,
+        );
+
+        await expect(
+          createExecutionSubmission(
+            mediaRoot,
+            {
+              ...googleWriteInput,
+
+              reservationId:
+                "22222222-2222-4222-8222-222222222222",
+            },
+            submissionDependencies,
+          ),
+        ).rejects.toThrow(
+          /reservation/i,
+        );
+      },
+    );
+
+    it(
+      "blocks a duplicate GOOGLE_GENAI submission for the same shot",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const reservation =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId:
+                "EP92",
+
+              shotId:
+                "S01",
+
+              provider:
+                "GOOGLE_GENAI",
+            },
+            reservationDependencies,
+          );
+
+        const input = {
+          ...googleWriteInput,
+
+          reservationId:
+            reservation.record
+              .reservationId,
+        };
+
+        await createExecutionSubmission(
+          mediaRoot,
+          input,
+          submissionDependencies,
+        );
+
+        await expect(
+          createExecutionSubmission(
+            mediaRoot,
+            input,
+            submissionDependencies,
+          ),
+        ).rejects.toThrow(
+          /execution submission already exists/i,
+        );
+      },
+    );
+
+    it(
+      "keeps the VEO writer emitting schemaVersion 1.3",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const reservation =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId:
+                "EP91",
+
+              shotId:
+                "S01",
+
+              provider:
+                "VEO",
+            },
+            reservationDependencies,
+          );
+
+        const result =
+          await createExecutionSubmission(
+            mediaRoot,
+            {
+              reservationId:
+                reservation.record
+                  .reservationId,
+
+              episodeId:
+                "EP91",
+
+              shotId:
+                "S01",
+
+              provider:
+                "VEO",
+
+              providerExecutionId:
+                "models/veo/operations/123",
+
+              recoveryMetadata:
+                veoWriteRecoveryMetadata,
+            },
+            submissionDependencies,
+          );
+
+        expect(
+          result.record,
+        ).toEqual({
+          schemaVersion:
+            "1.3",
+
+          submittedAt:
+            "2026-09-24T12:01:00.000Z",
+
+          status:
+            "SUBMITTED",
+
+          reservationId:
+            "11111111-1111-4111-8111-111111111111",
+
+          episodeId:
+            "EP91",
+
+          shotId:
+            "S01",
+
+          provider:
+            "VEO",
+
+          providerExecutionId:
+            "models/veo/operations/123",
+
+          recoveryMetadata:
+            veoRecoveryMetadata,
+        });
       },
     );
   },

@@ -4,9 +4,14 @@ import {
 
 import {
   ExecutionReservationEpisodeIdSchema,
-  ExecutionReservationProviderSchema,
   ExecutionReservationShotIdSchema,
 } from "./executionReservation.schema.js";
+
+const ExecutionCompletionProviderSchema =
+  z.enum([
+    "RUNWAY",
+    "VEO",
+  ]);
 
 export const ExecutionCompletionInputSchema =
   z.object({
@@ -21,7 +26,7 @@ export const ExecutionCompletionInputSchema =
       ExecutionReservationShotIdSchema,
 
     provider:
-      ExecutionReservationProviderSchema,
+      ExecutionCompletionProviderSchema,
 
     providerExecutionId:
       z.string()
@@ -68,7 +73,7 @@ export const ExecutionCompletionSchema =
       ExecutionReservationShotIdSchema,
 
     provider:
-      ExecutionReservationProviderSchema,
+      ExecutionCompletionProviderSchema,
 
     providerExecutionId:
       z.string()

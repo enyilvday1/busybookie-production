@@ -20,6 +20,7 @@ export const ExecutionReservationProviderSchema =
   z.enum([
     "RUNWAY",
     "VEO",
+    "GOOGLE_GENAI",
   ]);
 
 export const ExecutionReservationInputSchema =

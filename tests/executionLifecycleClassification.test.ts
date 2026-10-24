@@ -20,6 +20,14 @@ import type {
   ExecutionSubmission,
 } from "../src/execution/executionSubmission.schema.js";
 
+import type {
+  PaidExecutionProvider,
+} from "../src/execution/singleShotExecution.types.js";
+
+const paidProvider:
+  PaidExecutionProvider =
+    "RUNWAY";
+
 const reservation:
   ExecutionReservation = {
     schemaVersion:
@@ -41,7 +49,7 @@ const reservation:
       "S01",
 
     provider:
-      "RUNWAY",
+      paidProvider,
   };
 
 const submission:
@@ -65,7 +73,7 @@ const submission:
       reservation.shotId,
 
     provider:
-      reservation.provider,
+      paidProvider,
 
     providerExecutionId:
       "task-runway-123",
@@ -92,7 +100,7 @@ const completion:
       reservation.shotId,
 
     provider:
-      reservation.provider,
+      paidProvider,
 
     providerExecutionId:
       submission.providerExecutionId,

@@ -27,6 +27,7 @@ import {
 } from "../src/execution/createExecutionReservation.js";
 
 import {
+  ExecutionReservationInputSchema,
   ExecutionReservationSchema,
 } from "../src/execution/executionReservation.schema.js";
 
@@ -446,6 +447,133 @@ describe(
           ),
         ).rejects.toThrow(
           /not valid JSON/i,
+        );
+      },
+    );
+  },
+);
+
+describe(
+  "Busybookie execution reservation provider domain",
+  () => {
+    const reservationRecord = {
+      schemaVersion: "1.0",
+      reservationId:
+        "11111111-1111-4111-8111-111111111111",
+      reservedAt:
+        "2026-09-23T20:00:00.000Z",
+      status: "RESERVED",
+      episodeId: "EP90",
+      shotId: "S01",
+    };
+
+    it.each([
+      "RUNWAY",
+      "VEO",
+      "GOOGLE_GENAI",
+    ])(
+      "accepts %s as a durable reservation provider",
+      (provider) => {
+        expect(
+          ExecutionReservationInputSchema.safeParse({
+            episodeId: "EP90",
+            shotId: "S01",
+            provider,
+          }).success,
+        ).toBe(true);
+
+        expect(
+          ExecutionReservationSchema.safeParse({
+            ...reservationRecord,
+            provider,
+          }).success,
+        ).toBe(true);
+      },
+    );
+
+    it.each([
+      "MANUAL",
+      "KREA",
+      "google_genai",
+      "",
+    ])(
+      "rejects %j as a durable reservation provider",
+      (provider) => {
+        expect(
+          ExecutionReservationInputSchema.safeParse({
+            episodeId: "EP90",
+            shotId: "S01",
+            provider,
+          }).success,
+        ).toBe(false);
+
+        expect(
+          ExecutionReservationSchema.safeParse({
+            ...reservationRecord,
+            provider,
+          }).success,
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "keeps the reservation record schemaVersion at exactly 1.0",
+      () => {
+        for (
+          const schemaVersion of [
+            "1.1",
+            "1.4",
+            "2.0",
+          ]
+        ) {
+          expect(
+            ExecutionReservationSchema.safeParse({
+              ...reservationRecord,
+              schemaVersion,
+              provider: "GOOGLE_GENAI",
+            }).success,
+          ).toBe(false);
+        }
+      },
+    );
+
+    it(
+      "creates and reads a durable GOOGLE_GENAI reservation at schemaVersion 1.0",
+      async () => {
+        const mediaRoot =
+          await makeTempDirectory();
+
+        const result =
+          await createExecutionReservation(
+            mediaRoot,
+            {
+              episodeId: "EP90",
+              shotId: "S01",
+              provider: "GOOGLE_GENAI",
+            },
+            fixedDependencies,
+          );
+
+        expect(result.record).toEqual({
+          schemaVersion: "1.0",
+          reservationId:
+            "11111111-1111-4111-8111-111111111111",
+          reservedAt:
+            "2026-09-23T20:00:00.000Z",
+          status: "RESERVED",
+          episodeId: "EP90",
+          shotId: "S01",
+          provider: "GOOGLE_GENAI",
+        });
+
+        await expect(
+          readExecutionReservation(
+            mediaRoot,
+            "EP90",
+            "S01",
+          ),
+        ).resolves.toEqual(
+          result.record,
         );
       },
     );

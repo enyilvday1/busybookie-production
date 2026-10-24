@@ -48,9 +48,8 @@ import type {
 } from "./executionSubmission.schema.js";
 
 export type PaidExecutionProvider =
-  ExecutionReservationInput[
-    "provider"
-  ];
+  | "RUNWAY"
+  | "VEO";
 
 export type SingleShotSubmissionAcceptance =
   | Readonly<{

@@ -34,6 +34,7 @@ import {
 } from "../src/execution/createExecutionSubmission.js";
 
 import {
+  ExecutionCompletionInputSchema,
   ExecutionCompletionSchema,
 } from "../src/execution/executionCompletion.schema.js";
 
@@ -963,6 +964,127 @@ describe(
         ).rejects.toThrow(
           /not valid JSON/i,
         );
+      },
+    );
+  },
+);
+
+describe(
+  "Busybookie execution completion provider domain",
+  () => {
+    const completionInput = {
+      reservationId:
+        "11111111-1111-4111-8111-111111111111",
+
+      episodeId:
+        "EP90",
+
+      shotId:
+        "S01",
+
+      providerExecutionId:
+        "provider-execution-123",
+
+      generationRecordPath:
+        "D:/Busybookie/generated-video/EP90/S01/record.json",
+    };
+
+    const completionRecord = {
+      ...completionInput,
+
+      schemaVersion:
+        "1.0",
+
+      completedAt:
+        "2026-09-24T16:02:00.000Z",
+
+      status:
+        "COMPLETED",
+    };
+
+    it.each([
+      "RUNWAY",
+      "VEO",
+    ])(
+      "accepts %s for completion input and record",
+      (provider) => {
+        expect(
+          ExecutionCompletionInputSchema
+            .safeParse({
+              ...completionInput,
+              provider,
+            })
+            .success,
+        ).toBe(
+          true,
+        );
+
+        expect(
+          ExecutionCompletionSchema
+            .safeParse({
+              ...completionRecord,
+              provider,
+            })
+            .success,
+        ).toBe(
+          true,
+        );
+      },
+    );
+
+    it.each([
+      "GOOGLE_GENAI",
+      "MANUAL",
+    ])(
+      "rejects %s for completion input and record in this slice",
+      (provider) => {
+        expect(
+          ExecutionCompletionInputSchema
+            .safeParse({
+              ...completionInput,
+              provider,
+            })
+            .success,
+        ).toBe(
+          false,
+        );
+
+        expect(
+          ExecutionCompletionSchema
+            .safeParse({
+              ...completionRecord,
+              provider,
+            })
+            .success,
+        ).toBe(
+          false,
+        );
+      },
+    );
+
+    it(
+      "keeps the completion record schemaVersion at exactly 1.0",
+      () => {
+        for (
+          const schemaVersion of [
+            "1.1",
+            "1.4",
+            "2.0",
+          ]
+        ) {
+          expect(
+            ExecutionCompletionSchema
+              .safeParse({
+                ...completionRecord,
+                schemaVersion,
+                provider:
+                  "RUNWAY",
+              })
+              .success,
+          ).toBe(
+            false,
+          );
+        }
       },
     );
   },

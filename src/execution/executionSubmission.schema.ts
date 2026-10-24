@@ -4,13 +4,21 @@ import {
 
 import {
   ExecutionReservationEpisodeIdSchema,
-  ExecutionReservationProviderSchema,
   ExecutionReservationShotIdSchema,
 } from "./executionReservation.schema.js";
 
 import {
+  GoogleGenAiPolicySchema,
+} from "../schemas/googleGenAiPolicy.schema.js";
+
+import {
   VeoDurationSecondsSchema,
 } from "../schemas/veoPolicy.schema.js";
+
+import {
+  GEMINI_OMNI_11_FLASH_MODEL,
+  GOOGLE_GENAI_PROVIDER,
+} from "../googleGenai/googleGenAi.types.js";
 
 import {
   VEO_720P_RESOLUTION,
@@ -18,6 +26,12 @@ import {
   VEO_IMAGE_MIME_TYPES,
   VEO_LANDSCAPE_ASPECT_RATIO,
 } from "../veo/veo.types.js";
+
+const LegacyExecutionSubmissionProviderSchema =
+  z.enum([
+    "RUNWAY",
+    "VEO",
+  ]);
 
 const ExecutionSubmissionReservationIdSchema =
   z.string()
@@ -150,6 +164,41 @@ const VeoRecoveryMetadataSchema =
   })
     .strict();
 
+const GoogleGenAiRecoveryMetadataSchema =
+  z.object({
+    request:
+      z.object({
+        model:
+          z.literal(
+            GEMINI_OMNI_11_FLASH_MODEL,
+          ),
+
+        background:
+          z.literal(true),
+
+        store:
+          z.literal(true),
+
+        stream:
+          z.literal(false),
+
+        promptText:
+          z.string()
+            .trim()
+            .min(1),
+
+        sourceImagePath:
+          z.string()
+            .trim()
+            .min(1),
+      })
+        .strict(),
+
+    policySnapshot:
+      GoogleGenAiPolicySchema,
+  })
+    .strict();
+
 const RunwayExecutionSubmissionInputSchema =
   z.object({
     reservationId:
@@ -236,7 +285,7 @@ const ExecutionSubmissionV1Schema =
       ExecutionReservationShotIdSchema,
 
     provider:
-      ExecutionReservationProviderSchema,
+      LegacyExecutionSubmissionProviderSchema,
 
     providerExecutionId:
       ExecutionSubmissionProviderExecutionIdSchema,
@@ -360,6 +409,46 @@ const VeoExecutionSubmissionV1_3Schema =
   })
     .strict();
 
+// providerExecutionId holds the Google Interaction.id; there is no
+// separate interactionId field.
+const GoogleGenAiExecutionSubmissionV1_4Schema =
+  z.object({
+    schemaVersion:
+      z.literal(
+        "1.4",
+      ),
+
+    submittedAt:
+      z.string()
+        .datetime(),
+
+    status:
+      z.literal(
+        "SUBMITTED",
+      ),
+
+    reservationId:
+      ExecutionSubmissionReservationIdSchema,
+
+    episodeId:
+      ExecutionReservationEpisodeIdSchema,
+
+    shotId:
+      ExecutionReservationShotIdSchema,
+
+    provider:
+      z.literal(
+        GOOGLE_GENAI_PROVIDER,
+      ),
+
+    providerExecutionId:
+      ExecutionSubmissionProviderExecutionIdSchema,
+
+    recoveryMetadata:
+      GoogleGenAiRecoveryMetadataSchema,
+  })
+    .strict();
+
 export const ExecutionSubmissionSchema =
   z.discriminatedUnion(
     "schemaVersion",
@@ -368,6 +457,7 @@ export const ExecutionSubmissionSchema =
       RunwayExecutionSubmissionV1_1Schema,
       RunwayExecutionSubmissionV1_2Schema,
       VeoExecutionSubmissionV1_3Schema,
+      GoogleGenAiExecutionSubmissionV1_4Schema,
     ],
   );
 

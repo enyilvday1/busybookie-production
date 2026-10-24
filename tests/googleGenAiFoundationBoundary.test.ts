@@ -37,6 +37,23 @@ const ALLOWED_EXTERNAL_IMPORTS =
 const FOUNDATION_MODULE_PATTERN =
   /googleGenai\/|googleGenAiPolicy\.schema|loadGoogleGenAiPolicy/;
 
+const APPROVED_FOUNDATION_CONSUMERS = [
+  "src/execution/executionSubmission.schema.ts",
+] as const;
+
+const APPROVED_CONSUMER_FOUNDATION_IMPORTS = [
+  "../googleGenai/googleGenAi.types.js",
+  "../schemas/googleGenAiPolicy.schema.js",
+] as const;
+
+const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
+  "src/execution/executionReservation.schema.ts",
+  "src/execution/executionSubmission.schema.ts",
+] as const;
+
+const GOOGLE_REFERENCE_PATTERN =
+  /GOOGLE_GENAI|gemini-omni/;
+
 function toPosix(
   path:
     string,
@@ -197,7 +214,7 @@ describe(
     );
 
     it(
-      "introduces no runtime consumer of the foundation in src or scripts",
+      "allows exactly one approved foundation consumer in src or scripts",
       async () => {
         const candidates = [
           ...(
@@ -222,6 +239,9 @@ describe(
         const consumers: string[] =
           [];
 
+        const consumerImports =
+          new Map<string, string[]>();
+
         for (
           const file of candidates
         ) {
@@ -234,40 +254,58 @@ describe(
               "utf8",
             );
 
-          if (
+          const foundationImports =
             importSpecifiers(
               source,
-            ).some(
+            ).filter(
               (specifier) =>
                 FOUNDATION_MODULE_PATTERN.test(
                   specifier,
                 ),
-            )
+            );
+
+          if (
+            foundationImports.length >
+            0
           ) {
             consumers.push(
               file,
+            );
+
+            consumerImports.set(
+              file,
+              foundationImports,
             );
           }
         }
 
         expect(
-          consumers,
-        ).toEqual([]);
+          consumers.sort(),
+        ).toEqual([
+          ...APPROVED_FOUNDATION_CONSUMERS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                APPROVED_FOUNDATION_CONSUMERS[0],
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...APPROVED_CONSUMER_FOUNDATION_IMPORTS,
+        ]);
       },
     );
 
     it(
-      "leaves routing, execution, and legacy Veo code without any GOOGLE_GENAI reference",
+      "leaves routing and legacy Veo code without any GOOGLE_GENAI reference",
       async () => {
         const files = [
           ...(
             await listTypeScriptFiles(
               "src/routing",
-            )
-          ),
-          ...(
-            await listTypeScriptFiles(
-              "src/execution",
             )
           ),
           ...(
@@ -297,7 +335,7 @@ describe(
             );
 
           if (
-            /GOOGLE_GENAI|gemini-omni/.test(
+            GOOGLE_REFERENCE_PATTERN.test(
               source,
             )
           ) {
@@ -310,6 +348,52 @@ describe(
         expect(
           references,
         ).toEqual([]);
+      },
+    );
+
+    it(
+      "limits execution GOOGLE_GENAI references to the exact durable schema files",
+      async () => {
+        const files =
+          await listTypeScriptFiles(
+            "src/execution",
+          );
+
+        expect(
+          files.length,
+        ).toBeGreaterThan(0);
+
+        const references: string[] =
+          [];
+
+        for (
+          const file of files
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          if (
+            GOOGLE_REFERENCE_PATTERN.test(
+              source,
+            )
+          ) {
+            references.push(
+              file,
+            );
+          }
+        }
+
+        expect(
+          references.sort(),
+        ).toEqual([
+          ...APPROVED_EXECUTION_GOOGLE_REFERENCES,
+        ]);
       },
     );
   },

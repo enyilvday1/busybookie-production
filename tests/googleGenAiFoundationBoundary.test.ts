@@ -39,10 +39,85 @@ const FOUNDATION_MODULE_PATTERN =
 
 const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
+  "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
+
+const GOOGLE_COMPLETION_PERSISTENCE_SOURCES = {
+  "src/googleGenai/audit/googleGenAiGenerationRecord.schema.ts": [
+    "../../execution/executionReservation.schema.js",
+    "../googleGenAi.types.js",
+    "node:path",
+    "zod",
+  ],
+  "src/googleGenai/audit/googleGenAiGenerationRecordPath.ts": [
+    "../../execution/executionReservation.schema.js",
+    "../output/googleGenAiVideoOutputPath.js",
+    "node:path",
+  ],
+  "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts": [
+    "./googleGenAiGenerationRecord.schema.js",
+    "./googleGenAiGenerationRecordPath.js",
+    "node:fs/promises",
+  ],
+  "src/execution/googleGenAiExecutionCompletion.schema.ts": [
+    "../googleGenai/googleGenAi.types.js",
+    "./executionReservation.schema.js",
+    "zod",
+  ],
+  "src/execution/readGoogleGenAiExecutionCompletion.ts": [
+    "./executionCompletionPath.js",
+    "./googleGenAiExecutionCompletion.schema.js",
+    "node:fs/promises",
+  ],
+  "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts": [
+    "../../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+    "../../googleGenai/audit/readGoogleGenAiGenerationRecord.js",
+    "../../googleGenai/googleGenAi.types.js",
+    "../../googleGenai/output/googleGenAiVideoOutputPath.js",
+    "../executionCompletionPath.js",
+    "../googleGenAiExecutionCompletion.schema.js",
+    "../readExecutionReservation.js",
+    "../readExecutionSubmission.js",
+    "../readGoogleGenAiExecutionCompletion.js",
+    "./materializeGoogleGenAiSingleShotOutput.js",
+    "node:crypto",
+    "node:fs/promises",
+    "node:path",
+    "node:util",
+  ],
+} as const;
+
+const GOOGLE_COMPLETION_SCHEMA_FOUNDATION_IMPORTS = [
+  "../googleGenai/googleGenAi.types.js",
+] as const;
+
+const GOOGLE_COMPLETION_PERSISTENCE_ADAPTER =
+  "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts";
+
+const GOOGLE_COMPLETION_PERSISTENCE_ADAPTER_FOUNDATION_IMPORTS = [
+  "../../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+  "../../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+  "../../googleGenai/audit/readGoogleGenAiGenerationRecord.js",
+  "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/output/googleGenAiVideoOutputPath.js",
+] as const;
+
+const GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN =
+  /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion/;
+
+const GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS = [
+  "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
+  "src/execution/readGoogleGenAiExecutionCompletion.ts",
+  "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts",
+] as const;
+
+const GOOGLE_COMPLETION_PERSISTENCE_FORBIDDEN_PATTERN =
+  /@google\/genai|process\.env|\bfetch\s*\(|interactions\.|\bfiles\.|\brename\s*\(|\bcopyFile\s*\(|\bcreateExecutionCompletion\b|\brecoverExecutionCompletion\b|executionCompletion\.schema|\breadExecutionCompletion\b|reconcileExecutionLifecycle|inspectExecutionLifecycle|classifyExecutionLifecycle|executeSingleShot|evaluateShotProvider|assessPreReservationProviderOptimization|verifyCompletedShotForComposition|resolveDurableShotVisualGenerationState|writeRunwayGenerationRecord|writeVeoGenerationRecord|\/runway\/|\/veo\/|\/routing\//;
 
 const GOOGLE_OUTPUT_PATH_MODULE =
   "src/googleGenai/output/googleGenAiVideoOutputPath.ts";
@@ -142,10 +217,12 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/createExecutionSubmission.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
+  "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
@@ -257,6 +334,9 @@ describe(
             )
           ).sort(),
         ).toEqual([
+          "src/googleGenai/audit/googleGenAiGenerationRecord.schema.ts",
+          "src/googleGenai/audit/googleGenAiGenerationRecordPath.ts",
+          "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts",
           "src/googleGenai/googleGenAi.types.ts",
           "src/googleGenai/googleGenAiInteractionContract.ts",
           "src/googleGenai/googleGenAiPricing.ts",
@@ -456,6 +536,32 @@ describe(
         ).toEqual([
           ...GOOGLE_OUTPUT_MATERIALIZER_FOUNDATION_IMPORTS,
         ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                "src/execution/googleGenAiExecutionCompletion.schema.ts",
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_COMPLETION_SCHEMA_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_COMPLETION_PERSISTENCE_ADAPTER,
+              ),
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            ...GOOGLE_COMPLETION_PERSISTENCE_ADAPTER_FOUNDATION_IMPORTS,
+          ].sort(),
+        );
       },
     );
 
@@ -866,6 +972,136 @@ describe(
         ).not.toMatch(
           /googleGenai\/|googleGenAiPolicy\.schema|createGoogleGenAiSingleShotProductionInteraction|submitGoogleGenAiSingleShot|recoverGoogleGenAiSingleShot|\.create\(|\.cancel\(|\.delete\(|\.download\(|\bfiles\.|\bfetch\s*\(/,
         );
+      },
+    );
+
+    it(
+      "keeps the dormant Google completion persistence sources on their exact import sets with no SDK, network, shared completion writer, lifecycle, routing, or rename/copy publication",
+      async () => {
+        for (
+          const [
+            file,
+            expectedImports,
+          ] of Object.entries(
+            GOOGLE_COMPLETION_PERSISTENCE_SOURCES,
+          )
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          expect(
+            [
+              ...new Set(
+                importSpecifiers(
+                  source,
+                ),
+              ),
+            ].sort(),
+            file,
+          ).toEqual(
+            [
+              ...expectedImports,
+            ].sort(),
+          );
+
+          expect(
+            RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+              source,
+            ),
+            file,
+          ).toBe(
+            false,
+          );
+
+          expect(
+            GOOGLE_COMPLETION_PERSISTENCE_FORBIDDEN_PATTERN.test(
+              source,
+            ),
+            file,
+          ).toBe(
+            false,
+          );
+        }
+
+        const adapterSource =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_COMPLETION_PERSISTENCE_ADAPTER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          adapterSource,
+        ).toMatch(
+          /fileSystem\.link\(/,
+        );
+
+        expect(
+          adapterSource,
+        ).toMatch(
+          /import type \{\s*GoogleGenAiSingleShotOutputMaterializationResult,?\s*\} from "\.\/materializeGoogleGenAiSingleShotOutput\.js";/,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant Google completion persistence modules unconsumed by runtime code",
+      async () => {
+        const importers: string[] =
+          [];
+
+        for (
+          const file of [
+            ...(
+              await listTypeScriptFiles(
+                "src",
+              )
+            ),
+            ...(
+              await listTypeScriptFiles(
+                "scripts",
+              )
+            ),
+          ]
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          if (
+            importSpecifiers(
+              source,
+            ).some(
+              (specifier) =>
+                GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN.test(
+                  specifier,
+                ),
+            )
+          ) {
+            importers.push(
+              file,
+            );
+          }
+        }
+
+        expect(
+          importers.sort(),
+        ).toEqual([
+          ...GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS,
+        ]);
       },
     );
 

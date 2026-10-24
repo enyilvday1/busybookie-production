@@ -39,9 +39,48 @@ const FOUNDATION_MODULE_PATTERN =
 
 const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
+
+const GOOGLE_OUTPUT_PATH_MODULE =
+  "src/googleGenai/output/googleGenAiVideoOutputPath.ts";
+
+const GOOGLE_OUTPUT_PATH_MODULE_IMPORTS = [
+  "node:crypto",
+  "node:path",
+] as const;
+
+const GOOGLE_OUTPUT_MATERIALIZER =
+  "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts";
+
+const GOOGLE_OUTPUT_MATERIALIZER_FOUNDATION_IMPORTS = [
+  "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/googleGenAiInteractionContract.js",
+  "../../googleGenai/output/googleGenAiVideoOutputPath.js",
+] as const;
+
+const GOOGLE_OUTPUT_MATERIALIZER_IMPORTS = [
+  "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/googleGenAiInteractionContract.js",
+  "../../googleGenai/output/googleGenAiVideoOutputPath.js",
+  "../readExecutionSubmission.js",
+  "node:crypto",
+  "node:fs/promises",
+  "node:path",
+] as const;
+
+const GOOGLE_PRODUCTION_OUTPUT_RETRIEVER =
+  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts";
+
+const GOOGLE_PRODUCTION_OUTPUT_RETRIEVER_IMPORTS = [
+  "./materializeGoogleGenAiSingleShotOutput.js",
+  "@google/genai",
+] as const;
+
+const PROVIDER_OUTPUT_HELPER_PATTERN =
+  /\/runway\/|\/veo\/|runwayOutputPath|veoOutputPath|downloadRunwayOutput|recoverRunwayOutput|persistVeoGeneratedVideo|recoverVeoOutput/;
 
 const GOOGLE_RECOVERY_ADAPTER =
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts";
@@ -105,6 +144,8 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/executionSubmission.schema.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
+  "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
@@ -112,6 +153,7 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
 const APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS = [
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
   "src/veo/createVeoClient.ts",
   "src/veo/execution/resumeVeoOperation.ts",
 ] as const;
@@ -218,6 +260,7 @@ describe(
           "src/googleGenai/googleGenAi.types.ts",
           "src/googleGenai/googleGenAiInteractionContract.ts",
           "src/googleGenai/googleGenAiPricing.ts",
+          "src/googleGenai/output/googleGenAiVideoOutputPath.ts",
         ]);
       },
     );
@@ -400,6 +443,18 @@ describe(
           ].sort(),
         ).toEqual([
           ...GOOGLE_RECOVERY_ADAPTER_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_OUTPUT_MATERIALIZER,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_OUTPUT_MATERIALIZER_FOUNDATION_IMPORTS,
         ]);
       },
     );
@@ -661,6 +716,205 @@ describe(
         ).not.toMatch(
           /googleGenai\/|googleGenAiPolicy\.schema|createGoogleGenAiSingleShotProductionInteractionCreator|submitGoogleGenAiSingleShot|\.create\(|\.cancel\(|\.delete\(|\/veo\/|\/runway\//,
         );
+      },
+    );
+
+    it(
+      "keeps the Google output path module on node:crypto and node:path only",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_OUTPUT_PATH_MODULE,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_OUTPUT_PATH_MODULE_IMPORTS,
+        ]);
+
+        expect(
+          PROVIDER_OUTPUT_HELPER_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          source,
+        ).not.toMatch(
+          /process\.env|@google\/genai|\bfetch\s*\(/,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant output materializer on its exact import set with no SDK, fetch, rename publication, or lifecycle writers",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_OUTPUT_MATERIALIZER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_OUTPUT_MATERIALIZER_IMPORTS,
+        ]);
+
+        expect(
+          RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          PROVIDER_OUTPUT_HELPER_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          source,
+        ).not.toMatch(
+          /@google\/genai|\brename\s*\(|\bcopyFile\s*\(|createWriteStream|\.download\(|\bfiles\.|createInteraction|\.create\(|\.cancel\(|\.delete\(/,
+        );
+
+        expect(
+          source,
+        ).toMatch(
+          /fileSystem\.link\(/,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant production output retriever on its exact import set with no create, download, or fetch",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_PRODUCTION_OUTPUT_RETRIEVER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_PRODUCTION_OUTPUT_RETRIEVER_IMPORTS,
+        ]);
+
+        expect(
+          GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          PROVIDER_OUTPUT_HELPER_PATTERN.test(
+            source,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          source,
+        ).not.toMatch(
+          /googleGenai\/|googleGenAiPolicy\.schema|createGoogleGenAiSingleShotProductionInteraction|submitGoogleGenAiSingleShot|recoverGoogleGenAiSingleShot|\.create\(|\.cancel\(|\.delete\(|\.download\(|\bfiles\.|\bfetch\s*\(/,
+        );
+      },
+    );
+
+    it(
+      "keeps package and environment configuration free of Google GenAI runtime activation",
+      async () => {
+        const manifest:
+          unknown =
+          JSON.parse(
+            await readFile(
+              join(
+                ROOT,
+                "package.json",
+              ),
+              "utf8",
+            ),
+          );
+
+        expect(
+          manifest,
+        ).toMatchObject({
+          dependencies: {
+            "@google/genai":
+              "^2.24.0",
+          },
+        });
+
+        for (
+          const file of [
+            "src/schemas/environment.schema.ts",
+            "src/validation/loadEnvironment.ts",
+          ]
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          expect(
+            source,
+            file,
+          ).not.toMatch(
+            /GOOGLE_GENAI|gemini-omni|googleGenai|GoogleGenAi/,
+          );
+        }
       },
     );
 

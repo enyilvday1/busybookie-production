@@ -39,6 +39,7 @@ const FOUNDATION_MODULE_PATTERN =
 
 const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
 
 const APPROVED_CONSUMER_FOUNDATION_IMPORTS = [
@@ -46,10 +47,29 @@ const APPROVED_CONSUMER_FOUNDATION_IMPORTS = [
   "../schemas/googleGenAiPolicy.schema.js",
 ] as const;
 
+const GOOGLE_SUBMISSION_ADAPTER =
+  "src/execution/providers/submitGoogleGenAiSingleShot.ts";
+
+const GOOGLE_SUBMISSION_ADAPTER_FOUNDATION_IMPORTS = [
+  "../../googleGenai/googleGenAi.types.js",
+  "../../schemas/googleGenAiPolicy.schema.js",
+] as const;
+
+const GOOGLE_SUBMISSION_ADAPTER_IMPORTS = [
+  "../../googleGenai/googleGenAi.types.js",
+  "../../schemas/googleGenAiPolicy.schema.js",
+  "../executionReservation.schema.js",
+  "../executionSubmission.schema.js",
+  "./referenceImagePath.js",
+  "node:fs/promises",
+  "node:path",
+] as const;
+
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/createExecutionSubmission.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
+  "src/execution/providers/submitGoogleGenAiSingleShot.ts",
 ] as const;
 
 const DURABLE_SUBMISSION_WRITER =
@@ -310,6 +330,18 @@ describe(
         ).toEqual([
           ...APPROVED_CONSUMER_FOUNDATION_IMPORTS,
         ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_SUBMISSION_ADAPTER,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_SUBMISSION_ADAPTER_FOUNDATION_IMPORTS,
+        ]);
       },
     );
 
@@ -439,6 +471,38 @@ describe(
           source,
         ).not.toMatch(
           /@google\/genai|loadGoogleGenAiPolicy|\bfetch\s*\(|node:https?|node:net|\/providers\/|\/veo\/|\/runway\//,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant Google submission adapter on its exact minimal import set",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_SUBMISSION_ADAPTER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                source,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_SUBMISSION_ADAPTER_IMPORTS,
+        ]);
+
+        expect(
+          source,
+        ).not.toMatch(
+          /@google\/genai|loadGoogleGenAiPolicy|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/,
         );
       },
     );

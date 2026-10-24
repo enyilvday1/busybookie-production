@@ -40,11 +40,85 @@ const FOUNDATION_MODULE_PATTERN =
 const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts",
 ] as const;
+
+const GOOGLE_RECONCILIATION_SOURCES = {
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts": [
+    "../googleGenai/googleGenAi.types.js",
+    "./executionCompletionPath.js",
+    "./executionReservation.schema.js",
+    "./executionSubmission.schema.js",
+    "./googleGenAiExecutionCompletion.schema.js",
+    "./readExecutionReservation.js",
+    "./readExecutionSubmission.js",
+    "./readGoogleGenAiExecutionCompletion.js",
+  ],
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts": [
+    "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+    "../googleGenai/audit/readGoogleGenAiGenerationRecord.js",
+    "../googleGenai/googleGenAi.types.js",
+    "../googleGenai/output/googleGenAiVideoOutputPath.js",
+    "./googleGenAiExecutionCompletion.schema.js",
+    "./inspectGoogleGenAiExecutionLifecycle.js",
+    "node:crypto",
+    "node:fs/promises",
+    "node:path",
+  ],
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [
+    "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../googleGenai/googleGenAi.types.js",
+    "./googleGenAiExecutionCompletion.schema.js",
+    "./inspectGoogleGenAiExecutionLifecycle.js",
+    "./providers/materializeGoogleGenAiSingleShotOutput.js",
+    "./providers/persistGoogleGenAiSingleShotCompletion.js",
+    "./providers/recoverGoogleGenAiSingleShot.js",
+    "./verifyGoogleGenAiDurableCompletion.js",
+  ],
+} as const;
+
+const GOOGLE_RECONCILIATION_FOUNDATION_IMPORTS = {
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts": [
+    "../googleGenai/googleGenAi.types.js",
+  ],
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts": [
+    "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+    "../googleGenai/audit/readGoogleGenAiGenerationRecord.js",
+    "../googleGenai/googleGenAi.types.js",
+    "../googleGenai/output/googleGenAiVideoOutputPath.js",
+  ],
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [
+    "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../googleGenai/googleGenAi.types.js",
+  ],
+} as const;
+
+const GOOGLE_RECONCILIATION_MODULE_PATTERN =
+  /inspectGoogleGenAiExecutionLifecycle|verifyGoogleGenAiDurableCompletion|reconcileGoogleGenAiExecutionLifecycle/;
+
+const GOOGLE_RECONCILIATION_IMPORTERS = [
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+] as const;
+
+const GOOGLE_RECONCILIATION_FORBIDDEN_PATTERN =
+  /@google\/genai|new GoogleGenAI|process\.env|loadEnvironment|\bfetch\s*\(|node:https?|node:net|node:child_process|interactions\.|\.create\(|\bfiles\.|submitGoogleGenAiSingleShot|createGoogleGenAiSingleShotProduction|\breadExecutionCompletion\b|\binspectExecutionLifecycle\b|\bclassifyExecutionLifecycle\b|\breconcileExecutionLifecycle\b|\bcreateExecutionCompletion\b|\brecoverExecutionCompletion\b|executionCompletion\.schema|executeSingleShot|evaluateShotProvider|assessPreReservationProviderOptimization|verifyCompletedShotForComposition|buildEpisodeCompositionPlan|resolveDurableShotVisualGenerationState|createProductionExecutionReconcileDependencies|runExecutionReconcileCli|\brename\s*\(|\bcopyFile\s*\(|\/runway\/|\/veo\/|\/routing\/|\/composition\/|\/cli\//;
+
+const GOOGLE_READ_ONLY_RECONCILIATION_SOURCES = [
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+] as const;
+
+const READ_ONLY_FORBIDDEN_WRITE_PATTERN =
+  /\bwriteFile\b|\blink\s*\(|\bunlink\b|\bmkdir\b|\brename\b|\bcopyFile\b|\bappendFile\b|\btruncate\b|["'](?:w|wx|a|a\+|r\+|w\+)["']/;
 
 const GOOGLE_COMPLETION_PERSISTENCE_SOURCES = {
   "src/googleGenai/audit/googleGenAiGenerationRecord.schema.ts": [
@@ -111,8 +185,11 @@ const GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN =
   /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion/;
 
 const GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS = [
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/readGoogleGenAiExecutionCompletion.ts",
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts",
   "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts",
 ] as const;
 
@@ -218,6 +295,7 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
@@ -225,6 +303,8 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts",
 ] as const;
 
 const APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS = [
@@ -562,6 +642,30 @@ describe(
             ...GOOGLE_COMPLETION_PERSISTENCE_ADAPTER_FOUNDATION_IMPORTS,
           ].sort(),
         );
+
+        for (
+          const [
+            file,
+            expectedFoundationImports,
+          ] of Object.entries(
+            GOOGLE_RECONCILIATION_FOUNDATION_IMPORTS,
+          )
+        ) {
+          expect(
+            [
+              ...new Set(
+                consumerImports.get(
+                  file,
+                ),
+              ),
+            ].sort(),
+            file,
+          ).toEqual(
+            [
+              ...expectedFoundationImports,
+            ].sort(),
+          );
+        }
       },
     );
 
@@ -1101,6 +1205,163 @@ describe(
           importers.sort(),
         ).toEqual([
           ...GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS,
+        ]);
+      },
+    );
+
+    it(
+      "keeps the dormant Google reconciliation modules on their exact import sets with no SDK, network, create, shared lifecycle, downstream, or Runway/Veo coupling",
+      async () => {
+        for (
+          const [
+            file,
+            expectedImports,
+          ] of Object.entries(
+            GOOGLE_RECONCILIATION_SOURCES,
+          )
+        ) {
+          const raw =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          const code =
+            raw
+              .replace(
+                /\/\*[\s\S]*?\*\//g,
+                "",
+              )
+              .replace(
+                /\/\/.*$/gm,
+                "",
+              );
+
+          expect(
+            [
+              ...new Set(
+                importSpecifiers(
+                  raw,
+                ),
+              ),
+            ].sort(),
+            file,
+          ).toEqual(
+            [
+              ...expectedImports,
+            ].sort(),
+          );
+
+          expect(
+            RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+              raw,
+            ),
+            file,
+          ).toBe(
+            false,
+          );
+
+          expect(
+            GOOGLE_RECONCILIATION_FORBIDDEN_PATTERN.test(
+              code,
+            ),
+            file,
+          ).toBe(
+            false,
+          );
+        }
+      },
+    );
+
+    it(
+      "keeps the Google inspection and durable verification modules free of write APIs",
+      async () => {
+        for (
+          const file of GOOGLE_READ_ONLY_RECONCILIATION_SOURCES
+        ) {
+          const code =
+            (
+              await readFile(
+                join(
+                  ROOT,
+                  file,
+                ),
+                "utf8",
+              )
+            )
+              .replace(
+                /\/\*[\s\S]*?\*\//g,
+                "",
+              )
+              .replace(
+                /\/\/.*$/gm,
+                "",
+              );
+
+          expect(
+            READ_ONLY_FORBIDDEN_WRITE_PATTERN.test(
+              code,
+            ),
+            file,
+          ).toBe(
+            false,
+          );
+        }
+      },
+    );
+
+    it(
+      "keeps the dormant Google reconciliation modules unconsumed by shared, downstream, CLI, routing, or production code",
+      async () => {
+        const importers: string[] =
+          [];
+
+        for (
+          const file of [
+            ...(
+              await listTypeScriptFiles(
+                "src",
+              )
+            ),
+            ...(
+              await listTypeScriptFiles(
+                "scripts",
+              )
+            ),
+          ]
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          if (
+            importSpecifiers(
+              source,
+            ).some(
+              (specifier) =>
+                GOOGLE_RECONCILIATION_MODULE_PATTERN.test(
+                  specifier,
+                ),
+            )
+          ) {
+            importers.push(
+              file,
+            );
+          }
+        }
+
+        expect(
+          importers.sort(),
+        ).toEqual([
+          ...GOOGLE_RECONCILIATION_IMPORTERS,
         ]);
       },
     );

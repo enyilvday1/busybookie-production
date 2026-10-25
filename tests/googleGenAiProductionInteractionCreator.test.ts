@@ -100,6 +100,14 @@ import {
   loadGoogleGenAiPolicy,
 } from "../src/validation/loadGoogleGenAiPolicy.js";
 
+import {
+  loadGoogleGenAiActivationPolicy,
+} from "../src/validation/loadGoogleGenAiActivationPolicy.js";
+
+import {
+  GOOGLE_GENAI_CREATE_TIMEOUT_MS,
+} from "../src/googleGenai/googleGenAiActivationLimits.js";
+
 const PRODUCTION_SOURCE =
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts";
 
@@ -134,6 +142,17 @@ GoogleGenAiSingleShotInteractionRequest {
           "image/png",
       },
     ],
+
+    response_format: {
+      type:
+        "video",
+
+      delivery:
+        "uri",
+
+      resolution:
+        "720p",
+    },
 
     background:
       true,
@@ -322,7 +341,7 @@ describe(
     );
 
     it(
-      "passes the exact request object unchanged with exactly { maxRetries: 0 }",
+      "passes the exact request object unchanged with exactly { maxRetries: 0, timeout: 60000 }",
       async () => {
         sdk.create.mockResolvedValue({
           id:
@@ -378,6 +397,9 @@ describe(
         ).toStrictEqual({
           maxRetries:
             0,
+
+          timeout:
+            60000,
         });
 
         expect(
@@ -431,6 +453,9 @@ describe(
           ).toStrictEqual({
             maxRetries:
               0,
+
+            timeout:
+              60000,
           });
         }
       },
@@ -549,6 +574,13 @@ describe(
         ),
       ],
       [
+        "AbortSignal.timeout TimeoutError",
+        new DOMException(
+          "The operation was aborted due to timeout",
+          "TimeoutError",
+        ),
+      ],
+      [
         "HTTP 429",
         Object.assign(
           new Error(
@@ -658,6 +690,9 @@ describe(
         ).toStrictEqual({
           maxRetries:
             0,
+
+          timeout:
+            60000,
         });
 
         expect(
@@ -740,7 +775,7 @@ describe(
     );
 
     it(
-      "keeps the production source free of env access, polling, cancellation, timeouts, client retry options, and retry loops",
+      "keeps the production source free of env access, polling, cancellation, extra timeouts, client retry options, and retry loops",
       async () => {
         const source =
           (
@@ -764,7 +799,29 @@ describe(
         expect(
           source,
         ).not.toMatch(
-          /process\.env|\.get\(|\bcancel\b|\btimeout\b|httpOptions|retryOptions|vertexai|project\s*:|location\s*:|baseUrl|apiVersion|\bwhile\s*\(|\bfor\s*\(|setTimeout|console\./,
+          /process\.env|\.get\(|\bcancel\b|httpOptions|retryOptions|vertexai|project\s*:|location\s*:|baseUrl|apiVersion|\bwhile\s*\(|\bfor\s*\(|setTimeout|console\./,
+        );
+
+        // The only permitted timeout is the frozen B4U5 create timeout,
+        // passed once as an SDK request option alongside maxRetries: 0.
+        expect(
+          source.match(
+            /\btimeout\b/g,
+          ) ?? [],
+        ).toHaveLength(
+          1,
+        );
+
+        expect(
+          source,
+        ).toMatch(
+          /timeout:\s*GOOGLE_GENAI_CREATE_TIMEOUT_MS,/,
+        );
+
+        expect(
+          GOOGLE_GENAI_CREATE_TIMEOUT_MS,
+        ).toBe(
+          60000,
         );
 
         expect(
@@ -845,6 +902,10 @@ describe(
             0x50,
             0x4e,
             0x47,
+            0x0d,
+            0x0a,
+            0x1a,
+            0x0a,
           ]),
         );
 
@@ -852,6 +913,9 @@ describe(
           id:
             "   ",
         });
+
+        const checkedInActivationPolicy =
+          await loadGoogleGenAiActivationPolicy();
 
         const onSubmissionAccepted =
           vi.fn(
@@ -900,6 +964,18 @@ describe(
               policySnapshot:
                 await loadGoogleGenAiPolicy(),
 
+              activationPolicy: {
+                ...checkedInActivationPolicy,
+
+                admission: {
+                  newSubmissionsEnabled:
+                    true,
+                },
+              },
+
+              resolution:
+                "720p",
+
               onSubmissionAccepted,
             },
             {
@@ -924,6 +1000,9 @@ describe(
         ).toStrictEqual({
           maxRetries:
             0,
+
+          timeout:
+            60000,
         });
 
         expect(

@@ -38,6 +38,7 @@ import type {
 } from "../src/execution/executionReservation.schema.js";
 
 import {
+  GoogleGenAiNewSubmissionsDisabledError,
   submitGoogleGenAiSingleShot,
   type GoogleGenAiCreatedInteraction,
   type GoogleGenAiInteractionCreator,
@@ -54,6 +55,19 @@ import type {
 import {
   loadGoogleGenAiPolicy,
 } from "../src/validation/loadGoogleGenAiPolicy.js";
+
+import {
+  loadGoogleGenAiActivationPolicy,
+  type LoadedGoogleGenAiActivationPolicy,
+} from "../src/validation/loadGoogleGenAiActivationPolicy.js";
+
+import {
+  GoogleGenAiExpectedCostRejectedError,
+} from "../src/googleGenai/googleGenAiExpectedCost.js";
+
+import {
+  GoogleGenAiReferenceImageRejectedError,
+} from "../src/googleGenai/assets/readGoogleGenAiReferenceImage.js";
 
 const INTERACTION_ID =
   "v1_ChdnZW1pbmktb21uaS1pbnRlcmFjdGlvbi0xMjM";
@@ -83,12 +97,108 @@ const temporaryDirectories:
 let policySnapshot:
   GoogleGenAiPolicy;
 
+let checkedInActivationPolicy:
+  LoadedGoogleGenAiActivationPolicy;
+
+let enabledActivationPolicy:
+  LoadedGoogleGenAiActivationPolicy;
+
 beforeAll(
   async () => {
     policySnapshot =
       await loadGoogleGenAiPolicy();
+
+    checkedInActivationPolicy =
+      await loadGoogleGenAiActivationPolicy();
+
+    // Test-only copy: the checked-in policy stays default-off.
+    enabledActivationPolicy = {
+      ...checkedInActivationPolicy,
+
+      admission: {
+        newSubmissionsEnabled:
+          true,
+      },
+    };
   },
 );
+
+/**
+ * Minimal byte fixtures that carry each supported format's real
+ * signature, so production magic-byte validation is exercised as-is.
+ */
+function minimalImageBytes(
+  mimeType:
+    string,
+): Buffer {
+  const tail =
+    Buffer.from(
+      "busybookie-fixture",
+      "utf8",
+    );
+
+  switch (mimeType) {
+    case "image/png":
+      return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        tail,
+      ]);
+
+    case "image/jpeg":
+      return Buffer.concat([
+        Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+        tail,
+      ]);
+
+    case "image/webp":
+      return Buffer.concat([
+        Buffer.from("RIFF", "latin1"),
+        Buffer.from([0x1a, 0x00, 0x00, 0x00]),
+        Buffer.from("WEBPVP8 ", "latin1"),
+        tail,
+      ]);
+
+    case "image/heic":
+    case "image/heif": {
+      const brand =
+        mimeType === "image/heic"
+          ? "heic"
+          : "mif1";
+
+      return Buffer.concat([
+        Buffer.from([0x00, 0x00, 0x00, 0x18]),
+        Buffer.from(`ftyp${brand}`, "latin1"),
+        Buffer.from([0x00, 0x00, 0x00, 0x00]),
+        Buffer.from(`mif1${brand}`, "latin1"),
+        tail,
+      ]);
+    }
+
+    case "image/gif":
+      return Buffer.concat([
+        Buffer.from("GIF89a", "latin1"),
+        tail,
+      ]);
+
+    case "image/bmp":
+      return Buffer.concat([
+        Buffer.from("BM", "latin1"),
+        Buffer.alloc(24),
+        tail,
+      ]);
+
+    case "image/tiff":
+      return Buffer.concat([
+        Buffer.from([0x49, 0x49, 0x2a, 0x00]),
+        tail,
+      ]);
+
+    default:
+      throw new Error(
+        `No fixture for ${mimeType}.`,
+      );
+  }
+}
 
 afterEach(
   async () => {
@@ -254,6 +364,12 @@ async function validInput(
 
     policySnapshot,
 
+    activationPolicy:
+      enabledActivationPolicy,
+
+    resolution:
+      "720p",
+
     onSubmissionAccepted:
       acceptanceMock(),
 
@@ -369,6 +485,17 @@ describe(
             },
           ],
 
+          response_format: {
+            type:
+              "video",
+
+            delivery:
+              "uri",
+
+            resolution:
+              "720p",
+          },
+
           background:
             true,
 
@@ -387,8 +514,20 @@ describe(
           "background",
           "input",
           "model",
+          "response_format",
           "store",
           "stream",
+        ]);
+
+        // Duration is deliberately omitted (no evidenced literal).
+        expect(
+          Object.keys(
+            request.response_format,
+          ).sort(),
+        ).toEqual([
+          "delivery",
+          "resolution",
+          "type",
         ]);
 
         expect(
@@ -849,9 +988,8 @@ describe(
           await makeMediaRoot();
 
         const bytes =
-          Buffer.from(
-            `busybookie-${extension}-bytes`,
-            "utf8",
+          minimalImageBytes(
+            mimeType,
           );
 
         const sourceImagePath =
@@ -1226,6 +1364,329 @@ describe(
                     "SUBMITTED",
                 },
               }),
+            );
+          },
+        );
+
+        it(
+          "rejects every new submission under the checked-in default-off activation policy",
+          async () => {
+            expect(
+              checkedInActivationPolicy
+                .admission
+                .newSubmissionsEnabled,
+            ).toBe(
+              false,
+            );
+
+            await expectNoCreate(
+              async () => ({
+                activationPolicy:
+                  checkedInActivationPolicy,
+              }),
+              /new submissions are disabled/i,
+            );
+          },
+        );
+
+        it(
+          "raises the typed kill-switch error before reading the reservation or the image",
+          async () => {
+            const mediaRoot =
+              await makeMediaRoot();
+
+            const createInteraction =
+              createInteractionMock();
+
+            const attempt =
+              submitGoogleGenAiSingleShot(
+                {
+                  ...(await validInput(
+                    mediaRoot,
+                  )),
+
+                  activationPolicy:
+                    checkedInActivationPolicy,
+
+                  reservation:
+                    "not-a-reservation",
+
+                  sourceImagePath:
+                    referencePath(
+                      mediaRoot,
+                      "missing.png",
+                    ),
+                },
+                {
+                  createInteraction,
+                },
+              );
+
+            await expect(
+              attempt,
+            ).rejects.toBeInstanceOf(
+              GoogleGenAiNewSubmissionsDisabledError,
+            );
+
+            await expect(
+              attempt,
+            ).rejects.toMatchObject({
+              code:
+                "NEW_SUBMISSIONS_DISABLED",
+            });
+
+            expect(
+              createInteraction,
+            ).toHaveBeenCalledTimes(
+              0,
+            );
+          },
+        );
+
+        it.each([
+          [
+            "missing",
+            (): unknown =>
+              undefined,
+          ],
+          [
+            "drifted create timeout",
+            (): unknown => ({
+              ...enabledActivationPolicy,
+
+              timeouts: {
+                ...enabledActivationPolicy.timeouts,
+
+                createTimeoutMs:
+                  120000,
+              },
+            }),
+          ],
+          [
+            "string switch",
+            (): unknown => ({
+              ...enabledActivationPolicy,
+
+              admission: {
+                newSubmissionsEnabled:
+                  "true",
+              },
+            }),
+          ],
+          [
+            "unknown key",
+            (): unknown => ({
+              ...enabledActivationPolicy,
+
+              environmentOverride:
+                true,
+            }),
+          ],
+        ])(
+          "rejects an invalid activation policy (%s)",
+          async (
+            _label,
+            buildPolicy,
+          ) => {
+            await expectNoCreate(
+              async () => ({
+                activationPolicy:
+                  buildPolicy(),
+              }),
+            );
+          },
+        );
+
+        it.each([
+          "360p",
+          "1080p",
+          "4k",
+        ])(
+          "rejects %s because no authoritative local price exists",
+          async (resolution) => {
+            await expectNoCreate(
+              async () => ({
+                resolution,
+              }),
+              /PRICING_UNAVAILABLE/,
+            );
+          },
+        );
+
+        it.each([
+          [
+            "upper-case",
+            "720P",
+          ],
+          [
+            "unknown",
+            "8k",
+          ],
+          [
+            "numeric",
+            720,
+          ],
+          [
+            "missing",
+            undefined,
+          ],
+        ])(
+          "rejects a %s resolution",
+          async (
+            _label,
+            resolution,
+          ) => {
+            await expectNoCreate(
+              async () => ({
+                resolution,
+              }),
+              /RESOLUTION_UNSUPPORTED/,
+            );
+          },
+        );
+
+        it(
+          "raises the typed expected-cost error",
+          async () => {
+            const mediaRoot =
+              await makeMediaRoot();
+
+            const createInteraction =
+              createInteractionMock();
+
+            await expect(
+              submitGoogleGenAiSingleShot(
+                await validInput(
+                  mediaRoot,
+                  {
+                    resolution:
+                      "1080p",
+                  },
+                ),
+                {
+                  createInteraction,
+                },
+              ),
+            ).rejects.toBeInstanceOf(
+              GoogleGenAiExpectedCostRejectedError,
+            );
+
+            expect(
+              createInteraction,
+            ).toHaveBeenCalledTimes(
+              0,
+            );
+          },
+        );
+
+        it.each([
+          [
+            "empty file",
+            "rejected-reference.png",
+            Buffer.alloc(0),
+            /EMPTY/,
+          ],
+          [
+            "non-image content",
+            "rejected-reference.png",
+            Buffer.from(
+              "not an image at all",
+              "utf8",
+            ),
+            /UNSUPPORTED_SIGNATURE/,
+          ],
+          [
+            "JPEG bytes behind a .png extension",
+            "rejected-reference.png",
+            minimalImageBytes(
+              "image/jpeg",
+            ),
+            /SIGNATURE_MIME_MISMATCH/,
+          ],
+          [
+            "one byte over the 10 MiB limit",
+            "rejected-reference.png",
+            Buffer.concat([
+              minimalImageBytes(
+                "image/png",
+              ),
+              Buffer.alloc(
+                10485761 -
+                  minimalImageBytes(
+                    "image/png",
+                  ).length,
+              ),
+            ]),
+            /TOO_LARGE/,
+          ],
+        ])(
+          "rejects a reference image with %s through the secure reader",
+          async (
+            _label,
+            fileName,
+            bytes,
+            message,
+          ) => {
+            await expectNoCreate(
+              async (mediaRoot) => ({
+                sourceImagePath:
+                  await writeImage(
+                    referencePath(
+                      mediaRoot,
+                      fileName,
+                    ),
+                    bytes,
+                  ),
+              }),
+              message,
+            );
+          },
+        );
+
+        it(
+          "raises the typed reference-image error for a directory path",
+          async () => {
+            const mediaRoot =
+              await makeMediaRoot();
+
+            const directoryPath =
+              referencePath(
+                mediaRoot,
+                "folder.png",
+              );
+
+            await mkdir(
+              directoryPath,
+              {
+                recursive:
+                  true,
+              },
+            );
+
+            const createInteraction =
+              createInteractionMock();
+
+            await expect(
+              submitGoogleGenAiSingleShot(
+                await validInput(
+                  mediaRoot,
+                  {
+                    sourceImagePath:
+                      directoryPath,
+                  },
+                ),
+                {
+                  createInteraction,
+                },
+              ),
+            ).rejects.toBeInstanceOf(
+              GoogleGenAiReferenceImageRejectedError,
+            );
+
+            expect(
+              createInteraction,
+            ).toHaveBeenCalledTimes(
+              0,
             );
           },
         );

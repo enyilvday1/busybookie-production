@@ -41,12 +41,22 @@ const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+  "src/schemas/googleGenAiActivationPolicy.schema.ts",
+] as const;
+
+const GOOGLE_ACTIVATION_POLICY_SCHEMA =
+  "src/schemas/googleGenAiActivationPolicy.schema.ts";
+
+const GOOGLE_ACTIVATION_POLICY_SCHEMA_FOUNDATION_IMPORTS = [
+  "../googleGenai/googleGenAi.types.js",
+  "../googleGenai/googleGenAiActivationLimits.js",
 ] as const;
 
 const GOOGLE_RECONCILIATION_SOURCES = {
@@ -268,26 +278,58 @@ const GOOGLE_SUBMISSION_ADAPTER =
   "src/execution/providers/submitGoogleGenAiSingleShot.ts";
 
 const GOOGLE_SUBMISSION_ADAPTER_FOUNDATION_IMPORTS = [
+  "../../googleGenai/assets/readGoogleGenAiReferenceImage.js",
   "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/googleGenAiActivationLimits.js",
+  "../../googleGenai/googleGenAiExpectedCost.js",
   "../../schemas/googleGenAiPolicy.schema.js",
 ] as const;
 
 const GOOGLE_SUBMISSION_ADAPTER_IMPORTS = [
+  "../../googleGenai/assets/readGoogleGenAiReferenceImage.js",
   "../../googleGenai/googleGenAi.types.js",
+  "../../googleGenai/googleGenAiActivationLimits.js",
+  "../../googleGenai/googleGenAiExpectedCost.js",
+  "../../schemas/googleGenAiActivationPolicy.schema.js",
   "../../schemas/googleGenAiPolicy.schema.js",
   "../executionReservation.schema.js",
   "../executionSubmission.schema.js",
   "./referenceImagePath.js",
-  "node:fs/promises",
   "node:path",
+] as const;
+
+const GOOGLE_ACTIVATION_AUTHORITY_SPECIFIER_PATTERN =
+  /googleGenAiActivationPolicy\.schema|loadGoogleGenAiActivationPolicy|googleGenAiActivationLimits|googleGenAiExpectedCost|readGoogleGenAiReferenceImage/;
+
+const GOOGLE_RECOVERY_SIDE_SOURCES = [
+  "src/execution/googleGenAiExecutionCompletion.schema.ts",
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
+  "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
+  "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
+  "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
+  "src/execution/readGoogleGenAiExecutionCompletion.ts",
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+  "src/googleGenai/audit/googleGenAiGenerationRecord.schema.ts",
+  "src/googleGenai/audit/googleGenAiGenerationRecordPath.ts",
+  "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts",
+  "src/googleGenai/googleGenAiInteractionContract.ts",
+  "src/googleGenai/output/googleGenAiVideoOutputPath.ts",
 ] as const;
 
 const GOOGLE_PRODUCTION_INTERACTION_CREATOR =
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts";
 
 const GOOGLE_PRODUCTION_INTERACTION_CREATOR_IMPORTS = [
+  "../../googleGenai/googleGenAiActivationLimits.js",
   "./submitGoogleGenAiSingleShot.js",
   "@google/genai",
+] as const;
+
+const GOOGLE_PRODUCTION_INTERACTION_CREATOR_FOUNDATION_IMPORTS = [
+  "../../googleGenai/googleGenAiActivationLimits.js",
 ] as const;
 
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
@@ -414,10 +456,13 @@ describe(
             )
           ).sort(),
         ).toEqual([
+          "src/googleGenai/assets/readGoogleGenAiReferenceImage.ts",
           "src/googleGenai/audit/googleGenAiGenerationRecord.schema.ts",
           "src/googleGenai/audit/googleGenAiGenerationRecordPath.ts",
           "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts",
           "src/googleGenai/googleGenAi.types.ts",
+          "src/googleGenai/googleGenAiActivationLimits.ts",
+          "src/googleGenai/googleGenAiExpectedCost.ts",
           "src/googleGenai/googleGenAiInteractionContract.ts",
           "src/googleGenai/googleGenAiPricing.ts",
           "src/googleGenai/output/googleGenAiVideoOutputPath.ts",
@@ -591,6 +636,30 @@ describe(
           ].sort(),
         ).toEqual([
           ...GOOGLE_SUBMISSION_ADAPTER_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_ACTIVATION_POLICY_SCHEMA,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_ACTIVATION_POLICY_SCHEMA_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_PRODUCTION_INTERACTION_CREATOR,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_PRODUCTION_INTERACTION_CREATOR_FOUNDATION_IMPORTS,
         ]);
 
         expect(
@@ -836,7 +905,62 @@ describe(
         expect(
           source,
         ).not.toMatch(
-          /loadGoogleGenAiPolicy|loadEnvironment|googleGenai\/|googleGenAiPolicy\.schema|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|executeSingleShot|\/veo\/|\/runway\/|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/,
+          /loadGoogleGenAiPolicy|loadEnvironment|googleGenai\/(?!googleGenAiActivationLimits\.js["'])|googleGenAiPolicy\.schema|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|executeSingleShot|\/veo\/|\/runway\/|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/,
+        );
+      },
+    );
+
+    it(
+      "keeps the production interaction creator's dependency on the submission adapter type-only",
+      async () => {
+        const source =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_PRODUCTION_INTERACTION_CREATOR,
+            ),
+            "utf8",
+          );
+
+        const submitStatements =
+          [
+            ...source.matchAll(
+              /(?:^|\n)\s*((?:import|export)\b[^;]*?from\s*["']\.\/submitGoogleGenAiSingleShot\.js["'])/g,
+            ),
+          ].map(
+            (match) =>
+              match[1] ?? "",
+          );
+
+        expect(
+          submitStatements.length,
+        ).toBeGreaterThan(
+          0,
+        );
+
+        for (
+          const statement of submitStatements
+        ) {
+          // Only a top-level `import type` is erased from emitted JavaScript;
+          // a value import or an inline `{ type X }` specifier keeps a
+          // runtime load of the submission orchestrator.
+          expect(
+            statement,
+          ).toMatch(
+            /^import\s+type\s*\{[^}]*\}\s*from\s*["']\.\/submitGoogleGenAiSingleShot\.js["']$/,
+          );
+        }
+
+        expect(
+          source,
+        ).not.toMatch(
+          /import\(\s*["']\.\/submitGoogleGenAiSingleShot\.js["']\s*\)|require\(\s*["']\.\/submitGoogleGenAiSingleShot\.js["']\s*\)/,
+        );
+
+        expect(
+          source,
+        ).toMatch(
+          /import\s*\{\s*GOOGLE_GENAI_CREATE_TIMEOUT_MS,?\s*\}\s*from\s*["']\.\.\/\.\.\/googleGenai\/googleGenAiActivationLimits\.js["']/,
         );
       },
     );
@@ -1475,6 +1599,60 @@ describe(
           source,
         ).not.toMatch(
           /@google\/genai|loadGoogleGenAiPolicy|createExecutionSubmission|createExecutionCompletion|reconcileExecutionLifecycle|evaluateShotProvider|assessPreReservationProviderOptimization|\bfetch\s*\(|node:https?|node:net|node:child_process|process\.env/,
+        );
+      },
+    );
+
+    it(
+      "keeps the activation policy and new-submission switch out of every Google recovery-side module",
+      async () => {
+        for (
+          const file of GOOGLE_RECOVERY_SIDE_SOURCES
+        ) {
+          const source =
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            );
+
+          expect(
+            importSpecifiers(
+              source,
+            ).filter(
+              (specifier) =>
+                GOOGLE_ACTIVATION_AUTHORITY_SPECIFIER_PATTERN.test(
+                  specifier,
+                ),
+            ),
+            file,
+          ).toEqual(
+            [],
+          );
+
+          expect(
+            source,
+            file,
+          ).not.toMatch(
+            /newSubmissionsEnabled|ActivationPolicy|GoogleGenAiNewSubmissionsDisabledError/,
+          );
+        }
+
+        const submissionSource =
+          await readFile(
+            join(
+              ROOT,
+              GOOGLE_SUBMISSION_ADAPTER,
+            ),
+            "utf8",
+          );
+
+        expect(
+          submissionSource,
+        ).toMatch(
+          /\.admission\s*\.newSubmissionsEnabled/,
         );
       },
     );

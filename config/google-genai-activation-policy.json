@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "provider": "GOOGLE_GENAI",
+  "model": "gemini-omni-1.1-flash",
+  "admission": {
+    "newSubmissionsEnabled": false
+  },
+  "cost": {
+    "fixedPointUnit": "MICRO_USD",
+    "maxExpectedCostMicroUsd": 2000000,
+    "inputReserveMicroUsd": 500000,
+    "costAdmissionDurationSeconds": 10
+  },
+  "limits": {
+    "maxOutputBytes": 268435456,
+    "maxReferenceImageBytes": 10485760,
+    "sseMaxEventBytes": 1048576,
+    "sseMaxResponseBytesPerAttempt": 16777216,
+    "sseMaxEventsPerAttempt": 512
+  },
+  "timeouts": {
+    "createTimeoutMs": 60000,
+    "streamConnectHeadersTimeoutMs": 30000,
+    "streamIdleTimeoutMs": 120000,
+    "streamAttemptTimeoutMs": 900000,
+    "filesMetadataTimeoutMs": 30000,
+    "filesDownloadTimeoutMs": 600000,
+    "reconciliationAttemptTimeoutMs": 1200000
+  },
+  "recovery": {
+    "automatedRemoteRecoveryHorizonMs": 86400000,
+    "filesMinRemainingLifetimeMs": 3600000,
+    "maxStreamRecoveryAttemptsPerReconciliation": 3,
+    "maxFilesDownloadAttemptsPerReconciliation": 2
+  }
+}

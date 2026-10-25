@@ -1,15 +1,28 @@
 import {
-  readFile,
-} from "node:fs/promises";
-
-import {
   extname,
 } from "node:path";
+
+import {
+  readGoogleGenAiReferenceImage,
+} from "../../googleGenai/assets/readGoogleGenAiReferenceImage.js";
 
 import {
   GEMINI_OMNI_11_FLASH_MODEL,
   GOOGLE_GENAI_PROVIDER,
 } from "../../googleGenai/googleGenAi.types.js";
+
+import {
+  GOOGLE_GENAI_VIDEO_DELIVERY,
+  type GoogleGenAiVideoResolution,
+} from "../../googleGenai/googleGenAiActivationLimits.js";
+
+import {
+  computeGoogleGenAiExpectedCost,
+} from "../../googleGenai/googleGenAiExpectedCost.js";
+
+import {
+  GoogleGenAiActivationPolicySchema,
+} from "../../schemas/googleGenAiActivationPolicy.schema.js";
 
 import {
   GoogleGenAiPolicySchema,
@@ -36,7 +49,27 @@ import {
  * It never polls, retrieves output, completes, reconciles, retries, or
  * falls back to another provider. The Google client is injected; this
  * module constructs no client and reads no credentials.
+ *
+ * Before any create it enforces the operational activation policy: the
+ * default-off new-submission switch, the expected-cost cap for the
+ * requested resolution, and the bounded, link-safe, magic-byte-checked
+ * reference-image read. These gates apply to NEW submissions only;
+ * recovery of an accepted Interaction never consults them.
  */
+
+export class GoogleGenAiNewSubmissionsDisabledError extends Error {
+  readonly code =
+    "NEW_SUBMISSIONS_DISABLED" as const;
+
+  constructor() {
+    super(
+      "Google GenAI new submissions are disabled by the activation policy (admission.newSubmissionsEnabled=false). No interaction was created.",
+    );
+
+    this.name =
+      "GoogleGenAiNewSubmissionsDisabledError";
+  }
+}
 
 const GOOGLE_GENAI_IMAGE_MIME_TYPES =
   Object.freeze({
@@ -97,6 +130,18 @@ export type GoogleGenAiSingleShotImageInput =
       GoogleGenAiSingleShotImageMimeType;
   }>;
 
+export type GoogleGenAiSingleShotVideoResponseFormat =
+  Readonly<{
+    type:
+      "video";
+
+    delivery:
+      typeof GOOGLE_GENAI_VIDEO_DELIVERY;
+
+    resolution:
+      GoogleGenAiVideoResolution;
+  }>;
+
 export type GoogleGenAiSingleShotInteractionRequest =
   Readonly<{
     model:
@@ -106,6 +151,9 @@ export type GoogleGenAiSingleShotInteractionRequest =
       GoogleGenAiSingleShotTextInput,
       GoogleGenAiSingleShotImageInput,
     ];
+
+    response_format:
+      GoogleGenAiSingleShotVideoResponseFormat;
 
     background:
       true;
@@ -183,6 +231,12 @@ export type GoogleGenAiSingleShotSubmissionInput =
       string;
 
     policySnapshot:
+      unknown;
+
+    activationPolicy:
+      unknown;
+
+    resolution:
       unknown;
 
     onSubmissionAccepted:
@@ -277,6 +331,20 @@ export async function submitGoogleGenAiSingleShot(
 ): Promise<
   GoogleGenAiSingleShotSubmissionResult
 > {
+  const activationPolicy =
+    GoogleGenAiActivationPolicySchema
+      .parse(
+        input.activationPolicy,
+      );
+
+  if (
+    !activationPolicy
+      .admission
+      .newSubmissionsEnabled
+  ) {
+    throw new GoogleGenAiNewSubmissionsDisabledError();
+  }
+
   const reservation =
     ExecutionReservationSchema
       .parse(
@@ -309,6 +377,18 @@ export async function submitGoogleGenAiSingleShot(
         input.policySnapshot,
       );
 
+  const expectedCost =
+    computeGoogleGenAiExpectedCost({
+      resolution:
+        input.resolution,
+
+      pricing:
+        policySnapshot.pricing,
+
+      cost:
+        activationPolicy.cost,
+    });
+
   const promptText =
     requirePromptText(
       input.promptText,
@@ -325,10 +405,21 @@ export async function submitGoogleGenAiSingleShot(
       sourceImagePath,
     );
 
-  const imageBytes =
-    await readFile(
+  const referenceImage =
+    await readGoogleGenAiReferenceImage({
+      mediaRoot:
+        input.mediaRoot,
+
       sourceImagePath,
-    );
+
+      expectedMimeType:
+        mimeType,
+
+      maxBytes:
+        activationPolicy
+          .limits
+          .maxReferenceImageBytes,
+    });
 
   const recoveryMetadata:
     GoogleGenAiSubmissionRecoveryMetadata =
@@ -374,7 +465,7 @@ export async function submitGoogleGenAiSingleShot(
             "image",
 
           data:
-            imageBytes.toString(
+            referenceImage.bytes.toString(
               "base64",
             ),
 
@@ -382,6 +473,17 @@ export async function submitGoogleGenAiSingleShot(
             mimeType,
         },
       ],
+
+      response_format: {
+        type:
+          "video",
+
+        delivery:
+          GOOGLE_GENAI_VIDEO_DELIVERY,
+
+        resolution:
+          expectedCost.resolution,
+      },
 
       background:
         true,

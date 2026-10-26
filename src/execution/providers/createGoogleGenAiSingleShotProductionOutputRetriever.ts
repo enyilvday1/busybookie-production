@@ -1,93 +1,32 @@
-import {
-  GoogleGenAI,
-} from "@google/genai";
-
 import type {
   GoogleGenAiOutputRetriever,
 } from "./materializeGoogleGenAiSingleShotOutput.js";
 
 /**
- * Dormant production binding for Google GenAI same-ID output retrieval.
+ * RETIRED legacy Google GenAI production output retriever.
  *
- * Constructs one SDK client per factory call from an explicitly supplied
- * API key and returns the narrow retrieveOutput dependency. Every lookup
- * is a single non-streaming get of the durable Interaction.id with
- * maxRetries: 0 that returns the raw id, status, and output_video.
- * Validation and file materialization stay with
- * materializeGoogleGenAiSingleShotOutput; no output is downloaded here.
+ * The former SDK-backed binding performed its own non-streaming same-ID
+ * retrieval of output_video with its own client and credential: a second
+ * observation and an unbounded alternate output path that bypasses secure
+ * replay and streaming Files materialization. It is now a fail-closed
+ * migration stub: every call throws synchronously with a static message
+ * before any key use, client construction, provider call or network access.
+ * It never delegates to the secure factory and offers no fallback. The
+ * export name and return type are kept so that any accidental use fails
+ * immediately and unmistakably.
  */
+
+const RETIRED_MESSAGE =
+  "createGoogleGenAiSingleShotProductionOutputRetriever is retired: the legacy SDK output lookup conflicts with secure one-replay recovery and streaming materialization. Use createGoogleGenAiSingleShotSecureProductionRecovery with reconcileGoogleGenAiExecutionLifecycle.";
+
 export function createGoogleGenAiSingleShotProductionOutputRetriever(
   apiKey:
     string,
 ): GoogleGenAiOutputRetriever {
-  const normalizedApiKey =
-    typeof apiKey ===
-      "string"
-      ? apiKey.trim()
-      : "";
+  // The key is intentionally never read, validated or echoed.
+  void apiKey;
 
-  if (!normalizedApiKey) {
-    throw new Error(
-      "Google GenAI API key is required.",
-    );
-  }
-
-  const client =
-    new GoogleGenAI({
-      apiKey:
-        normalizedApiKey,
-    });
-
-  return async (
-    providerExecutionId,
-  ) => {
-    if (
-      typeof providerExecutionId !==
-        "string" ||
-      !providerExecutionId.trim()
-    ) {
-      throw new Error(
-        "Google GenAI same-ID output retrieval requires a non-empty providerExecutionId.",
-      );
-    }
-
-    const interaction =
-      await client.interactions
-        .get(
-          providerExecutionId,
-          {
-            stream:
-              false,
-
-            include_input:
-              false,
-          },
-          {
-            maxRetries:
-              0,
-          },
-        )
-        .catch(
-          (error: unknown) => {
-            throw new Error(
-              `Google GenAI same-ID output retrieval failed for ${providerExecutionId}. Busybookie must not create or resubmit a replacement interaction automatically.`,
-              {
-                cause:
-                  error,
-              },
-            );
-          },
-        );
-
-    return Object.freeze({
-      id:
-        interaction.id,
-
-      status:
-        interaction.status,
-
-      outputVideo:
-        interaction.output_video,
-    });
-  };
+  throw new Error(
+    RETIRED_MESSAGE,
+  );
 }

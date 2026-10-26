@@ -81,6 +81,9 @@ export const GoogleGenAiActivationPolicySchema =
 
     limits:
       z.object({
+        filesMetadataMaxResponseBytes:
+          z.literal(limits.filesMetadataMaxResponseBytes),
+
         maxOutputBytes:
           z.literal(
             limits.maxOutputBytes,
@@ -149,6 +152,15 @@ export const GoogleGenAiActivationPolicySchema =
 
     recovery:
       z.object({
+        streamRecoveryFirstRetryDelayMs:
+          z.literal(recovery.streamRecoveryFirstRetryDelayMs),
+
+        streamRecoverySecondRetryDelayMs:
+          z.literal(recovery.streamRecoverySecondRetryDelayMs),
+
+        filesDownloadRetryDelayMs:
+          z.literal(recovery.filesDownloadRetryDelayMs),
+
         automatedRemoteRecoveryHorizonMs:
           z.literal(
             recovery.automatedRemoteRecoveryHorizonMs,

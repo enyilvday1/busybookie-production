@@ -46,6 +46,9 @@ export const GOOGLE_GENAI_ACTIVATION_LIMITS =
 
     limits:
       Object.freeze({
+        filesMetadataMaxResponseBytes:
+          65_536,
+
         maxOutputBytes:
           268_435_456,
 
@@ -88,6 +91,15 @@ export const GOOGLE_GENAI_ACTIVATION_LIMITS =
 
     recovery:
       Object.freeze({
+        streamRecoveryFirstRetryDelayMs:
+          5_000,
+
+        streamRecoverySecondRetryDelayMs:
+          15_000,
+
+        filesDownloadRetryDelayMs:
+          10_000,
+
         automatedRemoteRecoveryHorizonMs:
           86_400_000,
 

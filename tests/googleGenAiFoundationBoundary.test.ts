@@ -42,6 +42,7 @@ const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
@@ -85,6 +86,8 @@ const GOOGLE_RECONCILIATION_SOURCES = {
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [
     "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
     "../googleGenai/googleGenAi.types.js",
+    "../googleGenai/transport/googleGenAiSecureOutputTransport.types.js",
+    "../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
     "./googleGenAiExecutionCompletion.schema.js",
     "./inspectGoogleGenAiExecutionLifecycle.js",
     "./providers/materializeGoogleGenAiSingleShotOutput.js",
@@ -108,6 +111,8 @@ const GOOGLE_RECONCILIATION_FOUNDATION_IMPORTS = {
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [
     "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
     "../googleGenai/googleGenAi.types.js",
+    "../googleGenai/transport/googleGenAiSecureOutputTransport.types.js",
+    "../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
   ],
 } as const;
 
@@ -115,6 +120,7 @@ const GOOGLE_RECONCILIATION_MODULE_PATTERN =
   /inspectGoogleGenAiExecutionLifecycle|verifyGoogleGenAiDurableCompletion|reconcileGoogleGenAiExecutionLifecycle/;
 
 const GOOGLE_RECONCILIATION_IMPORTERS = [
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
 ] as const;
@@ -221,12 +227,16 @@ const GOOGLE_OUTPUT_MATERIALIZER_FOUNDATION_IMPORTS = [
   "../../googleGenai/googleGenAi.types.js",
   "../../googleGenai/googleGenAiInteractionContract.js",
   "../../googleGenai/output/googleGenAiVideoOutputPath.js",
+  "../../googleGenai/transport/googleGenAiSecureOutputTransport.types.js",
+  "../../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
 ] as const;
 
 const GOOGLE_OUTPUT_MATERIALIZER_IMPORTS = [
   "../../googleGenai/googleGenAi.types.js",
   "../../googleGenai/googleGenAiInteractionContract.js",
   "../../googleGenai/output/googleGenAiVideoOutputPath.js",
+  "../../googleGenai/transport/googleGenAiSecureOutputTransport.types.js",
+  "../../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
   "../readExecutionSubmission.js",
   "node:crypto",
   "node:fs/promises",
@@ -238,7 +248,6 @@ const GOOGLE_PRODUCTION_OUTPUT_RETRIEVER =
 
 const GOOGLE_PRODUCTION_OUTPUT_RETRIEVER_IMPORTS = [
   "./materializeGoogleGenAiSingleShotOutput.js",
-  "@google/genai",
 ] as const;
 
 const PROVIDER_OUTPUT_HELPER_PATTERN =
@@ -263,7 +272,6 @@ const GOOGLE_PRODUCTION_INTERACTION_GETTER =
 
 const GOOGLE_PRODUCTION_INTERACTION_GETTER_IMPORTS = [
   "./recoverGoogleGenAiSingleShot.js",
-  "@google/genai",
 ] as const;
 
 const GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN =
@@ -317,7 +325,23 @@ const GOOGLE_RECOVERY_SIDE_SOURCES = [
   "src/googleGenai/audit/readGoogleGenAiGenerationRecord.ts",
   "src/googleGenai/googleGenAiInteractionContract.ts",
   "src/googleGenai/output/googleGenAiVideoOutputPath.ts",
+  "src/googleGenai/transport/googleGenAiSecureOutputTransport.types.ts",
+  "src/googleGenai/transport/googleGenAiSecureOutputTransportError.ts",
+  "src/googleGenai/transport/parseGoogleGenAiInteractionSse.ts",
+  "src/googleGenai/transport/replayGoogleGenAiInteraction.ts",
+  "src/googleGenai/transport/validateGoogleGenAiFilesDownloadUri.ts",
+  "src/googleGenai/transport/getGoogleGenAiFilesMetadata.ts",
+  "src/googleGenai/transport/downloadGoogleGenAiFile.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
 ] as const;
+
+// The secure production recovery factory is the single recovery-side module
+// allowed one activation-authority import: the frozen limits constant.
+const GOOGLE_RECOVERY_SIDE_AUTHORITY_IMPORT_EXCEPTIONS: Readonly<Record<string, readonly string[]>> = {
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts": [
+    "../../googleGenai/googleGenAiActivationLimits.js",
+  ],
+};
 
 const GOOGLE_PRODUCTION_INTERACTION_CREATOR =
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts";
@@ -339,8 +363,7 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
-  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
-  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
@@ -351,8 +374,6 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
 
 const APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS = [
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
-  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts",
-  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts",
   "src/veo/createVeoClient.ts",
   "src/veo/execution/resumeVeoOperation.ts",
 ] as const;
@@ -466,6 +487,13 @@ describe(
           "src/googleGenai/googleGenAiInteractionContract.ts",
           "src/googleGenai/googleGenAiPricing.ts",
           "src/googleGenai/output/googleGenAiVideoOutputPath.ts",
+          "src/googleGenai/transport/downloadGoogleGenAiFile.ts",
+          "src/googleGenai/transport/getGoogleGenAiFilesMetadata.ts",
+          "src/googleGenai/transport/googleGenAiSecureOutputTransport.types.ts",
+          "src/googleGenai/transport/googleGenAiSecureOutputTransportError.ts",
+          "src/googleGenai/transport/parseGoogleGenAiInteractionSse.ts",
+          "src/googleGenai/transport/replayGoogleGenAiInteraction.ts",
+          "src/googleGenai/transport/validateGoogleGenAiFilesDownloadUri.ts",
         ]);
       },
     );
@@ -1629,7 +1657,9 @@ describe(
             ),
             file,
           ).toEqual(
-            [],
+            [
+              ...(GOOGLE_RECOVERY_SIDE_AUTHORITY_IMPORT_EXCEPTIONS[file] ?? []),
+            ],
           );
 
           expect(

@@ -194,6 +194,13 @@ describe(
         const policy =
           await loadGoogleGenAiActivationPolicy();
 
+        expect(policy.limits.filesMetadataMaxResponseBytes).toBe(65536);
+        expect(policy.recovery.streamRecoveryFirstRetryDelayMs).toBe(5000);
+        expect(policy.recovery.streamRecoverySecondRetryDelayMs).toBe(15000);
+        expect(policy.recovery.filesDownloadRetryDelayMs).toBe(10000);
+        expect(Object.isFrozen(GOOGLE_GENAI_ACTIVATION_LIMITS.limits)).toBe(true);
+        expect(Object.isFrozen(GOOGLE_GENAI_ACTIVATION_LIMITS.recovery)).toBe(true);
+
         expect(
           Object.isFrozen(
             policy,
@@ -272,6 +279,9 @@ describe(
           },
 
           limits: {
+            filesMetadataMaxResponseBytes:
+              65536,
+
             maxOutputBytes:
               268435456,
 
@@ -312,6 +322,15 @@ describe(
           },
 
           recovery: {
+            streamRecoveryFirstRetryDelayMs:
+              5000,
+
+            streamRecoverySecondRetryDelayMs:
+              15000,
+
+            filesDownloadRetryDelayMs:
+              10000,
+
             automatedRemoteRecoveryHorizonMs:
               86400000,
 
@@ -450,6 +469,7 @@ describe(
       ["cost", "inputReserveMicroUsd"],
       ["cost", "costAdmissionDurationSeconds"],
       ["limits", "maxOutputBytes"],
+      ["limits", "filesMetadataMaxResponseBytes"],
       ["limits", "maxReferenceImageBytes"],
       ["limits", "sseMaxEventBytes"],
       ["limits", "sseMaxResponseBytesPerAttempt"],
@@ -465,6 +485,9 @@ describe(
       ["recovery", "filesMinRemainingLifetimeMs"],
       ["recovery", "maxStreamRecoveryAttemptsPerReconciliation"],
       ["recovery", "maxFilesDownloadAttemptsPerReconciliation"],
+      ["recovery", "streamRecoveryFirstRetryDelayMs"],
+      ["recovery", "streamRecoverySecondRetryDelayMs"],
+      ["recovery", "filesDownloadRetryDelayMs"],
     ])(
       "rejects missing, mistyped, non-finite, non-positive and drifted %s.%s",
       async (
@@ -709,7 +732,7 @@ describe(
     );
 
     it(
-      "limits activation-policy importers in src and scripts to the submission path and its own authority chain",
+      "limits activation-policy importers in src and scripts to the submission path, the dormant secure recovery factory and its own authority chain",
       async () => {
         const importers: string[] =
           [];
@@ -760,6 +783,8 @@ describe(
           importers.sort(),
         ).toEqual([
           "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
+          // B4V7: the dormant secure recovery factory reads the frozen limits constant.
+          "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
           "src/execution/providers/submitGoogleGenAiSingleShot.ts",
           "src/googleGenai/googleGenAiExpectedCost.ts",
           "src/schemas/googleGenAiActivationPolicy.schema.ts",

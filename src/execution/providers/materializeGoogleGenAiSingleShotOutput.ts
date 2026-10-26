@@ -1,6 +1,7 @@
 import {
   createHash,
   randomUUID,
+  timingSafeEqual,
 } from "node:crypto";
 
 import {
@@ -31,6 +32,20 @@ import {
   createGoogleGenAiVideoOutputPath,
 } from "../../googleGenai/output/googleGenAiVideoOutputPath.js";
 
+import type {
+  GoogleGenAiDownloadedFile,
+  GoogleGenAiOutputChunkSink,
+  GoogleGenAiOutputUriDownloader as GoogleGenAiStreamingOutputUriDownloader,
+  GoogleGenAiPrepareOutputUri,
+  GoogleGenAiRecoveryContext,
+  GoogleGenAiSecureOutputTransportPolicy,
+  GoogleGenAiVerifiedFileMetadata,
+} from "../../googleGenai/transport/googleGenAiSecureOutputTransport.types.js";
+
+import {
+  GoogleGenAiSecureOutputTransportError,
+} from "../../googleGenai/transport/googleGenAiSecureOutputTransportError.js";
+
 import {
   readExecutionSubmission,
 } from "../readExecutionSubmission.js";
@@ -44,8 +59,18 @@ import {
  * the Google output path without ever replacing an existing file. The
  * final file is published with an exclusive hard link from a fully written
  * and fsynced temporary file; there is no rename, copy, or direct-write
- * path. It never creates, resubmits, retries, completes, reconciles, or
- * mutates the reservation or submission.
+ * path. It never creates, resubmits, completes, reconciles, or mutates the
+ * reservation or submission.
+ *
+ * A URI output is never buffered whole. Each attempt prepares fresh
+ * verified metadata through the injected prepareUri, then streams the
+ * injected downloader's chunks through a materializer-owned positional
+ * writer that independently counts, hashes, and keeps only the MP4 prefix.
+ * This module is the sole Files download retry owner: at most
+ * policy.recovery.maxFilesDownloadAttemptsPerReconciliation attempts, a
+ * retry only after a typed transient failure and complete owned-temp
+ * cleanup, separated by the published abortable retry delay. It has no
+ * network, credential, or SDK authority of its own.
  */
 
 export const GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE =
@@ -72,24 +97,30 @@ export type GoogleGenAiOutputRetriever =
       GoogleGenAiRetrievedOutputInteraction
     >;
 
-export type GoogleGenAiOutputUriDownloadRequest =
-  Readonly<{
-    uri:
-      string;
-
-    maxOutputBytes:
-      number;
-  }>;
-
+/** The streaming downloader contract, re-exported for existing type-import sites. */
 export type GoogleGenAiOutputUriDownloader =
-  (
-    request:
-      GoogleGenAiOutputUriDownloadRequest,
-  ) =>
-    Promise<Uint8Array>;
+  GoogleGenAiStreamingOutputUriDownloader;
 
 export type GoogleGenAiOutputFileHandle =
   Readonly<{
+    write:
+      (
+        buffer:
+          Uint8Array,
+        offset:
+          number,
+        length:
+          number,
+        position:
+          number,
+      ) =>
+        Promise<
+          Readonly<{
+            bytesWritten:
+              number;
+          }>
+        >;
+
     writeFile:
       (
         data:
@@ -194,13 +225,27 @@ export type GoogleGenAiSingleShotOutputMaterializationInput =
       number;
   }>;
 
+/**
+ * prepareUri, downloadUri, policy, and context are URI-only. Historical
+ * inline-only calls may omit them; a URI output requires all four at
+ * runtime before any URI work, with no whole-buffer fallback.
+ */
 export type GoogleGenAiSingleShotOutputMaterializationDependencies =
   Readonly<{
     retrieveOutput:
       GoogleGenAiOutputRetriever;
 
-    downloadUri:
+    prepareUri?:
+      GoogleGenAiPrepareOutputUri;
+
+    downloadUri?:
       GoogleGenAiOutputUriDownloader;
+
+    policy?:
+      GoogleGenAiSecureOutputTransportPolicy;
+
+    context?:
+      GoogleGenAiRecoveryContext;
 
     fileSystem?:
       GoogleGenAiOutputFileSystem;
@@ -422,6 +467,8 @@ function decodeStrictBase64(
   return decoded;
 }
 
+// Messages are static and the parse cause is discarded: a provider-returned
+// URI may carry secret-bearing content that must not escape through an Error.
 function requireDownloadableUri(
   uri:
     string,
@@ -434,13 +481,9 @@ function requireDownloadableUri(
       new URL(
         uri,
       );
-  } catch (error) {
+  } catch {
     throw new Error(
       "Google GenAI output_video.uri is not a valid URL.",
-      {
-        cause:
-          error,
-      },
     );
   }
 
@@ -449,7 +492,7 @@ function requireDownloadableUri(
     "https:"
   ) {
     throw new Error(
-      `Google GenAI output_video.uri must use https; received ${JSON.stringify(parsed.protocol)}.`,
+      "Google GenAI output_video.uri must use https.",
     );
   }
 
@@ -476,6 +519,539 @@ function requireDownloadableUri(
       "Google GenAI output_video.uri must be a canonical absolute https URL.",
     );
   }
+}
+
+function transportFailure(
+  code:
+    GoogleGenAiSecureOutputTransportError["code"],
+): GoogleGenAiSecureOutputTransportError {
+  return new GoogleGenAiSecureOutputTransportError(
+    code,
+  );
+}
+
+function isPositiveSafeInteger(
+  value:
+    unknown,
+): value is number {
+  return typeof value ===
+    "number" &&
+    Number.isSafeInteger(
+      value,
+    ) &&
+    value > 0;
+}
+
+function parentFailure(
+  signal:
+    AbortSignal,
+): GoogleGenAiSecureOutputTransportError {
+  return transportFailure(
+    signal.reason instanceof
+      GoogleGenAiSecureOutputTransportError &&
+      signal.reason.code ===
+        "RECONCILIATION_TIMEOUT"
+      ? "RECONCILIATION_TIMEOUT"
+      : "OPERATION_ABORTED",
+  );
+}
+
+type UriMaterializationAuthority =
+  Readonly<{
+    prepareUri:
+      GoogleGenAiPrepareOutputUri;
+
+    downloadUri:
+      GoogleGenAiOutputUriDownloader;
+
+    context:
+      GoogleGenAiRecoveryContext;
+
+    maxOutputBytes:
+      number;
+
+    maxAttempts:
+      number;
+
+    retryDelayMs:
+      number;
+
+    nextAttemptMs:
+      number;
+  }>;
+
+/**
+ * Requires every URI-only dependency before any URI work. The effective
+ * byte bound is min(input, policy): a caller may narrow, never widen.
+ */
+function requireUriAuthority(
+  dependencies:
+    GoogleGenAiSingleShotOutputMaterializationDependencies,
+  inputMaxOutputBytes:
+    number,
+): UriMaterializationAuthority {
+  const {
+    prepareUri,
+    downloadUri,
+    policy,
+    context,
+  } =
+    dependencies;
+
+  if (
+    typeof prepareUri !==
+      "function" ||
+    typeof downloadUri !==
+      "function" ||
+    policy === null ||
+    typeof policy !==
+      "object" ||
+    policy.limits === null ||
+    typeof policy.limits !==
+      "object" ||
+    policy.timeouts === null ||
+    typeof policy.timeouts !==
+      "object" ||
+    policy.recovery === null ||
+    typeof policy.recovery !==
+      "object" ||
+    context === null ||
+    typeof context !==
+      "object" ||
+    !(context.signal instanceof
+      AbortSignal) ||
+    typeof context.remainingMs !==
+      "function"
+  ) {
+    throw transportFailure(
+      "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+    );
+  }
+
+  const policyMaxOutputBytes =
+    policy.limits.maxOutputBytes;
+
+  const metadataTimeoutMs =
+    policy.timeouts.filesMetadataTimeoutMs;
+
+  const downloadTimeoutMs =
+    policy.timeouts.filesDownloadTimeoutMs;
+
+  const maxAttempts =
+    policy.recovery
+      .maxFilesDownloadAttemptsPerReconciliation;
+
+  const retryDelayMs =
+    policy.recovery.filesDownloadRetryDelayMs;
+
+  if (
+    ![
+      policyMaxOutputBytes,
+      metadataTimeoutMs,
+      downloadTimeoutMs,
+      maxAttempts,
+      retryDelayMs,
+    ].every(
+      isPositiveSafeInteger,
+    )
+  ) {
+    throw transportFailure(
+      "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+    );
+  }
+
+  return Object.freeze({
+    prepareUri,
+    downloadUri,
+    context,
+
+    maxOutputBytes:
+      Math.min(
+        inputMaxOutputBytes,
+        policyMaxOutputBytes,
+      ),
+
+    maxAttempts,
+    retryDelayMs,
+
+    // A next attempt is one metadata request followed by one download,
+    // each admitted only with its full published timeout.
+    nextAttemptMs:
+      metadataTimeoutMs +
+      downloadTimeoutMs,
+  });
+}
+
+function remainingBudgetMs(
+  context:
+    GoogleGenAiRecoveryContext,
+): number {
+  let remaining:
+    number;
+
+  try {
+    remaining =
+      context.remainingMs();
+  } catch {
+    throw transportFailure(
+      "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+    );
+  }
+
+  if (
+    typeof remaining !==
+      "number" ||
+    !Number.isFinite(
+      remaining,
+    ) ||
+    Math.abs(
+      remaining,
+    ) >
+      Number.MAX_SAFE_INTEGER
+  ) {
+    throw transportFailure(
+      "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+    );
+  }
+
+  return remaining;
+}
+
+function requireActive(
+  context:
+    GoogleGenAiRecoveryContext,
+): void {
+  if (context.signal.aborted) {
+    throw parentFailure(
+      context.signal,
+    );
+  }
+}
+
+/**
+ * Admission to a new irreversible step (sync, hard-link publication).
+ * Timer delivery is not authority: the shared context's current remaining
+ * budget/horizon is sampled as well, so an elapsed deadline whose callback
+ * has not yet run still refuses the step. A step already in progress is
+ * never force-cancelled.
+ */
+function requireAuthority(
+  context:
+    GoogleGenAiRecoveryContext,
+): void {
+  requireActive(
+    context,
+  );
+
+  const remaining =
+    remainingBudgetMs(
+      context,
+    );
+
+  requireActive(
+    context,
+  );
+
+  if (remaining <= 0) {
+    throw transportFailure(
+      "RECOVERY_BUDGET_EXHAUSTED",
+    );
+  }
+}
+
+const CLOSED_TRANSPORT_ERROR_FIELDS =
+  Object.freeze([
+    "code",
+    "attempt",
+    "httpStatus",
+    "retryable",
+  ] as const);
+
+/**
+ * Reads the closed semantic fields only as own data properties, the shape
+ * the trusted constructor produces (absent attempt/httpStatus are still own
+ * properties holding undefined). Inherited, missing or accessor fields are
+ * never read and make the value unclassifiable.
+ */
+function ownClosedTransportFields(
+  error:
+    object,
+): Readonly<Record<typeof CLOSED_TRANSPORT_ERROR_FIELDS[number], unknown>> | undefined {
+  const fields:
+    Partial<Record<typeof CLOSED_TRANSPORT_ERROR_FIELDS[number], unknown>> = {};
+
+  for (
+    const field of CLOSED_TRANSPORT_ERROR_FIELDS
+  ) {
+    const descriptor =
+      Reflect.getOwnPropertyDescriptor(
+        error,
+        field,
+      );
+
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor)
+    ) {
+      return undefined;
+    }
+
+    fields[field] =
+      descriptor.value;
+  }
+
+  return fields as Readonly<Record<typeof CLOSED_TRANSPORT_ERROR_FIELDS[number], unknown>>;
+}
+
+/**
+ * Normalizes a dependency failure into a FRESH trusted error. `instanceof`
+ * is only a structural signal: the original closed fields are validated
+ * before any normalization. The trusted constructor is the validator — the
+ * candidate is rebuilt from its ORIGINAL code/attempt/httpStatus and must
+ * round-trip exactly, including its supplied retryable flag. Any field the
+ * constructor would drop or reinterpret (malformed status, invalid attempt,
+ * unknown code) or a contradictory retryable flag fails closed to the
+ * existing nonretryable SECURE_TRANSPORT_CONFIGURATION_INVALID, so invalid
+ * input can never be normalized into a valid (possibly retryable) failure.
+ * Nothing else (stack, message, cause, custom properties) is ever read.
+ */
+function sanitizeUriFailure(
+  error:
+    unknown,
+): GoogleGenAiSecureOutputTransportError {
+  const invalid =
+    (): GoogleGenAiSecureOutputTransportError =>
+      transportFailure(
+        "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+      );
+
+  try {
+    if (
+      !(error instanceof
+        GoogleGenAiSecureOutputTransportError)
+    ) {
+      return invalid();
+    }
+
+    const fields =
+      ownClosedTransportFields(
+        error,
+      );
+
+    if (fields === undefined) {
+      return invalid();
+    }
+
+    const {
+      code,
+      attempt,
+      httpStatus,
+      retryable,
+    } =
+      fields;
+
+    if (
+      typeof code !==
+        "string" ||
+      typeof retryable !==
+        "boolean" ||
+      (attempt !== undefined &&
+        typeof attempt !==
+          "number") ||
+      (httpStatus !== undefined &&
+        typeof httpStatus !==
+          "number")
+    ) {
+      return invalid();
+    }
+
+    const rebuilt =
+      new GoogleGenAiSecureOutputTransportError(
+        code as GoogleGenAiSecureOutputTransportError["code"],
+        {
+          ...(attempt === undefined
+            ? {}
+            : {
+                attempt,
+              }),
+
+          ...(httpStatus === undefined
+            ? {}
+            : {
+                httpStatus,
+              }),
+        },
+      );
+
+    // Validate-before-normalize: every original field must survive the
+    // trusted constructor unchanged (Object.is also rejects NaN).
+    if (
+      rebuilt.code !==
+        code ||
+      !Object.is(
+        rebuilt.attempt,
+        attempt,
+      ) ||
+      !Object.is(
+        rebuilt.httpStatus,
+        httpStatus,
+      ) ||
+      rebuilt.retryable !==
+        retryable
+    ) {
+      return invalid();
+    }
+
+    return rebuilt;
+  } catch {
+    // A hostile trap or descriptor read is never retained as a cause.
+    return invalid();
+  }
+}
+
+/** Abortable published retry delay; the timer never outlives the wait. */
+function waitForRetry(
+  delayMs:
+    number,
+  signal:
+    AbortSignal,
+): Promise<void> {
+  return new Promise(
+    (
+      resolve,
+      reject,
+    ) => {
+      if (signal.aborted) {
+        reject(
+          parentFailure(
+            signal,
+          ),
+        );
+
+        return;
+      }
+
+      const onAbort =
+        (): void => {
+          clearTimeout(
+            timer,
+          );
+
+          reject(
+            parentFailure(
+              signal,
+            ),
+          );
+        };
+
+      const timer =
+        setTimeout(
+          () => {
+            signal.removeEventListener(
+              "abort",
+              onAbort,
+            );
+
+            resolve();
+          },
+          delayMs,
+        );
+
+      signal.addEventListener(
+        "abort",
+        onAbort,
+        {
+          once:
+            true,
+        },
+      );
+    },
+  );
+}
+
+function isTransientTransportFailure(
+  error:
+    unknown,
+): boolean {
+  return error instanceof
+    GoogleGenAiSecureOutputTransportError &&
+    error.retryable;
+}
+
+/** Identical structural rules as requireMp4Signature, over a retained prefix only. */
+function mp4PrefixIsValid(
+  prefix:
+    Uint8Array,
+  byteCount:
+    number,
+): boolean {
+  if (
+    byteCount <
+      MINIMUM_FTYP_BOX_BYTES ||
+    prefix.byteLength <
+      MINIMUM_FTYP_BOX_BYTES
+  ) {
+    return false;
+  }
+
+  const view =
+    Buffer.from(
+      prefix.buffer,
+      prefix.byteOffset,
+      MINIMUM_FTYP_BOX_BYTES,
+    );
+
+  if (
+    view.toString(
+      "latin1",
+      4,
+      8,
+    ) !== "ftyp"
+  ) {
+    return false;
+  }
+
+  const boxSize =
+    view.readUInt32BE(
+      0,
+    );
+
+  return boxSize >=
+      MINIMUM_FTYP_BOX_BYTES &&
+    boxSize <=
+      byteCount &&
+    (boxSize -
+      MINIMUM_FTYP_BOX_BYTES) %
+      4 ===
+      0;
+}
+
+function digestEquals(
+  actual:
+    Buffer,
+  expectedHex:
+    string,
+): boolean {
+  if (
+    !/^[0-9a-f]{64}$/.test(
+      expectedHex,
+    )
+  ) {
+    return false;
+  }
+
+  const expected =
+    Buffer.from(
+      expectedHex,
+      "hex",
+    );
+
+  return actual.byteLength ===
+      expected.byteLength &&
+    timingSafeEqual(
+      actual,
+      expected,
+    );
 }
 
 function requireBoundedBytes(
@@ -884,6 +1460,1033 @@ async function publishGoogleGenAiOutput(
   return alreadyPresent;
 }
 
+/**
+ * URI-path existing-final inspection: false when absent; true only for a
+ * regular file with the expected size, incremental SHA-256 and a valid
+ * bounded MP4 prefix. Any other existing entry is a conflict and is never
+ * replaced. Never loads the file whole.
+ */
+async function uriFinalHoldsExpectedContent(
+  fileSystem:
+    GoogleGenAiOutputFileSystem,
+  finalPath:
+    string,
+  expected:
+    ExpectedContent,
+): Promise<boolean> {
+  let stats:
+    Awaited<
+      ReturnType<
+        GoogleGenAiOutputFileSystem["lstat"]
+      >
+    >;
+
+  try {
+    stats =
+      await fileSystem.lstat(
+        finalPath,
+      );
+  } catch (error) {
+    if (
+      errorCode(
+        error,
+      ) ===
+      "ENOENT"
+    ) {
+      return false;
+    }
+
+    throw transportFailure(
+      "OUTPUT_PUBLICATION_FAILED",
+    );
+  }
+
+  if (
+    !stats.isFile() ||
+    stats.size !==
+      expected.byteCount
+  ) {
+    throw transportFailure(
+      "OUTPUT_PUBLICATION_CONFLICT",
+    );
+  }
+
+  let handle:
+    GoogleGenAiOutputFileHandle;
+
+  try {
+    handle =
+      await fileSystem.open(
+        finalPath,
+        "r",
+      );
+  } catch {
+    throw transportFailure(
+      "OUTPUT_PUBLICATION_FAILED",
+    );
+  }
+
+  const hash =
+    createHash(
+      "sha256",
+    );
+
+  const prefix =
+    new Uint8Array(
+      MINIMUM_FTYP_BOX_BYTES,
+    );
+
+  const chunk =
+    new Uint8Array(
+      Math.min(
+        EXISTING_FILE_HASH_CHUNK_BYTES,
+        expected.byteCount,
+      ),
+    );
+
+  let position =
+    0;
+
+  let failure:
+    GoogleGenAiSecureOutputTransportError | undefined;
+
+  try {
+    while (position < expected.byteCount) {
+      let bytesRead:
+        number;
+
+      try {
+        ({
+          bytesRead,
+        } =
+          await handle.read(
+            chunk,
+            0,
+            Math.min(
+              chunk.byteLength,
+              expected.byteCount -
+                position,
+            ),
+            position,
+          ));
+      } catch {
+        throw transportFailure(
+          "OUTPUT_PUBLICATION_FAILED",
+        );
+      }
+
+      // The file changed beneath the lstat: it is not the expected content.
+      if (
+        !Number.isSafeInteger(
+          bytesRead,
+        ) ||
+        bytesRead <= 0 ||
+        bytesRead >
+          expected.byteCount -
+            position
+      ) {
+        throw transportFailure(
+          "OUTPUT_PUBLICATION_CONFLICT",
+        );
+      }
+
+      const read =
+        chunk.subarray(
+          0,
+          bytesRead,
+        );
+
+      if (position < MINIMUM_FTYP_BOX_BYTES) {
+        prefix.set(
+          read.subarray(
+            0,
+            MINIMUM_FTYP_BOX_BYTES -
+              position,
+          ),
+          position,
+        );
+      }
+
+      hash.update(
+        read,
+      );
+
+      position +=
+        bytesRead;
+    }
+  } catch (error) {
+    failure =
+      error instanceof
+        GoogleGenAiSecureOutputTransportError
+        ? error
+        : transportFailure(
+            "OUTPUT_PUBLICATION_FAILED",
+          );
+  }
+
+  try {
+    await handle.close();
+  } catch {
+    failure ??=
+      transportFailure(
+        "OUTPUT_PUBLICATION_FAILED",
+      );
+  }
+
+  if (failure) {
+    throw failure;
+  }
+
+  if (
+    !digestEquals(
+      hash.digest(),
+      expected.sha256,
+    ) ||
+    !mp4PrefixIsValid(
+      prefix,
+      expected.byteCount,
+    )
+  ) {
+    throw transportFailure(
+      "OUTPUT_PUBLICATION_CONFLICT",
+    );
+  }
+
+  return true;
+}
+
+type ContentBinding =
+  Readonly<{
+    name:
+      string;
+
+    byteCount:
+      number;
+
+    sha256:
+      string;
+  }>;
+
+/**
+ * Locally revalidates prepared metadata and binds the first validated
+ * name/size/SHA for this invocation; a later attempt must match exactly.
+ */
+function requirePreparedMetadata(
+  metadata:
+    GoogleGenAiVerifiedFileMetadata,
+  uri:
+    string,
+  maxOutputBytes:
+    number,
+  binding:
+    ContentBinding | undefined,
+): ContentBinding {
+  if (
+    metadata === null ||
+    typeof metadata !==
+      "object" ||
+    metadata.resource === null ||
+    typeof metadata.resource !==
+      "object" ||
+    typeof metadata.resource.name !==
+      "string" ||
+    metadata.mimeType !==
+      GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE ||
+    !isPositiveSafeInteger(
+      metadata.byteCount,
+    ) ||
+    typeof metadata.sha256 !==
+      "string" ||
+    !/^[0-9a-f]{64}$/.test(
+      metadata.sha256,
+    )
+  ) {
+    throw transportFailure(
+      "FILES_METADATA_INVALID",
+    );
+  }
+
+  if (
+    metadata.resource.downloadUri !==
+    uri
+  ) {
+    throw transportFailure(
+      "FILE_IDENTITY_MISMATCH",
+    );
+  }
+
+  if (
+    metadata.byteCount >
+    maxOutputBytes
+  ) {
+    throw transportFailure(
+      "FILE_TOO_LARGE",
+    );
+  }
+
+  if (
+    binding !== undefined &&
+    (binding.name !==
+      metadata.resource.name ||
+      binding.byteCount !==
+        metadata.byteCount ||
+      binding.sha256 !==
+        metadata.sha256)
+  ) {
+    throw transportFailure(
+      "FILE_IDENTITY_MISMATCH",
+    );
+  }
+
+  return binding ??
+    Object.freeze({
+      name:
+        metadata.resource.name,
+
+      byteCount:
+        metadata.byteCount,
+
+      sha256:
+        metadata.sha256,
+    });
+}
+
+type UriAttemptOutcome =
+  | Readonly<{
+      kind:
+        "PUBLISHED";
+
+      alreadyPresent:
+        boolean;
+    }>
+  | Readonly<{
+      kind:
+        "RETRYABLE";
+
+      failure:
+        GoogleGenAiSecureOutputTransportError;
+    }>;
+
+/**
+ * One download attempt into a fresh exclusively created temp. Ownership
+ * begins only after a successful "wx" open. Every exit closes the handle
+ * and unlinks the owned temp; a transient downloader failure is reported
+ * as retryable only after that cleanup settled successfully.
+ */
+async function streamUriOutputAttempt(
+  fileSystem:
+    GoogleGenAiOutputFileSystem,
+  finalPath:
+    string,
+  metadata:
+    GoogleGenAiVerifiedFileMetadata,
+  authority:
+    UriMaterializationAuthority,
+): Promise<UriAttemptOutcome> {
+  const {
+    context,
+  } =
+    authority;
+
+  const expected:
+    ExpectedContent =
+    Object.freeze({
+      byteCount:
+        metadata.byteCount,
+
+      sha256:
+        metadata.sha256,
+    });
+
+  const temporaryPath =
+    join(
+      dirname(
+        finalPath,
+      ),
+      `.${basename(finalPath)}.${randomUUID()}.part`,
+    );
+
+  let handle:
+    GoogleGenAiOutputFileHandle;
+
+  try {
+    handle =
+      await fileSystem.open(
+        temporaryPath,
+        "wx",
+      );
+  } catch {
+    // A failed open proves no ownership; the path is never unlinked.
+    throw transportFailure(
+      "TEMP_WRITE_FAILED",
+    );
+  }
+
+  let handleOpen =
+    true;
+
+  let position =
+    0;
+
+  let byteCount =
+    0;
+
+  const hash =
+    createHash(
+      "sha256",
+    );
+
+  const prefix =
+    new Uint8Array(
+      MINIMUM_FTYP_BOX_BYTES,
+    );
+
+  let sinkFailure:
+    GoogleGenAiSecureOutputTransportError | undefined;
+
+  let sinkClosed =
+    false;
+
+  let activeWrite:
+    Promise<void> | undefined;
+
+  async function persistChunk(
+    chunk:
+      Uint8Array,
+  ): Promise<void> {
+    const prospective =
+      byteCount +
+      chunk.byteLength;
+
+    if (
+      prospective >
+      authority.maxOutputBytes
+    ) {
+      throw transportFailure(
+        "DOWNLOAD_TOO_LARGE",
+      );
+    }
+
+    if (
+      prospective >
+      expected.byteCount
+    ) {
+      throw transportFailure(
+        "DOWNLOAD_SIZE_MISMATCH",
+      );
+    }
+
+    let offset =
+      0;
+
+    while (offset < chunk.byteLength) {
+      const length =
+        chunk.byteLength -
+        offset;
+
+      let result:
+        unknown;
+
+      try {
+        result =
+          await handle.write(
+            chunk,
+            offset,
+            length,
+            position,
+          );
+      } catch {
+        throw transportFailure(
+          "TEMP_WRITE_FAILED",
+        );
+      }
+
+      const bytesWritten =
+        result !== null &&
+        typeof result ===
+          "object" &&
+        "bytesWritten" in result
+          ? result.bytesWritten
+          : undefined;
+
+      if (
+        typeof bytesWritten !==
+          "number" ||
+        !Number.isSafeInteger(
+          bytesWritten,
+        ) ||
+        bytesWritten <= 0 ||
+        bytesWritten >
+          length
+      ) {
+        throw transportFailure(
+          "TEMP_WRITE_FAILED",
+        );
+      }
+
+      offset +=
+        bytesWritten;
+
+      position +=
+        bytesWritten;
+    }
+
+    // Evidence advances only for a fully persisted chunk.
+    if (byteCount < MINIMUM_FTYP_BOX_BYTES) {
+      prefix.set(
+        chunk.subarray(
+          0,
+          MINIMUM_FTYP_BOX_BYTES -
+            byteCount,
+        ),
+        byteCount,
+      );
+    }
+
+    hash.update(
+      chunk,
+    );
+
+    byteCount =
+      prospective;
+  }
+
+  const sink:
+    GoogleGenAiOutputChunkSink =
+    Object.freeze({
+      writeChunk:
+        async (
+          chunk:
+            Uint8Array,
+        ): Promise<void> => {
+          if (
+            sinkFailure !==
+            undefined
+          ) {
+            throw sinkFailure;
+          }
+
+          if (
+            sinkClosed ||
+            activeWrite !==
+              undefined ||
+            !(chunk instanceof
+              Uint8Array)
+          ) {
+            sinkFailure =
+              transportFailure(
+                "TEMP_WRITE_FAILED",
+              );
+
+            throw sinkFailure;
+          }
+
+          if (context.signal.aborted) {
+            sinkFailure =
+              parentFailure(
+                context.signal,
+              );
+
+            throw sinkFailure;
+          }
+
+          if (chunk.byteLength === 0) {
+            return;
+          }
+
+          const write =
+            persistChunk(
+              chunk,
+            );
+
+          activeWrite =
+            write.then(
+              () => undefined,
+              () => undefined,
+            );
+
+          try {
+            await write;
+          } catch (error) {
+            sinkFailure =
+              error instanceof
+                GoogleGenAiSecureOutputTransportError
+                ? error
+                : transportFailure(
+                    "TEMP_WRITE_FAILED",
+                  );
+
+            throw sinkFailure;
+          } finally {
+            activeWrite =
+              undefined;
+          }
+        },
+    });
+
+  let primary:
+    GoogleGenAiSecureOutputTransportError | undefined;
+
+  let failed =
+    false;
+
+  let retryable:
+    GoogleGenAiSecureOutputTransportError | undefined;
+
+  let published =
+    false;
+
+  let alreadyPresent =
+    false;
+
+  try {
+    let downloaded:
+      GoogleGenAiDownloadedFile;
+
+    try {
+      downloaded =
+        await authority.downloadUri(
+          metadata,
+          sink,
+          context,
+        );
+    } catch (error) {
+      const sanitized =
+        sanitizeUriFailure(
+          error,
+        );
+
+      if (
+        sinkFailure === undefined &&
+        isTransientTransportFailure(
+          sanitized,
+        )
+      ) {
+        retryable =
+          sanitized;
+      }
+
+      throw sanitized;
+    } finally {
+      sinkClosed =
+        true;
+
+      // No old writer may continue into cleanup or a next attempt.
+      await activeWrite;
+    }
+
+    if (
+      downloaded === null ||
+      typeof downloaded !==
+        "object" ||
+      downloaded.mimeType !==
+        GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE
+    ) {
+      throw transportFailure(
+        "DOWNLOAD_CONTENT_TYPE_INVALID",
+      );
+    }
+
+    if (
+      byteCount !==
+        expected.byteCount ||
+      downloaded.byteCount !==
+        expected.byteCount
+    ) {
+      throw transportFailure(
+        "DOWNLOAD_SIZE_MISMATCH",
+      );
+    }
+
+    const localDigest =
+      hash.digest();
+
+    if (
+      typeof downloaded.sha256 !==
+        "string" ||
+      !digestEquals(
+        localDigest,
+        expected.sha256,
+      ) ||
+      !digestEquals(
+        localDigest,
+        downloaded.sha256,
+      )
+    ) {
+      throw transportFailure(
+        "DOWNLOAD_HASH_MISMATCH",
+      );
+    }
+
+    if (
+      !mp4PrefixIsValid(
+        prefix,
+        byteCount,
+      )
+    ) {
+      throw transportFailure(
+        "DOWNLOAD_MP4_INVALID",
+      );
+    }
+
+    // Expiry observable after the download admits no new sync.
+    requireAuthority(
+      context,
+    );
+
+    try {
+      await handle.sync();
+    } catch {
+      throw transportFailure(
+        "TEMP_WRITE_FAILED",
+      );
+    }
+
+    // Expiry during sync: the owned handle is still closed and unlinked by
+    // cleanup below, but nothing further is admitted.
+    requireAuthority(
+      context,
+    );
+
+    handleOpen =
+      false;
+
+    try {
+      await handle.close();
+    } catch {
+      throw transportFailure(
+        "TEMP_WRITE_FAILED",
+      );
+    }
+
+    // Expiry during close admits no hard-link publication.
+    requireAuthority(
+      context,
+    );
+
+    try {
+      await fileSystem.link(
+        temporaryPath,
+        finalPath,
+      );
+
+      published =
+        true;
+    } catch (error) {
+      if (
+        errorCode(
+          error,
+        ) !==
+        "EEXIST"
+      ) {
+        throw transportFailure(
+          "OUTPUT_PUBLICATION_FAILED",
+        );
+      }
+
+      if (
+        !(await uriFinalHoldsExpectedContent(
+          fileSystem,
+          finalPath,
+          expected,
+        ))
+      ) {
+        throw transportFailure(
+          "OUTPUT_PUBLICATION_FAILED",
+        );
+      }
+
+      published =
+        true;
+
+      alreadyPresent =
+        true;
+    }
+  } catch (error) {
+    failed =
+      true;
+
+    // Sanitized before retention, rethrow or aggregation.
+    primary =
+      sanitizeUriFailure(
+        error,
+      );
+  }
+
+  const cleanupFailures:
+    GoogleGenAiSecureOutputTransportError[] = [];
+
+  if (handleOpen) {
+    try {
+      await handle.close();
+    } catch {
+      // Close failure still attempts the unlink and blocks any retry.
+      cleanupFailures.push(
+        transportFailure(
+          "TEMP_CLEANUP_FAILED",
+        ),
+      );
+    }
+  }
+
+  try {
+    await fileSystem.unlink(
+      temporaryPath,
+    );
+  } catch {
+    cleanupFailures.push(
+      transportFailure(
+        "TEMP_CLEANUP_FAILED",
+      ),
+    );
+  }
+
+  const cleanupFailure =
+    cleanupFailures[0];
+
+  if (failed) {
+    if (cleanupFailure !== undefined) {
+      throw new AggregateError(
+        [
+          primary,
+          cleanupFailure,
+        ],
+        "Google GenAI output download failed and its temporary file could not be cleaned up.",
+      );
+    }
+
+    if (retryable !== undefined) {
+      return Object.freeze({
+        kind:
+          "RETRYABLE",
+
+        failure:
+          retryable,
+      });
+    }
+
+    throw primary;
+  }
+
+  // A published final is never removed; a cleanup failure is surfaced and
+  // the invocation does not report success.
+  if (cleanupFailure !== undefined) {
+    throw cleanupFailure;
+  }
+
+  if (!published) {
+    throw transportFailure(
+      "OUTPUT_PUBLICATION_FAILED",
+    );
+  }
+
+  return Object.freeze({
+    kind:
+      "PUBLISHED",
+
+    alreadyPresent,
+  });
+}
+
+/**
+ * Sole Files download retry owner. Every attempt prepares fresh metadata
+ * before any temp exists; a typed transient metadata or download failure
+ * consumes an attempt. A retry is admitted only when the published delay
+ * plus a full next attempt (metadata then download timeout) fits the
+ * shared context budget, waits abortably, and rechecks before starting.
+ */
+async function materializeUriOutput(
+  fileSystem:
+    GoogleGenAiOutputFileSystem,
+  finalPath:
+    string,
+  uri:
+    string,
+  authority:
+    UriMaterializationAuthority,
+): Promise<
+  Readonly<{
+    expected:
+      ExpectedContent;
+
+    alreadyPresent:
+      boolean;
+  }>
+> {
+  const {
+    context,
+  } =
+    authority;
+
+  let binding:
+    ContentBinding | undefined;
+
+  let directoryReady =
+    false;
+
+  for (
+    let attempt = 1;
+    ;
+    attempt += 1
+  ) {
+    if (attempt > 1) {
+      if (
+        remainingBudgetMs(
+          context,
+        ) <
+        authority.retryDelayMs +
+          authority.nextAttemptMs
+      ) {
+        throw transportFailure(
+          "RECOVERY_BUDGET_EXHAUSTED",
+        );
+      }
+
+      await waitForRetry(
+        authority.retryDelayMs,
+        context.signal,
+      );
+
+      if (
+        remainingBudgetMs(
+          context,
+        ) <
+        authority.nextAttemptMs
+      ) {
+        throw transportFailure(
+          "RECOVERY_BUDGET_EXHAUSTED",
+        );
+      }
+    }
+
+    requireActive(
+      context,
+    );
+
+    let metadata:
+      GoogleGenAiVerifiedFileMetadata;
+
+    try {
+      metadata =
+        await authority.prepareUri(
+          {
+            uri,
+
+            maxOutputBytes:
+              authority.maxOutputBytes,
+          },
+          context,
+        );
+    } catch (error) {
+      const sanitized =
+        sanitizeUriFailure(
+          error,
+        );
+
+      if (
+        attempt <
+          authority.maxAttempts &&
+        isTransientTransportFailure(
+          sanitized,
+        )
+      ) {
+        continue;
+      }
+
+      throw sanitized;
+    }
+
+    binding =
+      requirePreparedMetadata(
+        metadata,
+        uri,
+        authority.maxOutputBytes,
+        binding,
+      );
+
+    const expected:
+      ExpectedContent =
+      Object.freeze({
+        byteCount:
+          binding.byteCount,
+
+        sha256:
+          binding.sha256,
+      });
+
+    requireActive(
+      context,
+    );
+
+    if (!directoryReady) {
+      try {
+        await fileSystem.mkdir(
+          dirname(
+            finalPath,
+          ),
+          {
+            recursive:
+              true,
+          },
+        );
+      } catch {
+        throw transportFailure(
+          "OUTPUT_PUBLICATION_FAILED",
+        );
+      }
+
+      directoryReady =
+        true;
+    }
+
+    if (
+      await uriFinalHoldsExpectedContent(
+        fileSystem,
+        finalPath,
+        expected,
+      )
+    ) {
+      return Object.freeze({
+        expected,
+
+        alreadyPresent:
+          true,
+      });
+    }
+
+    requireActive(
+      context,
+    );
+
+    const outcome =
+      await streamUriOutputAttempt(
+        fileSystem,
+        finalPath,
+        metadata,
+        authority,
+      );
+
+    if (
+      outcome.kind ===
+      "PUBLISHED"
+    ) {
+      return Object.freeze({
+        expected,
+
+        alreadyPresent:
+          outcome.alreadyPresent,
+      });
+    }
+
+    if (
+      attempt >=
+      authority.maxAttempts
+    ) {
+      throw outcome.failure;
+    }
+  }
+}
+
 export async function materializeGoogleGenAiSingleShotOutput(
   input:
     GoogleGenAiSingleShotOutputMaterializationInput,
@@ -1052,46 +2655,79 @@ export async function materializeGoogleGenAiSingleShotOutput(
     );
   }
 
-  let bytes:
-    Buffer;
-
-  let sourceKind:
-    GoogleGenAiOutputSourceKind;
-
-  if (data !== undefined) {
-    bytes =
-      requireBoundedBytes(
-        decodeStrictBase64(
-          data,
-          maxOutputBytes,
-        ),
+  if (
+    data === undefined &&
+    uri !== undefined
+  ) {
+    // Every URI-only dependency is required before any URI work; there is
+    // no whole-buffer or inline fallback.
+    const authority =
+      requireUriAuthority(
+        dependencies,
         maxOutputBytes,
       );
 
-    sourceKind =
-      "INLINE_DATA";
-  } else if (uri !== undefined) {
     requireDownloadableUri(
       uri,
     );
 
-    bytes =
-      requireBoundedBytes(
-        await dependencies
-          .downloadUri({
-            uri,
-            maxOutputBytes,
-          }),
-        maxOutputBytes,
+    const streamed =
+      await materializeUriOutput(
+        dependencies.fileSystem ??
+          NODE_OUTPUT_FILE_SYSTEM,
+        outputPath,
+        uri,
+        authority,
       );
 
-    sourceKind =
-      "URI";
-  } else {
+    return Object.freeze({
+      provider:
+        GOOGLE_GENAI_PROVIDER,
+
+      providerExecutionId,
+
+      outputIndex:
+        GOOGLE_GENAI_VIDEO_OUTPUT_INDEX,
+
+      outputPath,
+
+      mimeType:
+        GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE,
+
+      byteCount:
+        streamed.expected.byteCount,
+
+      sha256:
+        streamed.expected.sha256,
+
+      sourceKind:
+        "URI",
+
+      alreadyPresent:
+        streamed.alreadyPresent,
+    });
+  }
+
+  if (data === undefined) {
     throw new Error(
       "Google GenAI output_video must provide exactly one of data or uri.",
     );
   }
+
+  // Historical injected inline output only; production replay never
+  // yields inline data and a URI is never converted to inline.
+  const bytes =
+    requireBoundedBytes(
+      decodeStrictBase64(
+        data,
+        maxOutputBytes,
+      ),
+      maxOutputBytes,
+    );
+
+  const sourceKind:
+    GoogleGenAiOutputSourceKind =
+    "INLINE_DATA";
 
   requireMp4Signature(
     bytes,

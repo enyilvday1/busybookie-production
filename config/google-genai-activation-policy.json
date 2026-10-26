@@ -12,6 +12,7 @@
     "costAdmissionDurationSeconds": 10
   },
   "limits": {
+    "filesMetadataMaxResponseBytes": 65536,
     "maxOutputBytes": 268435456,
     "maxReferenceImageBytes": 10485760,
     "sseMaxEventBytes": 1048576,
@@ -28,6 +29,9 @@
     "reconciliationAttemptTimeoutMs": 1200000
   },
   "recovery": {
+    "streamRecoveryFirstRetryDelayMs": 5000,
+    "streamRecoverySecondRetryDelayMs": 15000,
+    "filesDownloadRetryDelayMs": 10000,
     "automatedRemoteRecoveryHorizonMs": 86400000,
     "filesMinRemainingLifetimeMs": 3600000,
     "maxStreamRecoveryAttemptsPerReconciliation": 3,

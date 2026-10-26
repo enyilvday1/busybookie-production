@@ -586,16 +586,17 @@ async function settle<T>(
   );
 }
 
-/** Yields with setImmediate, which fake setTimeout never controls. */
+/**
+ * Condition-driven: yields with real setImmediate (only setTimeout and
+ * clearTimeout are faked) until the condition holds. Real filesystem
+ * completion is not bounded by any event-loop turn count; the existing
+ * Vitest test timeout remains the only outer bound.
+ */
 async function turnsUntil(
   condition:
     () => boolean,
 ): Promise<void> {
-  for (
-    let turn = 0;
-    turn < 10_000 && !condition();
-    turn += 1
-  ) {
+  while (!condition()) {
     await new Promise(
       (resolve) =>
         setImmediate(

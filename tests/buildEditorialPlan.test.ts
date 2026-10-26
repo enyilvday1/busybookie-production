@@ -138,7 +138,25 @@ describe("E2 construction, frame and audio contracts", () => {
     for(const n of [0,-0,-1,NaN,Infinity,-Infinity,Number.MAX_VALUE,Number.MIN_VALUE,Number.MAX_SAFE_INTEGER,
       30.04,4.01,0.1+0.2,0.2800000000000001]) bad.add(n);
     expect(bad.size).toBe(32761);
-    for(const seconds of bad) expect(()=>editorialDurationFrames(seconds)).toThrow(/NON_FRAME_ALIGNED_DURATION/);
+    // One aggregate assertion instead of 32761 per-probe matchers. matchesToThrow reproduces the installed
+    // toThrow(/NON_FRAME_ALIGNED_DURATION/) contract exactly: a probe must throw; a truthy thrown value's message
+    // (or the value itself when it is a string) must match; a falsy thrown value skips the message check.
+    function matchesToThrow(thrown:unknown) {
+      if(!thrown) return true;
+      return /NON_FRAME_ALIGNED_DURATION/.test((typeof thrown==="string" ? thrown : (thrown as {message?:unknown}).message) as string);
+    }
+    const unexpected:{probe:number; reason:"accepted"|"wrong-error"; message?:string}[]=[];
+    for(const seconds of bad) {
+      let threw=false, thrown:unknown;
+      try { editorialDurationFrames(seconds); } catch(error) { threw=true; thrown=error; }
+      if(!threw) unexpected.push({probe:seconds,reason:"accepted"});
+      else if(!matchesToThrow(thrown)) {
+        const message=typeof thrown==="string" ? thrown : (thrown as {message?:unknown}).message;
+        unexpected.push({probe:seconds,reason:"wrong-error",message:typeof message==="string" ? message.slice(0,200) : typeof message});
+      }
+    }
+    // Bounded diagnostics: the full count plus the first 20 offenders; any failing probe makes count non-zero.
+    expect({count:unexpected.length,first:unexpected.slice(0,20)}).toEqual({count:0,first:[]});
   });
   it.each([0,-0,-1,NaN,Infinity,-Infinity,Number.MAX_VALUE,Number.MIN_VALUE,30.04,4.01,0.1+0.2])(
     "T14 builder rejects invalid/off-grid seconds %s", seconds=>{

@@ -8,6 +8,9 @@ const directory = "src/googleGenai/transport";
 const materializer = "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts";
 const reconciler = "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts";
 const factory = "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts";
+// B4X: the only approved runtime consumers of the factory and of the closed transport error codes.
+const operatorComposition = "src/execution/createGoogleGenAiOperatorProductionDependencies.ts";
+const operatorCli = "src/execution/cli/runGoogleGenAiOperatorCli.ts";
 const expected: Readonly<Record<string, readonly string[]>> = {
   "googleGenAiSecureOutputTransport.types.ts": ["../googleGenAiInteractionContract.js"],
   "googleGenAiSecureOutputTransportError.ts": [],
@@ -284,7 +287,7 @@ describe("B4V7 exact secure transport boundary", () => {
     // B4V6: the materializer and Google reconciler consume only the pure type/error contracts.
     expect(Object.fromEntries(Object.entries(importers).map(([name, paths]) => [name, paths.sort()]))).toEqual({
       "googleGenAiSecureOutputTransport.types.ts": [factory, materializer, reconciler, directory + "/downloadGoogleGenAiFile.ts", directory + "/getGoogleGenAiFilesMetadata.ts", directory + "/parseGoogleGenAiInteractionSse.ts", directory + "/replayGoogleGenAiInteraction.ts", directory + "/validateGoogleGenAiFilesDownloadUri.ts"],
-      "googleGenAiSecureOutputTransportError.ts": [materializer, reconciler, directory + "/downloadGoogleGenAiFile.ts", directory + "/getGoogleGenAiFilesMetadata.ts", directory + "/parseGoogleGenAiInteractionSse.ts", directory + "/replayGoogleGenAiInteraction.ts", directory + "/validateGoogleGenAiFilesDownloadUri.ts"],
+      "googleGenAiSecureOutputTransportError.ts": [operatorCli, materializer, reconciler, directory + "/downloadGoogleGenAiFile.ts", directory + "/getGoogleGenAiFilesMetadata.ts", directory + "/parseGoogleGenAiInteractionSse.ts", directory + "/replayGoogleGenAiInteraction.ts", directory + "/validateGoogleGenAiFilesDownloadUri.ts"],
       "parseGoogleGenAiInteractionSse.ts": [directory + "/getGoogleGenAiFilesMetadata.ts", directory + "/replayGoogleGenAiInteraction.ts"],
       "replayGoogleGenAiInteraction.ts": [factory],
       "validateGoogleGenAiFilesDownloadUri.ts": [directory + "/downloadGoogleGenAiFile.ts", directory + "/getGoogleGenAiFilesMetadata.ts"],
@@ -337,13 +340,14 @@ describe("B4V7 exact secure transport boundary", () => {
     }
   });
 
-  it("keeps the factory and both retired adapters without any src/scripts consumer in any module form", async () => {
+  it("allows only the B4X operator composition to consume the factory and keeps both retired adapters unconsumed in any module form", async () => {
     // Every TS/JS-family file is parsed (no raw-text prefilter); static, re-export,
     // dynamic import, require and import-equals references are all checked.
+    // B4X replaced the B4V zero-consumer invariant with this exact approved consumer.
     const { fileCount, consumers } = await scanDormancyConsumers();
     expect(fileCount).toBeGreaterThan(0);
     expect(consumers).toEqual({
-      createGoogleGenAiSingleShotSecureProductionRecovery: [],
+      createGoogleGenAiSingleShotSecureProductionRecovery: [operatorComposition],
       createGoogleGenAiSingleShotProductionInteractionGetter: [],
       createGoogleGenAiSingleShotProductionOutputRetriever: [],
     });

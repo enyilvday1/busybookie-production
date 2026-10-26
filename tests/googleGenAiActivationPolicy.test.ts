@@ -782,6 +782,10 @@ describe(
         expect(
           importers.sort(),
         ).toEqual([
+          // B4X: the operator CLI runner loads the activation policy for execute only.
+          "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+          // B4X: the operator orchestrator runs the pre-reservation cost and reference-image admission.
+          "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
           "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
           // B4V7: the dormant secure recovery factory reads the frozen limits constant.
           "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
@@ -826,6 +830,8 @@ describe(
         expect(
           references.sort(),
         ).toEqual([
+          // B4X: the operator orchestrator checks the switch before any reservation.
+          "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
           "src/execution/providers/submitGoogleGenAiSingleShot.ts",
           "src/schemas/googleGenAiActivationPolicy.schema.ts",
         ]);

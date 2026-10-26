@@ -17,6 +17,10 @@ import {
   it,
 } from "vitest";
 
+import {
+  parseAst,
+} from "rolldown/parseAst";
+
 const ROOT =
   process.cwd();
 
@@ -38,6 +42,8 @@ const FOUNDATION_MODULE_PATTERN =
   /googleGenai\/|googleGenAiPolicy\.schema|loadGoogleGenAiPolicy/;
 
 const APPROVED_FOUNDATION_CONSUMERS = [
+  "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+  "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
@@ -50,6 +56,25 @@ const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
   "src/schemas/googleGenAiActivationPolicy.schema.ts",
+] as const;
+
+// B4X operator-only runner: the two new runtime consumers of foundation modules.
+const GOOGLE_OPERATOR_ORCHESTRATOR =
+  "src/execution/executeGoogleGenAiOperatorSingleShot.ts";
+
+const GOOGLE_OPERATOR_ORCHESTRATOR_FOUNDATION_IMPORTS = [
+  "../googleGenai/assets/readGoogleGenAiReferenceImage.js",
+  "../googleGenai/googleGenAi.types.js",
+  "../googleGenai/googleGenAiExpectedCost.js",
+  "../schemas/googleGenAiPolicy.schema.js",
+] as const;
+
+const GOOGLE_OPERATOR_CLI =
+  "src/execution/cli/runGoogleGenAiOperatorCli.ts";
+
+const GOOGLE_OPERATOR_CLI_FOUNDATION_IMPORTS = [
+  "../../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
+  "../../validation/loadGoogleGenAiPolicy.js",
 ] as const;
 
 const GOOGLE_ACTIVATION_POLICY_SCHEMA =
@@ -120,6 +145,7 @@ const GOOGLE_RECONCILIATION_MODULE_PATTERN =
   /inspectGoogleGenAiExecutionLifecycle|verifyGoogleGenAiDurableCompletion|reconcileGoogleGenAiExecutionLifecycle/;
 
 const GOOGLE_RECONCILIATION_IMPORTERS = [
+  "src/execution/cli/runGoogleGenAiOperatorCli.ts",
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
@@ -357,11 +383,14 @@ const GOOGLE_PRODUCTION_INTERACTION_CREATOR_FOUNDATION_IMPORTS = [
 ] as const;
 
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
+  "src/execution/cli/runGoogleGenAiOperatorCli.ts",
   "src/execution/createExecutionSubmission.ts",
+  "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/providers/buildGoogleGenAiSingleShotPrompt.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
@@ -646,7 +675,7 @@ describe(
           [
             ...new Set(
               consumerImports.get(
-                APPROVED_FOUNDATION_CONSUMERS[0],
+                "src/execution/executionSubmission.schema.ts",
               ),
             ),
           ].sort(),
@@ -676,6 +705,30 @@ describe(
           ].sort(),
         ).toEqual([
           ...GOOGLE_ACTIVATION_POLICY_SCHEMA_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_OPERATOR_ORCHESTRATOR,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_OPERATOR_ORCHESTRATOR_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                GOOGLE_OPERATOR_CLI,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...GOOGLE_OPERATOR_CLI_FOUNDATION_IMPORTS,
         ]);
 
         expect(
@@ -1686,5 +1739,205 @@ describe(
         );
       },
     );
+  },
+);
+
+// ---------------------------------------------------------------------------
+// B4X operator-only Google runner (B4X1 lock sections 20-23). B4X ends the B4V
+// zero-consumer dormancy on purpose; these assertions replace it with the EXACT
+// approved consumer graph rather than removing enforcement.
+
+const B4X_OPERATOR_MODULES = {
+  promptBuilder: "src/execution/providers/buildGoogleGenAiSingleShotPrompt.ts",
+  orchestrator: "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
+  composition: "src/execution/createGoogleGenAiOperatorProductionDependencies.ts",
+  cliArgs: "src/execution/cli/googleGenAiOperatorCliArgs.ts",
+  cli: "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+  script: "scripts/google-genai-operator.ts",
+} as const;
+
+const B4X_GOVERNED_RUNTIME_CONSUMERS: Readonly<Record<string, readonly string[]>> = {
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts": [B4X_OPERATOR_MODULES.composition],
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts": [B4X_OPERATOR_MODULES.composition],
+  "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts": [],
+  "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts": [],
+  "src/execution/providers/submitGoogleGenAiSingleShot.ts": [B4X_OPERATOR_MODULES.orchestrator],
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [B4X_OPERATOR_MODULES.cli],
+  "src/execution/inspectGoogleGenAiExecutionLifecycle.ts": [
+    B4X_OPERATOR_MODULES.cli,
+    "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+    "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+  ],
+  "src/validation/loadGoogleGenAiActivationPolicy.ts": [B4X_OPERATOR_MODULES.cli],
+  "src/validation/loadGoogleGenAiPolicy.ts": [B4X_OPERATOR_MODULES.cli],
+  "src/googleGenai/googleGenAiExpectedCost.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
+  "src/googleGenai/assets/readGoogleGenAiReferenceImage.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
+  [B4X_OPERATOR_MODULES.promptBuilder]: [B4X_OPERATOR_MODULES.orchestrator],
+  [B4X_OPERATOR_MODULES.orchestrator]: [B4X_OPERATOR_MODULES.cli],
+  [B4X_OPERATOR_MODULES.composition]: [B4X_OPERATOR_MODULES.cli],
+  [B4X_OPERATOR_MODULES.cliArgs]: [B4X_OPERATOR_MODULES.cli],
+  [B4X_OPERATOR_MODULES.cli]: [B4X_OPERATOR_MODULES.script],
+};
+
+// Exact import maps of the new modules: "specifier" for a runtime import, "type:specifier" for a type-only import.
+const B4X_OPERATOR_IMPORTS: Readonly<Record<string, readonly string[]>> = {
+  [B4X_OPERATOR_MODULES.promptBuilder]: ["type:../../schemas/episodeManifest.schema.js"],
+  [B4X_OPERATOR_MODULES.orchestrator]: [
+    "../googleGenai/assets/readGoogleGenAiReferenceImage.js",
+    "../googleGenai/googleGenAi.types.js",
+    "../googleGenai/googleGenAiExpectedCost.js",
+    "../validation/validateEpisodeProduction.js",
+    "./providers/buildGoogleGenAiSingleShotPrompt.js",
+    "./providers/submitGoogleGenAiSingleShot.js",
+    "node:path",
+    "type:../schemas/character.schema.js",
+    "type:../schemas/episodeManifest.schema.js",
+    "type:../schemas/googleGenAiPolicy.schema.js",
+    "type:../schemas/productionRules.schema.js",
+    "type:../validation/loadGoogleGenAiActivationPolicy.js",
+    "type:./createExecutionReservation.js",
+    "type:./createExecutionSubmission.js",
+    "type:./inspectExecutionLifecycle.js",
+    "type:./singleShotExecution.types.js",
+  ],
+  [B4X_OPERATOR_MODULES.composition]: [
+    "./providers/createGoogleGenAiSingleShotProductionInteractionCreator.js",
+    "./providers/createGoogleGenAiSingleShotSecureProductionRecovery.js",
+  ],
+  [B4X_OPERATOR_MODULES.cliArgs]: ["../executionReservation.schema.js"],
+  [B4X_OPERATOR_MODULES.cli]: [
+    "../../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
+    "../../validation/loadCharacterBible.js",
+    "../../validation/loadEnvironment.js",
+    "../../validation/loadEpisodeManifest.js",
+    "../../validation/loadGoogleGenAiActivationPolicy.js",
+    "../../validation/loadGoogleGenAiPolicy.js",
+    "../../validation/loadProductionRules.js",
+    "../../validation/validateEpisodeProduction.js",
+    "../../validation/validateMediaRoot.js",
+    "../createExecutionReservation.js",
+    "../createExecutionSubmission.js",
+    "../createGoogleGenAiOperatorProductionDependencies.js",
+    "../createProductionVisualReferenceVerifier.js",
+    "../executeGoogleGenAiOperatorSingleShot.js",
+    "../inspectExecutionLifecycle.js",
+    "../inspectGoogleGenAiExecutionLifecycle.js",
+    "../readExecutionReservation.js",
+    "../reconcileGoogleGenAiExecutionLifecycle.js",
+    "./googleGenAiOperatorCliArgs.js",
+    "node:crypto",
+  ],
+  [B4X_OPERATOR_MODULES.script]: ["../src/execution/cli/runGoogleGenAiOperatorCli.js"],
+};
+
+const B4X_OPERATOR_FORBIDDEN_PATTERN =
+  /process\.env|console\.|util\.inspect|node:util|@google\/genai|\bfetch\s*\(|loadProviderRoutingPolicy|evaluateShotProvider|executeSingleShot\.js|createProductionSingleShotExecutionDependencies|createProductionExecutionReconcileDependencies|reconcileExecutionLifecycle\.js|runSingleShotExecutionCli|runExecutionReconcileCli|\/routing\/|\/runway\/|\/veo\/|\/composition\/|ProductionInteractionGetter|ProductionOutputRetriever|buildVeoPrompt|buildRunwayGen45Prompt|process\.exit\(/;
+
+type B4xModuleReference = Readonly<{ specifier: string; typeOnly: boolean }>;
+
+/** Every static, re-export, dynamic-import, require and import-equals reference (parser-decoded specifiers). */
+function b4xModuleReferences(source: string, file: string): B4xModuleReference[] {
+  const references: B4xModuleReference[] = [];
+  const literal = (node: unknown): string | undefined => {
+    const value = node as { type?: unknown; value?: unknown; expressions?: unknown[]; quasis?: { value?: { cooked?: unknown } }[] } | null;
+    if (!value || typeof value !== "object") return undefined;
+    if (value.type === "Literal" && typeof value.value === "string") return value.value;
+    const cooked = value.quasis?.[0]?.value?.cooked;
+    if (value.type === "TemplateLiteral" && value.expressions?.length === 0 && value.quasis?.length === 1 && typeof cooked === "string") return cooked;
+    return undefined;
+  };
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) { for (const child of node) visit(child); return; }
+    const value = node as Record<string, unknown>;
+    const bindings = (Array.isArray(value.specifiers) ? value.specifiers : []) as Record<string, unknown>[];
+    const specifier = literal(value.source);
+    if (value.type === "ImportDeclaration" && specifier !== undefined) {
+      references.push({ specifier, typeOnly: value.importKind === "type" || (bindings.length > 0 && bindings.every((binding) => binding.type === "ImportSpecifier" && binding.importKind === "type")) });
+    } else if ((value.type === "ExportNamedDeclaration" || value.type === "ExportAllDeclaration") && specifier !== undefined) {
+      references.push({ specifier, typeOnly: value.exportKind === "type" || (bindings.length > 0 && bindings.every((binding) => binding.exportKind === "type")) });
+    } else if (value.type === "ImportExpression" && specifier !== undefined) {
+      references.push({ specifier, typeOnly: false });
+    } else if (value.type === "CallExpression" && (value.callee as Record<string, unknown> | undefined)?.name === "require") {
+      const required = literal(Array.isArray(value.arguments) ? value.arguments[0] : undefined);
+      if (required !== undefined) references.push({ specifier: required, typeOnly: false });
+    } else if (value.type === "TSImportEqualsDeclaration") {
+      const reference = value.moduleReference as Record<string, unknown> | undefined;
+      const required = reference?.type === "TSExternalModuleReference" ? literal(reference.expression) : undefined;
+      if (required !== undefined) references.push({ specifier: required, typeOnly: value.importKind === "type" });
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(parseAst(source, { lang: "ts" }, file));
+  return references;
+}
+
+function b4xResolve(file: string, specifier: string): string | undefined {
+  if (!specifier.startsWith(".")) return undefined;
+  return toPosix(relative(ROOT, resolve(dirname(join(ROOT, file)), specifier.replace(/\.js$/, ".ts"))));
+}
+
+async function b4xScan(): Promise<Readonly<{ runtime: Map<string, string[]>; any: Map<string, string[]> }>> {
+  const runtime = new Map<string, string[]>();
+  const any = new Map<string, string[]>();
+  for (const file of [...await listTypeScriptFiles("src"), ...await listTypeScriptFiles("scripts")]) {
+    const source = await readFile(join(ROOT, file), "utf8");
+    for (const reference of b4xModuleReferences(source, file)) {
+      const target = b4xResolve(file, reference.specifier);
+      if (target === undefined) continue;
+      if (!any.get(target)?.includes(file)) any.set(target, [...any.get(target) ?? [], file]);
+      if (!reference.typeOnly && !runtime.get(target)?.includes(file)) runtime.set(target, [...runtime.get(target) ?? [], file]);
+    }
+  }
+  return { runtime, any };
+}
+
+describe(
+  "B4X operator-only Google runner boundary",
+  () => {
+    it("enforces the exact post-B4X runtime consumer graph of every governed Google module", async () => {
+      const { runtime } = await b4xScan();
+      for (const [target, consumers] of Object.entries(B4X_GOVERNED_RUNTIME_CONSUMERS)) {
+        expect([...runtime.get(target) ?? []].sort(), target).toEqual([...consumers].sort());
+      }
+    });
+
+    it("lets no shared, routing, automation, composition or status module reach the operator runner in any module form", async () => {
+      const { any } = await b4xScan();
+      expect([...any.get(B4X_OPERATOR_MODULES.promptBuilder) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.orchestrator]);
+      expect([...any.get(B4X_OPERATOR_MODULES.orchestrator) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli]);
+      expect([...any.get(B4X_OPERATOR_MODULES.composition) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli]);
+      expect([...any.get(B4X_OPERATOR_MODULES.cliArgs) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli]);
+      expect([...any.get(B4X_OPERATOR_MODULES.cli) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.script]);
+      for (const scriptsFile of await listTypeScriptFiles("scripts")) {
+        if (scriptsFile === B4X_OPERATOR_MODULES.script) continue;
+        const source = await readFile(join(ROOT, scriptsFile), "utf8");
+        expect(source, scriptsFile).not.toMatch(/GoogleGenAi|googleGenai|GOOGLE_GENAI|google-genai-operator/);
+      }
+    });
+
+    it("keeps every new operator module on its exact import map", async () => {
+      for (const [file, imports] of Object.entries(B4X_OPERATOR_IMPORTS)) {
+        const source = await readFile(join(ROOT, file), "utf8");
+        const actual = b4xModuleReferences(source, file).map((reference) => (reference.typeOnly ? `type:${reference.specifier}` : reference.specifier));
+        expect(actual.sort(), file).toEqual([...imports].sort());
+      }
+    });
+
+    it("keeps the new operator modules free of environment, console, SDK, network, routing, shared-dispatch and legacy recovery authority", async () => {
+      for (const file of Object.values(B4X_OPERATOR_MODULES)) {
+        const source = await readFile(join(ROOT, file), "utf8");
+        expect(source, file).not.toMatch(B4X_OPERATOR_FORBIDDEN_PATTERN);
+        if (file !== B4X_OPERATOR_MODULES.cli) expect(source, file).not.toMatch(/loadEnvironment|loadGoogleGenAiActivationPolicy\(/);
+      }
+    });
+
+    it("keeps the committed activation policy default-off and the shared routing configuration Google-free", async () => {
+      const policy: unknown = JSON.parse(await readFile(join(ROOT, "config/google-genai-activation-policy.json"), "utf8"));
+      expect(policy).toMatchObject({ admission: { newSubmissionsEnabled: false } });
+      for (const file of ["config/production-rules.json", "config/provider-routing-policy.json", "src/schemas/productionRules.schema.ts", "src/schemas/providerRoutingPolicy.schema.ts", "src/execution/singleShotExecution.types.ts", "src/execution/executeSingleShot.ts"]) {
+        expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/GOOGLE_GENAI|GoogleGenAi|gemini-omni/);
+      }
+    });
   },
 );

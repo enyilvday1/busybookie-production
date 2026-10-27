@@ -49,12 +49,20 @@ import {
 } from "../src/execution/executionCompletionPath.js";
 
 import {
+  createExecutionReservationPath,
+} from "../src/execution/executionReservationPath.js";
+
+import {
   createExecutionSubmissionPath,
 } from "../src/execution/executionSubmissionPath.js";
 
 import {
   inspectExecutionLifecycle,
 } from "../src/execution/inspectExecutionLifecycle.js";
+
+import {
+  inspectGoogleGenAiExecutionLifecycle,
+} from "../src/execution/inspectGoogleGenAiExecutionLifecycle.js";
 
 import {
   materializeGoogleGenAiSingleShotOutput,
@@ -3043,6 +3051,115 @@ describe(
               submission: { reservationId: RESERVATION_ID, providerExecutionId: INTERACTION_ID },
             });
             expect(durableFiles(await snapshot(mediaRoot))).toStrictEqual(before);
+          },
+        );
+
+        /** Simulated exFAT record publication: every record link reports EISDIR; optional sync fault on one exclusive final. */
+        function exfatCompletionFileSystem(
+          events: string[],
+          failSyncOn?: string,
+        ): GoogleGenAiCompletionFileSystem {
+          return {
+            mkdir: (path, options) => mkdir(path, options),
+            open: async (path, flags) => {
+              const handle = await open(path, flags);
+              const name = basename(path);
+              const isFinal = !name.startsWith(".");
+              if (isFinal) events.push(`record:open:wx:${name}`);
+              return {
+                writeFile: (data) => handle.writeFile(data),
+                sync: async () => {
+                  if (isFinal && name === failSyncOn) throw Object.assign(new Error("EIO SECRET record sync"), { code: "EIO" });
+                  await handle.sync();
+                },
+                close: () => handle.close(),
+              };
+            },
+            link: async (_existingPath, newPath) => {
+              events.push(`record:link:${basename(newPath)}`);
+              throw Object.assign(new Error("EISDIR SECRET record"), { code: "EISDIR" });
+            },
+            unlink: async (path) => {
+              events.push(`record:unlink:${basename(path)}`);
+              await unlink(path);
+            },
+          };
+        }
+
+        it(
+          "B4Y2O reaches COMPLETED when video, generation record and completion all publish through the exFAT fallback",
+          async () => {
+            const mediaRoot = await submittedShot();
+            const reservationBefore = await readFile(createExecutionReservationPath(mediaRoot, "EP92", "S01"));
+            const submissionBefore = await readFile(createExecutionSubmissionPath(mediaRoot, "EP92", "S01"));
+            vi.mocked(persistGoogleGenAiSingleShotCompletion).mockClear();
+            vi.mocked(materializeGoogleGenAiSingleShotOutput).mockClear();
+            const videoEvents: string[] = [];
+            const recordEvents: string[] = [];
+            const spies = recoverySpies({
+              outputFileSystem: exfatOutputFileSystem(videoEvents),
+              completionFileSystem: exfatCompletionFileSystem(recordEvents),
+            });
+            const result = await reconcile(mediaRoot, spies.dependencies);
+
+            expect(result.lifecycleState).toBe("COMPLETED");
+            expect(result.reconciliationMode).toBe("RECOVERED_SUBMISSION");
+            // Every hard link on the success path was refused; each final came from its own exclusive create.
+            expect(videoEvents.filter((event) => event === "link")).toHaveLength(1);
+            expect(videoEvents.filter((event) => event === "open:final:wx")).toHaveLength(1);
+            const recordName = basename(recordPath(mediaRoot));
+            const completionName = basename(completionPath(mediaRoot));
+            expect(recordEvents).toEqual([
+              `record:link:${recordName}`,
+              `record:open:wx:${recordName}`,
+              expect.stringMatching(/^record:unlink:\..+\.part$/),
+              `record:link:${completionName}`,
+              `record:open:wx:${completionName}`,
+              expect.stringMatching(/^record:unlink:\..+\.part$/),
+            ]);
+
+            expect((await readFile(outputPath(mediaRoot))).equals(OUTPUT_BYTES)).toBe(true);
+            expect(await exists(recordPath(mediaRoot))).toBe(true);
+            expect(await exists(completionPath(mediaRoot))).toBe(true);
+            expect(await partFiles(mediaRoot)).toEqual([]);
+            expect((await inspectGoogleGenAiExecutionLifecycle(mediaRoot, "EP92", "S01")).state).toBe("COMPLETED");
+            expect((await readFile(createExecutionReservationPath(mediaRoot, "EP92", "S01"))).equals(reservationBefore)).toBe(true);
+            expect((await readFile(createExecutionSubmissionPath(mediaRoot, "EP92", "S01"))).equals(submissionBefore)).toBe(true);
+            // Same existing submission only: one replay, one materialization, one persistence; nothing created.
+            expect(spies.replayInteraction).toHaveBeenCalledTimes(1);
+            expect(spies.replayInteraction.mock.calls[0]?.[0]).toBe(INTERACTION_ID);
+            expect(vi.mocked(materializeGoogleGenAiSingleShotOutput)).toHaveBeenCalledTimes(1);
+            expect(vi.mocked(persistGoogleGenAiSingleShotCompletion)).toHaveBeenCalledTimes(1);
+          },
+        );
+
+        it(
+          "B4Y2O keeps the lifecycle SUBMITTED when the exFAT completion-record fallback fails after the generation record",
+          async () => {
+            const mediaRoot = await submittedShot();
+            vi.mocked(persistGoogleGenAiSingleShotCompletion).mockClear();
+            const recordEvents: string[] = [];
+            const completionName = basename(completionPath(mediaRoot));
+            const spies = recoverySpies({
+              outputFileSystem: exfatOutputFileSystem([]),
+              completionFileSystem: exfatCompletionFileSystem(recordEvents, completionName),
+            });
+            const error = await settle(reconcile(mediaRoot, spies.dependencies));
+
+            expect(error).toBeInstanceOf(Error);
+            expect(String(error)).not.toContain("SECRET");
+            expect(vi.mocked(persistGoogleGenAiSingleShotCompletion)).toHaveBeenCalledTimes(1);
+            expect(recordEvents).toContain(`record:open:wx:${completionName}`);
+            expect(recordEvents).toContain(`record:unlink:${completionName}`);
+            // The generation record stays published and valid; no completion exists.
+            expect(await exists(recordPath(mediaRoot))).toBe(true);
+            expect(JSON.parse(await readFile(recordPath(mediaRoot), "utf8"))).toMatchObject({
+              providerExecutionId: INTERACTION_ID,
+              reservationId: RESERVATION_ID,
+            });
+            expect(await exists(completionPath(mediaRoot))).toBe(false);
+            expect(await partFiles(mediaRoot)).toEqual([]);
+            expect((await inspectGoogleGenAiExecutionLifecycle(mediaRoot, "EP92", "S01")).state).toBe("SUBMITTED");
           },
         );
 

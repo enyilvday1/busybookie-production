@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   rm,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -48,6 +49,10 @@ import {
 import {
   inspectExecutionLifecycle,
 } from "../src/execution/inspectExecutionLifecycle.js";
+
+import {
+  inspectGoogleGenAiExecutionLifecycle,
+} from "../src/execution/inspectGoogleGenAiExecutionLifecycle.js";
 
 import {
   readExecutionCompletion,
@@ -3025,5 +3030,477 @@ describe(
         );
       },
     );
+  },
+);
+
+describe(
+  "Busybookie Google GenAI completion persistence B4Y2O exFAT record publication",
+  () => {
+    const NOW = "2026-10-24T12:10:00.000Z";
+
+    type FinalFault =
+      | "partialThenFail"
+      | "silentShort"
+      | "ENOSPC"
+      | "EIO"
+      | "corruptSameLength"
+      | "syncFail"
+      | "closeFail";
+
+    type ExfatOptions = Readonly<{
+      // Final names whose hard link reports EISDIR (default: every record).
+      eisdirFor?: (name: string) => boolean;
+      // Injected non-EISDIR link failure (no EISDIR at all).
+      linkError?: () => unknown;
+      // Runs immediately before the exclusive final create (race / pre-existing entry).
+      beforeFinalCreate?: (finalPath: string) => Promise<void>;
+      fault?: FinalFault;
+      faultFor?: string;
+      failFinalUnlinkFor?: string;
+      chunkedWrites?: boolean;
+    }>;
+
+    const coded = (message: string, code: string) => Object.assign(new Error(message), { code });
+
+    /** Simulated exFAT record publication over a real temp media root; events record every step. */
+    function exfatFileSystem(options: ExfatOptions = {}): RecordingFileSystem {
+      const recording = recordingFileSystem();
+      const { events } = recording;
+      const base = recording.fileSystem;
+      const fileSystem: GoogleGenAiCompletionFileSystem = {
+        ...base,
+        link: async (existingPath, newPath) => {
+          const name = basename(newPath);
+          if (options.linkError !== undefined) {
+            events.push(`link:${name}`);
+            throw options.linkError();
+          }
+          if (options.eisdirFor !== undefined && !options.eisdirFor(name)) return base.link(existingPath, newPath);
+          events.push(`link:${name}`);
+          throw coded("EISDIR: illegal operation on a directory, link SECRET", "EISDIR");
+        },
+        open: async (path, flags) => {
+          const name = basename(path);
+          if (name.startsWith(".")) return base.open(path, flags);
+          await options.beforeFinalCreate?.(path);
+          events.push(`open:${flags}:${name}`);
+          const handle = await open(path, flags);
+          const faulted = options.fault !== undefined && (options.faultFor === undefined || options.faultFor === name);
+          return {
+            writeFile: async (data) => {
+              events.push(`write:${name}`);
+              if (faulted && (options.fault === "ENOSPC" || options.fault === "EIO")) {
+                throw coded(`${options.fault} SECRET final write`, options.fault);
+              }
+              if (faulted && options.fault === "partialThenFail") {
+                const first = data.subarray(0, Math.max(1, Math.floor(data.byteLength / 2)));
+                const { bytesWritten } = await handle.write(first, 0, first.byteLength, 0);
+                events.push(`write:partial:${bytesWritten}`);
+                throw coded("EIO SECRET second write", "EIO");
+              }
+              if (faulted && options.fault === "silentShort") {
+                await handle.writeFile(data.subarray(0, data.byteLength - 7));
+                return;
+              }
+              if (faulted && options.fault === "corruptSameLength") {
+                const corrupted = Buffer.from(data);
+                corrupted[corrupted.byteLength - 3] = 0x41;
+                await handle.writeFile(corrupted);
+                return;
+              }
+              if (options.chunkedWrites === true) {
+                // Several genuinely short writes behind the complete-write primitive.
+                let offset = 0;
+                const step = Math.max(1, Math.ceil(data.byteLength / 3));
+                while (offset < data.byteLength) {
+                  const { bytesWritten } = await handle.write(data, offset, Math.min(step, data.byteLength - offset), offset);
+                  events.push(`write:chunk:${name}`);
+                  offset += bytesWritten;
+                }
+                return;
+              }
+              await handle.writeFile(data);
+            },
+            sync: async () => {
+              if (faulted && options.fault === "syncFail") throw coded("EIO SECRET final sync", "EIO");
+              await handle.sync();
+              events.push(`sync:${name}`);
+            },
+            close: async () => {
+              if (faulted && options.fault === "closeFail") {
+                // The descriptor is really released, then the close stage reports failure.
+                await handle.close();
+                events.push(`close:fault:${name}`);
+                throw coded("EIO SECRET final close", "EIO");
+              }
+              await handle.close();
+              events.push(`close:${name}`);
+            },
+          };
+        },
+        unlink: async (path) => {
+          if (basename(path) === options.failFinalUnlinkFor) {
+            events.push(`unlink:fault:${basename(path)}`);
+            throw coded("EBUSY SECRET unlink", "EBUSY");
+          }
+          return base.unlink(path);
+        },
+      };
+      return { fileSystem, events };
+    }
+
+    async function settled(promise: Promise<unknown>): Promise<unknown> {
+      try {
+        await promise;
+      } catch (error) {
+        return error;
+      }
+      throw new Error("Expected the persistence to reject.");
+    }
+
+    const serialized = (record: unknown) => `${JSON.stringify(record, null, 2)}\n`;
+
+    function names(mediaRoot: string) {
+      return {
+        generation: basename(generationRecordPathFor(mediaRoot)),
+        completion: basename(completionPathFor(mediaRoot)),
+      };
+    }
+
+    async function partEntries(mediaRoot: string): Promise<string[]> {
+      return (await shotDirectoryEntries(mediaRoot)).filter((entry) => entry.endsWith(".part"));
+    }
+
+    function persist(
+      shot: Awaited<ReturnType<typeof prepareShot>>,
+      fileSystem: GoogleGenAiCompletionFileSystem,
+    ) {
+      return persistGoogleGenAiSingleShotCompletion(
+        persistenceInput(shot.mediaRoot, shot.materializedOutput),
+        { now: () => NOW, fileSystem },
+      );
+    }
+
+    /** Publishes both records normally, captures their bytes, then removes them (a clean SUBMITTED shot). */
+    async function seedRecordBytes(shot: Awaited<ReturnType<typeof prepareShot>>) {
+      await persist(shot, recordingFileSystem().fileSystem);
+      const generation = await readFile(generationRecordPathFor(shot.mediaRoot));
+      const completion = await readFile(completionPathFor(shot.mediaRoot));
+      await unlink(completionPathFor(shot.mediaRoot));
+      await unlink(generationRecordPathFor(shot.mediaRoot));
+      return { generation, completion };
+    }
+
+    function expectSanitized(error: unknown) {
+      expect(String(error)).not.toMatch(/SECRET|EIO|ENOSPC|EBUSY|EISDIR/);
+      expect(String(error)).not.toContain(INTERACTION_ID);
+    }
+
+    async function expectNoOwnedRecord(mediaRoot: string, name: string) {
+      expect(await shotDirectoryEntries(mediaRoot)).not.toContain(name);
+      expect(await partEntries(mediaRoot)).toEqual([]);
+      expect(await pathExists(completionPathFor(mediaRoot))).toBe(false);
+      expect((await inspectGoogleGenAiExecutionLifecycle(mediaRoot, "EP92", "S01")).state).toBe("SUBMITTED");
+    }
+
+    it("PT1 keeps the hard-link fast path: a successful link never creates a fallback final", async () => {
+      const shot = await prepareShot();
+      const recording = exfatFileSystem({ eisdirFor: () => false });
+      const result = await persist(shot, recording.fileSystem);
+      const { generation, completion } = names(shot.mediaRoot);
+      expect(recording.events).toContain(`link:${generation}`);
+      expect(recording.events).toContain(`link:${completion}`);
+      expect(recording.events).not.toContain(`open:wx:${generation}`);
+      expect(recording.events).not.toContain(`open:wx:${completion}`);
+      expect(recording.events.filter((event) => event.startsWith("write:"))).toEqual([]);
+      expect(await readFile(generationRecordPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.generationRecord));
+      expect(await readFile(completionPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.completion));
+    });
+
+    it("PT2 publishes the GENERATION record through one exclusive final after EISDIR and re-reads it", async () => {
+      const shot = await prepareShot();
+      const { generation, completion } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ eisdirFor: (name) => name === generation });
+      const result = await persist(shot, recording.fileSystem);
+      const at = (event: string) => recording.events.indexOf(event);
+      expect(recording.events.filter((event) => event === `open:wx:${generation}`)).toHaveLength(1);
+      expect(at(`link:${generation}`)).toBeLessThan(at(`open:wx:${generation}`));
+      expect(at(`open:wx:${generation}`)).toBeLessThan(at(`write:${generation}`));
+      expect(at(`write:${generation}`)).toBeLessThan(at(`sync:${generation}`));
+      expect(at(`sync:${generation}`)).toBeLessThan(at(`close:${generation}`));
+      expect(recording.events.slice(at(`close:${generation}`), at(`link:${completion}`))).toEqual([
+        `close:${generation}`,
+        expect.stringMatching(/^unlink:\..+\.part$/),
+        "mkdir",
+        expect.stringMatching(/^open:wx:\..+\.part$/),
+        "write",
+        "sync",
+        "close",
+      ]);
+      expect(recording.events).not.toContain(`open:wx:${completion}`);
+      expect(result.generationRecordAlreadyPresent).toBe(false);
+      expect(await readFile(generationRecordPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.generationRecord));
+      expect(await partEntries(shot.mediaRoot)).toEqual([]);
+    });
+
+    it("PT3 publishes the COMPLETION record through its own exclusive final after EISDIR", async () => {
+      const shot = await prepareShot();
+      const { generation, completion } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ eisdirFor: (name) => name === completion });
+      const result = await persist(shot, recording.fileSystem);
+      expect(recording.events).not.toContain(`open:wx:${generation}`);
+      expect(recording.events.filter((event) => event === `open:wx:${completion}`)).toHaveLength(1);
+      expect(recording.events).toContain(`sync:${completion}`);
+      expect(recording.events).toContain(`close:${completion}`);
+      expect(result.completionAlreadyPresent).toBe(false);
+      expect(await readFile(completionPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.completion));
+      expect((await inspectGoogleGenAiExecutionLifecycle(shot.mediaRoot, "EP92", "S01")).state).toBe("COMPLETED");
+      expect(await partEntries(shot.mediaRoot)).toEqual([]);
+    });
+
+    it("PT4 publishes BOTH records through the fallback with several short writes and exact bytes", async () => {
+      const shot = await prepareShot();
+      const { generation, completion } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ chunkedWrites: true });
+      const result = await persist(shot, recording.fileSystem);
+      expect(recording.events.filter((event) => event === `write:chunk:${generation}`).length).toBeGreaterThan(1);
+      expect(recording.events.filter((event) => event === `write:chunk:${completion}`).length).toBeGreaterThan(1);
+      expect(result.generationRecordAlreadyPresent).toBe(false);
+      expect(result.completionAlreadyPresent).toBe(false);
+      expect(await readFile(generationRecordPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.generationRecord));
+      expect(await readFile(completionPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.completion));
+      expect(await partEntries(shot.mediaRoot)).toEqual([]);
+      expect((await inspectGoogleGenAiExecutionLifecycle(shot.mediaRoot, "EP92", "S01")).state).toBe("COMPLETED");
+    });
+
+    it("PT5 reuses an exact existing generation record under EISDIR without rewriting it", async () => {
+      const shot = await prepareShot();
+      const { generation, completion } = names(shot.mediaRoot);
+      await persist(shot, recordingFileSystem().fileSystem);
+      await unlink(completionPathFor(shot.mediaRoot));
+      const before = await readFile(generationRecordPathFor(shot.mediaRoot));
+      const recording = exfatFileSystem();
+      const result = await persist(shot, recording.fileSystem);
+      expect(result.generationRecordAlreadyPresent).toBe(true);
+      expect(recording.events).not.toContain(`open:wx:${generation}`);
+      expect(recording.events).toContain(`open:wx:${completion}`);
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(before)).toBe(true);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(true);
+    });
+
+    it("PT6 accepts matching records that appear before the exclusive create (wx EEXIST) without writing", async () => {
+      const shot = await prepareShot();
+      const seeded = await seedRecordBytes(shot);
+      const recording = exfatFileSystem({
+        beforeFinalCreate: async (finalPath) => {
+          await writeFile(finalPath, finalPath === completionPathFor(shot.mediaRoot) ? seeded.completion : seeded.generation, { flag: "wx" });
+        },
+      });
+      const result = await persist(shot, recording.fileSystem);
+      expect(result.generationRecordAlreadyPresent).toBe(true);
+      expect(result.completionAlreadyPresent).toBe(true);
+      expect(recording.events.filter((event) => event.startsWith("write:"))).toEqual([]);
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(seeded.generation)).toBe(true);
+      expect((await readFile(completionPathFor(shot.mediaRoot))).equals(seeded.completion)).toBe(true);
+      expect(await partEntries(shot.mediaRoot)).toEqual([]);
+    });
+
+    it("NT1 rejects a different record (raced in, then pre-existing) and never overwrites or deletes it", async () => {
+      const shot = await prepareShot();
+      const seeded = await seedRecordBytes(shot);
+      const different = JSON.parse(seeded.generation.toString("utf8"));
+      different.outputs[0].bytes += 1;
+      const differentBytes = Buffer.from(serialized(different), "utf8");
+      const raced = exfatFileSystem({
+        beforeFinalCreate: async (finalPath) => {
+          if (finalPath === generationRecordPathFor(shot.mediaRoot)) await writeFile(finalPath, differentBytes, { flag: "wx" });
+        },
+      });
+      const racedError = await settled(persist(shot, raced.fileSystem));
+      expect(String(racedError)).toMatch(/does not match the verified output evidence/);
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(differentBytes)).toBe(true);
+      expect(raced.events.filter((event) => event.startsWith("write:"))).toEqual([]);
+      // The same record now pre-exists: rejected again, still untouched.
+      const preexisting = exfatFileSystem();
+      expect(String(await settled(persist(shot, preexisting.fileSystem)))).toMatch(/does not match the verified output evidence/);
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(differentBytes)).toBe(true);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(false);
+    });
+
+    it("NT2 rejects a truncated record that wins the exclusive create and leaves it in place", async () => {
+      const shot = await prepareShot();
+      const seeded = await seedRecordBytes(shot);
+      const truncated = seeded.generation.subarray(0, 40);
+      const recording = exfatFileSystem({
+        beforeFinalCreate: async (finalPath) => {
+          if (finalPath === generationRecordPathFor(shot.mediaRoot)) await writeFile(finalPath, truncated, { flag: "wx" });
+        },
+      });
+      await settled(persist(shot, recording.fileSystem));
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(truncated)).toBe(true);
+      expect(recording.events).not.toContain(`unlink:${basename(generationRecordPathFor(shot.mediaRoot))}`);
+      expect(recording.events.filter((event) => event.startsWith("write:"))).toEqual([]);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(false);
+    });
+
+    it("NT3 fails closed when a directory occupies the final path and leaves the directory untouched", async () => {
+      const shot = await prepareShot();
+      const recordPath = generationRecordPathFor(shot.mediaRoot);
+      const recording = exfatFileSystem({
+        beforeFinalCreate: async (finalPath) => {
+          if (finalPath === recordPath) await mkdir(finalPath);
+        },
+      });
+      await settled(persist(shot, recording.fileSystem));
+      expect((await stat(recordPath)).isDirectory()).toBe(true);
+      expect(recording.events.filter((event) => event.startsWith("write:"))).toEqual([]);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(false);
+    });
+
+    const NON_EISDIR_LINK_FAILURES: ReadonlyArray<readonly [string, () => unknown]> = [
+      ["EPERM", () => coded("EPERM SECRET", "EPERM")],
+      ["EACCES", () => coded("EACCES SECRET", "EACCES")],
+      ["ENOTSUP", () => coded("ENOTSUP SECRET", "ENOTSUP")],
+      ["EXDEV", () => coded("EXDEV SECRET", "EXDEV")],
+      ["EIO", () => coded("EIO SECRET", "EIO")],
+      ["ENOENT", () => coded("ENOENT SECRET", "ENOENT")],
+      ["unknown code", () => coded("SECRET", "UNKNOWN_CODE")],
+      ["non-object", () => "EISDIR"],
+    ];
+
+    it.each(NON_EISDIR_LINK_FAILURES)("NT4 a %s link failure keeps the no-fallback error and never creates the final", async (_label, linkError) => {
+      const shot = await prepareShot();
+      const recording = exfatFileSystem({ linkError });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expect(String(error)).toMatch(/No rename, copy, or direct-write fallback is permitted/);
+      expect(recording.events.some((event) => /^open:wx:[^.]/.test(event))).toBe(false);
+      await expectNoOwnedRecord(shot.mediaRoot, names(shot.mediaRoot).generation);
+    });
+
+    it("NT5 a positive partial write followed by a failing write removes the owned final and fails", async () => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: "partialThenFail", faultFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expect(String(error)).toMatch(/exclusive-copy publication to .+ failed\./);
+      expectSanitized(error);
+      const partial = recording.events.find((event) => event.startsWith("write:partial:"));
+      expect(Number(partial?.split(":")[2])).toBeGreaterThan(0);
+      expect(recording.events.indexOf(`unlink:${generation}`)).toBeGreaterThan(recording.events.indexOf(partial ?? ""));
+      await expectNoOwnedRecord(shot.mediaRoot, generation);
+    });
+
+    it("NT6 a silently short final is caught by the byte re-read and removed", async () => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: "silentShort", faultFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expect((error as Error).cause).toMatchObject({ message: expect.stringMatching(/does not match the serialized record/) });
+      expect(recording.events).toContain(`close:${generation}`);
+      expect(recording.events).toContain(`unlink:${generation}`);
+      await expectNoOwnedRecord(shot.mediaRoot, generation);
+    });
+
+    it.each(["ENOSPC", "EIO"] as const)("NT7 a %s final write failure removes the owned final, sanitized", async (code) => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: code, faultFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expectSanitized(error);
+      expect((error as Error).cause).toMatchObject({ code });
+      expect(recording.events).toContain(`unlink:${generation}`);
+      await expectNoOwnedRecord(shot.mediaRoot, generation);
+    });
+
+    it("NT8 a final sync failure never publishes and removes the owned final", async () => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: "syncFail", faultFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expectSanitized(error);
+      expect(recording.events).not.toContain(`sync:${generation}`);
+      expect(recording.events).toContain(`unlink:${generation}`);
+      await expectNoOwnedRecord(shot.mediaRoot, generation);
+    });
+
+    it("NT9 a fallback FINAL close failure is never success: no retried close, owned final removed", async () => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: "closeFail", faultFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expectSanitized(error);
+      const at = (event: string) => recording.events.indexOf(event);
+      expect(at(`sync:${generation}`)).toBeLessThan(at(`close:fault:${generation}`));
+      expect(recording.events.filter((event) => event.startsWith("close:") && event.endsWith(generation))).toEqual([`close:fault:${generation}`]);
+      expect(at(`unlink:${generation}`)).toBeGreaterThan(at(`close:fault:${generation}`));
+      await expectNoOwnedRecord(shot.mediaRoot, generation);
+    });
+
+    it("NT10 same-length corruption is caught by the byte re-read and the owned final removed", async () => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: "corruptSameLength", faultFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expect((error as Error).cause).toMatchObject({ message: expect.stringMatching(/does not match the serialized record/) });
+      expect(recording.events).toContain(`unlink:${generation}`);
+      await expectNoOwnedRecord(shot.mediaRoot, generation);
+    });
+
+    it("NT11 an owned-final cleanup failure is surfaced as an AggregateError, never success", async () => {
+      const shot = await prepareShot();
+      const { generation } = names(shot.mediaRoot);
+      const recording = exfatFileSystem({ fault: "EIO", faultFor: generation, failFinalUnlinkFor: generation });
+      const error = await settled(persist(shot, recording.fileSystem));
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(String(error)).toMatch(/partial record could not be removed/);
+      expectSanitized(error);
+      expect(recording.events).toContain(`unlink:fault:${generation}`);
+      // The temp record is still cleaned up; no completion exists.
+      expect(await partEntries(shot.mediaRoot)).toEqual([]);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(false);
+      expect((await inspectGoogleGenAiExecutionLifecycle(shot.mediaRoot, "EP92", "S01")).state).toBe("SUBMITTED");
+    });
+
+    it("NT12 generation success then completion failure stays SUBMITTED, and an offline retry reuses the generation record", async () => {
+      const shot = await prepareShot();
+      const { generation, completion } = names(shot.mediaRoot);
+      const failing = exfatFileSystem({ fault: "syncFail", faultFor: completion });
+      const error = await settled(persist(shot, failing.fileSystem));
+      expectSanitized(error);
+      expect(failing.events).toContain(`open:wx:${generation}`);
+      const generationBytes = await readFile(generationRecordPathFor(shot.mediaRoot));
+      expect(JSON.parse(generationBytes.toString("utf8"))).toMatchObject({
+        providerExecutionId: INTERACTION_ID,
+        reservationId: RESERVATION_ID,
+        recordedAt: NOW,
+      });
+      expect(failing.events).toContain(`unlink:${completion}`);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(false);
+      expect(await partEntries(shot.mediaRoot)).toEqual([]);
+      expect((await inspectGoogleGenAiExecutionLifecycle(shot.mediaRoot, "EP92", "S01")).state).toBe("SUBMITTED");
+
+      // Offline retry: the generation record is verified and reused, never rewritten; completion then persists.
+      const healthy = exfatFileSystem();
+      const result = await persist(shot, healthy.fileSystem);
+      expect(result.generationRecordAlreadyPresent).toBe(true);
+      expect(result.completionAlreadyPresent).toBe(false);
+      expect(healthy.events).not.toContain(`open:wx:${generation}`);
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(generationBytes)).toBe(true);
+      expect(await readFile(completionPathFor(shot.mediaRoot), "utf8")).toBe(serialized(result.completion));
+      expect((await inspectGoogleGenAiExecutionLifecycle(shot.mediaRoot, "EP92", "S01")).state).toBe("COMPLETED");
+    });
+
+    it("NT13 a crash-left partial generation record fails closed and is never overwritten or deleted", async () => {
+      const shot = await prepareShot();
+      const seeded = await seedRecordBytes(shot);
+      const crashLeft = seeded.generation.subarray(0, seeded.generation.byteLength - 20);
+      await writeFile(generationRecordPathFor(shot.mediaRoot), crashLeft, { flag: "wx" });
+      const recording = exfatFileSystem();
+      await settled(persist(shot, recording.fileSystem));
+      expect((await readFile(generationRecordPathFor(shot.mediaRoot))).equals(crashLeft)).toBe(true);
+      expect(recording.events.some((event) => /^open:wx:[^.]/.test(event))).toBe(false);
+      expect(recording.events.some((event) => event.startsWith("unlink:"))).toBe(false);
+      expect(await pathExists(completionPathFor(shot.mediaRoot))).toBe(false);
+    });
   },
 );

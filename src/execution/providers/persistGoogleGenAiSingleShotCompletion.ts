@@ -8,6 +8,7 @@ import {
   lstat,
   mkdir,
   open,
+  readFile,
   realpath,
   unlink,
 } from "node:fs/promises";
@@ -81,7 +82,11 @@ import type {
  * disk, then publishes the Google generation record followed by the Google
  * 1.1 execution completion. Both JSON records are published with an
  * exclusive hard link from a fully written and fsynced temporary file and
- * are never replaced. An existing completion is only ever verified; this
+ * are never replaced. Only where the volume cannot hard-link (EISDIR, as
+ * exFAT reports on Windows) are the same serialized bytes written through
+ * an exclusively created ("wx") final handle, synced, closed and re-read
+ * byte-for-byte before publication succeeds; there is no rename or
+ * overwrite path. An existing completion is only ever verified; this
  * adapter never creates evidence underneath it. No provider call, retry,
  * resubmission, routing, or reconciliation happens here.
  */
@@ -618,7 +623,151 @@ function requireMatchingCompletion(
 }
 
 /**
- * Publishes the serialized record at finalPath with an exclusive hard link.
+ * Publishes exactly `bytes` at finalPath through an exclusively created
+ * final handle, used only after the hard link reported EISDIR. EISDIR says
+ * nothing about the destination, so the "wx" create is the sole authority:
+ * EEXIST returns "EXISTS" for the caller's existing-record contract and
+ * nothing is written. Ownership of finalPath begins only after a successful
+ * create; any later failure removes that owned final and never succeeds.
+ */
+async function publishRecordBytesExclusively(
+  fileSystem:
+    GoogleGenAiCompletionFileSystem,
+
+  finalPath:
+    string,
+
+  bytes:
+    Buffer,
+): Promise<"PUBLISHED" | "EXISTS"> {
+  let destination:
+    GoogleGenAiCompletionFileHandle;
+
+  try {
+    destination =
+      await fileSystem.open(
+        finalPath,
+        "wx",
+      );
+  } catch (error) {
+    if (
+      errorCode(
+        error,
+      ) ===
+      "EEXIST"
+    ) {
+      return "EXISTS";
+    }
+
+    throw new Error(
+      `Google GenAI record exclusive-copy publication to ${finalPath} failed.`,
+      {
+        cause:
+          error,
+      },
+    );
+  }
+
+  let destinationOpen =
+    true;
+
+  let failure:
+    unknown;
+
+  try {
+    // Bytes reach the final only through the exclusively acquired handle.
+    await destination.writeFile(
+      bytes,
+    );
+
+    await destination.sync();
+
+    destinationOpen =
+      false;
+
+    await destination.close();
+
+    // Independent byte-for-byte re-read of the final itself.
+    const written =
+      await readFile(
+        finalPath,
+      );
+
+    if (
+      !written.equals(
+        bytes,
+      )
+    ) {
+      throw new Error(
+        "Google GenAI record exclusive-copy publication final does not match the serialized record.",
+      );
+    }
+
+    return "PUBLISHED";
+  } catch (error) {
+    failure =
+      error;
+  }
+
+  // Reached only on failure: the final was created by this invocation and
+  // was never verified, so it is the sole permitted cleanup target.
+  let cleanupError:
+    unknown;
+
+  let cleanupFailed =
+    false;
+
+  if (destinationOpen) {
+    try {
+      await destination.close();
+    } catch (error) {
+      cleanupFailed =
+        true;
+
+      cleanupError =
+        error;
+    }
+  }
+
+  try {
+    await fileSystem.unlink(
+      finalPath,
+    );
+  } catch (error) {
+    if (!cleanupFailed) {
+      cleanupError =
+        error;
+    }
+
+    cleanupFailed =
+      true;
+  }
+
+  const publicationFailure =
+    new Error(
+      `Google GenAI record exclusive-copy publication to ${finalPath} failed.`,
+      {
+        cause:
+          failure,
+      },
+    );
+
+  if (cleanupFailed) {
+    throw new AggregateError(
+      [
+        publicationFailure,
+        cleanupError,
+      ],
+      `Google GenAI record exclusive-copy publication to ${finalPath} failed and its partial record could not be removed.`,
+    );
+  }
+
+  throw publicationFailure;
+}
+
+/**
+ * Publishes the serialized record at finalPath with an exclusive hard link,
+ * falling back to an exclusive-create copy of the same bytes only on EISDIR.
  * Returns "PUBLISHED" when this invocation created finalPath and "EXISTS"
  * when another writer already owns it. Never replaces an existing file.
  */
@@ -651,6 +800,14 @@ async function publishJsonRecordExclusively(
       `.${basename(finalPath)}.${randomUUID()}.part`,
     );
 
+  // The one authoritative byte sequence for the temp, any fallback final and
+  // its re-read comparison; never reserialized.
+  const bytes =
+    Buffer.from(
+      serialized,
+      "utf8",
+    );
+
   let temporaryCreated =
     false;
 
@@ -676,10 +833,7 @@ async function publishJsonRecordExclusively(
 
     try {
       await handle.writeFile(
-        Buffer.from(
-          serialized,
-          "utf8",
-        ),
+        bytes,
       );
 
       await handle.sync();
@@ -707,12 +861,22 @@ async function publishJsonRecordExclusively(
         finalPath,
       );
     } catch (error) {
-      if (
+      const code =
         errorCode(
           error,
-        ) !==
-        "EEXIST"
-      ) {
+        );
+
+      if (code === "EEXIST") {
+        outcome =
+          "EXISTS";
+      } else if (code === "EISDIR") {
+        outcome =
+          await publishRecordBytesExclusively(
+            fileSystem,
+            finalPath,
+            bytes,
+          );
+      } else {
         throw new Error(
           `Google GenAI record hard-link publication to ${finalPath} failed. No rename, copy, or direct-write fallback is permitted.`,
           {
@@ -721,9 +885,6 @@ async function publishJsonRecordExclusively(
           },
         );
       }
-
-      outcome =
-        "EXISTS";
     }
   } catch (error) {
     failed =

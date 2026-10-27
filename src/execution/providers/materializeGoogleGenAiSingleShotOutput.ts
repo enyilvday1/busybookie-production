@@ -58,9 +58,12 @@ import {
  * video/mp4 output, bounds and validates the bytes, and publishes them to
  * the Google output path without ever replacing an existing file. The
  * final file is published with an exclusive hard link from a fully written
- * and fsynced temporary file; there is no rename, copy, or direct-write
- * path. It never creates, resubmits, completes, reconciles, or mutates the
- * reservation or submission.
+ * and fsynced temporary file. Only where the volume cannot hard-link (EISDIR,
+ * as exFAT reports on Windows) and the final is proven absent, the verified
+ * bytes are copied through an exclusively created ("wx") final handle and the
+ * final is fully revalidated before publication succeeds; there is no rename
+ * or overwrite path. It never creates, resubmits, completes, reconciles, or
+ * mutates the reservation or submission.
  *
  * A URI output is never buffered whole. Each attempt prepares fresh
  * verified metadata through the injected prepareUri, then streams the
@@ -1379,46 +1382,72 @@ async function publishGoogleGenAiOutput(
 
     await handle.close();
 
-    try {
-      await fileSystem.link(
+    const outcome =
+      await publishVerifiedTemporaryFileNoOverwrite(
+        fileSystem,
         temporaryPath,
         finalPath,
+        expected,
+        {
+          link:
+            () =>
+              fileSystem.link(
+                temporaryPath,
+                finalPath,
+              ),
+
+          // The inline path has no recovery context to admit steps against.
+          checkpoint:
+            () => undefined,
+
+          existingFinalHoldsExpected:
+            finalHoldsExpectedContent,
+
+          rejectLinkFailure:
+            (error) =>
+              new Error(
+                `Google GenAI output hard-link publication to ${finalPath} failed. No rename, copy, or direct-write fallback is permitted.`,
+                {
+                  cause:
+                    error,
+                },
+              ),
+
+          rejectMissingAfterCollision:
+            (error) =>
+              new Error(
+                `Google GenAI output hard-link publication to ${finalPath} reported EEXIST but no final file is present.`,
+                {
+                  cause:
+                    error,
+                },
+              ),
+
+          rejectCopyFailure:
+            (cause, ownedFinalCleanupFailed) => {
+              const failure =
+                new Error(
+                  `Google GenAI output exclusive-copy publication to ${finalPath} failed.`,
+                  {
+                    cause,
+                  },
+                );
+
+              return ownedFinalCleanupFailed
+                ? new AggregateError(
+                    [
+                      failure,
+                    ],
+                    `Google GenAI output exclusive-copy publication to ${finalPath} failed and its partial final could not be removed.`,
+                  )
+                : failure;
+            },
+        },
       );
-    } catch (error) {
-      if (
-        errorCode(
-          error,
-        ) !==
-        "EEXIST"
-      ) {
-        throw new Error(
-          `Google GenAI output hard-link publication to ${finalPath} failed. No rename, copy, or direct-write fallback is permitted.`,
-          {
-            cause:
-              error,
-          },
-        );
-      }
 
-      if (
-        !(await finalHoldsExpectedContent(
-          fileSystem,
-          finalPath,
-          expected,
-        ))
-      ) {
-        throw new Error(
-          `Google GenAI output hard-link publication to ${finalPath} reported EEXIST but no final file is present.`,
-          {
-            cause:
-              error,
-          },
-        );
-      }
-
-      alreadyPresent =
-        true;
-    }
+    alreadyPresent =
+      outcome ===
+      "ALREADY_PRESENT";
   } catch (error) {
     failed =
       true;
@@ -1653,6 +1682,426 @@ async function uriFinalHoldsExpectedContent(
   }
 
   return true;
+}
+
+type VerifiedPublicationOutcome =
+  | "LINKED"
+  | "ALREADY_PRESENT"
+  | "COPIED";
+
+/** Site-specific policy for the shared no-overwrite publication helper. */
+type VerifiedPublicationPolicy =
+  Readonly<{
+    // The site's own exclusive hard-link publication of its temp to its final.
+    link:
+      () =>
+        Promise<void>;
+
+    // Admission to an irreversible step (exclusive create, copy chunk, sync).
+    checkpoint:
+      () => void;
+
+    // The site's existing-final contract: false only when absent, true only
+    // for the exact expected content, throws on any other existing entry.
+    existingFinalHoldsExpected:
+      (
+        fileSystem:
+          GoogleGenAiOutputFileSystem,
+        finalPath:
+          string,
+        expected:
+          ExpectedContent,
+      ) =>
+        Promise<boolean>;
+
+    rejectLinkFailure:
+      (
+        error:
+          unknown,
+      ) => Error;
+
+    rejectMissingAfterCollision:
+      (
+        error:
+          unknown,
+      ) => Error;
+
+    rejectCopyFailure:
+      (
+        cause:
+          unknown,
+        ownedFinalCleanupFailed:
+          boolean,
+      ) => Error;
+  }>;
+
+/**
+ * Publishes an owned, fully written, synced and validated temporary file to
+ * finalPath without ever replacing an existing entry. The exclusive hard
+ * link is always attempted first. Only EISDIR, which exFAT on Windows
+ * reports for every link attempt (including onto an existing destination),
+ * admits the exclusive-copy fallback, and only after the temporary file is
+ * proven to be the expected regular file and the final is proven absent.
+ */
+async function publishVerifiedTemporaryFileNoOverwrite(
+  fileSystem:
+    GoogleGenAiOutputFileSystem,
+  temporaryPath:
+    string,
+  finalPath:
+    string,
+  expected:
+    ExpectedContent,
+  policy:
+    VerifiedPublicationPolicy,
+): Promise<VerifiedPublicationOutcome> {
+  let linkError:
+    unknown;
+
+  try {
+    await policy.link();
+
+    return "LINKED";
+  } catch (error) {
+    linkError =
+      error;
+  }
+
+  const code =
+    errorCode(
+      linkError,
+    );
+
+  if (code === "EEXIST") {
+    if (
+      !(await policy.existingFinalHoldsExpected(
+        fileSystem,
+        finalPath,
+        expected,
+      ))
+    ) {
+      throw policy.rejectMissingAfterCollision(
+        linkError,
+      );
+    }
+
+    return "ALREADY_PRESENT";
+  }
+
+  if (code !== "EISDIR") {
+    throw policy.rejectLinkFailure(
+      linkError,
+    );
+  }
+
+  // EISDIR alone proves neither "unsupported" nor "absent".
+  let sourceStats:
+    Awaited<
+      ReturnType<
+        GoogleGenAiOutputFileSystem["lstat"]
+      >
+    >;
+
+  try {
+    sourceStats =
+      await fileSystem.lstat(
+        temporaryPath,
+      );
+  } catch {
+    throw policy.rejectLinkFailure(
+      linkError,
+    );
+  }
+
+  if (
+    !sourceStats.isFile() ||
+    sourceStats.size !==
+      expected.byteCount
+  ) {
+    throw policy.rejectLinkFailure(
+      linkError,
+    );
+  }
+
+  if (
+    await policy.existingFinalHoldsExpected(
+      fileSystem,
+      finalPath,
+      expected,
+    )
+  ) {
+    return "ALREADY_PRESENT";
+  }
+
+  policy.checkpoint();
+
+  let destination:
+    GoogleGenAiOutputFileHandle;
+
+  try {
+    destination =
+      await fileSystem.open(
+        finalPath,
+        "wx",
+      );
+  } catch (error) {
+    // Another entry appeared after inspection: never write, re-run the contract once.
+    if (
+      errorCode(
+        error,
+      ) ===
+        "EEXIST" &&
+      (await policy.existingFinalHoldsExpected(
+        fileSystem,
+        finalPath,
+        expected,
+      ))
+    ) {
+      return "ALREADY_PRESENT";
+    }
+
+    throw policy.rejectCopyFailure(
+      error,
+      false,
+    );
+  }
+
+  // Ownership of finalPath begins only after the successful exclusive open.
+  let destinationOpen =
+    true;
+
+  let source:
+    GoogleGenAiOutputFileHandle | undefined;
+
+  let failure:
+    unknown;
+
+  try {
+    source =
+      await fileSystem.open(
+        temporaryPath,
+        "r",
+      );
+
+    const hash =
+      createHash(
+        "sha256",
+      );
+
+    const prefix =
+      new Uint8Array(
+        MINIMUM_FTYP_BOX_BYTES,
+      );
+
+    const chunk =
+      new Uint8Array(
+        Math.min(
+          EXISTING_FILE_HASH_CHUNK_BYTES,
+          expected.byteCount,
+        ),
+      );
+
+    let position =
+      0;
+
+    while (position < expected.byteCount) {
+      policy.checkpoint();
+
+      const {
+        bytesRead,
+      } =
+        await source.read(
+          chunk,
+          0,
+          Math.min(
+            chunk.byteLength,
+            expected.byteCount -
+              position,
+          ),
+          position,
+        );
+
+      if (
+        !Number.isSafeInteger(
+          bytesRead,
+        ) ||
+        bytesRead <= 0 ||
+        bytesRead >
+          expected.byteCount -
+            position
+      ) {
+        throw new Error(
+          "Google GenAI verified temporary output changed during exclusive-copy publication.",
+        );
+      }
+
+      const data =
+        chunk.subarray(
+          0,
+          bytesRead,
+        );
+
+      let offset =
+        0;
+
+      // Bytes reach the final only through the exclusively acquired handle.
+      while (offset < bytesRead) {
+        const result:
+          unknown =
+          await destination.write(
+            data,
+            offset,
+            bytesRead -
+              offset,
+            position +
+              offset,
+          );
+
+        const bytesWritten =
+          result !== null &&
+          typeof result ===
+            "object" &&
+          "bytesWritten" in result
+            ? result.bytesWritten
+            : undefined;
+
+        if (
+          typeof bytesWritten !==
+            "number" ||
+          !Number.isSafeInteger(
+            bytesWritten,
+          ) ||
+          bytesWritten <= 0 ||
+          bytesWritten >
+            bytesRead -
+              offset
+        ) {
+          throw new Error(
+            "Google GenAI exclusive-copy publication wrote an invalid byte count.",
+          );
+        }
+
+        offset +=
+          bytesWritten;
+      }
+
+      if (position < MINIMUM_FTYP_BOX_BYTES) {
+        prefix.set(
+          data.subarray(
+            0,
+            MINIMUM_FTYP_BOX_BYTES -
+              position,
+          ),
+          position,
+        );
+      }
+
+      hash.update(
+        data,
+      );
+
+      position +=
+        bytesRead;
+    }
+
+    if (
+      position !==
+        expected.byteCount ||
+      !digestEquals(
+        hash.digest(),
+        expected.sha256,
+      ) ||
+      !mp4PrefixIsValid(
+        prefix,
+        position,
+      )
+    ) {
+      throw new Error(
+        "Google GenAI exclusive-copy publication bytes do not match the verified output.",
+      );
+    }
+
+    policy.checkpoint();
+
+    await destination.sync();
+
+    destinationOpen =
+      false;
+
+    await destination.close();
+
+    const openSource =
+      source;
+
+    source =
+      undefined;
+
+    await openSource.close();
+
+    // Independent read-only revalidation of the final itself.
+    let finalVerified =
+      false;
+
+    try {
+      finalVerified =
+        await uriFinalHoldsExpectedContent(
+          fileSystem,
+          finalPath,
+          expected,
+        );
+    } catch {
+      finalVerified =
+        false;
+    }
+
+    if (!finalVerified) {
+      throw new Error(
+        "Google GenAI exclusive-copy publication final failed revalidation.",
+      );
+    }
+
+    return "COPIED";
+  } catch (error) {
+    failure =
+      error;
+  }
+
+  // Reached only on failure: the final was created by this invocation and
+  // was never verified, so it is the sole permitted cleanup target.
+  let ownedFinalCleanupFailed =
+    false;
+
+  if (destinationOpen) {
+    try {
+      await destination.close();
+    } catch {
+      ownedFinalCleanupFailed =
+        true;
+    }
+  }
+
+  if (source !== undefined) {
+    try {
+      await source.close();
+    } catch {
+      ownedFinalCleanupFailed =
+        true;
+    }
+  }
+
+  try {
+    await fileSystem.unlink(
+      finalPath,
+    );
+  } catch {
+    ownedFinalCleanupFailed =
+      true;
+  }
+
+  throw policy.rejectCopyFailure(
+    failure,
+    ownedFinalCleanupFailed,
+  );
 }
 
 type ContentBinding =
@@ -2039,6 +2488,9 @@ async function streamUriOutputAttempt(
   let alreadyPresent =
     false;
 
+  let ownedFinalCleanupFailures =
+    0;
+
   try {
     let downloaded:
       GoogleGenAiDownloadedFile;
@@ -2164,44 +2616,65 @@ async function streamUriOutputAttempt(
       context,
     );
 
-    try {
-      await fileSystem.link(
+    const outcome =
+      await publishVerifiedTemporaryFileNoOverwrite(
+        fileSystem,
         temporaryPath,
         finalPath,
+        expected,
+        {
+          link:
+            () =>
+              fileSystem.link(
+                temporaryPath,
+                finalPath,
+              ),
+
+          checkpoint:
+            () =>
+              requireAuthority(
+                context,
+              ),
+
+          existingFinalHoldsExpected:
+            uriFinalHoldsExpectedContent,
+
+          rejectLinkFailure:
+            () =>
+              transportFailure(
+                "OUTPUT_PUBLICATION_FAILED",
+              ),
+
+          rejectMissingAfterCollision:
+            () =>
+              transportFailure(
+                "OUTPUT_PUBLICATION_FAILED",
+              ),
+
+          rejectCopyFailure:
+            (cause, ownedFinalCleanupFailed) => {
+              if (ownedFinalCleanupFailed) {
+                ownedFinalCleanupFailures +=
+                  1;
+              }
+
+              // Abort/budget keep their sanitized class; anything else is a publication failure.
+              return cause instanceof
+                GoogleGenAiSecureOutputTransportError
+                ? cause
+                : transportFailure(
+                    "OUTPUT_PUBLICATION_FAILED",
+                  );
+            },
+        },
       );
 
-      published =
-        true;
-    } catch (error) {
-      if (
-        errorCode(
-          error,
-        ) !==
-        "EEXIST"
-      ) {
-        throw transportFailure(
-          "OUTPUT_PUBLICATION_FAILED",
-        );
-      }
+    published =
+      true;
 
-      if (
-        !(await uriFinalHoldsExpectedContent(
-          fileSystem,
-          finalPath,
-          expected,
-        ))
-      ) {
-        throw transportFailure(
-          "OUTPUT_PUBLICATION_FAILED",
-        );
-      }
-
-      published =
-        true;
-
-      alreadyPresent =
-        true;
-    }
+    alreadyPresent =
+      outcome ===
+      "ALREADY_PRESENT";
   } catch (error) {
     failed =
       true;
@@ -2234,6 +2707,15 @@ async function streamUriOutputAttempt(
       temporaryPath,
     );
   } catch {
+    cleanupFailures.push(
+      transportFailure(
+        "TEMP_CLEANUP_FAILED",
+      ),
+    );
+  }
+
+  // A partial final this invocation created could not be removed.
+  if (ownedFinalCleanupFailures > 0) {
     cleanupFailures.push(
       transportFailure(
         "TEMP_CLEANUP_FAILED",

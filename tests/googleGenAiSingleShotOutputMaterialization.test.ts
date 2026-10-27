@@ -3384,6 +3384,272 @@ describe(
             );
           },
         );
+
+        describe(
+          "B4Y2L exFAT-safe no-overwrite publication (URI site)",
+          () => {
+            const eisdir = () => Object.assign(new Error(`EISDIR SECRET ${URI}`), { code: "EISDIR" });
+
+            /** Final-scoped fault state: armed only once the publication link has been attempted. */
+            function fallbackHooks(
+              options: Readonly<{
+                beforeEisdir?: (existingPath: string, newPath: string) => Promise<void>;
+                finalWrite?: (
+                  real: GoogleGenAiOutputFileHandle["write"],
+                  buffer: Uint8Array,
+                  offset: number,
+                  length: number,
+                  position: number,
+                  call: number,
+                ) => Promise<Readonly<{ bytesWritten: number }>>;
+                finalSync?: () => Promise<void>;
+                openFinalWx?: (path: string) => Promise<void>;
+                unlinkFinal?: (real: (path: string) => Promise<void>, path: string) => Promise<void>;
+                linkError?: () => unknown;
+              }> = {},
+            ) {
+              const state = { armed: false, finalPath: "", finalWrites: 0, finalWxOpens: 0 };
+              const hooks: Hooks = {
+                link: async (existingPath, newPath) => {
+                  state.armed = true;
+                  state.finalPath = newPath;
+                  await options.beforeEisdir?.(existingPath, newPath);
+                  throw options.linkError ? options.linkError() : eisdir();
+                },
+                openWx: (path) => {
+                  if (!state.armed || path !== state.finalPath) return undefined;
+                  state.finalWxOpens += 1;
+                  const race = options.openFinalWx;
+                  if (!race) return undefined;
+                  // The raced-in entry exists before the real exclusive open, which must then refuse it.
+                  return (async () => {
+                    await race(path);
+                    return (await open(path, "wx")) as unknown as GoogleGenAiOutputFileHandle;
+                  })();
+                },
+                write: async (real, buffer, offset, length, position) => {
+                  if (!state.armed) return real(buffer, offset, length, position);
+                  state.finalWrites += 1;
+                  return options.finalWrite
+                    ? options.finalWrite(real, buffer, offset, length, position, state.finalWrites)
+                    : real(buffer, offset, length, position);
+                },
+                sync: async () => { if (state.armed) await options.finalSync?.(); },
+                unlink: async (real, path) => {
+                  if (state.armed && path === state.finalPath && options.unlinkFinal) return options.unlinkFinal(real, path);
+                  return real(path);
+                },
+              };
+              return { hooks, state };
+            }
+
+            async function runCaught(setup: UriSetup) {
+              return setup.run().then((result) => ({ result, error: undefined as unknown }), (error: unknown) => ({ result: undefined, error }));
+            }
+
+            it("P1 keeps the hard-link fast path: a successful link never acquires, writes or revalidates a fallback final", async () => {
+              const setup = await uriSetup();
+              const result = await setup.run();
+              expect(result).toMatchObject({ alreadyPresent: false, byteCount: URI_BYTES.byteLength, sha256: sha256Hex(URI_BYTES) });
+              expect(setup.harness.events.filter((event) => event === "link")).toHaveLength(1);
+              expect(setup.harness.tempPaths).toHaveLength(1);
+              expect(setup.harness.events).not.toContain("open:r");
+              expect((await readFile(outputPathFor(setup.mediaRoot))).equals(URI_BYTES)).toBe(true);
+              expect(await shotDirectoryEntries(setup.mediaRoot)).toEqual([...DURABLE_RECORD_FILES, basename(outputPathFor(setup.mediaRoot))].sort());
+            });
+
+            it("P2/P3 publishes through one exclusive final handle after EISDIR, revalidates the final, then removes the temp", async () => {
+              const fault = fallbackHooks();
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const result = await setup.run();
+              const finalPath = outputPathFor(setup.mediaRoot);
+              expect(result).toMatchObject({ alreadyPresent: false, byteCount: URI_BYTES.byteLength, sha256: sha256Hex(URI_BYTES), outputPath: finalPath });
+              expect((await readFile(finalPath)).equals(URI_BYTES)).toBe(true);
+              expect(fault.state.finalWxOpens).toBe(1);
+              expect(fault.state.finalWrites).toBeGreaterThan(0);
+              expect(setup.harness.tempPaths).toEqual([expect.stringMatching(/\.part$/), finalPath]);
+              const events = setup.harness.events;
+              const link = events.indexOf("link");
+              const finalSync = events.indexOf("sync", link);
+              const revalidationRead = events.lastIndexOf("open:r");
+              const tempUnlink = events.lastIndexOf("unlink");
+              expect(events.slice(link + 1, link + 4)).toEqual(["lstat", "lstat", "open:wx"]);
+              expect(finalSync).toBeGreaterThan(link);
+              expect(revalidationRead).toBeGreaterThan(finalSync);
+              expect(tempUnlink).toBeGreaterThan(revalidationRead);
+              expect(setup.harness.unlinked).toEqual([setup.harness.tempPaths[0]]);
+              expect(await shotDirectoryEntries(setup.mediaRoot)).toEqual([...DURABLE_RECORD_FILES, basename(finalPath)].sort());
+            });
+
+            it("P4 accepts an exact final that exists at EISDIR time as already present without any write", async () => {
+              const fault = fallbackHooks({ beforeEisdir: async (_existing, newPath) => { await writeFile(newPath, URI_BYTES); } });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const result = await setup.run();
+              expect(result).toMatchObject({ alreadyPresent: true, sha256: sha256Hex(URI_BYTES) });
+              expect(fault.state.finalWxOpens).toBe(0);
+              expect(fault.state.finalWrites).toBe(0);
+              expect((await readFile(outputPathFor(setup.mediaRoot))).equals(URI_BYTES)).toBe(true);
+            });
+
+            it.each([
+              ["N1 different final", () => makeMp4("foreign-final-content-of-other-size")],
+              ["N2 truncated final", () => URI_BYTES.subarray(0, URI_BYTES.byteLength - 5)],
+              ["N2 same-size altered final", () => Buffer.from(URI_BYTES).fill(0x41, 24)],
+            ])("%s present at EISDIR time is never accepted, overwritten or fallback-written", async (_name, makeFinal) => {
+              const foreign = Buffer.from(makeFinal());
+              const fault = fallbackHooks({ beforeEisdir: async (_existing, newPath) => { await writeFile(newPath, foreign); } });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { error } = await runCaught(setup);
+              expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_CONFLICT", retryable: false });
+              expectSanitized(error, setup.mediaRoot);
+              expect(fault.state.finalWxOpens).toBe(0);
+              expect(fault.state.finalWrites).toBe(0);
+              expect((await readFile(outputPathFor(setup.mediaRoot))).equals(foreign)).toBe(true);
+            });
+
+            it("EISDIR alone never authorizes fallback: a directory at the final path fails closed with no exclusive create", async () => {
+              const fault = fallbackHooks({ beforeEisdir: async (_existing, newPath) => { await mkdir(newPath); } });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { error } = await runCaught(setup);
+              expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_CONFLICT" });
+              expect(fault.state.finalWxOpens).toBe(0);
+              expect((await lstat(outputPathFor(setup.mediaRoot))).isDirectory()).toBe(true);
+            });
+
+            it.each([
+              ["temp removed", async (existingPath: string) => { await unlink(existingPath); }],
+              ["temp truncated", async (existingPath: string) => { await writeFile(existingPath, URI_BYTES.subarray(0, 8)); }],
+              ["temp replaced by a directory", async (existingPath: string) => { await unlink(existingPath); await mkdir(existingPath); }],
+            ])("EISDIR with an invalid temp precondition (%s) fails closed with no exclusive create", async (_name, breakTemp) => {
+              const fault = fallbackHooks({ beforeEisdir: async (existingPath) => { await breakTemp(existingPath); } });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { error } = await runCaught(setup);
+              // A temp that is gone or no longer a file also fails the owned-temp cleanup, which is aggregated as today.
+              const primary = error instanceof AggregateError ? error.errors[0] : error;
+              expect(primary).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED", retryable: false });
+              expectSanitized(error, setup.mediaRoot);
+              expect(fault.state.finalWxOpens).toBe(0);
+              await expect(lstat(outputPathFor(setup.mediaRoot))).rejects.toMatchObject({ code: "ENOENT" });
+            });
+
+            it.each([
+              ["identical", () => URI_BYTES, true],
+              ["different", () => makeMp4("raced-in-different-final"), false],
+            ] as const)("N3 an %s final raced in before the exclusive create is never written", async (_name, makeFinal, accepted) => {
+              const raced = Buffer.from(makeFinal());
+              const fault = fallbackHooks({ openFinalWx: async (path) => { await writeFile(path, raced); } });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { result, error } = await runCaught(setup);
+              if (accepted) expect(result).toMatchObject({ alreadyPresent: true });
+              else expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_CONFLICT" });
+              expect(fault.state.finalWxOpens).toBe(1);
+              expect(fault.state.finalWrites).toBe(0);
+              expect((await readFile(outputPathFor(setup.mediaRoot))).equals(raced)).toBe(true);
+            });
+
+            it.each([
+              ["N4 write failure after a partial write", (real: GoogleGenAiOutputFileHandle["write"], buffer: Uint8Array, offset: number, length: number, position: number, call: number) =>
+                call === 1 ? real(buffer, offset, Math.max(1, Math.floor(length / 2)), position) : Promise.reject(new Error(`EIO SECRET ${URI}`))],
+              ["N5 ENOSPC", () => Promise.reject(Object.assign(new Error(`ENOSPC SECRET ${URI}`), { code: "ENOSPC" }))],
+              ["N4 drive removal (EIO)", () => Promise.reject(Object.assign(new Error(`EIO SECRET ${URI}`), { code: "EIO" }))],
+              ["N7 short write reported as complete", (real: GoogleGenAiOutputFileHandle["write"], buffer: Uint8Array, offset: number, length: number, position: number) =>
+                real(buffer, offset, Math.max(1, length - 3), position).then(() => ({ bytesWritten: length }))],
+              ["N6 corrupted destination bytes", (real: GoogleGenAiOutputFileHandle["write"], buffer: Uint8Array, offset: number, length: number, position: number) => {
+                const corrupted = Buffer.from(buffer.subarray(offset, offset + length));
+                corrupted.writeUInt8(corrupted.readUInt8(corrupted.byteLength - 1) ^ 0xff, corrupted.byteLength - 1);
+                return real(corrupted, 0, corrupted.byteLength, position);
+              }],
+              ["N8 destination MP4 header damaged", (real: GoogleGenAiOutputFileHandle["write"], buffer: Uint8Array, offset: number, length: number, position: number) => {
+                const damaged = Buffer.from(buffer.subarray(offset, offset + length));
+                if (position === 0) damaged.write("free", 4, "latin1");
+                return real(damaged, 0, damaged.byteLength, position);
+              }],
+              ["invalid bytesWritten", () => Promise.resolve({ bytesWritten: 0 })],
+            ])("%s fails publication, removes only the invocation-created final and never reports success", async (_name, finalWrite) => {
+              const fault = fallbackHooks({ finalWrite });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { result, error } = await runCaught(setup);
+              expect(result).toBeUndefined();
+              expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED", retryable: false });
+              expectSanitized(error, setup.mediaRoot);
+              expect(fault.state.finalWxOpens).toBe(1);
+              expect(setup.harness.unlinked).toContain(outputPathFor(setup.mediaRoot));
+              await expectOnlyDurableRecords(setup.mediaRoot);
+            });
+
+            it("fails publication when the exclusive final cannot be synced and removes the owned final", async () => {
+              const fault = fallbackHooks({ finalSync: async () => { throw new Error(`EIO sync SECRET ${URI}`); } });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { error } = await runCaught(setup);
+              expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED" });
+              expectSanitized(error, setup.mediaRoot);
+              await expectOnlyDurableRecords(setup.mediaRoot);
+            });
+
+            it("N9 surfaces TEMP_CLEANUP_FAILED when the invocation-created partial final cannot be removed, never success", async () => {
+              const fault = fallbackHooks({
+                finalWrite: () => Promise.reject(new Error(`EIO SECRET ${URI}`)),
+                unlinkFinal: async () => { throw new Error(`EBUSY SECRET ${URI}`); },
+              });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { result, error } = await runCaught(setup);
+              expect(result).toBeUndefined();
+              expect(error).toBeInstanceOf(AggregateError);
+              expect((error as AggregateError).errors).toEqual([
+                expect.objectContaining({ code: "OUTPUT_PUBLICATION_FAILED" }),
+                expect.objectContaining({ code: "TEMP_CLEANUP_FAILED" }),
+              ]);
+              expectSanitized(error, setup.mediaRoot);
+            });
+
+            it.each(["EIO", "EBUSY", "ENOENT", "UNKNOWN_CODE", "EPERM", "EACCES", "ENOTSUP", "EXDEV"])(
+              "N10/N11 a %s link failure never falls back",
+              async (code) => {
+                const fault = fallbackHooks({ linkError: () => Object.assign(new Error(`${code} SECRET ${URI}`), { code }) });
+                const setup = await uriSetup({ hooks: fault.hooks });
+                const { error } = await runCaught(setup);
+                expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED", retryable: false });
+                expectSanitized(error, setup.mediaRoot);
+                expect(fault.state.finalWxOpens).toBe(0);
+                expect(setup.harness.events.slice(setup.harness.events.indexOf("link") + 1)).not.toContain("lstat");
+                await expectOnlyDurableRecords(setup.mediaRoot);
+              },
+            );
+
+            it("N10 a non-object link failure never falls back", async () => {
+              const fault = fallbackHooks({ linkError: () => "EISDIR" });
+              const setup = await uriSetup({ hooks: fault.hooks });
+              const { error } = await runCaught(setup);
+              expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED" });
+              expect(fault.state.finalWxOpens).toBe(0);
+            });
+
+            it.each([
+              ["SHA256", { sha256: "0".repeat(64) }, "DOWNLOAD_HASH_MISMATCH"],
+              ["size", { byteCount: URI_BYTES.byteLength + 1 }, "DOWNLOAD_SIZE_MISMATCH"],
+            ] as const)("N13 a temp failing %s validation reaches neither link nor fallback", async (_name, result, code) => {
+              const fault = fallbackHooks();
+              const setup = await uriSetup({ hooks: fault.hooks, plans: [{ result }] });
+              const { error } = await runCaught(setup);
+              expect(error).toMatchObject({ code });
+              expect(setup.harness.events).not.toContain("link");
+              expect(fault.state.finalWxOpens).toBe(0);
+              await expectOnlyDurableRecords(setup.mediaRoot);
+            });
+
+            it("crash state: a partial final left without completion is never accepted, overwritten or written", async () => {
+              const setup = await uriSetup();
+              const finalPath = outputPathFor(setup.mediaRoot);
+              const partial = URI_BYTES.subarray(0, URI_BYTES.byteLength - 9);
+              await writeFile(finalPath, partial);
+              const { error } = await runCaught(setup);
+              expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_CONFLICT" });
+              expect(setup.downloadUri).not.toHaveBeenCalled();
+              expect(setup.harness.tempPaths).toEqual([]);
+              expect((await readFile(finalPath)).equals(partial)).toBe(true);
+            });
+          },
+        );
       },
     );
 
@@ -4451,6 +4717,181 @@ describe(
                   ),
                 ),
               ].sort(),
+            );
+          },
+        );
+
+        describe(
+          "B4Y2L exFAT-safe no-overwrite publication (inline site)",
+          () => {
+            function inlineFallbackFileSystem(
+              options: Readonly<{
+                linkCode?: string;
+                beforeEisdir?: (newPath: string) => Promise<void>;
+                failFinalWrite?: boolean;
+                failFinalWriteAfterPartial?: boolean;
+                failFinalUnlink?: boolean;
+              }> = {},
+            ) {
+              const recording = recordingFileSystem();
+              const base = recording.fileSystem;
+              const state = {
+                finalPath: "",
+                finalWxOpens: 0,
+                finalWrites: 0,
+                firstWriteRequested: 0,
+                firstWriteBytes: 0,
+                finalBytesAtFailure: -1,
+                unlinked: [] as string[],
+              };
+              const fileSystem: GoogleGenAiOutputFileSystem = {
+                ...base,
+                link: async (_existingPath, newPath) => {
+                  recording.events.push("link");
+                  state.finalPath = newPath;
+                  await options.beforeEisdir?.(newPath);
+                  const code = options.linkCode ?? "EISDIR";
+                  throw Object.assign(new Error(`Mock ${code} link failure.`), { code });
+                },
+                open: async (path, flags) => {
+                  const handle = await base.open(path, flags);
+                  if (path !== state.finalPath || flags !== "wx") return handle;
+                  state.finalWxOpens += 1;
+                  return {
+                    ...handle,
+                    write: async (buffer, offset, length, position) => {
+                      state.finalWrites += 1;
+                      if (options.failFinalWrite) throw new Error("Mock EIO final write.");
+                      if (options.failFinalWriteAfterPartial) {
+                        if (state.finalWrites > 1) {
+                          state.finalBytesAtFailure = (await lstat(path)).size;
+                          throw new Error("Mock EIO final write after a partial write.");
+                        }
+                        // A genuine short first write: only part of the requested bytes reach the owned final.
+                        state.firstWriteRequested = length;
+                        const written = await handle.write(buffer, offset, Math.max(1, Math.floor(length / 2)), position);
+                        state.firstWriteBytes = written.bytesWritten;
+                        return written;
+                      }
+                      return handle.write(buffer, offset, length, position);
+                    },
+                  };
+                },
+                unlink: async (path) => {
+                  if (options.failFinalUnlink && path === state.finalPath) throw new Error("Mock EBUSY final unlink.");
+                  await base.unlink(path);
+                  state.unlinked.push(path);
+                },
+              };
+              return { fileSystem, state, recording };
+            }
+
+            async function runInline(fileSystem: GoogleGenAiOutputFileSystem, bytes: Buffer = makeMp4()) {
+              const mediaRoot = await makeMediaRoot();
+              await persistSubmission(mediaRoot);
+              const outcome = await materializeGoogleGenAiSingleShotOutput(
+                materializationInput(mediaRoot),
+                { retrieveOutput: retrieverReturning(inlineVideo(bytes)), downloadUri: unusedDownloader(), fileSystem },
+              ).then((result) => ({ result, error: undefined as unknown }), (error: unknown) => ({ result: undefined, error }));
+              return { mediaRoot, ...outcome };
+            }
+
+            it("N14/P1 inline hard-link success acquires no exclusive final and writes no fallback bytes", async () => {
+              const recording = recordingFileSystem();
+              const { mediaRoot, result } = await runInline(recording.fileSystem);
+              expect(result).toMatchObject({ alreadyPresent: false, sourceKind: "INLINE_DATA" });
+              expect(recording.openedPaths.filter((opened) => opened.path === outputPathFor(mediaRoot))).toEqual([]);
+              expect(recording.events.filter((event) => event === "pwrite")).toEqual([]);
+            });
+
+            it("N14/P2 inline EISDIR with an absent final publishes through one exclusive final handle and revalidates it", async () => {
+              const bytes = makeMp4();
+              const fallback = inlineFallbackFileSystem();
+              const { mediaRoot, result } = await runInline(fallback.fileSystem, bytes);
+              expect(result).toMatchObject({ alreadyPresent: false, byteCount: bytes.byteLength, sha256: sha256Hex(bytes) });
+              expect(fallback.state.finalWxOpens).toBe(1);
+              expect(fallback.state.finalWrites).toBeGreaterThan(0);
+              expect((await readFile(outputPathFor(mediaRoot))).equals(bytes)).toBe(true);
+              const reads = fallback.recording.openedPaths.filter((opened) => opened.path === outputPathFor(mediaRoot));
+              expect(reads.map((opened) => opened.flags)).toEqual(["wx", "r"]);
+              expect(await shotDirectoryEntries(mediaRoot)).toEqual([...DURABLE_RECORD_FILES, basename(outputPathFor(mediaRoot))].sort());
+            });
+
+            it("N14/P4 inline EISDIR with an exact final already present writes nothing", async () => {
+              const bytes = makeMp4();
+              const fallback = inlineFallbackFileSystem({ beforeEisdir: async (newPath) => { await writeFile(newPath, bytes); } });
+              const { result } = await runInline(fallback.fileSystem, bytes);
+              expect(result).toMatchObject({ alreadyPresent: true });
+              expect(fallback.state.finalWxOpens).toBe(0);
+            });
+
+            it("N14/N1 inline EISDIR with a different final refuses to replace it and never writes", async () => {
+              const foreign = makeMp4("inline-foreign-final");
+              const fallback = inlineFallbackFileSystem({ beforeEisdir: async (newPath) => { await writeFile(newPath, foreign); } });
+              const { mediaRoot, error } = await runInline(fallback.fileSystem);
+              expect(error).toBeInstanceOf(Error);
+              expect((error as Error).message).toMatch(/Refusing to replace it/);
+              expect(fallback.state.finalWxOpens).toBe(0);
+              expect((await readFile(outputPathFor(mediaRoot))).equals(foreign)).toBe(true);
+            });
+
+            it("N14/N4 inline fallback write failure removes only the owned final and fails", async () => {
+              const fallback = inlineFallbackFileSystem({ failFinalWrite: true });
+              const { mediaRoot, result, error } = await runInline(fallback.fileSystem);
+              expect(result).toBeUndefined();
+              expect((error as Error).message).toMatch(/exclusive-copy publication to .* failed\./);
+              expect(fallback.state.finalWxOpens).toBe(1);
+              expect(await shotDirectoryEntries(mediaRoot)).toEqual(DURABLE_RECORD_FILES);
+            });
+
+            it("B4Y2L1 N14/N4 inline mid-copy failure writes partial bytes first, then removes only the owned final and fails", async () => {
+              const bytes = makeMp4();
+              const fallback = inlineFallbackFileSystem({ failFinalWriteAfterPartial: true });
+              const mediaRoot = await makeMediaRoot();
+              await persistSubmission(mediaRoot);
+              const durableDigests = async () =>
+                Promise.all(DURABLE_RECORD_FILES.map(async (name) => sha256Hex(await readFile(join(dirname(outputPathFor(mediaRoot)), name)))));
+              const durableBefore = await durableDigests();
+              const outcome = await materializeGoogleGenAiSingleShotOutput(
+                materializationInput(mediaRoot),
+                { retrieveOutput: retrieverReturning(inlineVideo(bytes)), downloadUri: unusedDownloader(), fileSystem: fallback.fileSystem },
+              ).then((result) => ({ result, error: undefined as unknown }), (error: unknown) => ({ result: undefined, error }));
+              const finalPath = outputPathFor(mediaRoot);
+
+              expect(outcome.result).toBeUndefined();
+              expect((outcome.error as Error).message).toMatch(/exclusive-copy publication to .* failed\./);
+              expect(fallback.recording.events.filter((event) => event === "link")).toHaveLength(1);
+              expect(fallback.state.finalPath).toBe(finalPath);
+              expect(fallback.state.finalWxOpens).toBe(1);
+              // Call 1 is a positive partial write; call 2 faults with copying still outstanding.
+              expect(fallback.state.finalWrites).toBe(2);
+              expect(fallback.state.firstWriteBytes).toBeGreaterThan(0);
+              expect(fallback.state.firstWriteBytes).toBeLessThan(fallback.state.firstWriteRequested);
+              expect(fallback.state.firstWriteBytes).toBeLessThan(bytes.byteLength);
+              expect(fallback.state.finalBytesAtFailure).toBe(fallback.state.firstWriteBytes);
+              // Only the owned partial final and the owned temp are removed; durable records are untouched.
+              expect(fallback.state.unlinked).toContain(finalPath);
+              expect(fallback.state.unlinked.every((path) => path === finalPath || basename(path).endsWith(".part"))).toBe(true);
+              expect(await shotDirectoryEntries(mediaRoot)).toEqual(DURABLE_RECORD_FILES);
+              expect(await durableDigests()).toEqual(durableBefore);
+            });
+
+            it("N14/N9 inline owned-final cleanup failure is surfaced, never success", async () => {
+              const fallback = inlineFallbackFileSystem({ failFinalWrite: true, failFinalUnlink: true });
+              const { result, error } = await runInline(fallback.fileSystem);
+              expect(result).toBeUndefined();
+              expect(error).toBeInstanceOf(AggregateError);
+              expect((error as AggregateError).message).toMatch(/partial final could not be removed/);
+            });
+
+            it.each(["EPERM", "EACCES", "ENOTSUP", "EXDEV", "EIO"])(
+              "N14/N11 inline %s link failure keeps the no-fallback error and never acquires the final",
+              async (linkCode) => {
+                const fallback = inlineFallbackFileSystem({ linkCode });
+                const { error } = await runInline(fallback.fileSystem);
+                expect((error as Error).message).toMatch(/hard-link publication .* failed\. No rename, copy, or direct-write fallback is permitted/);
+                expect(fallback.state.finalWxOpens).toBe(0);
+              },
             );
           },
         );

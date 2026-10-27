@@ -53,6 +53,10 @@ import {
 } from "../src/execution/executionSubmissionPath.js";
 
 import {
+  inspectExecutionLifecycle,
+} from "../src/execution/inspectExecutionLifecycle.js";
+
+import {
   materializeGoogleGenAiSingleShotOutput,
   type GoogleGenAiOutputFileSystem,
   type GoogleGenAiOutputRetriever,
@@ -109,6 +113,19 @@ vi.mock(
     return {
       ...actual,
       materializeGoogleGenAiSingleShotOutput: vi.fn(actual.materializeGoogleGenAiSingleShotOutput),
+    };
+  },
+);
+
+vi.mock(
+  "../src/execution/providers/persistGoogleGenAiSingleShotCompletion.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<typeof import("../src/execution/providers/persistGoogleGenAiSingleShotCompletion.js")>();
+
+    return {
+      ...actual,
+      persistGoogleGenAiSingleShotCompletion: vi.fn(actual.persistGoogleGenAiSingleShotCompletion),
     };
   },
 );
@@ -2903,6 +2920,129 @@ describe(
             const result = await reconcile(mediaRoot, spies.dependencies);
             expect(result.reconciliationMode).toBe("RECOVERED_SUBMISSION");
             expect(events).toEqual(["sync", "close", "link", "unlink"]);
+          },
+        );
+
+        /** Simulated exFAT publication: every link reports EISDIR; optional faults on the exclusive final only. */
+        function exfatOutputFileSystem(
+          events: string[],
+          failAt?: "write" | "sync" | "corrupt" | "close",
+        ): GoogleGenAiOutputFileSystem {
+          const base = outputFileSystem(events);
+          let finalPath: string | undefined;
+          return {
+            ...base,
+            link: async (_existingPath, newPath) => {
+              events.push("link");
+              finalPath = newPath;
+              throw Object.assign(new Error("EISDIR SECRET"), { code: "EISDIR" });
+            },
+            open: async (path, flags) => {
+              const handle = await base.open(path, flags);
+              if (path !== finalPath || flags !== "wx") return handle;
+              events.push("open:final:wx");
+              return {
+                ...handle,
+                write: async (buffer, offset, length, position) => {
+                  if (failAt === "write") throw Object.assign(new Error("ENOSPC SECRET"), { code: "ENOSPC" });
+                  if (failAt !== "corrupt") return handle.write(buffer, offset, length, position);
+                  const corrupted = Buffer.from(buffer.subarray(offset, offset + length)).fill(0x41, 16);
+                  return handle.write(corrupted, 0, corrupted.byteLength, position);
+                },
+                sync: async () => {
+                  if (failAt === "sync") throw new Error("EIO SECRET");
+                  await handle.sync();
+                  events.push("sync:final");
+                },
+                close: async () => {
+                  if (failAt !== "close") return handle.close();
+                  // The descriptor is really released, then the close stage reports failure.
+                  events.push(`close:final:bytes=${(await lstat(path)).size}`);
+                  await handle.close();
+                  events.push("close:final:fault");
+                  throw Object.assign(new Error("EIO SECRET close"), { code: "EIO" });
+                },
+              };
+            },
+          };
+        }
+
+        it(
+          "B4Y2L persists completion only after the exFAT exclusive-copy publication is verified",
+          async () => {
+            const mediaRoot = await submittedShot();
+            const events: string[] = [];
+            const spies = recoverySpies({ outputFileSystem: exfatOutputFileSystem(events) });
+            const result = await reconcile(mediaRoot, spies.dependencies);
+            expect(result.reconciliationMode).toBe("RECOVERED_SUBMISSION");
+            expect(events.filter((event) => event === "open:final:wx")).toHaveLength(1);
+            expect((await readFile(outputPath(mediaRoot))).equals(OUTPUT_BYTES)).toBe(true);
+            expect(await partFiles(mediaRoot)).toEqual([]);
+            expect(await exists(recordPath(mediaRoot))).toBe(true);
+            expect(await exists(completionPath(mediaRoot))).toBe(true);
+          },
+        );
+
+        it.each(["write", "sync", "corrupt"] as const)(
+          "B4Y2L N12 never persists completion when the exFAT exclusive-copy publication fails at %s",
+          async (failAt) => {
+            const mediaRoot = await submittedShot();
+            const events: string[] = [];
+            const spies = recoverySpies({ outputFileSystem: exfatOutputFileSystem(events, failAt) });
+            const error = await settle(reconcile(mediaRoot, spies.dependencies));
+            expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED", retryable: false });
+            expectSanitizedMembers(error, mediaRoot);
+            expect(events.filter((event) => event === "open:final:wx")).toHaveLength(1);
+            expect(await exists(outputPath(mediaRoot))).toBe(false);
+            expect(await partFiles(mediaRoot)).toEqual([]);
+            expect(await exists(recordPath(mediaRoot))).toBe(false);
+            expect(await exists(completionPath(mediaRoot))).toBe(false);
+          },
+        );
+
+        it(
+          "B4Y2L1 N12 never persists completion when the exFAT exclusive-copy publication fails at close",
+          async () => {
+            const mediaRoot = await submittedShot();
+            const durableFiles = (entries: Record<string, string>) =>
+              Object.fromEntries(Object.entries(entries).filter(([, digest]) => digest !== "dir"));
+            const lifecycleBefore = await inspectExecutionLifecycle(mediaRoot, "EP92", "S01");
+            const before = durableFiles(await snapshot(mediaRoot));
+            vi.mocked(persistGoogleGenAiSingleShotCompletion).mockClear();
+            const events: string[] = [];
+            const spies = recoverySpies({ outputFileSystem: exfatOutputFileSystem(events, "close") });
+            const error = await settle(reconcile(mediaRoot, spies.dependencies));
+
+            // Fallback entered, final exclusively acquired, all bytes copied and synced, then the final close faulted.
+            const at = (event: string) => events.indexOf(event);
+            expect(events.filter((event) => event === "link")).toHaveLength(1);
+            expect(events.filter((event) => event === "open:final:wx")).toHaveLength(1);
+            expect(events.filter((event) => event === "close:final:fault")).toHaveLength(1);
+            expect(at("link")).toBeLessThan(at("open:final:wx"));
+            expect(at("open:final:wx")).toBeLessThan(at("sync:final"));
+            expect(at("sync:final")).toBeLessThan(at(`close:final:bytes=${OUTPUT_BYTES.byteLength}`));
+            expect(at(`close:final:bytes=${OUTPUT_BYTES.byteLength}`)).toBeLessThan(at("close:final:fault"));
+            expect(events.slice(at("close:final:fault"))).toContain("unlink");
+
+            expect(error).toMatchObject({ code: "OUTPUT_PUBLICATION_FAILED", retryable: false });
+            expectSanitizedMembers(error, mediaRoot);
+            expect(vi.mocked(materializeGoogleGenAiSingleShotOutput)).toHaveBeenCalledTimes(1);
+            expect(vi.mocked(persistGoogleGenAiSingleShotCompletion)).toHaveBeenCalledTimes(0);
+            expect(spies.replayInteraction).toHaveBeenCalledTimes(1);
+
+            expect(await exists(outputPath(mediaRoot))).toBe(false);
+            expect(await partFiles(mediaRoot)).toEqual([]);
+            expect(await exists(recordPath(mediaRoot))).toBe(false);
+            expect(await exists(completionPath(mediaRoot))).toBe(false);
+
+            const lifecycleAfter = await inspectExecutionLifecycle(mediaRoot, "EP92", "S01");
+            expect(lifecycleAfter.state).toBe("SUBMITTED");
+            expect(lifecycleAfter).toStrictEqual(lifecycleBefore);
+            expect(lifecycleAfter).toMatchObject({
+              reservation: { reservationId: RESERVATION_ID },
+              submission: { reservationId: RESERVATION_ID, providerExecutionId: INTERACTION_ID },
+            });
+            expect(durableFiles(await snapshot(mediaRoot))).toStrictEqual(before);
           },
         );
 

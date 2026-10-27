@@ -172,3 +172,203 @@ describe("bounded raw Interaction SSE", () => {
     expect(new GoogleGenAiSecureOutputTransportError("SSE_HTTP_FAILED", { attempt: NaN, httpStatus: 999 }).httpStatus).toBeUndefined();
   });
 });
+
+describe("status_update usage and terminal done (synthetic, evidence-shaped)", () => {
+  const count = (modality: string, tokens: number) => ({ modality, tokens });
+  const invocation = () => ({
+    prompt_tokens_details: [count("MODALITY_A", 11), count("MODALITY_B", 12)],
+    candidates_tokens_details: [count("MODALITY_C", 13)],
+    thoughts_tokens_details: [count("MODALITY_A", 14)],
+  });
+  const usage = (): Record<string, unknown> => ({
+    total_tokens: 100, total_input_tokens: 40, input_tokens_by_modality: [count("MODALITY_A", 10), count("MODALITY_B", 30)],
+    total_cached_tokens: 0, total_output_tokens: 50, output_tokens_by_modality: [count("MODALITY_C", 50)],
+    total_tool_use_tokens: 0, total_thought_tokens: 10, raw_prompt_token: 40,
+    model_invocation_token_counts: [invocation()], non_grounding_model_invocation_token_counts: [invocation()], initial_input_tokens: 40,
+  });
+  const update = (extra: Record<string, unknown> = {}): Event => ({ event_type: "interaction.status_update", interaction_id: id, status: "in_progress", ...extra });
+  const finalInteraction = { id, status: "completed", usage: { ...usage(), billable_usage: { total_tokens: 1 } }, created: "2026-01-01T00:00:00Z",
+    updated: "2026-01-01T00:00:01Z", service_tier: "synthetic", object: "interaction", model: "synthetic-model" };
+  // Synthetic stream shaped like the sanitized B4Y2D/B4Y2E1 structure (frames 0-9); no real provider material.
+  const shaped: Event[] = [
+    { event_type: "interaction.created", interaction: { id, status: "in_progress", object: "interaction", model: "synthetic-model" } },
+    update(),
+    { event_type: "step.start", index: 0, step: { type: "thought" } },
+    { event_type: "step.delta", index: 0, delta: { type: "thought_signature", signature: "synthetic-signature" } },
+    { event_type: "step.stop", index: 0 },
+    { event_type: "step.start", index: 1, step: { type: "model_output" } },
+    { event_type: "step.delta", index: 1, event_id: "synthetic-event-id", delta: { type: "video", mime_type: "video/mp4", uri } },
+    update({ usage: usage() }),
+    { event_type: "step.stop", index: 1 },
+    { event_type: "interaction.completed", interaction: finalInteraction },
+  ];
+  const DONE = "event: done\ndata: [DONE]\n\n";
+  const expected = { id, status: "completed", outputVideo: { type: "video", mime_type: "video/mp4", uri } };
+  const text = (values: Event[] = shaped, tail = "", ending = "\n") => values.map((v) => frame(v, ending)).join("") + tail;
+  /** Pushes bytes split at the given offsets, asserting push() never releases a completed result, then finishes. */
+  function feed(input: string, cuts: number[] = []) {
+    const bytes = encoder.encode(input);
+    const p = parser();
+    let last = 0;
+    for (const cut of [...cuts, bytes.length]) { expect(p.push(bytes.subarray(last, cut))).toBeUndefined(); last = cut; }
+    return p.finish();
+  }
+  const oneByte = (input: string) => Array.from({ length: encoder.encode(input).length - 1 }, (_, i) => i + 1);
+  const withUsage = (value: unknown) => [shaped[0]!, update({ usage: value }), start, delta, stop, complete];
+  /** Production frame cap (1 MiB) so large usage fixtures reach the usage rule rather than the byte cap. */
+  const parseFull = (values: Event[]) => { const p = parser(policy.limits.sseMaxEventBytes); p.push(encoder.encode(values.map((v) => frame(v)).join(""))); return p.finish(); };
+
+  it("P1/P2 accepts status_update with the exact usage object and without usage", () => {
+    expect(parse(withUsage(usage()))).toEqual({ id, status: "completed", outputVideo: delta.delta });
+    expect(parse([shaped[0]!, update(), start, delta, stop, complete])).toEqual({ id, status: "completed", outputVideo: delta.delta });
+  });
+
+  it("accepts the 16-entry array bound at every usage array position", () => {
+    const sixteen = Array.from({ length: 16 }, (_, i) => count("MODALITY_A", i));
+    const value = usage();
+    value.input_tokens_by_modality = sixteen;
+    value.model_invocation_token_counts = Array.from({ length: 16 }, () => ({ ...invocation(), prompt_tokens_details: sixteen }));
+    expect(parseFull(withUsage(value)).status).toBe("completed");
+  });
+
+  it("P3/P10 historical completed -> EOF succeeds", () => {
+    expect(feed(text())).toEqual(expected);
+  });
+
+  it.each(["\n", "\r\n", "\r"])("P4 completed -> done -> EOF with %j endings equals the EOF result at every one-byte boundary", (ending) => {
+    const input = text(shaped, `event: done${ending}data: [DONE]${ending}${ending}`, ending);
+    expect(feed(input)).toEqual(expected);
+    expect(feed(input, oneByte(input))).toEqual(expected);
+  });
+
+  it("P6/P7/P8 same chunk, next chunk and a done frame split across five chunks all succeed", () => {
+    const input = text(shaped, DONE);
+    const at = encoder.encode(text()).length;
+    expect(feed(input)).toEqual(expected);
+    expect(feed(input, [at])).toEqual(expected);
+    expect(feed(input, [at, at + 3, at + 9, at + 15, at + 20, at + 22])).toEqual(expected);
+  });
+
+  it("P9 operates above the existing framer: no-space colon and CRLF framing yield the same done", () => {
+    expect(feed(text(shaped, "event:done\ndata:[DONE]\n\n"))).toEqual(expected);
+    expect(feed(text(shaped, "event: done\r\ndata: [DONE]\r\n\r\n"))).toEqual(expected);
+  });
+
+  it("chunk partitions of one valid stream all produce the identical completed result", () => {
+    const input = text(shaped, DONE);
+    const at = encoder.encode(text()).length;
+    const partitions = [[], [at], [at + 2], [at + 16], [at - 1, at + 1], oneByte(input).filter((n) => n > at - 64), oneByte(input)];
+    for (const cuts of partitions) expect(feed(input, cuts)).toEqual(expected);
+  });
+
+  it.each([
+    ["primitive string", "usage"], ["primitive number", 1], ["boolean", true], ["array", []], ["null", null],
+    ["unknown top-level key", { ...usage(), extra: 1 }], ["billable_usage on status_update", { ...usage(), billable_usage: {} }],
+    ["unknown modality-count key", { ...usage(), input_tokens_by_modality: [{ ...count("MODALITY_A", 1), extra: 1 }] }],
+    ["unknown invocation key", { ...usage(), model_invocation_token_counts: [{ ...invocation(), extra: [] }] }],
+    ["number as string", { ...usage(), total_tokens: "100" }], ["number as null", { ...usage(), raw_prompt_token: null }],
+    ["number as object", { ...usage(), initial_input_tokens: {} }],
+    ["tokens as string", { ...usage(), output_tokens_by_modality: [{ modality: "MODALITY_C", tokens: "1" }] }],
+    ["array replaced by object", { ...usage(), input_tokens_by_modality: count("MODALITY_A", 1) }],
+    ["invocation array replaced by object", { ...usage(), non_grounding_model_invocation_token_counts: invocation() }],
+    ["entry replaced by array", { ...usage(), input_tokens_by_modality: [[count("MODALITY_A", 1)]] }],
+    ["nested array replaced by object", { ...usage(), model_invocation_token_counts: [{ ...invocation(), candidates_tokens_details: count("MODALITY_C", 1) }] }],
+    ["null entry", { ...usage(), output_tokens_by_modality: [null] }],
+    ["empty modality array", { ...usage(), output_tokens_by_modality: [] }],
+    ["empty invocation array", { ...usage(), model_invocation_token_counts: [] }],
+    ["empty nested array", { ...usage(), model_invocation_token_counts: [{ ...invocation(), thoughts_tokens_details: [] }] }],
+    ["17 modality entries", { ...usage(), input_tokens_by_modality: Array.from({ length: 17 }, () => count("MODALITY_A", 1)) }],
+    ["17 invocations", { ...usage(), model_invocation_token_counts: Array.from({ length: 17 }, invocation) }],
+    ["empty modality", { ...usage(), input_tokens_by_modality: [count("", 1)] }],
+    ["numeric modality", { ...usage(), input_tokens_by_modality: [{ modality: 5, tokens: 1 }] }],
+    ["missing modality", { ...usage(), input_tokens_by_modality: [{ tokens: 1 }] }],
+    ["missing tokens", { ...usage(), input_tokens_by_modality: [{ modality: "MODALITY_A" }] }],
+  ])("N-U rejects usage with %s", (_name, value) => code(() => parseFull(withUsage(value))));
+
+  it.each(Object.keys(usage()))("N-U7 rejects usage missing required member %s", (member) => {
+    const value = usage(); delete value[member];
+    code(() => parse(withUsage(value)));
+  });
+
+  it("N-U5 rejects a non-finite usage number (1e400 decodes to Infinity)", () => {
+    const json = JSON.stringify(update({ usage: usage() })).replace('"total_tokens":100', '"total_tokens":1e400');
+    expect(json).toContain("1e400");
+    const p = parser();
+    p.push(encoder.encode(frame(shaped[0]!)));
+    code(() => p.push(encoder.encode(`event: interaction.status_update\ndata: ${json}\n\n`)));
+  });
+
+  const before = text(shaped.slice(0, 9));
+  it.each([
+    ["N-D1 done before completed", before + DONE + frame(shaped[9]!)],
+    ["N-D2 done right after created", frame(shaped[0]!) + DONE],
+    ["N-D2 done alone", DONE],
+    ["N-D3 second done", text(shaped, DONE + DONE)],
+    ["N-D4 status_update after completed", text(shaped, frame(update()))],
+    ["N-D4 step.stop after completed", text(shaped, frame({ event_type: "step.stop", index: 1 }))],
+    ["N-D4/N-D6 second completed", text(shaped, frame(shaped[9]!))],
+    ["N-D5 semantic event after done", text(shaped, DONE + frame(update()))],
+    ["N-D6 completed after done", text(shaped, DONE + frame(shaped[9]!))],
+    ["N-D7 unknown event after completed", text(shaped, frame({ event_type: "ping" }))],
+    ["N-D7 provider error after completed", text(shaped, frame({ event_type: "error", error: { message: "x" } }))],
+    ...["[DONE ]", "[done]", "DONE", "", "[DONE]x", "x[DONE]", '{"event_type":"done"}', " [DONE]"].map((value) =>
+      [`N-D8 sentinel ${JSON.stringify(value)}`, text(shaped, `event: done\ndata: ${value}\n\n`)]),
+    ["N-D8 sentinel via two spaces", text(shaped, "event: done\ndata:  [DONE]\n\n")],
+    ["N-D8b event Done", text(shaped, "event: Done\ndata: [DONE]\n\n")],
+    ["N-D8b event DONE", text(shaped, "event: DONE\ndata: [DONE]\n\n")],
+    ["N-D9 non-JSON data after completed", text(shaped, "event: x\ndata: not json\n\n")],
+    ["N-D10 done with id", text(shaped, "event: done\nid: 1\ndata: [DONE]\n\n")],
+    ["N-D10 done with comment", text(shaped, "event: done\n: note\ndata: [DONE]\n\n")],
+    ["N-D11 two data lines", text(shaped, "event: done\ndata: [DONE]\ndata: [DONE]\n\n")],
+    ["N-D11 frame after done", text(shaped, DONE + "event: done\ndata: x\n\n")],
+    ["N-D12 comment-only frame after completed", text(shaped, ": keepalive\n\n")],
+    ["N-D12 comment-only frame after done", text(shaped, DONE + ": keepalive\n\n")],
+  ])("%s -> INTERACTION_REPLAY_CONTRACT_CHANGED in one chunk and one byte at a time (N-S1)", (_name, input) => {
+    code(() => feed(input));
+    code(() => feed(input, oneByte(input)));
+  });
+
+  it.each([
+    ["done with retry", "event: done\nretry: 5\ndata: [DONE]\n\n"],
+    ["done with unknown field", "event: done\nfoo: bar\ndata: [DONE]\n\n"],
+    ["done without its blank-line terminator at EOF", "event: done\ndata: [DONE]\n"],
+    ["unterminated bytes after done", DONE + "garbage"],
+  ])("N-D9/N-D10 framer-level %s stays SSE_MALFORMED_EVENT", (_name, tail) => {
+    code(() => feed(text(shaped, tail)), "SSE_MALFORMED_EVENT");
+  });
+
+  it("chunk partitions of invalid post-completion streams all fail with the same code", () => {
+    for (const tail of [frame({ event_type: "ping" }), DONE + frame({ event_type: "ping" }), DONE + DONE]) {
+      const input = text(shaped, tail);
+      const at = encoder.encode(text()).length;
+      for (const cuts of [[], [at], [at + 3, at + 9, at + 15, at + 20], oneByte(input)]) code(() => feed(input, cuts));
+    }
+  });
+
+  it("N-S2 never releases a completed result from push(), even at a chunk boundary", () => {
+    const p = parser();
+    expect(p.push(encoder.encode(text()))).toBeUndefined();
+    expect(p.push(encoder.encode(DONE))).toBeUndefined();
+    expect(p.finish()).toEqual(expected);
+    code(() => p.push(encoder.encode("\n")));
+    code(() => p.finish());
+  });
+
+  it("N-E1 new usage and done failures carry no payload, sentinel, URL or provider text", () => {
+    const failures: unknown[] = [];
+    for (const run of [
+      () => parse(withUsage({ ...usage(), SECRETKEY: "SECRET-usage-value", input_tokens_by_modality: [count("SECRET-modality", 1)] })),
+      () => feed(text(shaped, "event: done\ndata: [SECRET]\n\n")),
+      () => feed(text(shaped, "event: SECRET\ndata: SECRET-trailing\n\n")),
+    ]) {
+      try { run(); } catch (error) { failures.push(error); }
+    }
+    expect(failures).toHaveLength(3);
+    for (const error of failures) {
+      expect(error).toBeInstanceOf(GoogleGenAiSecureOutputTransportError);
+      expect((error as GoogleGenAiSecureOutputTransportError).code).toBe("INTERACTION_REPLAY_CONTRACT_CHANGED");
+      const rendered = String(error) + JSON.stringify(error) + String((error as Error).stack) + String((error as Error).message);
+      for (const leaked of ["SECRET", "DONE", uri, "MODALITY", "googleapis"]) expect(rendered).not.toContain(leaked);
+    }
+  });
+});

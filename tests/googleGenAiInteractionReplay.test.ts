@@ -16,6 +16,7 @@ const completed = pending() + [
   { event_type: "step.stop", index: 0 },
   { event_type: "interaction.completed", interaction: { id, status: "completed" } },
 ].map(frame).join("");
+const done = "event: done\ndata: [DONE]\n\n";
 function policy(overrides: { limits?: Partial<Policy["limits"]>; timeouts?: Partial<Policy["timeouts"]>; recovery?: Partial<Policy["recovery"]> } = {}): Policy {
   return { limits: { ...published.limits, ...overrides.limits }, timeouts: { ...published.timeouts, ...overrides.timeouts }, recovery: { ...published.recovery, ...overrides.recovery } };
 }
@@ -225,9 +226,9 @@ describe("one bounded same-ID logical replay", () => {
   it("cancels early success, releases its reader and removes parent listeners", async () => {
     const { ctx } = context(); const add = vi.spyOn(ctx.signal, "addEventListener"); const remove = vi.spyOn(ctx.signal, "removeEventListener");
     const cancel = vi.fn();
-    const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(encoder.encode(completed)); }, cancel });
+    const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(encoder.encode(completed + done)); c.close(); }, cancel });
     expect((await run(async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }), policy(), ctx)).status).toBe("completed");
-    expect(cancel).toHaveBeenCalledTimes(1); expect(stream.locked).toBe(false); expect(add).toHaveBeenCalledTimes(1); expect(remove).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledTimes(0); expect(stream.locked).toBe(false); expect(add).toHaveBeenCalledTimes(1); expect(remove).toHaveBeenCalledTimes(1);
   });
 
   it.each(["headers", "read", "delay"])("propagates parent abort during %s and does not retry", async (stage) => {
@@ -471,4 +472,61 @@ describe("B4V8C replay closed dependency-error boundary (validate before classif
     b4v8cExpectSanitized(error, reason);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+});
+
+describe("completed replay termination: EOF-only release with one exact done frame", () => {
+  const video = { type: "video", mime_type: "video/mp4", uri: "https://generativelanguage.googleapis.com/v1beta/files/test:download?alt=media" };
+  const unknown = frame({ event_type: "ping" });
+  function chunked(parts: string[], close = true) {
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({ start(c) { for (const part of parts) c.enqueue(encoder.encode(part)); if (close) c.close(); }, cancel });
+    const fetchImpl = vi.fn<GoogleGenAiFetch>(async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }));
+    return { stream, cancel, fetchImpl };
+  }
+  const partitions = (tail: string): Array<[string, string[]]> => [
+    ["one chunk (completed and tail together)", [completed + tail]],
+    ["completed ends at a chunk boundary", [completed, tail]],
+    ["tail split across five chunks", [completed, tail.slice(0, 3), tail.slice(3, 9), tail.slice(9, 15), tail.slice(15, 20), tail.slice(20)]],
+    ["one byte at a time over the terminal region", [completed.slice(0, -40), ...(completed.slice(-40) + tail).split("")]],
+  ];
+
+  it.each(partitions(done))("returns the completed result only at EOF after done: %s", async (_name, parts) => {
+    const { stream, cancel, fetchImpl } = chunked(parts);
+    expect(await run(fetchImpl)).toEqual({ id, status: "completed", outputVideo: video });
+    expect(cancel).not.toHaveBeenCalled(); expect(stream.locked).toBe(false); expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps historical completed -> EOF without a done frame", async () => {
+    const { stream, fetchImpl } = chunked([completed]);
+    expect(await run(fetchImpl)).toEqual({ id, status: "completed", outputVideo: video });
+    expect(stream.locked).toBe(false);
+  });
+
+  it.each([...partitions(unknown), ...partitions(done + unknown), ...partitions(done + done)])(
+    "rejects invalid post-completion content in every chunk partition: %s",
+    async (_name, parts) => {
+      const { stream, fetchImpl } = chunked(parts);
+      const { result, error } = await capture(run(fetchImpl));
+      expect(result).toBeUndefined();
+      expect(error).toMatchObject({ code: "INTERACTION_REPLAY_CONTRACT_CHANGED", retryable: false });
+      expect(stream.locked).toBe(false); expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([["completed", completed], ["completed and done", completed + done]])(
+    "never reports success for a stream left open after %s; fails by the existing idle timeout",
+    async (_name, text) => {
+      const { ctx } = context(); const add = vi.spyOn(ctx.signal, "addEventListener"); const remove = vi.spyOn(ctx.signal, "removeEventListener");
+      const { stream, cancel, fetchImpl } = chunked([text], false);
+      let settled = false;
+      const outcome = capture(run(fetchImpl, policy({ recovery: { maxStreamRecoveryAttemptsPerReconciliation: 1 } }), ctx)).finally(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(119999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const { result, error } = await outcome;
+      expect(result).toBeUndefined(); expect(error).toMatchObject({ code: "SSE_IDLE_TIMEOUT" });
+      expect(cancel).toHaveBeenCalledTimes(1); expect(stream.locked).toBe(false); expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledTimes(1); expect(remove).toHaveBeenCalledTimes(1);
+    },
+  );
 });

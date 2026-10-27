@@ -59,6 +59,47 @@ function record(value: unknown): Record<string, unknown> {
 function keys(value: Record<string, unknown>, allowed: readonly string[]): void {
   if (Object.keys(value).some((key) => !allowed.includes(key))) changed();
 }
+function exactKeys(value: Record<string, unknown>, required: readonly string[]): void {
+  keys(value, required);
+  if (required.some((key) => !Object.hasOwn(value, key))) changed();
+}
+function finiteNumber(value: unknown): void {
+  if (typeof value !== "number" || !Number.isFinite(value)) changed();
+}
+function boundedArray(value: unknown): unknown[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) changed();
+  return value as unknown[];
+}
+
+// Closed, evidence-locked status_update usage (B4Y2E section 9). Validated, then discarded: never part of the result.
+const USAGE_NUMBERS = [
+  "total_tokens", "total_input_tokens", "total_cached_tokens", "total_output_tokens",
+  "total_tool_use_tokens", "total_thought_tokens", "raw_prompt_token", "initial_input_tokens",
+] as const;
+const USAGE_MODALITY_ARRAYS = ["input_tokens_by_modality", "output_tokens_by_modality"] as const;
+const USAGE_INVOCATION_ARRAYS = ["model_invocation_token_counts", "non_grounding_model_invocation_token_counts"] as const;
+const INVOCATION_MODALITY_ARRAYS = ["prompt_tokens_details", "candidates_tokens_details", "thoughts_tokens_details"] as const;
+function modalityCounts(value: unknown): void {
+  for (const entry of boundedArray(value)) {
+    const count = record(entry);
+    exactKeys(count, ["modality", "tokens"]);
+    if (typeof count.modality !== "string" || count.modality.length === 0) changed();
+    finiteNumber(count.tokens);
+  }
+}
+function validateStatusUpdateUsage(value: unknown): void {
+  const usage = record(value);
+  exactKeys(usage, [...USAGE_NUMBERS, ...USAGE_MODALITY_ARRAYS, ...USAGE_INVOCATION_ARRAYS]);
+  for (const key of USAGE_NUMBERS) finiteNumber(usage[key]);
+  for (const key of USAGE_MODALITY_ARRAYS) modalityCounts(usage[key]);
+  for (const key of USAGE_INVOCATION_ARRAYS) {
+    for (const entry of boundedArray(usage[key])) {
+      const invocation = record(entry);
+      exactKeys(invocation, INVOCATION_MODALITY_ARRAYS);
+      for (const nested of INVOCATION_MODALITY_ARRAYS) modalityCounts(invocation[nested]);
+    }
+  }
+}
 
 export function createGoogleGenAiInteractionSseParser(input: Readonly<{
   providerExecutionId: string;
@@ -83,6 +124,7 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
   let modelStepSeen = false;
   let lastStart = -1;
   let finished = false;
+  let doneSeen = false;
   const steps = new Map<number, { kind: "thought" | "model_output"; closed: boolean }>();
 
   const observation = (): GoogleGenAiInteractionReplayResult => {
@@ -122,8 +164,9 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
     }
     if (!created) changed();
     if (kind === "interaction.status_update") {
-      keys(event, ["event_type", "event_id", "interaction_id", "status"]);
+      keys(event, ["event_type", "event_id", "interaction_id", "status", "usage"]);
       identity(event.interaction_id);
+      if (Object.hasOwn(event, "usage")) validateStatusUpdateUsage(event.usage);
       update(event.status);
       return;
     }
@@ -184,16 +227,17 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
   const dispatch = (): void => {
     if (!hasContent) return;
     if (++eventCount > maxEvents) throw new GoogleGenAiSecureOutputTransportError("SSE_EVENT_LIMIT_EXCEEDED");
-    if (result) changed();
     let text: string;
     try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(frame.subarray(0, length)); } catch { malformed(); }
     if (firstFrame && text.startsWith("\uFEFF")) text = text.slice(1);
     if (text.includes("\uFEFF") || text.includes("\0")) malformed();
     let name: string | undefined;
     let idSeen = false;
+    let commentSeen = false;
     const data: string[] = [];
     for (const line of text.split(/\r\n|\r|\n/)) {
-      if (!line || line.startsWith(":")) continue;
+      if (!line) continue;
+      if (line.startsWith(":")) { commentSeen = true; continue; }
       const colon = line.indexOf(":");
       if (colon < 0) malformed();
       const field = line.slice(0, colon);
@@ -204,8 +248,15 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
       else if (field === "data") data.push(value);
       else malformed();
     }
-    if (data.length === 0) { if (name !== undefined || idSeen) malformed(); return; }
+    if (data.length === 0) { if (name !== undefined || idSeen) malformed(); if (result) changed(); return; }
     if (name === undefined) malformed();
+    // Post-completion grammar (B4Y2E2): after a valid interaction.completed only ONE exact framed
+    // `done` / `[DONE]` event may occur, then EOF. Checked before any JSON parsing.
+    if (result || name === "done") {
+      if (result?.status !== "completed" || doneSeen || name !== "done" || idSeen || commentSeen || data.length !== 1 || data[0] !== "[DONE]") changed();
+      doneSeen = true;
+      return;
+    }
     const json = data.join("\n");
     rejectDuplicateGoogleGenAiJsonKeys(json);
     let event: unknown;
@@ -233,7 +284,7 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
   };
   return Object.freeze({
     push(chunk: Uint8Array): GoogleGenAiInteractionReplayResult | undefined {
-      if (finished || result) changed();
+      if (finished || (result && status !== "completed")) changed();
       if (!(chunk instanceof Uint8Array)) malformed();
       for (const byte of chunk) {
         if (pendingCR) {
@@ -255,8 +306,8 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
         }
         else lineLength++;
       }
-      if (result && (hasContent || lineLength !== 0)) changed();
-      return result;
+      // A completed result is released only by finish() at EOF, never at a network chunk boundary.
+      return status === "completed" ? undefined : result;
     },
     finish(): GoogleGenAiInteractionReplayResult {
       if (finished) changed();

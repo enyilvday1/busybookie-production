@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, unlink } from "node:fs/promises";
+import { attemptHardLink } from "../filesystem/hardLink.js";
 import { join } from "node:path";
 import {
   interchangeArtifactFileName, interchangeArtifactPath, interchangeArtifactRelativePath, interchangeDirectoryPath, reservedInterchangeTempName,
@@ -108,9 +109,9 @@ export async function publishEditorialInterchangeArtifact(input: Readonly<{
   } finally {
     await handle.close();
   }
-  try {
-    await link(tempPath, finalPath);
-  } catch (cause) {
+  const attempt = await attemptHardLink(tempPath, finalPath);
+  if (attempt.status === "FAILED") {
+    const cause = attempt.error;
     await removeQuietly(tempPath);
     const failure = classifyInterchangeLinkFailure(cause);
     if (failure === "STORE_UNSUPPORTED") return { status: "STORE_UNSUPPORTED", detail: `hard link unavailable (${errorCode(cause)})` };

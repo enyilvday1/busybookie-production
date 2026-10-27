@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { link, mkdir, open, readdir, readFile, unlink } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, unlink } from "node:fs/promises";
+import { attemptHardLink } from "../filesystem/hardLink.js";
 import { join } from "node:path";
 import {
   assertGovernanceSha256, EDITORIAL_GOVERNANCE_RECORD_DIRECTORIES, governanceDirectoryPath, governanceFilePath, governanceSubjectPath,
@@ -102,9 +103,9 @@ export async function publishEditorialGovernanceRecord(input: Readonly<{
   } finally {
     await handle.close();
   }
-  try {
-    await link(tempPath, finalPath);
-  } catch (cause) {
+  const attempt = await attemptHardLink(tempPath, finalPath);
+  if (attempt.status === "FAILED") {
+    const cause = attempt.error;
     await removeQuietly(tempPath);
     const failure = classifyGovernanceLinkFailure(cause);
     if (failure === "EXISTS") return { status: "EXISTS", existingBytes: await readBytes(finalPath) };

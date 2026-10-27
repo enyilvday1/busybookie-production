@@ -4,7 +4,6 @@ import {
 } from "node:crypto";
 
 import {
-  link,
   lstat,
   mkdir,
   open,
@@ -12,6 +11,7 @@ import {
   realpath,
   unlink,
 } from "node:fs/promises";
+import { attemptHardLink } from "../../filesystem/hardLink.js";
 
 import {
   basename,
@@ -229,7 +229,10 @@ const NODE_COMPLETION_FILE_SYSTEM:
   Object.freeze({
     mkdir,
     open,
-    link,
+    link: async (existingPath, newPath) => {
+      const result = await attemptHardLink(existingPath, newPath);
+      if (result.status === "FAILED") throw result.error;
+    },
     unlink,
   });
 

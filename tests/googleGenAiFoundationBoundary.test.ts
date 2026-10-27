@@ -190,6 +190,7 @@ const GOOGLE_COMPLETION_PERSISTENCE_SOURCES = {
     "node:fs/promises",
   ],
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts": [
+    "../../filesystem/hardLink.js",
     "../../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
     "../../googleGenai/audit/googleGenAiGenerationRecordPath.js",
     "../../googleGenai/audit/readGoogleGenAiGenerationRecord.js",
@@ -258,6 +259,7 @@ const GOOGLE_OUTPUT_MATERIALIZER_FOUNDATION_IMPORTS = [
 ] as const;
 
 const GOOGLE_OUTPUT_MATERIALIZER_IMPORTS = [
+  "../../filesystem/hardLink.js",
   "../../googleGenai/googleGenAi.types.js",
   "../../googleGenai/googleGenAiInteractionContract.js",
   "../../googleGenai/output/googleGenAiVideoOutputPath.js",

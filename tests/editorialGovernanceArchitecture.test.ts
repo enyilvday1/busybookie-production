@@ -13,7 +13,7 @@ const GOVERNANCE_FILES = ["editorialGovernancePaths.ts", "editorialGovernanceSto
 const PLATFORM_IMPORTS = ["node:fs", "node:fs/promises", "node:path", "node:crypto"];
 const ALLOWED_IMPORTS: Record<string, readonly string[]> = {
   "editorialGovernancePaths.ts": PLATFORM_IMPORTS,
-  "editorialGovernanceStore.ts": [...PLATFORM_IMPORTS, "./editorialGovernancePaths.js"],
+  "editorialGovernanceStore.ts": [...PLATFORM_IMPORTS, "./editorialGovernancePaths.js", "../filesystem/hardLink.js"],
 };
 const E6_PURE_SOURCES = [
   "editorialProposal.schema.ts", "editorialReview.schema.ts", "editorialRevision.schema.ts",
@@ -63,7 +63,12 @@ describe("E6 dedicated src/editorialGovernance guard (category 21)", () => {
     for (const name of GOVERNANCE_FILES) {
       const text = readFileSync(join(governanceDirectory, name), "utf8");
       expect(governanceImportViolations(name, text), name).toStrictEqual([]);
-      expect(text, name).not.toMatch(/editorial\/|canonicalEditorialJson|editorialSha256|\.\.\//);
+      expect(text.replace('"../filesystem/hardLink.js"', '"hardLink"'), name).not.toMatch(/editorial\/|canonicalEditorialJson|editorialSha256|\.\.\//);
+      if (name === "editorialGovernanceStore.ts") {
+        expect(text).toContain('import { attemptHardLink } from "../filesystem/hardLink.js"');
+        expect(text).not.toMatch(/import \{[^}]*\blink\b[^}]*\} from "node:fs\/promises"/);
+        expect(text).not.toMatch(/linkFile|linkImpl|options\./);
+      }
     }
   });
 

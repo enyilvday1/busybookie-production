@@ -20,10 +20,11 @@ const E7_TESTS = ["editorialInterchangeTimelineSchema.test.ts", "editorialInterc
 const PLATFORM_IMPORTS = ["node:fs/promises", "node:path", "node:crypto"];
 const ALLOWED_STORE_IMPORTS: Record<string, readonly string[]> = {
   "editorialInterchangePaths.ts": PLATFORM_IMPORTS,
-  "editorialInterchangeStore.ts": [...PLATFORM_IMPORTS, "./editorialInterchangePaths.js"],
+  "editorialInterchangeStore.ts": [...PLATFORM_IMPORTS, "./editorialInterchangePaths.js", "../filesystem/hardLink.js"],
 };
 // Pre-E7 production sources pinned at master 5a827d16 (LF-normalized blob SHA-256 per path, LC_ALL=C path order).
-const PRE_E7_SOURCES_MANIFEST_SHA256 = "6cce6a75dc6397e1d776ad59d1ebd2572f0a2580a1f87689ffd50a4d53bf22f0";
+// B6 authorizes the governance store migration; the other 49 pre-E7 sources remain frozen.
+const PRE_E7_SOURCES_MANIFEST_SHA256 = "09eb6946ac1d09299b66c5cc4496c2788b6e4f4582d48dcb686f2f2cb6068e03";
 // Built by concatenation so this guard never matches its own pattern text.
 const LAUNCH = new RegExp(["child", "_process|\\bspawn", "\\(|\\bexec", "(File|Sync)?\\(|\\bfork\\("].join(""));
 const MEDIA_TOOLS = new RegExp(["ff", "mpeg|ff", "probe|pyt", "hon|opentime", "lineio|otio", "tool|Da", "Vinci"].join(""), "i");
@@ -73,16 +74,18 @@ describe("E7 dedicated src/editorialInterchange guard (category 24)", () => {
     for (const name of E7_STORE_FILES) {
       const text = code(join(interchangeDirectory, name));
       expect(interchangeStoreImportViolations(name, text), name).toStrictEqual([]);
-      expect(text, name).not.toMatch(/editorial\/|editorialGovernance|canonicalEditorialJson|editorialSha256|\.\.\//);
+      expect(text.replace('"../filesystem/hardLink.js"', '"hardLink"'), name).not.toMatch(/editorial\/|editorialGovernance|canonicalEditorialJson|editorialSha256|\.\.\//);
       expect(text, name).not.toMatch(MEDIA_TOOLS);
       expect(text, name).not.toMatch(/process\.|dotenv|fetch\(|https?:/);
     }
     expect(specifiers(read(join(interchangeDirectory, "editorialInterchangeStore.ts")))).toContain("./editorialInterchangePaths.js");
   });
 
-  it("store uses the real hard link and lstat with no copy/rename fallback or injectable primitive", () => {
+  it("store uses the central hard-link operation and lstat with no copy/rename fallback or injectable primitive", () => {
     const text = code(join(interchangeDirectory, "editorialInterchangeStore.ts"));
-    expect(text).toMatch(/import \{[^}]*\blink\b[^}]*\blstat\b[^}]*\} from "node:fs\/promises"/);
+    expect(text).toContain('import { attemptHardLink } from "../filesystem/hardLink.js"');
+    expect(text).toMatch(/import \{[^}]*\blstat\b[^}]*\} from "node:fs\/promises"/);
+    expect(text).not.toMatch(/import \{[^}]*\blink\b[^}]*\} from "node:fs\/promises"/);
     expect(text).not.toMatch(/\b(rename|copyFile|cp|symlink|writeFile\(finalPath)\b/);
     expect(text).not.toMatch(/linkFile|linkImpl|options\./);
     // lstat precedes any open of the final path inside the trusted-read routine.
@@ -166,12 +169,14 @@ describe("boundaries: no adoption, E6 unchanged, E8-E11 excluded (category 24)",
     }
   });
 
-  it("all pre-E7 src/editorial and src/editorialGovernance sources are byte-identical to master (AC7-01)", () => {
+  it("pre-E7 sources remain frozen except the authorized B6 governance store migration (AC7-01)", () => {
     const e7 = new Set(E7_PURE_SOURCES);
     const files = [...sourceFiles(editorialDirectory).filter((p) => !e7.has(p.slice(p.lastIndexOf(sep) + 1))), ...sourceFiles(governanceDirectory)]
       .map((p) => relative(repoRoot, p).split(sep).join("/")).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     expect(files).toHaveLength(50);
-    const manifest = files.map((p) => `${createHash("sha256").update(read(join(repoRoot, p)).replace(/\r\n/g, "\n"), "utf8").digest("hex")}  ${p}\n`).join("");
+    const frozen = files.filter((p) => p !== "src/editorialGovernance/editorialGovernanceStore.ts");
+    expect(frozen).toHaveLength(49);
+    const manifest = frozen.map((p) => `${createHash("sha256").update(read(join(repoRoot, p)).replace(/\r\n/g, "\n"), "utf8").digest("hex")}  ${p}\n`).join("");
     expect(createHash("sha256").update(manifest, "utf8").digest("hex")).toBe(PRE_E7_SOURCES_MANIFEST_SHA256);
   });
 

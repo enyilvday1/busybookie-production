@@ -5013,7 +5013,6 @@ describe(
                 )
                 .sort(),
             ).toEqual([
-              "link",
               "lstat",
               "mkdir",
               "open",

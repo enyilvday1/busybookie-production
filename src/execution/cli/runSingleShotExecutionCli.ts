@@ -220,6 +220,26 @@ export async function runSingleShotExecutionCli(
     );
   }
 
+  // B5C-X1: a Google submission is durably SUBMITTED, never completed here.
+  if (
+    result.provider === "GOOGLE_GENAI"
+  ) {
+    console.log(
+      `Single-shot execution submitted: ${episode.episodeId}/${options.shotId} (${result.provider})`
+    );
+    console.log(
+      `Provider execution: ${result.submitted.providerExecutionId}`
+    );
+    console.log(
+      `Submission record: ${result.submitted.submissionPath}`
+    );
+    console.log(
+      `Reconcile later with npm run execution:reconcile -- --episode ${options.episodeId} --shot ${options.shotId}. Do not resubmit.`
+    );
+
+    return;
+  }
+
   console.log(
     `Single-shot execution completed: ${episode.episodeId}/${options.shotId} (${result.provider})`
   );

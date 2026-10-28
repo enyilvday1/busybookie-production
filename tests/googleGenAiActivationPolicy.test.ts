@@ -784,6 +784,8 @@ describe(
         ).toEqual([
           // B4X: the operator CLI runner loads the activation policy for execute only.
           "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+          // B5C-X1: the single shared composition point loads the policy for the reused Google orchestrator.
+          "src/execution/createProductionSingleShotExecutionDependencies.ts",
           // B4X: the operator orchestrator runs the pre-reservation cost and reference-image admission.
           "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
           "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
@@ -884,15 +886,10 @@ describe(
 
         for (
           const file of [
-            "src/execution/executeSingleShot.ts",
-            "src/execution/singleShotExecution.types.ts",
-            "src/execution/cli/runSingleShotExecutionCli.ts",
-            "src/execution/createProductionSingleShotExecutionDependencies.ts",
             "src/execution/reconcileExecutionLifecycle.ts",
             "src/execution/createExecutionCompletion.ts",
             "src/composition/buildEpisodeCompositionPlan.ts",
             "src/composition/verifyCompletedShotForComposition.ts",
-            "src/execution/resolveDurableShotVisualGenerationState.ts",
           ]
         ) {
           expect(
@@ -908,6 +905,42 @@ describe(
             /GOOGLE_GENAI|GoogleGenAi|googleGenai|gemini-omni/,
           );
         }
+
+        // B5C-X1: shared execution may name GOOGLE_GENAI as its async branch literal, but imports no Google
+        // module, SDK, model, credential or activation switch. Only the composition point reaches Google modules.
+        for (
+          const file of [
+            "src/execution/executeSingleShot.ts",
+            "src/execution/singleShotExecution.types.ts",
+            "src/execution/resolveDurableShotVisualGenerationState.ts",
+            "src/execution/cli/runSingleShotExecutionCli.ts",
+          ]
+        ) {
+          expect(
+            await readFile(
+              join(
+                ROOT,
+                file,
+              ),
+              "utf8",
+            ),
+            file,
+          ).not.toMatch(
+            /GoogleGenAi|googleGenai|gemini-omni|@google\/genai|newSubmissionsEnabled|ActivationPolicy/,
+          );
+        }
+
+        expect(
+          await readFile(
+            join(
+              ROOT,
+              "src/execution/createProductionSingleShotExecutionDependencies.ts",
+            ),
+            "utf8",
+          ),
+        ).not.toMatch(
+          /@google\/genai|new GoogleGenAI|newSubmissionsEnabled|process\.env|\bfetch\s*\(|interactions\.|submitGoogleGenAiSingleShot|reconcile|Recovery|Materializ|Retriever|Getter/,
+        );
 
         // B5C-S1: routing may name GOOGLE_GENAI only as the explicit selection literal; it imports and
         // references no Google module, activation policy, model or submission authority.

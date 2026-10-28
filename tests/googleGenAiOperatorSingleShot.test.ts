@@ -291,6 +291,12 @@ describe("operator-only Google execute: deterministic admission precedes the res
     await expectRefusedBeforeReservation(h, "MANIFEST_PROVIDER_NOT_PAID");
   });
 
+  it("admits an explicit GOOGLE_GENAI manifest provider (B5C-X1) and still creates exactly once", async () => {
+    const h = await harness({ episode: episodeWith((shot) => { shot.generation = { ...shot.generation, provider: "GOOGLE_GENAI" }; }) });
+    await expect(executeGoogleGenAiOperatorSingleShot(h.request, h.dependencies)).resolves.toMatchObject({ lifecycleState: "SUBMITTED", provider: "GOOGLE_GENAI" });
+    expect(h.calls()).toMatchObject({ reservations: 1, creates: 1, submissions: 1 });
+  });
+
   it("refuses a shot that is not APPROVED_FOR_GENERATION", async () => {
     const h = await harness({ episode: episodeWith((shot) => { shot.generation = { ...shot.generation, status: "READY_FOR_APPROVAL" }; }) });
     await expectRefusedBeforeReservation(h, "SHOT_STATUS_NOT_APPROVED");

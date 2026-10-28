@@ -112,6 +112,87 @@ export async function executeSingleShot(
     );
   }
 
+  // B5C-X1: GOOGLE_GENAI is asynchronous. It bypasses the synchronous paid
+  // provider contract and delegates to the injected Google submission
+  // capability, which owns admission, activation, reservation, the single
+  // create and the durable accepted-submission record. No completion, poll,
+  // reconcile or output work happens here.
+  if (
+    readiness.executionProvider ===
+    "GOOGLE_GENAI"
+  ) {
+    if (
+      !request.confirmPaidGeneration
+    ) {
+      throw new Error(
+        "Paid-generation confirmation is required before creating an execution reservation.",
+      );
+    }
+
+    const googleSubmitter =
+      dependencies
+        .executeGoogleSubmission;
+
+    if (!googleSubmitter) {
+      throw new Error(
+        `Single-shot execution blocked: ${shot.id} has no shared Google submission dependency.`,
+      );
+    }
+
+    const submitted =
+      await googleSubmitter({
+        episode:
+          request.episode,
+
+        shotId:
+          shot.id,
+
+        bible:
+          request.bible,
+
+        rules:
+          request.rules,
+
+        mediaRoot:
+          request.mediaRoot,
+
+        sourceImagePath:
+          request.sourceImagePath,
+
+        confirmPaidGeneration:
+          request.confirmPaidGeneration,
+      });
+
+    if (
+      submitted.lifecycleState !==
+        "SUBMITTED" ||
+      submitted.provider !==
+        "GOOGLE_GENAI" ||
+      submitted.episodeId !==
+        request.episode.episodeId ||
+      submitted.shotId !==
+        shot.id ||
+      !submitted.providerExecutionId.trim() ||
+      !submitted.submissionPath.trim()
+    ) {
+      throw new Error(
+        `Google submission for ${request.episode.episodeId}/${shot.id} did not return a durable accepted-submission identity.`,
+      );
+    }
+
+    return Object.freeze({
+      provider:
+        "GOOGLE_GENAI",
+
+      lifecycleState:
+        "SUBMITTED",
+
+      readiness,
+
+      submitted,
+    });
+  }
+
   const provider =
     requirePaidProvider(
       readiness.executionProvider,

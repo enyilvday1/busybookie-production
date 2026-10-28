@@ -211,6 +211,73 @@ export type SingleShotVisualReferenceVerifier =
       SingleShotVisualReferenceVerificationResult
     >;
 
+// B5C-X1: the shared request handed to the injected Google submission
+// capability (the existing Google orchestrator, composed in production
+// wiring). Typed structurally so this module imports no Google module.
+export type SingleShotGoogleSubmissionRequest =
+  Readonly<{
+    episode: EpisodeManifest;
+    shotId: string;
+
+    bible: CharacterBible;
+    rules: ProductionRules;
+
+    mediaRoot: string;
+    sourceImagePath: string;
+
+    confirmPaidGeneration:
+      boolean;
+  }>;
+
+// Durable accepted-submission identity only: no output, no completion.
+export type SingleShotGoogleSubmittedExecution =
+  Readonly<{
+    lifecycleState:
+      "SUBMITTED";
+
+    episodeId:
+      string;
+
+    shotId:
+      string;
+
+    provider:
+      "GOOGLE_GENAI";
+
+    model:
+      string;
+
+    resolution:
+      string;
+
+    expectedMicroUsd:
+      number;
+
+    maxExpectedCostMicroUsd:
+      number;
+
+    reservationId:
+      string;
+
+    reservationPath:
+      string;
+
+    providerExecutionId:
+      string;
+
+    submissionPath:
+      string;
+  }>;
+
+export type SingleShotGoogleSubmitter =
+  (
+    request:
+      SingleShotGoogleSubmissionRequest,
+  ) =>
+    Promise<
+      SingleShotGoogleSubmittedExecution
+    >;
+
 export type SingleShotExecutionDependencies =
   Readonly<{
     readDialogueVisualAuthorization?:
@@ -233,9 +300,34 @@ export type SingleShotExecutionDependencies =
 
     executeVeo:
       SingleShotProviderExecutor;
+
+    // B5C-X1: absent means an explicit GOOGLE_GENAI shot fails closed.
+    executeGoogleSubmission?:
+      SingleShotGoogleSubmitter;
   }>;
 
 export type SingleShotExecutionResult =
+  | SingleShotCompletedExecutionResult
+  | SingleShotGoogleSubmittedExecutionResult;
+
+// B5C-X1: GOOGLE_GENAI returns only after the durable accepted-submission
+// record exists; the published R1 reconcile path completes it later.
+export type SingleShotGoogleSubmittedExecutionResult =
+  Readonly<{
+    provider:
+      "GOOGLE_GENAI";
+
+    lifecycleState:
+      "SUBMITTED";
+
+    readiness:
+      ShotExecutionReadiness;
+
+    submitted:
+      SingleShotGoogleSubmittedExecution;
+  }>;
+
+export type SingleShotCompletedExecutionResult =
   Readonly<{
     provider:
       PaidExecutionProvider;

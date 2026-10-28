@@ -231,18 +231,11 @@ export function evaluateShotExecutionReadiness(
         );
         break;
 
-      // B5C-S1: explicitly selectable, but not executable through shared
-      // production until B5C-X1; blocked before any reservation or provider.
+      // B5C-X1: technical readiness only. Google admission, cost and the
+      // paid-activation switch are owned by the Google orchestrator, which
+      // shared execution reaches before any reservation or provider call.
       case "GOOGLE_GENAI":
-        return {
-          disposition: "BLOCKED",
-          executionProvider: null,
-          routing,
-          reasons: routing.reasons,
-          blockers: [
-            `${shot.id}: GOOGLE_GENAI is explicitly selected, but shared Google execution is not available before B5C-X1.`,
-          ],
-        };
+        break;
 
       case "KREA":
         return {

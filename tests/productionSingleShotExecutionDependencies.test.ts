@@ -393,5 +393,104 @@ describe(
         );
       },
     );
+
+    // B5C-X1: one narrow Google capability (the existing orchestrator), composed lazily.
+    it(
+      "exposes only the lazy Google orchestrator capability and reads the Gemini credential only inside prepareSubmission",
+      async () => {
+        const lifecycle =
+          makeLifecycleCreatorMocks();
+
+        const trip = (name: string) =>
+          vi.fn(() => {
+            throw new Error(`${name} must not run during composition.`);
+          });
+
+        const prepareRunwayExecutor = trip("prepareRunwayExecutor");
+        const prepareVeoExecutor = trip("prepareVeoExecutor");
+        const loadGooglePolicies = vi.fn(async () => ({}) as never);
+        const createInteraction = vi.fn();
+        const prepareGoogleInteraction = vi.fn(() => ({ createInteraction, submittedRecovery: {} }) as never);
+        const submitGoogle = vi.fn(async () => ({ lifecycleState: "SUBMITTED" }) as never);
+
+        const compose = (credentials: { GEMINI_API_KEY?: string }) =>
+          createProductionSingleShotExecutionDependencies(
+            credentials,
+            {
+              ...lifecycle,
+              prepareRunwayExecutor: prepareRunwayExecutor as never,
+              prepareVeoExecutor: prepareVeoExecutor as never,
+              loadGooglePolicies,
+              prepareGoogleInteraction,
+              submitGoogle,
+            },
+          );
+
+        const productionDependencies =
+          compose({ GEMINI_API_KEY: "gemini-x1-key" });
+
+        expect(
+          Object.keys(productionDependencies).sort(),
+        ).toEqual([
+          "createCompletion",
+          "createReservation",
+          "createSubmission",
+          "executeGoogleSubmission",
+          "executeRunway",
+          "executeVeo",
+          "readDialogueVisualAuthorization",
+          "verifyVisualReference",
+        ]);
+
+        for (const spy of [prepareRunwayExecutor, prepareVeoExecutor, loadGooglePolicies, prepareGoogleInteraction, submitGoogle]) {
+          expect(spy).not.toHaveBeenCalled();
+        }
+
+        const request = { marker: "x1-request" } as never;
+
+        await productionDependencies.executeGoogleSubmission!(request);
+
+        expect(submitGoogle).toHaveBeenCalledTimes(1);
+
+        const [forwarded, orchestration] =
+          submitGoogle.mock.calls[0] as unknown as [Record<string, unknown>, Record<string, unknown>];
+
+        expect(forwarded).toEqual({ marker: "x1-request", resolution: "720p" });
+
+        expect(Object.keys(orchestration).sort()).toEqual([
+          "createReservation",
+          "createSubmission",
+          "inspectLifecycle",
+          "loadPolicies",
+          "prepareSubmission",
+          "verifyVisualReference",
+        ]);
+
+        expect(orchestration.loadPolicies).toBe(loadGooglePolicies);
+        expect(orchestration.createReservation).toBe(lifecycle.createReservation);
+        expect(orchestration.createSubmission).toBe(lifecycle.createSubmission);
+        expect(orchestration.verifyVisualReference).toBe(lifecycle.verifyVisualReference);
+        expect(prepareGoogleInteraction).not.toHaveBeenCalled();
+
+        const prepared = (orchestration.prepareSubmission as () => Record<string, unknown>)();
+
+        expect(prepareGoogleInteraction).toHaveBeenCalledExactlyOnceWith("gemini-x1-key");
+        expect(Object.keys(prepared)).toEqual(["createInteraction"]);
+        expect(prepared.createInteraction).toBe(createInteraction);
+
+        // No credential: refusal at prepareSubmission (orchestrator step 14), never at composition.
+        const keyless = compose({});
+
+        await keyless.executeGoogleSubmission!(request);
+
+        const [, keylessOrchestration] =
+          submitGoogle.mock.calls[1] as unknown as [unknown, Record<string, unknown>];
+
+        expect(() => (keylessOrchestration.prepareSubmission as () => unknown)()).toThrow("GEMINI_API_KEY is not configured.");
+        expect(prepareGoogleInteraction).toHaveBeenCalledTimes(1);
+        expect(prepareRunwayExecutor).not.toHaveBeenCalled();
+        expect(prepareVeoExecutor).not.toHaveBeenCalled();
+      },
+    );
   },
 );

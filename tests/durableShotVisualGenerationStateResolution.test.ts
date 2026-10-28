@@ -466,6 +466,29 @@ describe("durable per-shot visual-generation state", () => {
       });
     });
 
+    // B5C-X1: GOOGLE_GENAI is technically executable; SUBMITTED/COMPLETED stay owned by the lifecycle precedence above.
+    it("returns READY_FOR_GENERATION with provider GOOGLE_GENAI for an explicitly selected visual-only Google shot", async () => {
+      const runway = await readyRunwayShot();
+      const shot: Shot = { ...runway.shot, generation: { ...runway.shot.generation, provider: "GOOGLE_GENAI" } };
+      const episode: EpisodeManifest = {
+        ...runway.episode,
+        scenes: runway.episode.scenes.map((scene) => ({ ...scene, shots: scene.shots.map((candidate) => (candidate.id === shot.id ? shot : candidate)) })),
+      };
+      const input = { ...runway, episode, shot };
+      const deps = dependencies(nothing);
+
+      const result = await resolveDurableShotVisualGenerationState(input, deps);
+
+      expect(result).toMatchObject({
+        state: "READY_FOR_GENERATION",
+        episodeId: "EP90",
+        shotId: "S01",
+        provider: "GOOGLE_GENAI",
+        readiness: { disposition: "EXECUTABLE", executionProvider: "GOOGLE_GENAI" },
+        reference: { assetId: VILLAGE_ID },
+      });
+    });
+
     it("forwards its authorization reader to C1 so an authorized dialogue shot becomes READY", async () => {
       const input = await readyDialogueShot();
       const deps = dependencies(nothing, authorizationFor(input));

@@ -938,5 +938,76 @@ describe(
         );
       }
     );
+
+    // B5C-X1: a Google result is durably SUBMITTED and must never be reported as completed.
+    it(
+      "reports a GOOGLE_GENAI result as submitted with its durable submission record and never as completed",
+      async () => {
+        const f = await fixture();
+
+        const readiness = {
+          disposition: "EXECUTABLE",
+          executionProvider: "GOOGLE_GENAI",
+          routing: {} as never,
+          reasons: [],
+          blockers: [],
+        } as const;
+
+        vi.mocked(
+          f.dependencies.executeSingleShot
+        ).mockResolvedValueOnce(
+          Object.freeze({
+            provider: "GOOGLE_GENAI",
+            lifecycleState: "SUBMITTED",
+            readiness,
+            submitted: Object.freeze({
+              lifecycleState: "SUBMITTED",
+              episodeId: "EP90",
+              shotId: "S01",
+              provider: "GOOGLE_GENAI",
+              model: "gemini-omni-1.1-flash",
+              resolution: "720p",
+              expectedMicroUsd: 1,
+              maxExpectedCostMicroUsd: 2,
+              reservationId: "11111111-1111-4111-8111-111111111111",
+              reservationPath: "reservation.json",
+              providerExecutionId: "v1_x1-cli-interaction",
+              submissionPath: "submission.json",
+            }),
+          })
+        );
+
+        await runSingleShotExecutionCli(
+          f.args,
+          f.dependencies
+        );
+
+        const lines = vi.mocked(
+          console.log
+        ).mock.calls.map(
+          (call) =>
+            String(
+              call[0]
+            )
+        );
+
+        expect(
+          lines
+        ).toEqual([
+          "Single-shot execution submitted: EP90/S01 (GOOGLE_GENAI)",
+          "Provider execution: v1_x1-cli-interaction",
+          "Submission record: submission.json",
+          "Reconcile later with npm run execution:reconcile -- --episode EP90 --shot S01. Do not resubmit.",
+        ]);
+
+        expect(
+          lines.join("\n")
+        ).not.toMatch(
+          /completed|Completion record/i
+        );
+
+        f.expectNoExecution();
+      }
+    );
   }
 );

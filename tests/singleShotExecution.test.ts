@@ -597,6 +597,11 @@ describe(
           "RUNWAY",
         );
 
+        // B5C-X1: narrow the COMPLETED|SUBMITTED union to the completed variant.
+        if (result.provider === "GOOGLE_GENAI") {
+          throw new Error("RUNWAY must return a completed result.");
+        }
+
         expect(
           result.providerExecution
             .providerExecutionId,
@@ -668,6 +673,11 @@ describe(
         expect(result.provider).toBe(
           "VEO",
         );
+
+        // B5C-X1: narrow the COMPLETED|SUBMITTED union to the completed variant.
+        if (result.provider === "GOOGLE_GENAI") {
+          throw new Error("VEO must return a completed result.");
+        }
 
         expect(
           result.providerExecution

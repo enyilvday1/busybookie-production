@@ -26,7 +26,7 @@ import { validateEpisodeProduction } from "../src/validation/validateEpisodeProd
 
 // B5C-S1 explicit Google selection. Three layers stay distinct:
 //   S1  selection eligibility  - GOOGLE_GENAI may be explicitly selected (schema + production rules + routing);
-//   X1  shared submission      - absent: readiness BLOCKS Google before any reservation or provider authority;
+//   X1  shared submission      - present: readiness is EXECUTABLE; shared execution delegates to the injected Google submitter;
 //   B5D paid activation        - absent: config/google-genai-activation-policy.json keeps newSubmissionsEnabled=false.
 vi.mock("../src/execution/resolveDurableShotExecutionReadiness.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/execution/resolveDurableShotExecutionReadiness.js")>();
@@ -42,7 +42,7 @@ vi.mock("../src/validation/loadGoogleGenAiActivationPolicy.js", async (importOri
 });
 
 const ROOT = process.cwd();
-const PRE_X1_BLOCKER = "GOOGLE_GENAI is explicitly selected, but shared Google execution is not available before B5C-X1.";
+const NO_GOOGLE_SUBMITTER = "Single-shot execution blocked: S01 has no shared Google submission dependency.";
 const temporaryDirectories: string[] = [];
 let episode: EpisodeManifest;
 let bible: CharacterBible;
@@ -81,7 +81,7 @@ function episodeWith(shot: Shot): EpisodeManifest {
 }
 
 function tripDependencies() {
-  const trip = (name: string) => vi.fn(async () => { throw new Error(`${name} must not run for a pre-X1 Google shot.`); });
+  const trip = (name: string) => vi.fn(async () => { throw new Error(`${name} must not run for a Google shot without a submitter.`); });
   return {
     readDialogueVisualAuthorization: trip("readDialogueVisualAuthorization"),
     verifyVisualReference: trip("verifyVisualReference"),
@@ -164,27 +164,19 @@ describe("B5C-S1 explicit Google selection", () => {
     expect(evaluateShotExecutionReadiness(episode, shotWith("RUNWAY"), bible, rules, policy)).toMatchObject({ disposition: "EXECUTABLE", executionProvider: "RUNWAY" });
   });
 
-  it("S1.8 readiness BLOCKS an explicitly selected Google shot before B5C-X1; status reports it as not executable", async () => {
+  it("S1.8 (B5C-X1) readiness reports an explicitly selected Google shot as technically EXECUTABLE", async () => {
     const google = shotWith("GOOGLE_GENAI");
     const readiness = evaluateShotExecutionReadiness(episodeWith(google), google, bible, rules, policy);
-    expect(readiness).toMatchObject({ disposition: "BLOCKED", executionProvider: null, routing: { disposition: "ROUTABLE", recommendedProvider: "GOOGLE_GENAI" } });
-    expect(readiness.blockers).toEqual([`S01: ${PRE_X1_BLOCKER}`]);
-    const state = await resolveDurableShotVisualGenerationState({ episode: episodeWith(google), shot: google, bible, rules, policy, mediaRoot: await mediaRoot() });
-    expect(state).toMatchObject({ state: "CANONICAL_NOT_EXECUTABLE", readiness: { disposition: "BLOCKED" } });
+    expect(readiness).toMatchObject({ disposition: "EXECUTABLE", executionProvider: "GOOGLE_GENAI", routing: { disposition: "ROUTABLE", recommendedProvider: "GOOGLE_GENAI" }, blockers: [] });
+    expect(readiness.reasons).toContain("S01: GOOGLE_GENAI execution readiness checks passed.");
   });
 
-  it("S1.9 shared execution of a Google-selected shot creates zero reservations (readiness block and RUNWAY|VEO backstop)", async () => {
+  it("S1.9 (B5C-X1) shared execution without an injected Google submitter fails closed with zero reservations and no RUNWAY|VEO cast", async () => {
     const root = await mediaRoot();
     const google = shotWith("GOOGLE_GENAI");
     const blocked = tripDependencies();
-    await expect(executeSingleShot(request(google, root), blocked)).rejects.toThrow(`Single-shot execution blocked: S01 readiness is BLOCKED. Blockers: S01: ${PRE_X1_BLOCKER}`);
-    expect(blocked.createReservation).not.toHaveBeenCalled();
-
-    // Defence in depth: even if readiness were bypassed, executeSingleShot's unchanged paid-provider check refuses Google.
-    vi.mocked(resolveDurableShotExecutionReadiness).mockResolvedValueOnce({ disposition: "EXECUTABLE", executionProvider: "GOOGLE_GENAI", routing: evaluateShotProvider(google, bible, rules, policy), reasons: [], blockers: [] });
-    const bypassed = tripDependencies();
-    await expect(executeSingleShot(request(google, root), bypassed)).rejects.toThrow("Single-shot execution blocked: S01 has no supported paid execution provider.");
-    expect(bypassed.createReservation).not.toHaveBeenCalled();
+    await expect(executeSingleShot(request(google, root), blocked)).rejects.toThrow(NO_GOOGLE_SUBMITTER);
+    for (const spy of Object.values(blocked)) expect(spy).not.toHaveBeenCalled();
     expect(await inspectExecutionLifecycle(root, "EP90", "S01")).toEqual({ state: "NOTHING" });
   });
 
@@ -202,7 +194,8 @@ describe("B5C-S1 explicit Google selection", () => {
       prepareRunwayExecutor,
       prepareVeoExecutor,
     });
-    await expect(executeSingleShot(request(shotWith("GOOGLE_GENAI"), root), production)).rejects.toThrow(PRE_X1_BLOCKER);
+    // B5C-X1: the committed activation policy (false) refuses inside the Google orchestrator.
+    await expect(executeSingleShot(request(shotWith("GOOGLE_GENAI"), root), production)).rejects.toThrow("NEW_SUBMISSIONS_DISABLED");
     for (const spy of [prepareRunwayExecutor, prepareVeoExecutor, trip.verifyVisualReference, trip.createReservation, trip.createSubmission, trip.createCompletion]) {
       expect(spy).not.toHaveBeenCalled();
     }
@@ -215,7 +208,7 @@ describe("B5C-S1 explicit Google selection", () => {
     const google = shotWith("GOOGLE_GENAI");
     expect(() => validateEpisodeProduction(episodeWith(google), bible, rules)).not.toThrow();
     expect(evaluateShotProvider(google, bible, rules, policy).recommendedProvider).toBe("GOOGLE_GENAI");
-    expect(evaluateShotExecutionReadiness(episodeWith(google), google, bible, rules, policy).disposition).toBe("BLOCKED");
+    expect(evaluateShotExecutionReadiness(episodeWith(google), google, bible, rules, policy).disposition).toBe("EXECUTABLE");
     expect(createGoogleGenAiSingleShotProductionInteractionCreator).not.toHaveBeenCalled();
   });
 
@@ -234,7 +227,7 @@ describe("B5C-S1 explicit Google selection", () => {
     const google = shotWith("GOOGLE_GENAI");
     evaluateShotProvider(google, bible, rules, policy);
     evaluateShotExecutionReadiness(episodeWith(google), google, bible, rules, policy);
-    await expect(executeSingleShot(request(google, await mediaRoot()), tripDependencies())).rejects.toThrow(PRE_X1_BLOCKER);
+    await expect(executeSingleShot(request(google, await mediaRoot()), tripDependencies())).rejects.toThrow(NO_GOOGLE_SUBMITTER);
     expect(loadGoogleGenAiActivationPolicy).not.toHaveBeenCalled();
     const bytes = await readFile(join(ROOT, "config", "google-genai-activation-policy.json"));
     expect(createHash("sha256").update(bytes).digest("hex")).toBe("12c2728465972de9df3d3c0ba7fef539ad8802ae5b8161ad83c57409bd268ffb");

@@ -213,6 +213,8 @@ const PAID_MANIFEST_PROVIDERS: ReadonlySet<string> =
   new Set([
     "RUNWAY",
     "VEO",
+    // B5C-X1: an explicit GOOGLE_GENAI manifest (B5C-S1 selection).
+    "GOOGLE_GENAI",
   ]);
 
 // B4U5 section 7 policy set; a subset of the submitter's extension map.

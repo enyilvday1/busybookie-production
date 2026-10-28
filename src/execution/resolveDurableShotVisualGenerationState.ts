@@ -77,6 +77,12 @@ export type ResolveDurableShotVisualGenerationStateDependencies =
       typeof verifyApprovedVisualReferenceAsset;
   }>;
 
+// B5C-X1: GOOGLE_GENAI is executable but asynchronous; it is not a
+// synchronous PaidExecutionProvider.
+type VisualGenerationProvider =
+  | PaidExecutionProvider
+  | "GOOGLE_GENAI";
+
 type ExecutionLifecycleState<
   S extends ExecutionLifecycleClassification["state"],
 > =
@@ -121,14 +127,14 @@ export type DurableShotVisualGenerationState =
       episodeId: string;
       shotId: string;
       readiness: ShotExecutionReadiness;
-      provider: PaidExecutionProvider;
+      provider: VisualGenerationProvider;
     }>
   | Readonly<{
       state: "REFERENCE_SELECTION_REQUIRED";
       episodeId: string;
       shotId: string;
       readiness: ShotExecutionReadiness;
-      provider: PaidExecutionProvider;
+      provider: VisualGenerationProvider;
       candidateAssetIds: readonly string[];
     }>
   | Readonly<{
@@ -136,7 +142,7 @@ export type DurableShotVisualGenerationState =
       episodeId: string;
       shotId: string;
       readiness: ShotExecutionReadiness;
-      provider: PaidExecutionProvider;
+      provider: VisualGenerationProvider;
       reference: Readonly<{
         assetId: string;
         absolutePath: string;
@@ -278,7 +284,9 @@ export async function resolveDurableShotVisualGenerationState(
     provider !==
       "RUNWAY" &&
     provider !==
-      "VEO"
+      "VEO" &&
+    provider !==
+      "GOOGLE_GENAI"
   ) {
     throw new Error(
       `Shot ${episodeId}/${shotId} is EXECUTABLE without a supported paid execution provider.`,

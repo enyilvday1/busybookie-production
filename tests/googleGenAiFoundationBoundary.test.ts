@@ -43,6 +43,8 @@ const FOUNDATION_MODULE_PATTERN =
 
 const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+  // B5C-X1: the single shared composition point for the reused Google orchestrator.
+  "src/execution/createProductionSingleShotExecutionDependencies.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
@@ -71,6 +73,14 @@ const GOOGLE_OPERATOR_ORCHESTRATOR_FOUNDATION_IMPORTS = [
 
 const GOOGLE_OPERATOR_CLI =
   "src/execution/cli/runGoogleGenAiOperatorCli.ts";
+
+// B5C-X1: shared production wiring loads only the Google policy (foundation) for the orchestrator.
+const SHARED_GOOGLE_COMPOSITION =
+  "src/execution/createProductionSingleShotExecutionDependencies.ts";
+
+const SHARED_GOOGLE_COMPOSITION_FOUNDATION_IMPORTS = [
+  "../validation/loadGoogleGenAiPolicy.js",
+] as const;
 
 const GOOGLE_OPERATOR_CLI_FOUNDATION_IMPORTS = [
   "../../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
@@ -394,8 +404,12 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   // B5C-R1: shared lifecycle/reconcile dispatch keyed on the durable reservation provider.
   "src/execution/cli/runExecutionReconcileCli.ts",
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+  // B5C-X1: shared async Google branch, its result typing, CLI output, visual state and the composition point.
+  "src/execution/cli/runSingleShotExecutionCli.ts",
   "src/execution/createExecutionSubmission.ts",
+  "src/execution/createProductionSingleShotExecutionDependencies.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
+  "src/execution/executeSingleShot.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
@@ -409,6 +423,8 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/providers/recoverGoogleGenAiSingleShot.ts",
   "src/execution/providers/submitGoogleGenAiSingleShot.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
+  "src/execution/resolveDurableShotVisualGenerationState.ts",
+  "src/execution/singleShotExecution.types.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
 ] as const;
 
@@ -740,6 +756,18 @@ describe(
           ].sort(),
         ).toEqual([
           ...GOOGLE_OPERATOR_CLI_FOUNDATION_IMPORTS,
+        ]);
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                SHARED_GOOGLE_COMPOSITION,
+              ),
+            ),
+          ].sort(),
+        ).toEqual([
+          ...SHARED_GOOGLE_COMPOSITION_FOUNDATION_IMPORTS,
         ]);
 
         expect(
@@ -1770,6 +1798,9 @@ const B4X_OPERATOR_MODULES = {
   script: "scripts/google-genai-operator.ts",
 } as const;
 
+// B5C-X1: the one authorized shared production-wiring seam that reaches the existing operator orchestrator.
+const X1_SHARED_GOOGLE_COMPOSITION = "src/execution/createProductionSingleShotExecutionDependencies.ts";
+
 const B4X_GOVERNED_RUNTIME_CONSUMERS: Readonly<Record<string, readonly string[]>> = {
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts": [B4X_OPERATOR_MODULES.composition, "src/execution/createProductionExecutionReconcileDependencies.ts"],
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts": [B4X_OPERATOR_MODULES.composition],
@@ -1783,13 +1814,13 @@ const B4X_GOVERNED_RUNTIME_CONSUMERS: Readonly<Record<string, readonly string[]>
     "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
     "src/execution/verifyGoogleGenAiDurableCompletion.ts",
   ],
-  "src/validation/loadGoogleGenAiActivationPolicy.ts": [B4X_OPERATOR_MODULES.cli],
-  "src/validation/loadGoogleGenAiPolicy.ts": [B4X_OPERATOR_MODULES.cli],
+  "src/validation/loadGoogleGenAiActivationPolicy.ts": [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
+  "src/validation/loadGoogleGenAiPolicy.ts": [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
   "src/googleGenai/googleGenAiExpectedCost.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
   "src/googleGenai/assets/readGoogleGenAiReferenceImage.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
   [B4X_OPERATOR_MODULES.promptBuilder]: [B4X_OPERATOR_MODULES.orchestrator],
-  [B4X_OPERATOR_MODULES.orchestrator]: [B4X_OPERATOR_MODULES.cli],
-  [B4X_OPERATOR_MODULES.composition]: [B4X_OPERATOR_MODULES.cli],
+  [B4X_OPERATOR_MODULES.orchestrator]: [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
+  [B4X_OPERATOR_MODULES.composition]: [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
   [B4X_OPERATOR_MODULES.cliArgs]: [B4X_OPERATOR_MODULES.cli],
   [B4X_OPERATOR_MODULES.cli]: [B4X_OPERATOR_MODULES.script],
 };
@@ -1917,11 +1948,13 @@ describe(
       }
     });
 
-    it("lets no shared, routing, automation, composition or status module reach the operator runner in any module form", async () => {
+    it("lets no shared, routing, automation, composition or status module reach the operator runner in any module form except the one B5C-X1 shared wiring seam", async () => {
       const { any } = await b4xScan();
       expect([...any.get(B4X_OPERATOR_MODULES.promptBuilder) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.orchestrator]);
-      expect([...any.get(B4X_OPERATOR_MODULES.orchestrator) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli]);
-      expect([...any.get(B4X_OPERATOR_MODULES.composition) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli]);
+      expect([...any.get(B4X_OPERATOR_MODULES.orchestrator) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION].sort());
+      expect([...any.get(B4X_OPERATOR_MODULES.composition) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION].sort());
+      // The seam itself is reached only by the shared single-shot CLI; low-level create stays operator-owned.
+      expect([...any.get(X1_SHARED_GOOGLE_COMPOSITION) ?? []].sort()).toEqual(["src/execution/cli/runSingleShotExecutionCli.ts"]);
       expect([...any.get(B4X_OPERATOR_MODULES.cliArgs) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli]);
       expect([...any.get(B4X_OPERATOR_MODULES.cli) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.script]);
       for (const scriptsFile of await listTypeScriptFiles("scripts")) {
@@ -1950,8 +1983,12 @@ describe(
     it("keeps the committed activation policy default-off and the shared routing configuration Google-free", async () => {
       const policy: unknown = JSON.parse(await readFile(join(ROOT, "config/google-genai-activation-policy.json"), "utf8"));
       expect(policy).toMatchObject({ admission: { newSubmissionsEnabled: false } });
-      for (const file of ["config/provider-routing-policy.json", "src/schemas/providerRoutingPolicy.schema.ts", "src/execution/singleShotExecution.types.ts", "src/execution/executeSingleShot.ts"]) {
+      for (const file of ["config/provider-routing-policy.json", "src/schemas/providerRoutingPolicy.schema.ts"]) {
         expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/GOOGLE_GENAI|GoogleGenAi|gemini-omni/);
+      }
+      // B5C-X1: the shared execution types and branch name the GOOGLE_GENAI literal only; no Google module or model.
+      for (const file of ["src/execution/singleShotExecution.types.ts", "src/execution/executeSingleShot.ts"]) {
+        expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/GoogleGenAi|googleGenai|gemini-omni|@google\/genai/);
       }
       // B5C-S1: selection eligibility only. The rules vocabulary and the enabled list each name GOOGLE_GENAI exactly once;
       // paid submission stays governed solely by the activation policy above (still false).

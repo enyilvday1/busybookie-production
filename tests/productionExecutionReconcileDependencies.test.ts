@@ -100,6 +100,16 @@ describe(
             makeMock(
               "recoverVeoOutput",
             ),
+
+          reconcileGoogleLifecycle:
+            makeMock(
+              "reconcileGoogleLifecycle",
+            ),
+
+          createGoogleSubmittedRecovery:
+            makeMock(
+              "createGoogleSubmittedRecovery",
+            ),
         } satisfies
           ProductionExecutionReconcileCompositionDependencies;
 
@@ -126,6 +136,8 @@ describe(
           "createVeoFileDownloadClient",
           "resumeVeoOperation",
           "recoverVeoOutput",
+          "reconcileGoogleLifecycle",
+          "createGoogleSubmittedRecovery",
         ]);
 
         for (
@@ -178,6 +190,24 @@ describe(
         ).toBe(
           false,
         );
+
+        // B5C-R1: existing-Google recovery only; no Google create/submit path.
+        for (
+          const forbidden of [
+            "createGoogleInteraction",
+            "createInteraction",
+            "submitGoogleGenAiSingleShot",
+            "executeGoogleGenAiOperatorSingleShot",
+            "loadActivationPolicy",
+          ]
+        ) {
+          expect(
+            forbidden in
+              result,
+          ).toBe(
+            false,
+          );
+        }
       },
     );
   },

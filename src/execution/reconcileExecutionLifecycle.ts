@@ -308,6 +308,19 @@ export async function reconcileExecutionLifecycle(
     const completion =
       lifecycle.completion;
 
+    // Only the shared Runway/Veo completion is reconciled here; any other
+    // completed provider fails closed before provider-specific handling.
+    if (
+      completion.provider !==
+        "VEO" &&
+      completion.provider !==
+        "RUNWAY"
+    ) {
+      throw new Error(
+        `Execution lifecycle reconciliation for completed provider ${completion.provider} is not implemented in this milestone.`,
+      );
+    }
+
     if (
       submission.provider ===
       "VEO"

@@ -10,6 +10,10 @@ import type {
   ExecutionSubmission,
 } from "./executionSubmission.schema.js";
 
+import type {
+  GoogleGenAiExecutionCompletion,
+} from "./googleGenAiExecutionCompletion.schema.js";
+
 export type ExecutionLifecycleClassificationInput =
   Readonly<{
     reservation:
@@ -56,6 +60,21 @@ export type ExecutionLifecycleClassification =
 
       completion:
         ExecutionCompletion;
+    }>
+  // B5C-R1: a Google-owned COMPLETED lifecycle carries its authoritative
+  // Google 1.1 completion unchanged (never coerced into the shared record).
+  | Readonly<{
+      state:
+        "COMPLETED";
+
+      reservation:
+        ExecutionReservation;
+
+      submission:
+        ExecutionSubmission;
+
+      completion:
+        GoogleGenAiExecutionCompletion;
     }>;
 
 function assertSubmissionMatchesReservation(

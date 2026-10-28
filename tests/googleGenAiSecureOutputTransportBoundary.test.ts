@@ -347,7 +347,8 @@ describe("B4V7 exact secure transport boundary", () => {
     const { fileCount, consumers } = await scanDormancyConsumers();
     expect(fileCount).toBeGreaterThan(0);
     expect(consumers).toEqual({
-      createGoogleGenAiSingleShotSecureProductionRecovery: [operatorComposition],
+      // B5C-R1: shared reconcile dependencies recover EXISTING Google submissions only.
+      createGoogleGenAiSingleShotSecureProductionRecovery: [operatorComposition, "src/execution/createProductionExecutionReconcileDependencies.ts"].sort(),
       createGoogleGenAiSingleShotProductionInteractionGetter: [],
       createGoogleGenAiSingleShotProductionOutputRetriever: [],
     });

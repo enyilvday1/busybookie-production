@@ -54,6 +54,16 @@ import {
   reconcileExecutionLifecycle,
 } from "./reconcileExecutionLifecycle.js";
 
+// B5C-R1: recovery of an EXISTING Google submission only. Both are
+// network-free to import and construct; no creator or submitter is wired.
+import {
+  reconcileGoogleGenAiExecutionLifecycle,
+} from "./reconcileGoogleGenAiExecutionLifecycle.js";
+
+import {
+  createGoogleGenAiSingleShotSecureProductionRecovery,
+} from "./providers/createGoogleGenAiSingleShotSecureProductionRecovery.js";
+
 export type ProductionExecutionReconcileCompositionDependencies =
   Readonly<{
     loadEnvironment:
@@ -94,6 +104,12 @@ export type ProductionExecutionReconcileCompositionDependencies =
 
     recoverVeoOutput:
       typeof recoverVeoOutput;
+
+    reconcileGoogleLifecycle:
+      typeof reconcileGoogleGenAiExecutionLifecycle;
+
+    createGoogleSubmittedRecovery:
+      typeof createGoogleGenAiSingleShotSecureProductionRecovery;
   }>;
 
 const defaultDependencies:
@@ -122,6 +138,12 @@ const defaultDependencies:
     createVeoFileDownloadClient,
     resumeVeoOperation,
     recoverVeoOutput,
+
+    reconcileGoogleLifecycle:
+      reconcileGoogleGenAiExecutionLifecycle,
+
+    createGoogleSubmittedRecovery:
+      createGoogleGenAiSingleShotSecureProductionRecovery,
   });
 
 export function createProductionExecutionReconcileDependencies(
@@ -181,5 +203,13 @@ export function createProductionExecutionReconcileDependencies(
     recoverVeoOutput:
       dependencies
         .recoverVeoOutput,
+
+    reconcileGoogleLifecycle:
+      dependencies
+        .reconcileGoogleLifecycle,
+
+    createGoogleSubmittedRecovery:
+      dependencies
+        .createGoogleSubmittedRecovery,
   });
 }

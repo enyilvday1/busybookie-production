@@ -145,7 +145,11 @@ const GOOGLE_RECONCILIATION_MODULE_PATTERN =
   /inspectGoogleGenAiExecutionLifecycle|verifyGoogleGenAiDurableCompletion|reconcileGoogleGenAiExecutionLifecycle/;
 
 const GOOGLE_RECONCILIATION_IMPORTERS = [
+  // B5C-R1: shared recovery interoperability (existing Google inspector/reconciler only).
+  "src/execution/cli/runExecutionReconcileCli.ts",
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
+  "src/execution/createProductionExecutionReconcileDependencies.ts",
+  "src/execution/inspectExecutionLifecycle.ts",
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
@@ -228,6 +232,8 @@ const GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN =
   /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion/;
 
 const GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS = [
+  // B5C-R1: type-only Google COMPLETED lifecycle variant.
+  "src/execution/classifyExecutionLifecycle.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/readGoogleGenAiExecutionCompletion.ts",
@@ -385,12 +391,15 @@ const GOOGLE_PRODUCTION_INTERACTION_CREATOR_FOUNDATION_IMPORTS = [
 ] as const;
 
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
+  // B5C-R1: shared lifecycle/reconcile dispatch keyed on the durable reservation provider.
+  "src/execution/cli/runExecutionReconcileCli.ts",
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
   "src/execution/createExecutionSubmission.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executionReservation.schema.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
+  "src/execution/inspectExecutionLifecycle.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/buildGoogleGenAiSingleShotPrompt.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
@@ -1759,14 +1768,15 @@ const B4X_OPERATOR_MODULES = {
 } as const;
 
 const B4X_GOVERNED_RUNTIME_CONSUMERS: Readonly<Record<string, readonly string[]>> = {
-  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts": [B4X_OPERATOR_MODULES.composition],
+  "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts": [B4X_OPERATOR_MODULES.composition, "src/execution/createProductionExecutionReconcileDependencies.ts"],
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts": [B4X_OPERATOR_MODULES.composition],
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionGetter.ts": [],
   "src/execution/providers/createGoogleGenAiSingleShotProductionOutputRetriever.ts": [],
   "src/execution/providers/submitGoogleGenAiSingleShot.ts": [B4X_OPERATOR_MODULES.orchestrator],
-  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [B4X_OPERATOR_MODULES.cli],
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts": [B4X_OPERATOR_MODULES.cli, "src/execution/createProductionExecutionReconcileDependencies.ts"],
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts": [
     B4X_OPERATOR_MODULES.cli,
+    "src/execution/inspectExecutionLifecycle.ts",
     "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
     "src/execution/verifyGoogleGenAiDurableCompletion.ts",
   ],

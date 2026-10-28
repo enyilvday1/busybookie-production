@@ -52,6 +52,11 @@ import type {
   recoverVeoOutput,
 } from "../../veo/output/recoverVeoOutput.js";
 
+import type {
+  GoogleGenAiSubmittedRecoveryDependencies,
+  reconcileGoogleGenAiExecutionLifecycle,
+} from "../reconcileGoogleGenAiExecutionLifecycle.js";
+
 import {
   parseExecutionReconcileCliArgs,
 } from "./executionReconcileCliArgs.js";
@@ -108,6 +113,16 @@ export type RunExecutionReconcileCliDependencies =
 
     recoverVeoOutput?:
       typeof recoverVeoOutput;
+
+    reconcileGoogleLifecycle?:
+      typeof reconcileGoogleGenAiExecutionLifecycle;
+
+    createGoogleSubmittedRecovery?:
+      (
+        apiKey:
+          string,
+      ) =>
+        GoogleGenAiSubmittedRecoveryDependencies;
   }>;
 
 export async function runExecutionReconcileCli(
@@ -159,6 +174,93 @@ export async function runExecutionReconcileCli(
       shotId:
         options.shotId,
     };
+
+  // B5C-R1: an EXISTING Google lifecycle (owned by its durable reservation)
+  // is recovered only by the existing Google reconciler, exactly once. This
+  // is recovery of an already-submitted job, never a new submission: no
+  // create, no activation-policy read, no other provider and no fallback.
+  if (
+    lifecycle.state !==
+      "NOTHING" &&
+    lifecycle.reservation.provider ===
+      "GOOGLE_GENAI"
+  ) {
+    if (
+      lifecycle.state !==
+        "SUBMITTED" &&
+      lifecycle.state !==
+        "COMPLETED"
+    ) {
+      throw new Error(
+        `Execution reconciliation CLI currently supports SUBMITTED or COMPLETED lifecycle only; received ${lifecycle.state}.`,
+      );
+    }
+
+    const reconcileGoogle =
+      dependencies
+        .reconcileGoogleLifecycle;
+
+    if (!reconcileGoogle) {
+      throw new Error(
+        "Google GenAI reconciliation CLI requires the existing Google lifecycle reconciler.",
+      );
+    }
+
+    const googleInput =
+      {
+        mediaRoot,
+        episodeId:
+          options.episodeId,
+        shotId:
+          options.shotId,
+      };
+
+    if (
+      lifecycle.state ===
+      "COMPLETED"
+    ) {
+      // Local durable-completion verification only: no credential, no
+      // provider client and no network.
+      await reconcileGoogle(
+        googleInput,
+        {},
+      );
+
+      return;
+    }
+
+    const createSubmittedRecovery =
+      dependencies
+        .createGoogleSubmittedRecovery;
+
+    if (!createSubmittedRecovery) {
+      throw new Error(
+        "Google GenAI reconciliation CLI requires the existing secure recovery factory.",
+      );
+    }
+
+    const geminiApiKey =
+      env.GEMINI_API_KEY
+        ?.trim();
+
+    if (!geminiApiKey) {
+      throw new Error(
+        "Google GenAI reconciliation requires GEMINI_API_KEY.",
+      );
+    }
+
+    await reconcileGoogle(
+      googleInput,
+      {
+        submittedRecovery:
+          createSubmittedRecovery(
+            geminiApiKey,
+          ),
+      },
+    );
+
+    return;
+  }
 
   if (
     lifecycle.state ===

@@ -921,7 +921,7 @@ describe(
         );
 
         it(
-          "keeps the shared completion reader and lifecycle inspection closed to the Google 1.1 completion",
+          "keeps the shared completion reader closed to the Google 1.1 completion while shared inspection dispatches to the Google inspector (B5C-R1)",
           async () => {
             const {
               mediaRoot,
@@ -936,6 +936,7 @@ describe(
               ),
             );
 
+            // The shared RUNWAY/VEO completion parser is NOT widened.
             await expect(
               readExecutionCompletion(
                 mediaRoot,
@@ -944,13 +945,60 @@ describe(
               ),
             ).rejects.toThrow();
 
-            await expect(
-              inspectExecutionLifecycle(
+            // Shared inspection is keyed on the durable GOOGLE_GENAI
+            // reservation and returns the Google inspector's authoritative
+            // 1.1 completion unchanged.
+            const google =
+              await inspectGoogleGenAiExecutionLifecycle(
                 mediaRoot,
                 "EP92",
                 "S01",
-              ),
-            ).rejects.toThrow();
+              );
+
+            const shared =
+              await inspectExecutionLifecycle(
+                mediaRoot,
+                "EP92",
+                "S01",
+              );
+
+            expect(
+              google.state,
+            ).toBe(
+              "COMPLETED",
+            );
+
+            expect(
+              shared,
+            ).toStrictEqual({
+              state:
+                "COMPLETED",
+
+              reservation:
+                google.reservation,
+
+              submission:
+                google.state === "COMPLETED"
+                  ? google.submission
+                  : undefined,
+
+              completion:
+                google.state === "COMPLETED"
+                  ? google.completion
+                  : undefined,
+            });
+
+            expect(
+              shared.state === "COMPLETED"
+                ? shared.completion
+                : undefined,
+            ).toMatchObject({
+              schemaVersion:
+                "1.1",
+
+              provider:
+                "GOOGLE_GENAI",
+            });
           },
         );
 

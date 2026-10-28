@@ -30,7 +30,8 @@
     "supportedProviders": [
       "RUNWAY",
       "VEO",
-      "MANUAL"
+      "MANUAL",
+      "GOOGLE_GENAI"
     ]
   }
 }

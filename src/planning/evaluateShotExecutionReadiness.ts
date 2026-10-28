@@ -231,6 +231,19 @@ export function evaluateShotExecutionReadiness(
         );
         break;
 
+      // B5C-S1: explicitly selectable, but not executable through shared
+      // production until B5C-X1; blocked before any reservation or provider.
+      case "GOOGLE_GENAI":
+        return {
+          disposition: "BLOCKED",
+          executionProvider: null,
+          routing,
+          reasons: routing.reasons,
+          blockers: [
+            `${shot.id}: GOOGLE_GENAI is explicitly selected, but shared Google execution is not available before B5C-X1.`,
+          ],
+        };
+
       case "KREA":
         return {
           disposition: "BLOCKED",

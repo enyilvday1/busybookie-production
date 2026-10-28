@@ -102,6 +102,16 @@ function createNonDialogueReason(
     );
   }
 
+  if (
+    provider ===
+    "GOOGLE_GENAI"
+  ) {
+    return (
+      `${shot.id}: non-dialogue visual-only shot explicitly ` +
+      `selects GOOGLE_GENAI as a visual-only alternative.`
+    );
+  }
+
   return (
     `${shot.id}: non-dialogue visual-only shot ` +
     `routes to ${provider}.`
@@ -158,12 +168,17 @@ export function evaluateShotProvider(
     };
   }
 
-  const recommendedProvider =
+  // B5C-S1: GOOGLE_GENAI is chosen only by an explicit manifest request on a
+  // visual-only shot. It is never a policy default and never a fallback.
+  const recommendedProvider: GenerationProvider =
     shot.generation.nativeAudio
       ? policy.nonDialogue
           .nativeAudioProvider
-      : policy.nonDialogue
-          .visualOnlyProvider;
+      : currentProvider ===
+          "GOOGLE_GENAI"
+        ? "GOOGLE_GENAI"
+        : policy.nonDialogue
+            .visualOnlyProvider;
 
   const currentProviderMatchesRecommendation =
     currentProvider ===
@@ -212,6 +227,14 @@ export function evaluateShotProvider(
       reasons: [
         routingReason,
         `${shot.id}: manifest provider ${currentProvider} conflicts with routing recommendation ${recommendedProvider}.`,
+        ...(
+          currentProvider ===
+          "GOOGLE_GENAI"
+            ? [
+                `${shot.id}: GOOGLE_GENAI is a visual-only alternative and cannot satisfy native audio.`,
+              ]
+            : []
+        ),
       ],
       blockers: [],
     };

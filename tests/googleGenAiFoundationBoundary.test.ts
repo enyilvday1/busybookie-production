@@ -831,7 +831,7 @@ describe(
     );
 
     it(
-      "leaves routing and legacy Veo code without any GOOGLE_GENAI reference",
+      "leaves legacy Veo code and every routing file except the explicit-selection router without any GOOGLE_GENAI reference",
       async () => {
         const files = [
           ...(
@@ -876,9 +876,12 @@ describe(
           }
         }
 
+        // B5C-S1: only the router may name GOOGLE_GENAI, as the explicit visual-only selection literal.
         expect(
           references,
-        ).toEqual([]);
+        ).toEqual([
+          "src/routing/evaluateShotProvider.ts",
+        ]);
       },
     );
 
@@ -1947,8 +1950,15 @@ describe(
     it("keeps the committed activation policy default-off and the shared routing configuration Google-free", async () => {
       const policy: unknown = JSON.parse(await readFile(join(ROOT, "config/google-genai-activation-policy.json"), "utf8"));
       expect(policy).toMatchObject({ admission: { newSubmissionsEnabled: false } });
-      for (const file of ["config/production-rules.json", "config/provider-routing-policy.json", "src/schemas/productionRules.schema.ts", "src/schemas/providerRoutingPolicy.schema.ts", "src/execution/singleShotExecution.types.ts", "src/execution/executeSingleShot.ts"]) {
+      for (const file of ["config/provider-routing-policy.json", "src/schemas/providerRoutingPolicy.schema.ts", "src/execution/singleShotExecution.types.ts", "src/execution/executeSingleShot.ts"]) {
         expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/GOOGLE_GENAI|GoogleGenAi|gemini-omni/);
+      }
+      // B5C-S1: selection eligibility only. The rules vocabulary and the enabled list each name GOOGLE_GENAI exactly once;
+      // paid submission stays governed solely by the activation policy above (still false).
+      for (const file of ["config/production-rules.json", "src/schemas/productionRules.schema.ts"]) {
+        const source = await readFile(join(ROOT, file), "utf8");
+        expect(source.match(/GOOGLE_GENAI/g), file).toHaveLength(1);
+        expect(source, file).not.toMatch(/GoogleGenAi|gemini-omni|newSubmissionsEnabled/);
       }
     });
   },

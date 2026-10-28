@@ -62,6 +62,7 @@ describe("Busybookie Production Rules", () => {
       "RUNWAY",
       "VEO",
       "MANUAL",
+      "GOOGLE_GENAI",
     ]);
   });
 });

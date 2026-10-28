@@ -848,6 +848,8 @@ describe(
           "VEO",
           "KREA",
           "MANUAL",
+          // B5C-S1: explicit selection vocabulary only; executable domain below stays RUNWAY|VEO.
+          "GOOGLE_GENAI",
         ]);
 
         const types =
@@ -891,7 +893,6 @@ describe(
             "src/composition/buildEpisodeCompositionPlan.ts",
             "src/composition/verifyCompletedShotForComposition.ts",
             "src/execution/resolveDurableShotVisualGenerationState.ts",
-            "src/routing/evaluateShotProvider.ts",
           ]
         ) {
           expect(
@@ -907,6 +908,29 @@ describe(
             /GOOGLE_GENAI|GoogleGenAi|googleGenai|gemini-omni/,
           );
         }
+
+        // B5C-S1: routing may name GOOGLE_GENAI only as the explicit selection literal; it imports and
+        // references no Google module, activation policy, model or submission authority.
+        const routing =
+          await readFile(
+            join(
+              ROOT,
+              "src/routing/evaluateShotProvider.ts",
+            ),
+            "utf8",
+          );
+
+        expect(
+          routing,
+        ).toMatch(
+          /GOOGLE_GENAI/,
+        );
+
+        expect(
+          routing,
+        ).not.toMatch(
+          /GoogleGenAi|googleGenai|gemini-omni|ActivationPolicy|newSubmissionsEnabled|GEMINI_API_KEY|process.env/,
+        );
       },
     );
   },

@@ -5,6 +5,8 @@ export const GenerationProviderSchema = z.enum([
   "VEO",
   "KREA",
   "MANUAL",
+  // Explicit visual-only alternative (B5C-S1); same literal as the durable reservation provider.
+  "GOOGLE_GENAI",
 ]);
 
 export const ProductionRulesSchema = z.object({

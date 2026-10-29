@@ -5,6 +5,7 @@ import {
 import {
   runExecutionReconcileCli,
 } from "./runExecutionReconcileCli.js";
+import type { CheckedEpisodeExecutionContext } from "../episodeExecutionGuard.js";
 
 export type RunProductionExecutionReconcileCliDependencies =
   Readonly<{
@@ -35,11 +36,16 @@ export async function runProductionExecutionReconcileCli(
   dependencies:
     RunProductionExecutionReconcileCliDependencies =
       defaultDependencies,
+  checkedContext?: CheckedEpisodeExecutionContext,
 ): Promise<void> {
   const reconcileDependencies =
     dependencies
       .createDependencies();
 
+  if (checkedContext) {
+    await dependencies.runCli(args, reconcileDependencies, checkedContext);
+    return;
+  }
   await dependencies
     .runCli(
       args,

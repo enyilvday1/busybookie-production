@@ -515,9 +515,7 @@ describe(
             ),
             f.dependencies
           )
-        ).rejects.toThrow(
-          /Paid-generation confirmation/
-        );
+        ).rejects.toMatchObject({ code: "ACTION_REJECTED" });
 
         expect(
           f.verifyVisualReference

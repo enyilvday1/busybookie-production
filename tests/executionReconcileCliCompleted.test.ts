@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach } from "vitest";
 import {
   describe,
   expect,
@@ -17,14 +20,17 @@ import {
   runExecutionReconcileCli,
 } from "../src/execution/cli/runExecutionReconcileCli.js";
 
+const temporaryGuardRoots: string[] = [];
+afterEach(async () => { for (const root of temporaryGuardRoots.splice(0)) await rm(root, { recursive: true, force: true }); });
+
 describe(
   "Busybookie execution reconciliation CLI completed lifecycle",
   () => {
     it(
       "verifies durable COMPLETED evidence without provider policy, credentials, or provider-client construction",
       async () => {
-        const mediaRoot =
-          "D:/Busybookie/Production";
+        const mediaRoot = await mkdtemp(join(process.cwd(), ".b7-reconcile-cli-"));
+        temporaryGuardRoots.push(mediaRoot);
 
         const lifecycle:
           ExecutionLifecycleClassification =

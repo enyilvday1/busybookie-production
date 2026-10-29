@@ -10,9 +10,8 @@ import {
   resolve,
 } from "node:path";
 
-import {
-  EpisodeActionPostStateResolutionError,
-  type EpisodeCoordinatorAction,
+import type {
+  EpisodeCoordinatorAction,
 } from "../coordinateEpisodeAction.js";
 
 import {
@@ -20,11 +19,15 @@ import {
   parseEpisodeAutomationPlan,
 } from "../episodeAutomationPlan.schema.js";
 
-import {
-  EpisodeAutomationError,
+import type {
   runEpisodeAutomation,
-  type EpisodeAutomationResult,
+  EpisodeAutomationResult,
 } from "../runEpisodeAutomation.js";
+import { EpisodeActionPostStateResolutionError, EpisodeAutomationError, BoundEpisodeActionError, BoundEpisodeError } from "../boundEpisodeProduction.types.js";
+import type { BoundEpisodeActionResult, BoundEpisodePreflight } from "../boundEpisodeProduction.types.js";
+import { buildBoundEpisodePreflight } from "../buildBoundEpisodePreflight.js";
+import { readEpisodeRuntimeIdentity } from "../episodeInputBinding.js";
+import type { FreshEpisodeOperatorSession } from "../episodeExecutionGuard.js";
 
 import {
   parseEpisodeAutomationCliArgs,
@@ -41,6 +44,9 @@ export type RunEpisodeAutomationCliDependencies =
 
     writeStdout:
       (text: string) => void;
+    buildPreflight?: typeof buildBoundEpisodePreflight;
+    readRuntimeIdentity?: typeof readEpisodeRuntimeIdentity;
+    setExitCode?: (code: 0 | 1) => void;
   }>;
 
 // Bounded, read-only, regular-file-only, strict UTF-8 read of the plan file.
@@ -166,7 +172,7 @@ const defaultDependencies:
         readEpisodeAutomationPlanText,
 
       runAutomation:
-        runEpisodeAutomation,
+      async (...args) => (await import("../runEpisodeAutomation.js")).runEpisodeAutomation(...args),
 
       writeStdout:
         (text: string) => {
@@ -206,6 +212,7 @@ function formatSuccessSummary(
 
   return [
     "",
+    "LEGACY dialogue-only execution; outside controlled visual guarantees.",
     `===== Busybookie Episode Automation (${result.episodeId}) =====`,
     ...lines,
     `Total successful explicit actions: ${result.results.length}`,
@@ -215,6 +222,24 @@ function formatSuccessSummary(
   ].join(
     "\n",
   );
+}
+
+export function formatBoundEpisodePreflight(report: BoundEpisodePreflight): string {
+  const counts = Object.entries(report.counts.episode).map(([state, count]) => `${state}=${count}`).join(" ");
+  return [
+    `Busybookie controlled visual preflight: ${report.episodeId} — ${report.title}`,
+    `Scope: ${report.scope.kind} (${report.scopeTotal ?? "unknown"}/${report.totalIntended ?? "unknown"} shots); inventory ${report.inventory.complete ? "complete" : "INCOMPLETE"}.`,
+    counts,
+    ...report.shots.map(row => `${row.order}. ${row.sceneId}/${row.shotId}${row.inScope ? "" : " [outside selected scope]"}: ${row.disposition}; lifecycle ${row.lifecycle.lifecycle}; provider ${row.durableProvider ?? row.resolvedProvider ?? row.manifestProvider}; ${row.primaryReason?.code ?? "no blocking reason"}; cost ${row.cost.status === "KNOWN" ? `${row.cost.modeledValue} ${row.cost.unit} (cap ${row.cost.perShotCap})` : "UNKNOWN"}; intent ${row.intentAlignment}; handoff ${row.handoffCompatibility}`),
+    `Completion: ${report.completion}; intent alignment: ${report.intentAlignment}.`,
+    `Next candidate: ${report.nextActionCandidate ? `${report.nextActionCandidate.kind} ${report.nextActionCandidate.sceneId}/${report.nextActionCandidate.shotId}` : "NONE"}. Explicit fresh authority is required for execution.`,
+    `Binding SHA256: ${report.bindingSha256 ?? "unavailable"}; observations SHA256: ${report.observationsSha256}.`,
+    `Ownership snapshot: ${report.ownership.observed}; no guard acquired by planning.`,
+    ...report.costs.readyByNativeUnit.map(total => `READY modeled estimate: ${total.complete ? total.value : "INCOMPLETE_TOTAL"} ${total.unit} across ${total.count} shots; billingKnown=false.`),
+    ...report.inventory.fatalReasons.map(issue => `Inventory issue: ${issue.code}.`),
+    ...report.handoff.issues.map(issue => `Handoff: ${issue.target?.shotId ?? "episode"} ${issue.code}.`),
+    "Use --json for the full immutable binding, reference and observation payloads. No production or editorial status was written.",
+  ].join("\n") + "\n";
 }
 
 export async function runEpisodeAutomationCli(
@@ -233,6 +258,24 @@ export async function runEpisodeAutomationCli(
     parseEpisodeAutomationCliArgs(
       args,
     );
+
+  const setExit = dependencies.setExitCode ?? ((code: 0 | 1) => { process.exitCode = code; });
+  const report = (value: BoundEpisodePreflight | BoundEpisodeActionResult) => dependencies.writeStdout(options.json
+    ? JSON.stringify(value) + "\n"
+    : "shots" in value ? formatBoundEpisodePreflight(value)
+    : [`Controlled visual action: ${value.status}; stop reason: ${value.stopReason ?? "none"}.`,
+      `Dispatch allowance consumed: ${value.dispatchAllowanceConsumed}; observed new creates: ${value.observedNewCreateCount}; recovery calls: ${value.recoveryDispatchCount}.`,
+      value.afterPlan ? formatBoundEpisodePreflight(value.afterPlan) : "Post-action preflight unavailable."].join("\n") + "\n");
+  if (options.episodeId) {
+    const mediaRoot = process.env.BUSYBOOKIE_MEDIA_ROOT;
+    if (!mediaRoot) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    const runtimeIdentity = await (dependencies.readRuntimeIdentity ?? readEpisodeRuntimeIdentity)(process.cwd(), mediaRoot, process.env.BUSYBOOKIE_FFPROBE_PATH);
+    const result = await (dependencies.buildPreflight ?? buildBoundEpisodePreflight)({ episodeId: options.episodeId,
+      mediaRoot, runtimeIdentity, ...(process.env.BUSYBOOKIE_FFPROBE_PATH ? { ffprobeExecutable: process.env.BUSYBOOKIE_FFPROBE_PATH } : {}),
+      ...(options.shotIds ? { scope: { kind: "SELECTED_SCOPE", shotIds: options.shotIds } } : {}) });
+    report(result); setExit(result.completion === "INCOMPLETE" || !result.inventory.complete ? 1 : 0); return;
+  }
+  if (!options.planPath) throw new Error("--plan is required.");
 
   // 2. Read the selected control file once.
   const text =
@@ -268,10 +311,31 @@ export async function runEpisodeAutomationCli(
   if (options.validateOnly) {
     dependencies
       .writeStdout(
-        `Plan structurally valid; ${plan.actions.length} explicitly authorized actions; no execution performed.\n`,
+        `Plan structurally valid (schema ${plan.schemaVersion}); ${plan.actions.length} actions; no production preflight or execution performed.\n`,
       );
 
     return;
+  }
+
+  if (options.planOnly) {
+    if (plan.schemaVersion !== "2.0") throw new BoundEpisodeError("LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION");
+    const runtime = plan.inputBinding.runtimeIdentity;
+    const result = await (dependencies.buildPreflight ?? buildBoundEpisodePreflight)({ episodeId: plan.episodeId, scope: plan.scope,
+      mediaRoot: runtime.mediaRoot, runtimeIdentity: runtime, expectedBinding: plan.inputBinding,
+      evidenceAdoptions: plan.evidenceAdoptions, ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}) });
+    report(result); setExit(result.completion === "INCOMPLETE" || !result.inventory.complete ? 1 : 0); return;
+  }
+  let freshSession: FreshEpisodeOperatorSession | undefined;
+  if (plan.schemaVersion === "2.0") {
+    const family = plan.actions[0].kind === "VISUAL_GENERATE" ? "GENERATION" : "RECONCILIATION";
+    if (options.confirmation !== family) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
+    // Lazy import keeps dotenv, secured production factories and guard write
+    // capabilities out of plan-only/structural-validation module loading.
+    freshSession = (await import("../episodeExecutionGuard.js")).createFreshEpisodeOperatorSession(family, true);
+  } else {
+    if (options.json) throw new Error("Legacy dialogue execution has no controlled visual JSON result.");
+    if (options.confirmation) throw new Error("Legacy dialogue execution does not accept visual confirmation flags.");
+    if (plan.actions.some(action => action.kind === "VISUAL_GENERATE" || action.kind === "VISUAL_RECONCILE")) throw new BoundEpisodeError("LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION");
   }
 
   // 5. Exactly one sequential run; summary only after it has fully returned.
@@ -279,7 +343,15 @@ export async function runEpisodeAutomationCli(
     await dependencies
       .runAutomation(
         plan,
+        undefined,
+        freshSession,
       );
+
+  if (!("results" in result)) {
+    report(result);
+    setExit(result.status === "ACTION_COMPLETED" || (result.status === "NO_ACTION" && result.visualCompletion !== "INCOMPLETE") ? 0 : 1);
+    return;
+  }
 
   dependencies
     .writeStdout(
@@ -316,6 +388,8 @@ export function formatEpisodeAutomationCliError(
   error:
     unknown,
 ): string {
+  if (error instanceof BoundEpisodeActionError) return JSON.stringify(error.result);
+  if (error instanceof BoundEpisodeError) return `Episode automation stopped (${error.code}).`;
   if (
     error instanceof
     EpisodeAutomationError

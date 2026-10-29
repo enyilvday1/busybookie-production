@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach } from "vitest";
 import {
   describe,
   expect,
@@ -41,14 +44,17 @@ import {
   runExecutionReconcileCli,
 } from "../src/execution/cli/runExecutionReconcileCli.js";
 
+const temporaryGuardRoots: string[] = [];
+afterEach(async () => { for (const root of temporaryGuardRoots.splice(0)) await rm(root, { recursive: true, force: true }); });
+
 describe(
   "Busybookie execution reconciliation CLI submitted Veo lifecycle",
   () => {
     it(
       "routes durable SUBMITTED Veo execution through lookup-only same-operation recovery",
       async () => {
-        const mediaRoot =
-          "D:/Busybookie/Production";
+        const mediaRoot = await mkdtemp(join(process.cwd(), ".b7-reconcile-cli-"));
+        temporaryGuardRoots.push(mediaRoot);
 
         const operationName =
           "models/veo-3.1-fast-generate-preview/operations/durable-veo-123";

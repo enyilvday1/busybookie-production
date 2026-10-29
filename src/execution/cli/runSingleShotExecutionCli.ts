@@ -20,7 +20,20 @@ import {
 
 import {
   validateEpisodeProduction,
+  assertEpisodeApprovals,
+  assertShotCanProgress,
 } from "../../validation/validateEpisodeProduction.js";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { readBoundFile } from "../episodeInputBinding.js";
+import { BoundEpisodeError } from "../boundEpisodeProduction.types.js";
+import { EpisodeManifestSchema } from "../../schemas/episodeManifest.schema.js";
+import { CharacterBibleSchema } from "../../schemas/character.schema.js";
+import { ProductionRulesSchema } from "../../schemas/productionRules.schema.js";
+import { ProviderRoutingPolicySchema } from "../../schemas/providerRoutingPolicy.schema.js";
+import { acquireEpisodeExecutionGuard, releaseEpisodeExecutionGuard, checkedEpisodeExecutionData,
+  assertCheckedEpisodeAdmission, readCheckedEpisodeJson, consumeEpisodeGenerationAllowance,
+  type CheckedEpisodeExecutionContext } from "../episodeExecutionGuard.js";
 
 import {
   validateMediaRoot,
@@ -100,10 +113,35 @@ export async function runSingleShotExecutionCli(
   dependencies:
     RunSingleShotExecutionCliDependencies =
       defaultDependencies,
+  checkedContext?: CheckedEpisodeExecutionContext,
 ): Promise<void> {
   const options = parseSingleShotExecutionCliArgs(
     args
   );
+
+  if (!options.confirmPaidGeneration) throw new BoundEpisodeError("ACTION_REJECTED");
+  if (checkedContext) {
+    const data = checkedEpisodeExecutionData(checkedContext);
+    const action = data.plan.actions[0];
+    if (action.kind !== "VISUAL_GENERATE" || options.episodeId !== action.episodeId || options.shotId !== action.shotId ||
+        options.sourceImagePath !== action.referenceBinding.canonicalAbsolutePath) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    await assertCheckedEpisodeAdmission(checkedContext);
+    const original = dependencies;
+    const required = <T>(value: T | null): T => { if (value === null) throw new BoundEpisodeError("INPUT_BINDING_DRIFT"); return value; };
+    dependencies = { ...original,
+      loadEpisodeManifest: async () => required(await readCheckedEpisodeJson(checkedContext, "MANIFEST", value => EpisodeManifestSchema.parse(value))),
+      loadCharacterBible: async () => required(await readCheckedEpisodeJson(checkedContext, "CHARACTERS", value => CharacterBibleSchema.parse(value))),
+      loadProductionRules: async () => required(await readCheckedEpisodeJson(checkedContext, "PRODUCTION_RULES", value => ProductionRulesSchema.parse(value))),
+      loadProviderRoutingPolicy: async () => required(await readCheckedEpisodeJson(checkedContext, "ROUTING", value => ProviderRoutingPolicySchema.parse(value))),
+      validateEpisodeProduction: (episode, bible, rules) => {
+        assertEpisodeApprovals(episode, rules);
+        const shot = episode.scenes.flatMap(scene => scene.shots).find(row => row.id === action.shotId);
+        if (!shot) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+        assertShotCanProgress(shot, bible, rules);
+      },
+      createDependencies: credentials => original.createDependencies(credentials, undefined, checkedContext),
+    };
+  }
 
   const env = dependencies.loadEnvironment();
 
@@ -139,6 +177,18 @@ export async function runSingleShotExecutionCli(
     env,
     rules
   );
+
+  if (checkedContext && mediaRoot !== checkedEpisodeExecutionData(checkedContext).plan.inputBinding.runtimeIdentity.mediaRoot) {
+    throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+  }
+  const standaloneGuard = checkedContext ? null : await (async () => {
+    const manifest = await readBoundFile({ root: process.cwd(), canonicalPath: resolve(process.cwd(), "episodes", options.episodeId, "episode.json"),
+      role: "MANIFEST", maxBytes: 1048576 });
+    if (!manifest.binding.rawSha256) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    return acquireEpisodeExecutionGuard({ mediaRoot, episodeId: options.episodeId,
+      manifestRawSha256: manifest.binding.rawSha256, sessionId: randomUUID() });
+  })();
+  try {
 
   const reconciliationGuidance =
     `Inspect durable evidence with npm run execution:reconcile -- --episode ${options.episodeId} --shot ${options.shotId}. Do not delete lifecycle records or automatically retry generation.`;
@@ -193,6 +243,7 @@ export async function runSingleShotExecutionCli(
   let result;
 
   try {
+    if (checkedContext) consumeEpisodeGenerationAllowance(checkedEpisodeExecutionData(checkedContext).invocation);
     result = await dependencies.executeSingleShot(
       {
         episode,
@@ -219,6 +270,10 @@ export async function runSingleShotExecutionCli(
       }
     );
   }
+
+  // Controlled callers consume typed durable post-observations, never this
+  // standalone CLI's raw provider execution identity or path diagnostics.
+  if (checkedContext) return;
 
   // B5C-X1: a Google submission is durably SUBMITTED, never completed here.
   if (
@@ -249,4 +304,5 @@ export async function runSingleShotExecutionCli(
   console.log(
     `Completion record: ${result.completion.completionPath}`
   );
+  } finally { if (standaloneGuard) await releaseEpisodeExecutionGuard(standaloneGuard); }
 }

@@ -87,9 +87,14 @@ it(
           "--image",
           "references/source.png",
         ])
-      ).rejects.toThrow(
-        /Paid-generation confirmation/
-      );
+      ).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+
+      expect(createProductionSingleShotExecutionDependencies).not.toHaveBeenCalled();
+      expect(executeSingleShot).not.toHaveBeenCalled();
+      // Explicit confirmation reaches the same real executor; the absent
+      // registry in this isolated root blocks before any provider preparation.
+      await expect(runSingleShotExecutionCli(["--episode", "EP90", "--shot", "S01", "--image",
+        "references/source.png", "--confirm-paid-generation"])).rejects.toThrow(/registry|reference|ENOENT/i);
 
       expect(
         createProductionSingleShotExecutionDependencies
@@ -106,7 +111,7 @@ it(
           shotId: "S01",
           mediaRoot: fixture.mediaRoot,
           sourceImagePath: "references/source.png",
-          confirmPaidGeneration: false,
+          confirmPaidGeneration: true,
         }),
         composed
       );

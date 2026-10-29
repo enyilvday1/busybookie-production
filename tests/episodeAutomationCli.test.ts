@@ -71,7 +71,8 @@ const DG = {
   dialogueLineId: "EP02_SC01_S02_L01",
   confirmPaidGeneration: true,
 } as const;
-const PLAN = { schemaVersion: "1.0", episodeId: EPISODE, actions: [VG, DG, VR] };
+const DR = { kind: "DIALOGUE_RECONCILE", sceneId: "SC01", shotId: "S02", dialogueLineId: "EP02_SC01_S02_L01", confirmReconciliation: true } as const;
+const PLAN = { schemaVersion: "1.0", episodeId: EPISODE, actions: [DG, DR, { ...DG, shotId: "S03", dialogueLineId: "EP02_SC01_S03_L01" }] };
 const RUNNER: Record<EpisodeCoordinatorAction["kind"], EpisodeCoordinatorRunner> = {
   VISUAL_GENERATE: "runSingleShotExecutionCli",
   VISUAL_RECONCILE: "runProductionExecutionReconcileCli",
@@ -147,7 +148,7 @@ describe("C7 CLI A argument parser", () => {
     [["--validate-only", "--plan", "dir with spaces/plan.json"], { planPath: "dir with spaces/plan.json", validateOnly: true }],
   ])("accepts %j", (args, expected) => {
     const options = parseEpisodeAutomationCliArgs(args);
-    expect(options).toEqual(expected);
+    expect(options).toEqual({ planOnly: false, json: false, shotIds: null, confirmation: null, ...expected });
     expect(Object.isFrozen(options)).toBe(true);
   });
 
@@ -166,9 +167,9 @@ describe("C7 CLI A argument parser", () => {
     [["--plan", "a.json", "--validate-only=yes"], /Unknown .*--validate-only/],
     [["--plan", "a.json", "extra.json"], /positional/],
     [["plan.json"], /positional/],
-    [["--plan", "a.json", "--episode", "EP02"], /Unknown .*--episode/],
-    [["--plan", "a.json", "--confirm-paid-generation"], /Unknown .*--confirm-paid-generation/],
-    [["--plan", "a.json", "--confirm-reconciliation"], /Unknown .*--confirm-reconciliation/],
+    [["--plan", "a.json", "--episode", "EP02"], /exactly one/],
+    [["--plan", "a.json", "--plan-only", "--confirm-paid-generation"], /Plan-only/],
+    [["--plan", "a.json", "--confirm-reconciliation", "--confirm-paid-generation"], /mutually exclusive/],
     [["--plan", "a.json", "--yes"], /Unknown/],
     [["--plan", "a.json", "--retry"], /Unknown .*--retry/],
     [["--plan", "a.json", "--force"], /Unknown .*--force/],
@@ -177,7 +178,7 @@ describe("C7 CLI A argument parser", () => {
     [["--plan", "a.json", "--resume"], /Unknown .*--resume/],
     [["--plan", "a.json", "--shot", "S02"], /Unknown .*--shot/],
     [["--plan", "a.json", "--kind", "VISUAL_GENERATE"], /Unknown .*--kind/],
-    [["--plan", "a.json", "--json"], /Unknown .*--json/],
+    [["--plan", "a.json", "--validate-only", "--json"], /structural/],
   ])("rejects %j", (args, expected) => {
     expect(() => parseEpisodeAutomationCliArgs(args)).toThrow(expected);
   });
@@ -326,7 +327,7 @@ describe("C7 CLI F --validate-only", () => {
     const controlled = harness();
     await runEpisodeAutomationCli(["--plan", "p.json", "--validate-only"], controlled.deps);
     expect(controlled.output()).toBe(
-      "Plan structurally valid; 3 explicitly authorized actions; no execution performed.\n",
+      "Plan structurally valid (schema 1.0); 3 actions; no production preflight or execution performed.\n",
     );
     expect(controlled.output()).not.toMatch(/admissible|will succeed|cost|complete|safe to replay/i);
     expect(controlled.runAutomation).not.toHaveBeenCalled();
@@ -350,7 +351,7 @@ describe("C7 CLI F --validate-only", () => {
     await runEpisodeAutomationCli(["--plan", path, "--validate-only"]);
 
     expect(stdout).toHaveBeenCalledWith(
-      "Plan structurally valid; 3 explicitly authorized actions; no execution performed.\n",
+      "Plan structurally valid (schema 1.0); 3 actions; no production preflight or execution performed.\n",
     );
     expect(coordinateEpisodeAction).not.toHaveBeenCalled();
     expect(loadEnvironment).not.toHaveBeenCalled();
@@ -370,9 +371,9 @@ describe("C7 CLI G execution and summary", () => {
     expect(controlled.events).toEqual(["read", "automation", "stdout"]);
 
     const output = controlled.output();
-    expect(output).toContain("1. VISUAL_GENERATE EP02/SC01/S02 -> runSingleShotExecutionCli");
-    expect(output).toContain("2. DIALOGUE_GENERATE EP02/SC01/S02 line EP02_SC01_S02_L01 -> runDialogueGenerationCli");
-    expect(output).toContain("3. VISUAL_RECONCILE EP02/SC01/S02 -> runProductionExecutionReconcileCli");
+    expect(output).toContain("1. DIALOGUE_GENERATE EP02/SC01/S02 line EP02_SC01_S02_L01 -> runDialogueGenerationCli");
+    expect(output).toContain("2. DIALOGUE_RECONCILE EP02/SC01/S02 line EP02_SC01_S02_L01 -> runDialogueReconcileCli");
+    expect(output).toContain("3. DIALOGUE_GENERATE EP02/SC01/S03 line EP02_SC01_S03_L01 -> runDialogueGenerationCli");
     expect(output).toContain("Total successful explicit actions: 3");
     expect(output).toContain("The explicit automation plan finished");
     expect(output).toContain("Composition was not attempted");

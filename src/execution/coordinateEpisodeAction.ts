@@ -1,3 +1,10 @@
+export { EpisodeActionPostStateResolutionError } from "./boundEpisodeProduction.types.js";
+import { EpisodeActionPostStateResolutionError } from "./boundEpisodeProduction.types.js";
+import { BoundEpisodeError, BoundEpisodeActionError, freezeBoundCopy, requireSameBinding,
+  type BoundEpisodeActionResult, type BoundVisualAction, type BoundEpisodePreflight, type IssueCode } from "./boundEpisodeProduction.types.js";
+import { checkedEpisodeExecutionData, assertCheckedEpisodeAdmission, admitEpisodeCoordinatorDispatch,
+  episodeInvocationCounts, type CheckedEpisodeExecutionContext } from "./episodeExecutionGuard.js";
+import { episodeIssue, readSelectedVisualPostObservation } from "./buildBoundEpisodePreflight.js";
 import {
   runDialogueGenerationCli,
 } from "../dialogue/cli/runDialogueGenerationCli.js";
@@ -97,6 +104,9 @@ export type CoordinateEpisodeActionInput =
     episodeId: string;
     action: EpisodeCoordinatorAction;
   }>;
+export type CoordinateBoundEpisodeActionInput = Readonly<{
+  episodeId: string; action: BoundVisualAction; controlledContext: CheckedEpisodeExecutionContext;
+}>;
 
 export type EpisodeCoordinatorRunner =
   | "runSingleShotExecutionCli"
@@ -151,7 +161,7 @@ export type CoordinateEpisodeActionDependencies =
       typeof runDialogueReconcileCli;
   }>;
 
-const defaultDependencies:
+export const episodeCoordinatorProductionDependencies:
   CoordinateEpisodeActionDependencies =
     Object.freeze({
       loadEnvironment,
@@ -171,54 +181,10 @@ const defaultDependencies:
       runDialogueGenerationCli,
       runDialogueReconcileCli,
     });
+const defaultDependencies = episodeCoordinatorProductionDependencies;
 
 // Only for: the secured runner resolved, then the post-action C4 resolution
 // threw. The action has happened; no after-state exists.
-export class EpisodeActionPostStateResolutionError extends Error {
-  readonly actionCompleted:
-    true =
-      true;
-
-  readonly episodeId:
-    string;
-
-  readonly action:
-    EpisodeCoordinatorAction;
-
-  readonly runner:
-    EpisodeCoordinatorRunner;
-
-  constructor(
-    input:
-      Readonly<{
-        episodeId: string;
-        action: EpisodeCoordinatorAction;
-        runner: EpisodeCoordinatorRunner;
-        cause: unknown;
-      }>,
-  ) {
-    super(
-      `Episode action ${input.action.kind} for ${input.episodeId} completed via ${input.runner}, but the resulting durable episode state could not be resolved.`,
-      {
-        cause:
-          input.cause,
-      },
-    );
-
-    this.name =
-      "EpisodeActionPostStateResolutionError";
-
-    this.episodeId =
-      input.episodeId;
-
-    this.action =
-      input.action;
-
-    this.runner =
-      input.runner;
-  }
-}
-
 // Runtime gate (callers can bypass the TypeScript literal types): a known
 // kind and its literal-true confirmation, before any parsing or I/O. Returns
 // a frozen copy of only the locked fields.
@@ -464,7 +430,7 @@ async function runAdmittedAction(
     string,
 
   action:
-    EpisodeCoordinatorAction,
+    Exclude<EpisodeCoordinatorAction, { kind: "VISUAL_GENERATE" | "VISUAL_RECONCILE" }>,
 
   shot:
     DurableEpisodeShotProductionState,
@@ -478,53 +444,6 @@ async function runAdmittedAction(
   switch (
     action.kind
   ) {
-    case "VISUAL_GENERATE":
-      if (
-        visual.state !==
-        "READY_FOR_GENERATION"
-      ) {
-        throw notAdmitted(
-          episodeId,
-          action,
-          visual.state,
-        );
-      }
-
-      await dependencies
-        .runSingleShotExecutionCli([
-          "--episode",
-          episodeId,
-          "--shot",
-          action.shotId,
-          "--image",
-          visual.reference.absolutePath,
-          "--confirm-paid-generation",
-        ]);
-
-      return "runSingleShotExecutionCli";
-
-    case "VISUAL_RECONCILE":
-      if (
-        visual.state !==
-        "SUBMITTED_RECONCILIATION_REQUIRED"
-      ) {
-        throw notAdmitted(
-          episodeId,
-          action,
-          visual.state,
-        );
-      }
-
-      await dependencies
-        .runProductionExecutionReconcileCli([
-          "--episode",
-          episodeId,
-          "--shot",
-          action.shotId,
-        ]);
-
-      return "runProductionExecutionReconcileCli";
-
     case "DIALOGUE_GENERATE":
       if (
         dialogue.state !==
@@ -606,14 +525,19 @@ async function runAdmittedAction(
   }
 }
 
+export function coordinateEpisodeAction(input: CoordinateBoundEpisodeActionInput,
+  dependencies?: CoordinateEpisodeActionDependencies): Promise<BoundEpisodeActionResult>;
+export function coordinateEpisodeAction(input: CoordinateEpisodeActionInput,
+  dependencies?: CoordinateEpisodeActionDependencies): Promise<CoordinateEpisodeActionResult>;
 export async function coordinateEpisodeAction(
   input:
-    CoordinateEpisodeActionInput,
+    CoordinateEpisodeActionInput | CoordinateBoundEpisodeActionInput,
 
   dependencies:
     CoordinateEpisodeActionDependencies =
       defaultDependencies,
-): Promise<CoordinateEpisodeActionResult> {
+): Promise<CoordinateEpisodeActionResult | BoundEpisodeActionResult> {
+  if ("controlledContext" in input) return coordinateBoundEpisodeAction(input, dependencies);
   // 1. Known kind + literal-true confirmation, before anything else.
   const action =
     requireConfirmedAction(
@@ -628,6 +552,10 @@ export async function coordinateEpisodeAction(
     episodeId,
     action,
   );
+
+  if (action.kind === "VISUAL_GENERATE" || action.kind === "VISUAL_RECONCILE") {
+    throw new BoundEpisodeError("LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION");
+  }
 
   // 3. Canonical read-only inputs, as execution:status loads them.
   const env =
@@ -735,4 +663,78 @@ export async function coordinateEpisodeAction(
     beforeState,
     afterState,
   });
+}
+
+async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionInput,
+  dependencies: CoordinateEpisodeActionDependencies): Promise<BoundEpisodeActionResult> {
+  const data = checkedEpisodeExecutionData(input.controlledContext);
+  requireSameBinding(input.action, data.plan.actions[0]);
+  if (input.episodeId !== data.plan.episodeId) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+  const action = data.plan.actions[0];
+  // Known exact kind, literal confirmation and target before I/O.
+  requireConfirmedAction(action); requireValidTarget(input.episodeId, action);
+  const target = { episodeId: action.episodeId, sceneId: action.sceneId, shotId: action.shotId, order: action.order };
+  let before = data.beforePlan;
+  const preflightInput = { episodeId: input.episodeId, scope: data.plan.scope,
+    mediaRoot: data.plan.inputBinding.runtimeIdentity.mediaRoot, runtimeIdentity: data.plan.inputBinding.runtimeIdentity,
+    evidenceAdoptions: data.plan.evidenceAdoptions,
+    ...(data.plan.inputBinding.runtimeIdentity.ffprobe ? { ffprobeExecutable: data.plan.inputBinding.runtimeIdentity.ffprobe.canonicalPath } : {}) };
+  try {
+    await assertCheckedEpisodeAdmission(input.controlledContext);
+    before = await data.preflight({ ...preflightInput, expectedBinding: data.plan.inputBinding });
+    admitEpisodeCoordinatorDispatch(data.invocation);
+  } catch (cause) {
+    if (!(cause instanceof BoundEpisodeError)) throw cause;
+    return freezeBoundCopy({ episodeId: input.episodeId, action, beforePlan: before, afterPlan: null, status: "REJECTED",
+      stopReason: cause.code, ...episodeInvocationCounts(data.invocation), observedNewCreateCount: 0,
+      visualCompletion: before.completion, handoff: before.handoff, remainingWork: before.remainingWork,
+      actionMayHaveEffects: false, issues: [episodeIssue(cause.code, target, "ADMISSION", cause)] });
+  }
+  let lowerCause: unknown; let lowerFailed = false;
+  try {
+    if (action.kind === "VISUAL_GENERATE") {
+      await dependencies.runSingleShotExecutionCli(["--episode", action.episodeId, "--shot", action.shotId,
+        "--image", action.referenceBinding.canonicalAbsolutePath, "--confirm-paid-generation"], undefined, input.controlledContext);
+    } else {
+      await dependencies.runProductionExecutionReconcileCli(["--episode", action.episodeId, "--shot", action.shotId], undefined, input.controlledContext);
+    }
+  } catch (cause) { lowerCause = cause; lowerFailed = true; }
+  // Always attempt observation after the runner settles, including throws.
+  // Omit expectedBinding so drift can be reported alongside useful fresh
+  // durable evidence instead of preventing that evidence from being read.
+  let after: BoundEpisodePreflight | null = null; let postCause: unknown;
+  try { after = await data.preflight(preflightInput); }
+  catch (cause) { postCause = cause; }
+  const counts = episodeInvocationCounts(data.invocation);
+  const effects = counts.dispatchAllowanceConsumed === 1 || counts.recoveryDispatchCount === 1;
+  const row = after?.shots.find(row => row.shotId === action.shotId && row.sceneId === action.sceneId);
+  let selectedPostObservation = row?.lifecycle ?? null;
+  let selectedObservationCause: unknown;
+  if (!row) {
+    try { selectedPostObservation = await readSelectedVisualPostObservation(preflightInput.mediaRoot, target); }
+    catch (cause) { selectedObservationCause = cause; }
+  }
+  let status: BoundEpisodeActionResult["status"] = "UNRESOLVED";
+  let stopReason: IssueCode | null = "POST_ACTION_STATE_UNRESOLVED";
+  if (after?.bindingSha256 !== data.plan.inputBindingSha256 && after !== null) stopReason = "INPUT_BINDING_DRIFT";
+  else if (row?.completionVerification === "FAILED") stopReason = "LOCAL_COMPLETION_VERIFICATION_FAILED";
+  else if (row?.disposition === "COMPLETED" && row.completionVerification === "VERIFIED") {
+    status = lowerFailed ? "STOPPED" : "ACTION_COMPLETED";
+    stopReason = lowerFailed ? "ACTION_REJECTED" : action.kind === "VISUAL_GENERATE" && after?.completion === "INCOMPLETE" ? "MAX_CREATE_COUNT_REACHED" : null;
+  } else if (row?.lifecycle.lifecycle === "SUBMITTED") { status = "STOPPED"; stopReason = "SUBMITTED_RECOVERY_REQUIRED"; }
+  else if (row?.lifecycle.lifecycle === "RESERVED_ONLY") {
+    status = "STOPPED"; stopReason = action.kind === "VISUAL_GENERATE" ? "RESERVED_ONLY_MANUAL_ADJUDICATION" : "INVALID_DURABLE_STATE";
+  } else if (row?.lifecycle.lifecycle === "NOTHING") {
+    status = "REJECTED"; stopReason = action.kind === "VISUAL_RECONCILE" ? "INVALID_DURABLE_STATE"
+      : lowerFailed ? "ACTION_REJECTED" : "UNEXPECTED_PROVIDER_RESULT";
+  }
+  if (!after?.inventory.complete && status === "ACTION_COMPLETED") { status = "UNRESOLVED"; stopReason = "POST_ACTION_STATE_UNRESOLVED"; }
+  const result: BoundEpisodeActionResult = freezeBoundCopy({ episodeId: input.episodeId, action, beforePlan: before,
+    afterPlan: after, selectedPostObservation, status, stopReason, ...counts, observedNewCreateCount: counts.dispatchAllowanceConsumed === 0 ? 0 : "UNKNOWN",
+    visualCompletion: after?.completion ?? "INCOMPLETE", handoff: after?.handoff ?? before.handoff,
+    remainingWork: after?.remainingWork ?? before.remainingWork, actionMayHaveEffects: effects,
+    issues: status === "ACTION_COMPLETED" ? [] : [episodeIssue(stopReason ?? "ACTION_REJECTED", target, "POST_ACTION", lowerCause ?? postCause, effects),
+      ...(selectedObservationCause === undefined ? [] : [episodeIssue("POST_ACTION_STATE_UNRESOLVED", target, "POST_ACTION", selectedObservationCause, effects)])] });
+  if (lowerFailed || postCause !== undefined) throw new BoundEpisodeActionError(result, lowerFailed ? lowerCause : postCause, postCause);
+  return result;
 }

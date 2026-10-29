@@ -782,11 +782,14 @@ describe(
         expect(
           importers.sort(),
         ).toEqual([
+          // B7: read-only full preflight and the extracted pure admission type.
+          "src/execution/buildBoundEpisodePreflight.ts",
           // B4X: the operator CLI runner loads the activation policy for execute only.
           "src/execution/cli/runGoogleGenAiOperatorCli.ts",
           // B5C-X1: the single shared composition point loads the policy for the reused Google orchestrator.
           "src/execution/createProductionSingleShotExecutionDependencies.ts",
           // B4X: the operator orchestrator runs the pre-reservation cost and reference-image admission.
+          "src/execution/evaluateGoogleGenAiLocalAdmission.ts",
           "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
           "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
           // B4V7: the dormant secure recovery factory reads the frozen limits constant.
@@ -832,6 +835,8 @@ describe(
         expect(
           references.sort(),
         ).toEqual([
+          // B7: read-only observation; it cannot activate or create a job.
+          "src/execution/buildBoundEpisodePreflight.ts",
           // B4X: the operator orchestrator checks the switch before any reservation.
           "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
           "src/execution/providers/submitGoogleGenAiSingleShot.ts",

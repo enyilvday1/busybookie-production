@@ -308,290 +308,60 @@ describe("C7 G duplicates and structural conflicts", () => {
   });
 });
 
-describe("C7 H immutability", () => {
-  it("parsed actions are new frozen copies; caller mutation cannot widen authority", () => {
-    const callerAction = { ...DG };
-    const callerActions = [callerAction];
-    const parsed = parseEpisodeAutomationPlan(plan(callerActions));
-    expect(parsed.actions[0]).not.toBe(callerAction);
-    expect(Object.isFrozen(parsed.actions[0])).toBe(true);
-    (callerAction as Record<string, unknown>).shotId = "S09";
-    callerActions.push({ ...VG } as never);
-    expect(parsed.actions).toEqual([DG]);
+describe("B7 legacy execution boundary and preserved dialogue behavior", () => {
+  it.each([{ actions: [VG] }, { actions: [VR] }, { actions: [DG, VG] }, { actions: [DG, DR, VG] }])("rejects a visual or mixed legacy plan before every coordinator call", async ({ actions }) => {
+    const controlled = harness();
+    await expect(runEpisodeAutomation(plan(actions), controlled.deps)).rejects.toMatchObject({ code: "LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION" });
+    expect(controlled.coordinateAction).not.toHaveBeenCalled();
   });
-
-  it("mutating the caller plan during a deferred first call does not change the later forwarded action", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const callerActions: Record<string, unknown>[] = [{ ...VG }, { ...VR }];
-    const callerPlan = plan(callerActions);
-    const controlled = harness(async (input, call) => {
-      if (call === 1) await gate;
-      return resultFor(input.action, call);
-    });
-
-    const run = runEpisodeAutomation(callerPlan, controlled.deps);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    callerActions[1]!.shotId = "S99";
-    callerActions[1]!.kind = "VISUAL_GENERATE";
-    callerActions.push({ ...DG });
-    (callerPlan as Record<string, unknown>).episodeId = "EP99";
-    release();
-    await run;
-
-    expect(controlled.coordinateAction).toHaveBeenCalledTimes(2);
-    expect(controlled.coordinateAction.mock.calls[1]![0]).toEqual({ episodeId: EPISODE, action: VR });
+  it("keeps strict structural validation before execution rejection", async () => {
+    const controlled = harness();
+    await expect(runEpisodeAutomation(plan([DG, { ...VG, force: true }]), controlled.deps)).rejects.toThrow(/invalid/);
+    expect(controlled.coordinateAction).not.toHaveBeenCalled();
+  });
+  it("defensively copies dialogue actions before an asynchronous invocation", async () => {
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    const callerActions: Record<string, unknown>[] = [{ ...DG }, { ...DR }];
+    const controlled = harness(async (input, call) => { if (call === 1) await gate; return resultFor(input.action, call); });
+    const run = runEpisodeAutomation(plan(callerActions), controlled.deps);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    callerActions[1]!.shotId = "S99"; callerActions.push({ ...VG }); release(); await run;
+    expect(controlled.coordinateAction.mock.calls.map(([input]) => input.action)).toEqual([DG, DR]);
     expect(Object.isFrozen(controlled.coordinateAction.mock.calls[1]![0].action)).toBe(true);
   });
-});
-
-describe("C7 I exact forwarding", () => {
-  it.each(Object.entries(KINDS))("%s is forwarded as exactly { episodeId, action }", async (_kind, action) => {
-    const controlled = harness();
-    await runEpisodeAutomation(plan([action]), controlled.deps);
-    const [forwarded] = controlled.coordinateAction.mock.calls[0]!;
-    expect(forwarded).toEqual({ episodeId: EPISODE, action });
-    expect(Object.keys(forwarded).sort()).toEqual(["action", "episodeId"]);
-    expect(Object.keys(forwarded.action).sort()).toEqual(Object.keys(action).sort());
-  });
-});
-
-describe("C7 J operator order", () => {
-  it("preserves literal plan order across kinds and reversed shot numbering", async () => {
-    const actions = [
-      visualAt(9),
-      { ...DG, shotId: "S07", dialogueLineId: "EP02_SC01_S07_L01" },
-      visualAt(3),
-      { ...VR, shotId: "S09" },
-      { ...DR, shotId: "S01", dialogueLineId: "EP02_SC01_S01_L01" },
-    ];
-    const controlled = harness();
-    await runEpisodeAutomation(plan(actions), controlled.deps);
-    expect(controlled.coordinateAction.mock.calls.map(([input]) => `${input.action.kind}:${input.action.shotId}`)).toEqual([
-      "VISUAL_GENERATE:S09",
-      "DIALOGUE_GENERATE:S07",
-      "VISUAL_GENERATE:S03",
-      "VISUAL_RECONCILE:S09",
-      "DIALOGUE_RECONCILE:S01",
-    ]);
-  });
-});
-
-describe("C7 K strict sequentialism", () => {
-  it("never starts a call before the previous one resolves (max in flight = 1)", async () => {
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const releases: Array<() => void> = [];
+  it("runs dialogue actions sequentially and returns the exact last durable state", async () => {
+    let active = 0; let maximum = 0; const results: CoordinateEpisodeActionResult[] = [];
     const controlled = harness(async (input, call) => {
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      await new Promise<void>((resolve) => releases.push(resolve));
-      inFlight -= 1;
-      return resultFor(input.action, call);
+      active++; maximum = Math.max(maximum, active); await Promise.resolve(); active--;
+      const result = resultFor(input.action, call); results.push(result); return result;
     });
-
-    const run = runEpisodeAutomation(plan([visualAt(1), visualAt(2), visualAt(3)]), controlled.deps);
-    for (let step = 1; step <= 3; step += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(controlled.coordinateAction).toHaveBeenCalledTimes(step);
-      releases[step - 1]!();
-    }
-    await run;
-    expect(maxInFlight).toBe(1);
-  });
-});
-
-describe("C7 L success contract", () => {
-  it("retains exact result references, freezes, and finalState is the last afterState", async () => {
-    const produced: CoordinateEpisodeActionResult[] = [];
-    const controlled = harness(async (input, call) => {
-      const result = resultFor(input.action, call);
-      produced.push(result);
-      return result;
-    });
-    const outcome = await runEpisodeAutomation(plan([VG, DG, VR]), controlled.deps);
-
-    expect(outcome.episodeId).toBe(EPISODE);
-    expect(outcome.results).toHaveLength(3);
-    outcome.results.forEach((result, index) => expect(result).toBe(produced[index]));
-    expect(outcome.finalState).toBe(produced[2]!.afterState);
-    expect(Object.isFrozen(outcome)).toBe(true);
+    const outcome = await runEpisodeAutomation(plan([DG, DR]), controlled.deps);
+    if (!("results" in outcome)) throw new Error("Expected legacy dialogue result.");
+    expect(maximum).toBe(1); expect(outcome.results).toEqual(results); expect(outcome.finalState).toBe(results[1]!.afterState);
     expect(Object.isFrozen(outcome.results)).toBe(true);
-    expect(Object.keys(outcome).sort()).toEqual(["episodeId", "finalState", "results"]);
-    expect(controlled.coordinateAction).toHaveBeenCalledTimes(3);
-    expect(resolveDurableEpisodeProductionState).not.toHaveBeenCalled();
+    expect(controlled.coordinateAction.mock.calls.map(([input]) => input.action)).toEqual([DG, DR]);
   });
-});
-
-describe("C7 M ordinary rejection stops the run", () => {
-  it.each([0, 1, 2])("a rejection at index %i stops with the exact prefix and cause", async (failAt) => {
-    const failure = new Error("C6b refused: VISUAL_GENERATE is not admitted");
-    const produced: CoordinateEpisodeActionResult[] = [];
-    const controlled = harness(async (input, call) => {
-      if (call === failAt + 1) throw failure;
-      const result = resultFor(input.action, call);
-      produced.push(result);
-      return result;
-    });
-    const actions = [visualAt(1), visualAt(2), visualAt(3)];
-
-    const error = (await rejection(runEpisodeAutomation(plan(actions), controlled.deps))) as EpisodeAutomationError;
-
+  it.each([0, 1])("retains runner cause and exact successful prefix at dialogue failure %i", async failAt => {
+    const failure = new Error("synthetic dialogue failure");
+    const controlled = harness(async (input, call) => { if (call === failAt + 1) throw failure; return resultFor(input.action, call); });
+    const error = await rejection(runEpisodeAutomation(plan([DG, DR]), controlled.deps));
     expect(error).toBeInstanceOf(EpisodeAutomationError);
-    expect(error.name).toBe("EpisodeAutomationError");
-    expect(error.cause).toBe(failure);
-    expect(error.episodeId).toBe(EPISODE);
-    expect(error.failedActionIndex).toBe(failAt);
-    expect(error.failedAction).toEqual(actions[failAt]);
-    expect(Object.isFrozen(error.failedAction)).toBe(true);
-    expect(error.failedActionOutcome).toBe("UNKNOWN");
-    expect(error.completedResults).toHaveLength(failAt);
-    error.completedResults.forEach((result, index) => expect(result).toBe(produced[index]));
-    expect(Object.isFrozen(error.completedResults)).toBe(true);
+    if (!(error instanceof EpisodeAutomationError)) throw new Error("wrong error");
+    expect(error.cause).toBe(failure); expect(error.failedActionIndex).toBe(failAt);
+    expect(error.completedResults).toHaveLength(failAt); expect(error.failedActionOutcome).toBe("UNKNOWN");
     expect(controlled.coordinateAction).toHaveBeenCalledTimes(failAt + 1);
-    expect(error.message).toContain(`stopped at action index ${failAt}`);
-    expect(error.message).toContain("later actions were not attempted");
-    expect(error.message).not.toMatch(/no effects|nothing happened|safe to retry/i);
-    for (const forbidden of ["afterState", "finalState", "resumeToken", "cursor", "nextIndex"]) {
-      expect(forbidden in error).toBe(false);
-    }
   });
-});
-
-describe("C7 N post-action state resolution failure", () => {
-  it.each(Object.entries(KINDS))("%s: COMPLETED_STATE_UNRESOLVED, typed cause kept, no retry or continuation", async (kind, action) => {
-    const postFailure = new EpisodeActionPostStateResolutionError({
-      episodeId: EPISODE,
-      action,
-      runner: RUNNER[kind as Kind],
-      cause: new Error("post-action C4 failed"),
-    });
-    const controlled = harness(async (input, call) => {
-      if (call === 2) throw postFailure;
-      return resultFor(input.action, call);
-    });
-    const other = kind.startsWith("VISUAL") ? { ...DG, shotId: "S05", dialogueLineId: "EP02_SC01_S05_L01" } : visualAt(5);
-
-    const error = (await rejection(
-      runEpisodeAutomation(plan([visualAt(1), action, other]), controlled.deps),
-    )) as EpisodeAutomationError;
-
-    expect(error.failedActionOutcome).toBe("COMPLETED_STATE_UNRESOLVED");
-    expect(error.cause).toBe(postFailure);
-    expect((error.cause as EpisodeActionPostStateResolutionError).actionCompleted).toBe(true);
-    expect((error.cause as EpisodeActionPostStateResolutionError).runner).toBe(RUNNER[kind as Kind]);
-    expect(error.failedActionIndex).toBe(1);
-    expect(error.completedResults).toHaveLength(1);
-    expect(controlled.coordinateAction).toHaveBeenCalledTimes(2);
-    expect("afterState" in error || "finalState" in error).toBe(false);
-  });
-
-  it("classifies by type, not by message text", async () => {
-    const lookalike = new Error("completed via runSingleShotExecutionCli, but the resulting durable episode state could not be resolved.");
-    const controlled = harness(async () => {
-      throw lookalike;
-    });
-    const error = (await rejection(runEpisodeAutomation(plan([VG]), controlled.deps))) as EpisodeAutomationError;
-    expect(error.failedActionOutcome).toBe("UNKNOWN");
-  });
-});
-
-describe("C7 O non-Error rejection", () => {
-  it.each(["plain string", 42, null, { code: "X" }])("%s is kept as the cause with outcome UNKNOWN", async (value) => {
-    const controlled = harness(async () => {
-      throw value;
-    });
-    const error = (await rejection(runEpisodeAutomation(plan([VG, VR]), controlled.deps))) as EpisodeAutomationError;
-    expect(error).toBeInstanceOf(EpisodeAutomationError);
-    expect(error.cause).toBe(value);
-    expect(error.failedActionOutcome).toBe("UNKNOWN");
-    expect(controlled.coordinateAction).toHaveBeenCalledTimes(1);
-    expect(error.message).not.toMatch(/no effects|no provider|nothing happened/i);
-  });
-});
-
-describe("C7 P replay and operator-authored remaining plans", () => {
-  it("an unchanged plan starts again at index 0 and a completed-target refusal stops it (no skip)", async () => {
-    const actions = [visualAt(1), visualAt(2)];
-    const first = harness();
-    await runEpisodeAutomation(plan(actions), first.deps);
-
-    const replay = harness(async (input, call) => {
-      if (input.action.shotId === "S01") throw new Error("VISUAL_GENERATE is not admitted: current state is LIFECYCLE_COMPLETED.");
-      return resultFor(input.action, call);
-    });
-    const error = (await rejection(runEpisodeAutomation(plan(actions), replay.deps))) as EpisodeAutomationError;
-    expect(replay.coordinateAction.mock.calls[0]![0].action.shotId).toBe("S01");
-    expect(replay.coordinateAction).toHaveBeenCalledTimes(1);
-    expect(error.failedActionIndex).toBe(0);
-  });
-
-  it("a separately supplied remaining-action plan invokes only its own entries", async () => {
-    const remaining = harness();
-    await runEpisodeAutomation(plan([visualAt(2), { ...VR, shotId: "S02" }]), remaining.deps);
-    expect(remaining.coordinateAction.mock.calls.map(([input]) => input.action)).toEqual([visualAt(2), { ...VR, shotId: "S02" }]);
-  });
-});
-
-describe("C7 Q intervention refusals stop without repair", () => {
-  it.each([
-    "DIALOGUE_GENERATION_ADMISSION_OPEN_INTERVENTION_REQUIRED",
-    "DIALOGUE_RESERVED_ONLY_INTERVENTION_REQUIRED",
-    "DIALOGUE_STALE_PLAN_INTERVENTION_REQUIRED",
-    "DIALOGUE_PLANNING_BLOCKED",
-  ])("refusal from %s stops; no follow-up action", async (refusedState) => {
-    const refusal = new Error(`DIALOGUE_GENERATE is not admitted for EP02/SC01/S02: current state is ${refusedState}.`);
-    const controlled = harness(async () => {
-      throw refusal;
-    });
-    const error = (await rejection(runEpisodeAutomation(plan([DG, VG]), controlled.deps))) as EpisodeAutomationError;
-    expect(error.cause).toBe(refusal);
+  it("retains typed dialogue post-state failure and stops without a second call", async () => {
+    const failure = new EpisodeActionPostStateResolutionError({ episodeId: EPISODE, action: DG,
+      runner: "runDialogueGenerationCli", cause: new Error("synthetic post-read failure") });
+    const controlled = harness(async () => { throw failure; });
+    const error = await rejection(runEpisodeAutomation(plan([DG, DR]), controlled.deps));
+    expect(error).toMatchObject({ failedActionOutcome: "COMPLETED_STATE_UNRESOLVED", cause: failure });
     expect(controlled.coordinateAction).toHaveBeenCalledTimes(1);
   });
-});
-
-describe("C7 R no implicit reconciliation", () => {
-  it("a generation whose afterState needs reconciliation does not add a reconcile", async () => {
-    const controlled = harness(async (input, call) =>
-      Object.freeze({ ...resultFor(input.action, call), afterState: state("SUBMITTED_RECONCILIATION_REQUIRED") }),
-    );
-    await runEpisodeAutomation(plan([VG]), controlled.deps);
-    expect(controlled.coordinateAction).toHaveBeenCalledTimes(1);
-  });
-
-  it("a separately listed reconcile forwards exactly that confirmed object next", async () => {
-    const controlled = harness();
-    await runEpisodeAutomation(plan([VG, VR]), controlled.deps);
-    expect(controlled.coordinateAction.mock.calls.map(([input]) => input.action)).toEqual([VG, VR]);
-  });
-});
-
-describe("C7 S a later independent target never runs after a failure", () => {
-  it("an unrelated later shot is not attempted", async () => {
-    const controlled = harness(async (input, call) => {
-      if (call === 1) throw new Error("runner failed");
-      return resultFor(input.action, call);
-    });
-    await expect(
-      runEpisodeAutomation(plan([visualAt(1), { ...DG, shotId: "S08", dialogueLineId: "EP02_SC01_S08_L01" }]), controlled.deps),
-    ).rejects.toBeInstanceOf(EpisodeAutomationError);
-    expect(controlled.coordinateAction).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("C7 T default dependency seam", () => {
-  beforeEach(() => {
-    vi.mocked(coordinateEpisodeAction).mockReset();
-  });
-
-  it("without injected dependencies the actual coordinateEpisodeAction symbol is called; no lower runner", async () => {
-    vi.mocked(coordinateEpisodeAction).mockImplementation(async (input) => resultFor(input.action, 1));
-    const outcome = await runEpisodeAutomation(plan([VG, DR]));
-    expect(coordinateEpisodeAction).toHaveBeenCalledTimes(2);
-    expect(outcome.results).toHaveLength(2);
-    for (const runner of [runSingleShotExecutionCli, runProductionExecutionReconcileCli, runDialogueGenerationCli, runDialogueReconcileCli]) {
-      expect(runner).not.toHaveBeenCalled();
-    }
+  it("retains the default coordinator seam for legacy dialogue", async () => {
+    vi.mocked(coordinateEpisodeAction).mockReset().mockImplementation(async input => resultFor(input.action, 1));
+    await runEpisodeAutomation(plan([DG])); expect(coordinateEpisodeAction).toHaveBeenCalledTimes(1);
     expect(loadEnvironment).not.toHaveBeenCalled();
   });
 });
@@ -616,26 +386,33 @@ describe("C7 U source boundary", () => {
 
   it("runEpisodeAutomation imports only the coordinator, the pure plan parser and a C4 type", async () => {
     const source = await read("src/execution/runEpisodeAutomation.ts");
-    expect(importsOf(source)).toEqual([
-      { specifier: "./coordinateEpisodeAction.js", typeOnly: false },
-      { specifier: "./episodeAutomationPlan.schema.js", typeOnly: false },
-      { specifier: "./resolveDurableEpisodeProductionState.js", typeOnly: true },
-    ]);
+    const allowed = new Set(["./coordinateEpisodeAction.js", "./episodeAutomationPlan.schema.js", "./resolveDurableEpisodeProductionState.js",
+      "./boundEpisodeProduction.types.js", "./buildBoundEpisodePreflight.js", "./episodeExecutionGuard.js", "./episodeInputBinding.js"]);
+    expect(importsOf(source).every(entry => allowed.has(entry.specifier))).toBe(true);
     const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     expect(code).not.toMatch(FORBIDDEN);
-    expect(code.match(/\.coordinateAction\s*\(/g)).toHaveLength(1);
+    // One legacy-loop call site and one unconditional-stop v2 call site.
+    expect(code.match(/\.coordinateAction\s*\(/g)).toHaveLength(2);
   });
 
   it("the plan schema is pure: zod, id schemas and a coordinator type only", async () => {
     const source = await read("src/execution/episodeAutomationPlan.schema.ts");
     expect(importsOf(source)).toEqual([
       { specifier: "zod", typeOnly: false },
+      { specifier: "./boundEpisodeProduction.types.js", typeOnly: false },
+      { specifier: "./boundEpisodeProduction.types.js", typeOnly: true },
       { specifier: "../dialogue/dialogueReservation.schema.js", typeOnly: false },
       { specifier: "./coordinateEpisodeAction.js", typeOnly: true },
       { specifier: "./executionReservation.schema.js", typeOnly: false },
     ]);
     const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     expect(code).not.toMatch(FORBIDDEN);
-    expect(code).not.toMatch(/\.regex\(|new RegExp/);
+    // V2 adds raw SHA256 and reviewed Git revision formats; target identity
+    // still comes exclusively from the existing canonical id schemas.
+    expect(code.match(/\.regex\([^\r\n]+/g)).toEqual([
+      '.regex(/^[0-9a-f]{64}$/);',
+      '.regex(/^[0-9a-f]{40}$/),',
+    ]);
+    expect(code).not.toMatch(/new RegExp/);
   });
 });

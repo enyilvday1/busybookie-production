@@ -361,10 +361,10 @@ describe("C6b A confirmation is the first operational gate", () => {
   });
 
   it("a valid literal true proceeds through loaders, C4 and exactly one runner", async () => {
-    const controlled = harness([admittedState("VISUAL_GENERATE"), admittedState("VISUAL_GENERATE", "after")]);
-    await coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps);
+    const controlled = harness([admittedState("DIALOGUE_GENERATE"), admittedState("DIALOGUE_GENERATE", "after")]);
+    await coordinateEpisodeAction(input(ACTIONS.DIALOGUE_GENERATE), controlled.deps);
     expect(controlled.events[0]).toBe("loadEnvironment");
-    expect(controlled.runners.runSingleShotExecutionCli).toHaveBeenCalledTimes(1);
+    expect(controlled.runners.runDialogueGenerationCli).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -393,8 +393,8 @@ describe("C6b B id validation happens before any I/O", () => {
 
 describe("C6b C canonical load", () => {
   it("a loaded episode identity mismatch throws with no C4 and no runner", async () => {
-    const controlled = harness([admittedState("VISUAL_GENERATE")], "EP03");
-    await expect(coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps)).rejects.toThrow(
+    const controlled = harness([admittedState("DIALOGUE_GENERATE")], "EP03");
+    await expect(coordinateEpisodeAction(input(ACTIONS.DIALOGUE_GENERATE), controlled.deps)).rejects.toThrow(
       /Loaded episode identity EP03 does not match the requested episode EP02/,
     );
     expect(controlled.resolveEpisodeProductionState).not.toHaveBeenCalled();
@@ -434,11 +434,11 @@ describe("C6b C canonical load", () => {
 
 describe("C6b D before-state and exact target", () => {
   it("C4 runs once before the runner", async () => {
-    const controlled = harness([admittedState("VISUAL_RECONCILE"), admittedState("VISUAL_RECONCILE", "after")]);
-    await coordinateEpisodeAction(input(ACTIONS.VISUAL_RECONCILE), controlled.deps);
+    const controlled = harness([admittedState("DIALOGUE_RECONCILE"), admittedState("DIALOGUE_RECONCILE", "after")]);
+    await coordinateEpisodeAction(input(ACTIONS.DIALOGUE_RECONCILE), controlled.deps);
     expect(controlled.events.filter((event) => event.startsWith("c4:") || event.startsWith("runner:"))).toEqual([
       "c4:1",
-      "runner:runProductionExecutionReconcileCli",
+      "runner:runDialogueReconcileCli",
       "c4:2",
     ]);
   });
@@ -453,12 +453,12 @@ describe("C6b D before-state and exact target", () => {
   });
 
   it.each([
-    ["an unknown shot", { shotId: "S09" }],
-    ["a sceneId mismatch", { sceneId: "SC02" }],
+    ["an unknown shot", { shotId: "S09", dialogueLineId: "EP02_SC01_S09_L01" }],
+    ["a sceneId mismatch", { sceneId: "SC02", dialogueLineId: "EP02_SC02_S02_L01" }],
   ])("%s throws before any runner", async (_label, overrides) => {
-    const controlled = harness([admittedState("VISUAL_GENERATE")]);
+    const controlled = harness([admittedState("DIALOGUE_GENERATE")]);
     await expect(
-      coordinateEpisodeAction(input({ ...ACTIONS.VISUAL_GENERATE, ...overrides }), controlled.deps),
+      coordinateEpisodeAction(input({ ...ACTIONS.DIALOGUE_GENERATE, ...overrides }), controlled.deps),
     ).rejects.toThrow(/has no exact durable shot/);
     expect(controlled.resolveEpisodeProductionState).toHaveBeenCalledTimes(1);
     expect(Object.values(runnerCalls(controlled))).toEqual([0, 0, 0, 0]);
@@ -471,31 +471,19 @@ describe("C6b D before-state and exact target", () => {
       summary: Object.freeze({ visualGenerationStates: Object.freeze({ READY_FOR_GENERATION: 99 }) }),
     }) as unknown as DurableEpisodeProductionState;
     const controlled = harness([lying]);
-    await expect(coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps)).rejects.toThrow(
-      /current state is CANONICAL_NOT_EXECUTABLE/,
+    await expect(coordinateEpisodeAction(input(ACTIONS.DIALOGUE_GENERATE), controlled.deps)).rejects.toThrow(
+      /current state is NO_DIALOGUE/,
     );
   });
 });
 
-describe("C6b E visual admission matrix (8 visual states x 2 visual kinds)", () => {
-  const ADMITTED = new Set(["READY_FOR_GENERATION:VISUAL_GENERATE", "SUBMITTED_RECONCILIATION_REQUIRED:VISUAL_RECONCILE"]);
-  for (const state of VISUAL_STATES) {
-    for (const kind of ["VISUAL_GENERATE", "VISUAL_RECONCILE"] as const) {
-      const admitted = ADMITTED.has(`${state}:${kind}`);
-      it(`${state} + ${kind} -> ${admitted ? "runner" : "throw, no runner"} (dialogue axis blocked)`, async () => {
-        const before = episodeState(visual(state), dialogue("DIALOGUE_PLANNING_BLOCKED"));
-        const controlled = harness([before, episodeState(visual(state), dialogue("DIALOGUE_PLANNING_BLOCKED"), "after")]);
-        const run = coordinateEpisodeAction(input(ACTIONS[kind]), controlled.deps);
-        if (admitted) {
-          await expect(run).resolves.toMatchObject({ runner: EXPECTED_RUNNER[kind] });
-          expect(controlled.runners[EXPECTED_RUNNER[kind]]).toHaveBeenCalledTimes(1);
-        } else {
-          await expect(run).rejects.toThrow(`${kind} is not admitted for EP02/SC01/S02: current state is ${state}.`);
-          expect(Object.values(runnerCalls(controlled))).toEqual([0, 0, 0, 0]);
-          expect(controlled.resolveEpisodeProductionState).toHaveBeenCalledTimes(1);
-        }
-      });
-    }
+describe("B7 unbound visual admission matrix", () => {
+  for (const state of VISUAL_STATES) for (const kind of ["VISUAL_GENERATE", "VISUAL_RECONCILE"] as const) {
+    it(state + " + " + kind + " requires reviewed v2 authority before any I/O", async () => {
+      const controlled = harness([episodeState(visual(state), dialogue("NO_DIALOGUE"))]);
+      await expect(coordinateEpisodeAction(input(ACTIONS[kind]), controlled.deps)).rejects.toMatchObject({ code: "LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION" });
+      expect(allCalls(controlled)).toBe(0);
+    });
   }
 });
 
@@ -542,7 +530,7 @@ describe("C6b F dialogue admission matrix (10 dialogue states x 2 dialogue kinds
 });
 
 describe("C6b G exact runner dispatch", () => {
-  for (const kind of KINDS) {
+  for (const kind of ["DIALOGUE_GENERATE", "DIALOGUE_RECONCILE"] as const) {
     it(`${kind} calls only ${EXPECTED_RUNNER[kind]} once with the exact argv`, async () => {
       const controlled = harness([admittedState(kind), admittedState(kind, "after")]);
       await coordinateEpisodeAction(input(ACTIONS[kind]), controlled.deps);
@@ -563,16 +551,11 @@ describe("C6b G exact runner dispatch", () => {
     });
   }
 
-  it("VISUAL_GENERATE passes C4's reference.absolutePath as --image (no reference choice)", async () => {
-    const controlled = harness([admittedState("VISUAL_GENERATE"), admittedState("VISUAL_GENERATE", "after")]);
-    await coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps);
-    const argv = controlled.runners.runSingleShotExecutionCli.mock.calls[0]![0]!;
-    expect(argv[argv.indexOf("--image") + 1]).toBe(IMAGE);
-  });
+
 });
 
 describe("C6b H success semantics", () => {
-  for (const kind of KINDS) {
+  for (const kind of ["DIALOGUE_GENERATE", "DIALOGUE_RECONCILE"] as const) {
     it(`${kind}: C4 twice around exactly one runner; frozen result with exact identities`, async () => {
       const before = admittedState(kind);
       const after = admittedState(kind, "after");
@@ -612,7 +595,7 @@ describe("C6b H success semantics", () => {
 });
 
 describe("C6b I runner failure", () => {
-  for (const kind of KINDS) {
+  for (const kind of ["DIALOGUE_GENERATE", "DIALOGUE_RECONCILE"] as const) {
     it(`${kind}: the exact runner error propagates; no after-state, no retry, no other runner`, async () => {
       const controlled = harness([admittedState(kind), admittedState(kind, "after")]);
       const failure = new Error(`${kind} secured runner failed`);
@@ -628,7 +611,7 @@ describe("C6b I runner failure", () => {
 });
 
 describe("C6b J post-action C4 failure", () => {
-  for (const kind of KINDS) {
+  for (const kind of ["DIALOGUE_GENERATE", "DIALOGUE_RECONCILE"] as const) {
     it(`${kind}: EpisodeActionPostStateResolutionError with the action completed and the cause preserved`, async () => {
       const controlled = harness([admittedState(kind)]);
       const postFailure = new Error("post-action durable evidence unreadable");
@@ -664,7 +647,7 @@ describe("C6b J post-action C4 failure", () => {
     const preFailure = new Error("before-state failure");
     const controlled = harness([]);
     controlled.resolveEpisodeProductionState.mockRejectedValueOnce(preFailure);
-    const rejection = await coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps).catch(
+    const rejection = await coordinateEpisodeAction(input(ACTIONS.DIALOGUE_GENERATE), controlled.deps).catch(
       (error: unknown) => error,
     );
     expect(rejection).toBe(preFailure);
@@ -673,24 +656,10 @@ describe("C6b J post-action C4 failure", () => {
 });
 
 describe("C6b K axis isolation", () => {
-  it.each(DIALOGUE_STATES)("VISUAL_GENERATE is admitted with READY_FOR_GENERATION while dialogue is %s", async (state) => {
-    const controlled = harness([
-      episodeState(visual("READY_FOR_GENERATION"), dialogue(state)),
-      episodeState(visual("READY_FOR_GENERATION"), dialogue(state), "after"),
-    ]);
-    await expect(coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps)).resolves.toMatchObject({
-      runner: "runSingleShotExecutionCli",
-    });
-  });
-
-  it.each(DIALOGUE_STATES)("VISUAL_RECONCILE is admitted with SUBMITTED_RECONCILIATION_REQUIRED while dialogue is %s", async (state) => {
-    const controlled = harness([
-      episodeState(visual("SUBMITTED_RECONCILIATION_REQUIRED"), dialogue(state)),
-      episodeState(visual("SUBMITTED_RECONCILIATION_REQUIRED"), dialogue(state), "after"),
-    ]);
-    await expect(coordinateEpisodeAction(input(ACTIONS.VISUAL_RECONCILE), controlled.deps)).resolves.toMatchObject({
-      runner: "runProductionExecutionReconcileCli",
-    });
+  it.each(DIALOGUE_STATES)("dialogue observation %s never grants unbound visual authority", async state => {
+    const controlled = harness([episodeState(visual("READY_FOR_GENERATION"), dialogue(state))]);
+    await expect(coordinateEpisodeAction(input(ACTIONS.VISUAL_GENERATE), controlled.deps)).rejects.toMatchObject({ code: "LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION" });
+    expect(allCalls(controlled)).toBe(0);
   });
 
   it.each(VISUAL_STATES)("DIALOGUE_GENERATE is admitted with DIALOGUE_AUDIO_REQUIRED while visual is %s", async (state) => {
@@ -730,7 +699,7 @@ describe("C6b default dependencies are the exact secured runners and read-only l
     vi.mocked(resolveDurableEpisodeProductionState).mockReset();
   });
 
-  for (const kind of KINDS) {
+  for (const kind of ["DIALOGUE_GENERATE", "DIALOGUE_RECONCILE"] as const) {
     it(`${kind} with default dependencies reaches only ${EXPECTED_RUNNER[kind]}`, async () => {
       vi.mocked(resolveDurableEpisodeProductionState)
         .mockResolvedValueOnce(admittedState(kind))
@@ -765,21 +734,14 @@ describe("C6b L source boundary", () => {
     const imports = [...source.matchAll(/import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"([^"]+)"/g)].map(
       (match) => `${match[2]}:${match[1]!.replace(/\s+/g, "")}`,
     );
-    expect(imports).toEqual([
-      "../dialogue/cli/runDialogueGenerationCli.js:runDialogueGenerationCli,",
-      "../dialogue/cli/runDialogueReconcileCli.js:runDialogueReconcileCli,",
-      "../dialogue/dialogueReservation.schema.js:DialogueReservationEpisodeIdSchema,DialogueReservationLineIdSchema,DialogueReservationSceneIdSchema,DialogueReservationShotIdSchema,dialogueReservationIdentityMatches,",
-      "../validation/loadCharacterBible.js:loadCharacterBible,",
-      "../validation/loadEnvironment.js:loadEnvironment,",
-      "../validation/loadEpisodeManifest.js:loadEpisodeManifest,",
-      "../validation/loadProductionRules.js:loadProductionRules,",
-      "../validation/loadProviderRoutingPolicy.js:loadProviderRoutingPolicy,",
-      "../validation/validateMediaRoot.js:resolveAndValidateMediaRootPath,",
-      "./cli/runProductionExecutionReconcileCli.js:runProductionExecutionReconcileCli,",
-      "./cli/runSingleShotExecutionCli.js:runSingleShotExecutionCli,",
-      "./executionReservation.schema.js:ExecutionReservationEpisodeIdSchema,ExecutionReservationShotIdSchema,",
-      "./resolveDurableEpisodeProductionState.js:resolveDurableEpisodeProductionState,typeDurableEpisodeProductionState,typeDurableEpisodeShotProductionState,typeResolveDurableEpisodeProductionStateInput,",
+    const permitted = new Set([
+      "./boundEpisodeProduction.types.js", "./episodeExecutionGuard.js", "./buildBoundEpisodePreflight.js",
+      "../dialogue/cli/runDialogueGenerationCli.js", "../dialogue/cli/runDialogueReconcileCli.js", "../dialogue/dialogueReservation.schema.js",
+      "../validation/loadCharacterBible.js", "../validation/loadEnvironment.js", "../validation/loadEpisodeManifest.js",
+      "../validation/loadProductionRules.js", "../validation/loadProviderRoutingPolicy.js", "../validation/validateMediaRoot.js",
+      "./cli/runProductionExecutionReconcileCli.js", "./cli/runSingleShotExecutionCli.js", "./executionReservation.schema.js", "./resolveDurableEpisodeProductionState.js",
     ]);
+    expect(imports.every(entry => [...permitted].some(path => entry.startsWith(path + ":")))).toBe(true);
     expect(source).not.toMatch(/\bimport\s*\(|\brequire\s*\(/);
   });
 

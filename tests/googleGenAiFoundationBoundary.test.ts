@@ -42,6 +42,8 @@ const FOUNDATION_MODULE_PATTERN =
   /googleGenai\/|googleGenAiPolicy\.schema|loadGoogleGenAiPolicy/;
 
 const APPROVED_FOUNDATION_CONSUMERS = [
+  // B7: local cost/reference admission only; no provider transport.
+  "src/execution/buildBoundEpisodePreflight.ts",
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
   // B5C-X1: the single shared composition point for the reused Google orchestrator.
   "src/execution/createProductionSingleShotExecutionDependencies.ts",
@@ -79,6 +81,7 @@ const SHARED_GOOGLE_COMPOSITION =
   "src/execution/createProductionSingleShotExecutionDependencies.ts";
 
 const SHARED_GOOGLE_COMPOSITION_FOUNDATION_IMPORTS = [
+  "../schemas/googleGenAiPolicy.schema.js",
   "../validation/loadGoogleGenAiPolicy.js",
 ] as const;
 
@@ -163,6 +166,8 @@ const GOOGLE_RECONCILIATION_IMPORTERS = [
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+  // B7: local COMPLETED verifier dispatch, never submitted recovery.
+  "src/execution/verifyLocalCompletedVisualExecution.ts",
 ] as const;
 
 const GOOGLE_RECONCILIATION_FORBIDDEN_PATTERN =
@@ -401,6 +406,9 @@ const GOOGLE_PRODUCTION_INTERACTION_CREATOR_FOUNDATION_IMPORTS = [
 ] as const;
 
 const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
+  // B7: bound visual authority, read-only planner and extracted local helpers.
+  "src/execution/boundEpisodeProduction.types.ts",
+  "src/execution/buildBoundEpisodePreflight.ts",
   // B5C-R1: shared lifecycle/reconcile dispatch keyed on the durable reservation provider.
   "src/execution/cli/runExecutionReconcileCli.ts",
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
@@ -408,6 +416,8 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/cli/runSingleShotExecutionCli.ts",
   "src/execution/createExecutionSubmission.ts",
   "src/execution/createProductionSingleShotExecutionDependencies.ts",
+  "src/execution/episodeAutomationPlan.schema.ts",
+  "src/execution/evaluateGoogleGenAiLocalAdmission.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executeSingleShot.ts",
   "src/execution/executionReservation.schema.ts",
@@ -426,6 +436,7 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/resolveDurableShotVisualGenerationState.ts",
   "src/execution/singleShotExecution.types.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
+  "src/execution/verifyLocalCompletedVisualExecution.ts",
 ] as const;
 
 const APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS = [
@@ -1816,9 +1827,9 @@ const B4X_GOVERNED_RUNTIME_CONSUMERS: Readonly<Record<string, readonly string[]>
   ],
   "src/validation/loadGoogleGenAiActivationPolicy.ts": [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
   "src/validation/loadGoogleGenAiPolicy.ts": [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
-  "src/googleGenai/googleGenAiExpectedCost.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
-  "src/googleGenai/assets/readGoogleGenAiReferenceImage.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
-  [B4X_OPERATOR_MODULES.promptBuilder]: [B4X_OPERATOR_MODULES.orchestrator],
+  "src/googleGenai/googleGenAiExpectedCost.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts", "src/execution/buildBoundEpisodePreflight.ts"],
+  "src/googleGenai/assets/readGoogleGenAiReferenceImage.ts": [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts", "src/execution/buildBoundEpisodePreflight.ts"],
+  [B4X_OPERATOR_MODULES.promptBuilder]: [B4X_OPERATOR_MODULES.orchestrator, "src/execution/buildBoundEpisodePreflight.ts"],
   [B4X_OPERATOR_MODULES.orchestrator]: [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
   [B4X_OPERATOR_MODULES.composition]: [B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION],
   [B4X_OPERATOR_MODULES.cliArgs]: [B4X_OPERATOR_MODULES.cli],
@@ -1832,7 +1843,10 @@ const B4X_OPERATOR_IMPORTS: Readonly<Record<string, readonly string[]>> = {
     "../googleGenai/assets/readGoogleGenAiReferenceImage.js",
     "../googleGenai/googleGenAi.types.js",
     "../googleGenai/googleGenAiExpectedCost.js",
-    "../validation/validateEpisodeProduction.js",
+    "./boundEpisodeProduction.types.js",
+    "./episodeExecutionGuard.js",
+    "./evaluateGoogleGenAiLocalAdmission.js",
+    "./evaluateGoogleGenAiLocalAdmission.js",
     "./providers/buildGoogleGenAiSingleShotPrompt.js",
     "./providers/submitGoogleGenAiSingleShot.js",
     "node:path",
@@ -1950,7 +1964,7 @@ describe(
 
     it("lets no shared, routing, automation, composition or status module reach the operator runner in any module form except the one B5C-X1 shared wiring seam", async () => {
       const { any } = await b4xScan();
-      expect([...any.get(B4X_OPERATOR_MODULES.promptBuilder) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.orchestrator]);
+      expect([...any.get(B4X_OPERATOR_MODULES.promptBuilder) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.orchestrator, "src/execution/buildBoundEpisodePreflight.ts"].sort());
       expect([...any.get(B4X_OPERATOR_MODULES.orchestrator) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION].sort());
       expect([...any.get(B4X_OPERATOR_MODULES.composition) ?? []].sort()).toEqual([B4X_OPERATOR_MODULES.cli, X1_SHARED_GOOGLE_COMPOSITION].sort());
       // The seam itself is reached only by the shared single-shot CLI; low-level create stays operator-owned.

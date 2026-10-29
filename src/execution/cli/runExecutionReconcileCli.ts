@@ -1,6 +1,16 @@
 import {
   inspectExecutionLifecycle,
 } from "../inspectExecutionLifecycle.js";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { readBoundFile } from "../episodeInputBinding.js";
+import { BoundEpisodeError } from "../boundEpisodeProduction.types.js";
+import { ProductionRulesSchema } from "../../schemas/productionRules.schema.js";
+import { RunwayPolicySchema } from "../../schemas/runwayPolicy.schema.js";
+import { VeoPolicySchema } from "../../schemas/veoPolicy.schema.js";
+import { acquireEpisodeExecutionGuard, releaseEpisodeExecutionGuard, checkedEpisodeExecutionData,
+  assertCheckedEpisodeAdmission, readCheckedEpisodeJson, consumeEpisodeRecoveryDispatch,
+  type CheckedEpisodeExecutionContext } from "../episodeExecutionGuard.js";
 
 import type {
   ExecutionLifecycleReconciliationDependencies,
@@ -131,11 +141,36 @@ export async function runExecutionReconcileCli(
 
   dependencies:
     RunExecutionReconcileCliDependencies,
+  checkedContext?: CheckedEpisodeExecutionContext,
 ): Promise<void> {
   const options =
     parseExecutionReconcileCliArgs(
       args,
     );
+
+  if (checkedContext) {
+    const data = checkedEpisodeExecutionData(checkedContext);
+    const action = data.plan.actions[0];
+    if (action.kind !== "VISUAL_RECONCILE" || options.episodeId !== action.episodeId || options.shotId !== action.shotId) {
+      throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    }
+    await assertCheckedEpisodeAdmission(checkedContext);
+    const original = dependencies;
+    const required = <T>(value: T | null): T => { if (value === null) throw new BoundEpisodeError("INPUT_BINDING_DRIFT"); return value; };
+    dependencies = { ...original,
+      loadProductionRules: async () => required(await readCheckedEpisodeJson(checkedContext, "PRODUCTION_RULES", value => ProductionRulesSchema.parse(value))),
+      loadRunwayPolicy: async () => required(await readCheckedEpisodeJson(checkedContext, "RUNWAY_POLICY", value => RunwayPolicySchema.parse(value))),
+      loadVeoPolicy: async () => required(await readCheckedEpisodeJson(checkedContext, "VEO_POLICY", value => VeoPolicySchema.parse(value))),
+      reconcileLifecycle: async (...args) => {
+        await assertCheckedEpisodeAdmission(checkedContext); consumeEpisodeRecoveryDispatch(data.invocation);
+        return original.reconcileLifecycle(...args);
+      },
+      ...(original.reconcileGoogleLifecycle ? { reconcileGoogleLifecycle: async (...args: Parameters<NonNullable<RunExecutionReconcileCliDependencies["reconcileGoogleLifecycle"]>>) => {
+        await assertCheckedEpisodeAdmission(checkedContext); consumeEpisodeRecoveryDispatch(data.invocation);
+        return original.reconcileGoogleLifecycle!(...args);
+      } } : {}),
+    };
+  }
 
   const env =
     dependencies
@@ -151,6 +186,18 @@ export async function runExecutionReconcileCli(
         env,
         rules,
       );
+
+  if (checkedContext && mediaRoot !== checkedEpisodeExecutionData(checkedContext).plan.inputBinding.runtimeIdentity.mediaRoot) {
+    throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+  }
+  const standaloneGuard = checkedContext ? null : await (async () => {
+    const manifest = await readBoundFile({ root: process.cwd(), canonicalPath: resolve(process.cwd(), "episodes", options.episodeId, "episode.json"),
+      role: "MANIFEST", maxBytes: 1048576 });
+    if (!manifest.binding.rawSha256) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    return acquireEpisodeExecutionGuard({ mediaRoot, episodeId: options.episodeId,
+      manifestRawSha256: manifest.binding.rawSha256, sessionId: randomUUID() });
+  })();
+  try {
 
   const lifecycle =
     await dependencies
@@ -526,4 +573,5 @@ export async function runExecutionReconcileCli(
             ),
       },
     );
+  } finally { if (standaloneGuard) await releaseEpisodeExecutionGuard(standaloneGuard); }
 }

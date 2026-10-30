@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "1.0",
+  "episodeId": "EP93",
+  "title": "BusyBookie B7E Controlled Two-Shot Validation",
+  "slug": "busybookie-b7e-controlled-two-shot-validation",
+  "status": "READY_FOR_GENERATION",
+  "audience": {
+    "description": "BusyBookie technical production validation",
+    "minAgeYears": 2,
+    "maxAgeYears": 5
+  },
+  "learningGoals": [
+    "technical media pipeline validation"
+  ],
+  "emotionalTheme": "gentle curiosity",
+  "targetDurationSeconds": 10,
+  "approvals": {
+    "script": "APPROVED",
+    "storyboard": "APPROVED",
+    "references": "APPROVED",
+    "roughCut": "PENDING",
+    "finalQc": "PENDING"
+  },
+  "scenes": [
+    {
+      "id": "SC01",
+      "title": "Littleleaf Valley Controlled Two-Shot Validation",
+      "summary": "Two gentle environment shots validate the controlled visual execution lifecycle using the approved Littleleaf Valley reference. This dedicated technical target requires separate explicit live authorization and does not represent final editorial release.",
+      "shots": [
+        {
+          "id": "S01",
+          "order": 1,
+          "title": "Gentle village approach",
+          "type": "ESTABLISHING",
+          "durationSeconds": 5,
+          "characters": [],
+          "visualAction": "Animate the approved Littleleaf Valley reference with subtle flower and leaf movement in a peaceful storybook morning. Preserve the village, bridge, stream and warm lighting. Introduce no characters, dialogue, speech, signs, lettering or new objects. No music is requested.",
+          "camera": "Use a very slow, smooth push toward the village while preserving the approved composition.",
+          "dialogue": [],
+          "audio": {
+            "sfx": []
+          },
+          "references": {
+            "required": true,
+            "assetIds": [
+              "littleleaf-valley-storybook-village-v1"
+            ],
+            "approvalStatus": "APPROVED"
+          },
+          "generation": {
+            "provider": "GOOGLE_GENAI",
+            "nativeAudio": false,
+            "status": "APPROVED_FOR_GENERATION",
+            "notes": "First shot of the dedicated B7E controlled lifecycle validation. Live provider execution requires separate explicit authorization."
+          },
+          "continuityNotes": [
+            "Preserve the approved Littleleaf Valley reference identity and storybook style.",
+            "Use subtle environmental motion only; no characters, dialogue, speech, text or subtitles.",
+            "No music or new reference identity is required."
+          ]
+        },
+        {
+          "id": "S02",
+          "order": 2,
+          "title": "Quiet stream and drifting clouds",
+          "type": "ESTABLISHING",
+          "durationSeconds": 5,
+          "characters": [],
+          "visualAction": "Animate the same approved Littleleaf Valley reference as a quiet wide view, emphasizing subtle stream sparkles and slow distant cloud drift. Preserve the village, bridge, vegetation and warm lighting. Introduce no characters, dialogue, speech, signs, lettering or new objects. No music is requested.",
+          "camera": "Hold a steady, locked wide composition with no push or pan so the gentle stream and cloud motion distinguishes this shot from S01.",
+          "dialogue": [],
+          "audio": {
+            "sfx": []
+          },
+          "references": {
+            "required": true,
+            "assetIds": [
+              "littleleaf-valley-storybook-village-v1"
+            ],
+            "approvalStatus": "APPROVED"
+          },
+          "generation": {
+            "provider": "GOOGLE_GENAI",
+            "nativeAudio": false,
+            "status": "APPROVED_FOR_GENERATION",
+            "notes": "Second ordered B7E lifecycle-validation shot. It cannot dispatch before S01 reaches verified durable completion. Live provider execution requires separate explicit authorization."
+          },
+          "continuityNotes": [
+            "Reuse the same approved Littleleaf Valley reference identity without new creative dependencies.",
+            "Keep the wide camera locked; use subtle stream and cloud motion only.",
+            "No characters, dialogue, speech, text, subtitles or music are required."
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1068,6 +1068,56 @@ describe(
             /mime_type is required/,
           ],
           [
+            "null mime_type with a uri",
+            {
+              type:
+                "video",
+
+              mime_type:
+                null,
+
+              uri:
+                "https://generativelanguage.googleapis.com/v1beta/files/test-123:download?alt=media",
+            },
+            /mime_type is required/,
+          ],
+          [
+            "non-mp4 mime_type with a uri",
+            {
+              type:
+                "video",
+
+              mime_type:
+                "video/webm",
+
+              uri:
+                "https://generativelanguage.googleapis.com/v1beta/files/test-123:download?alt=media",
+            },
+            /mime_type must be video\/mp4/,
+          ],
+          [
+            "non-string mime_type with a uri",
+            {
+              type:
+                "video",
+
+              mime_type:
+                4,
+
+              uri:
+                "https://generativelanguage.googleapis.com/v1beta/files/test-123:download?alt=media",
+            },
+            /mime_type must be video\/mp4/,
+          ],
+          [
+            "absent mime_type with neither data nor uri",
+            {
+              type:
+                "video",
+            },
+            /exactly one of data or uri\./,
+          ],
+          [
             "non-mp4 mime_type",
             {
               ...inlineVideo(),

@@ -3101,18 +3101,20 @@ export async function materializeGoogleGenAiSingleShotOutput(
 
   if (
     outputVideo.mime_type ===
-      undefined ||
-    outputVideo.mime_type ===
-      null
+    null
   ) {
     throw new Error(
       "Google GenAI output_video.mime_type is required.",
     );
   }
 
+  // An omitted replay MIME type is tolerated only on the URI path below,
+  // where Files metadata and the download independently prove video/mp4.
   if (
     outputVideo.mime_type !==
-    GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE
+      undefined &&
+    outputVideo.mime_type !==
+      GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE
   ) {
     throw new Error(
       `Google GenAI output_video.mime_type must be ${GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE}; received ${JSON.stringify(outputVideo.mime_type)}.`,
@@ -3196,6 +3198,16 @@ export async function materializeGoogleGenAiSingleShotOutput(
   if (data === undefined) {
     throw new Error(
       "Google GenAI output_video must provide exactly one of data or uri.",
+    );
+  }
+
+  // Inline bytes have no Files metadata or download to prove their type.
+  if (
+    outputVideo.mime_type ===
+    undefined
+  ) {
+    throw new Error(
+      "Google GenAI output_video.mime_type is required.",
     );
   }
 

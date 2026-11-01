@@ -220,8 +220,10 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
       } else changed();
     } else {
       keys(delta, ["type", "mime_type", "uri", "resolution"]);
-      if (video || delta.type !== "video" || delta.mime_type !== "video/mp4" || typeof delta.uri !== "string" || !delta.uri.trim()) changed();
-      video = Object.freeze({ type: "video", mime_type: "video/mp4", uri: delta.uri as string });
+      // An omitted mime_type stays omitted: absence is not evidence, and Files metadata and the download prove the type.
+      const declaresMime = Object.hasOwn(delta, "mime_type");
+      if (video || delta.type !== "video" || (declaresMime && delta.mime_type !== "video/mp4") || typeof delta.uri !== "string" || !delta.uri.trim()) changed();
+      video = Object.freeze({ type: "video", ...(declaresMime ? { mime_type: "video/mp4" as const } : {}), uri: delta.uri as string });
     }
   };
   const dispatch = (): void => {

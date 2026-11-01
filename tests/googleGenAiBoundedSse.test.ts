@@ -47,6 +47,43 @@ describe("bounded raw Interaction SSE", () => {
     expect(JSON.stringify(result)).not.toMatch(/private|summary|event_id|event_type/);
   });
 
+  it("accepts a video delta that omits mime_type without inventing one", () => {
+    const result = parse([created, start, { ...delta, delta: { type: "video", uri } }, stop, complete]);
+    expect(result).toEqual({ id, status: "completed", outputVideo: { type: "video", uri } });
+    expect(Object.hasOwn(result.outputVideo!, "mime_type")).toBe(false);
+    expect(Object.isFrozen(result.outputVideo)).toBe(true);
+  });
+
+  it("keeps a declared video/mp4 on the result", () => {
+    const result = parse([created, start, delta, stop, complete]);
+    expect(result.outputVideo).toEqual({ type: "video", mime_type: "video/mp4", uri });
+  });
+
+  it("accepts the exact B7E5D1 observed stream shape: no frame carries mime_type", () => {
+    const interactionFields = { object: "interaction", model: "gemini-omni-1.1-flash" };
+    const modality = (value: string) => ({ modality: value, tokens: 1 });
+    const invocation = { prompt_tokens_details: [modality("text"), modality("image")], candidates_tokens_details: [modality("text")], thoughts_tokens_details: [modality("text")] };
+    const usage = { total_tokens: 1, total_input_tokens: 1, input_tokens_by_modality: [modality("text"), modality("image")], total_cached_tokens: 0,
+      total_output_tokens: 1, output_tokens_by_modality: [modality("video")], total_tool_use_tokens: 0, total_thought_tokens: 0, raw_prompt_token: 1,
+      model_invocation_token_counts: [invocation], non_grounding_model_invocation_token_counts: [invocation], initial_input_tokens: 1 };
+    const frames: Event[] = [
+      { event_type: "interaction.created", interaction: { id, status: "in_progress", ...interactionFields } },
+      { event_type: "interaction.status_update", interaction_id: id, status: "in_progress" },
+      { event_type: "step.start", index: 0, step: { type: "thought" } },
+      { event_type: "step.delta", index: 0, delta: { type: "thought_signature", signature: "synthetic-signature" } },
+      { event_type: "step.stop", index: 0 },
+      { event_type: "step.start", index: 1, step: { type: "model_output" } },
+      { event_type: "step.delta", index: 1, event_id: "synthetic-event-id", delta: { type: "video", uri } },
+      { event_type: "interaction.status_update", interaction_id: id, status: "in_progress", usage },
+      { event_type: "step.stop", index: 1 },
+      { event_type: "interaction.completed", interaction: { id, status: "completed", ...interactionFields, created: "synthetic", updated: "synthetic", service_tier: "standard",
+        usage: { ...usage, billable_usage: { total_input_tokens: 1, total_cached_tokens: 0, total_output_tokens: 1, total_thought_tokens: 0, total_tokens: 1 } } } },
+    ];
+    const p = parser(8192);
+    p.push(encoder.encode(frames.map((v) => frame(v)).join("") + "event: done\ndata: [DONE]\n\n"));
+    expect(p.finish()).toEqual({ id, status: "completed", outputVideo: { type: "video", uri } });
+  });
+
   it("allows BOM only at start, multiline data, comments and an optional discarded id", () => {
     const p = parser();
     const json = JSON.stringify(created).replace(',"interaction"', ',\n"interaction"');
@@ -100,6 +137,14 @@ describe("bounded raw Interaction SSE", () => {
     [created, { ...start, step: { type: "thought" } }, { ...delta, delta: { type: "thought_summary", content: { type: "video", uri } } }],
     [created, start, { ...delta, delta: { type: "text", text: "unsupported" } }],
     [created, start, { ...delta, delta: { ...delta.delta, mime_type: "video/webm" } }],
+    ...[null, "", "VIDEO/MP4", "video/mp4; codecs=avc1", " video/mp4", 4, true, ["video/mp4"], {}].map((mime_type) => [created, start, { ...delta, delta: { ...delta.delta, mime_type } }]),
+    [created, start, { ...delta, delta: { type: "video" } }],
+    [created, start, { ...delta, delta: { type: "video", uri: "   " } }],
+    [created, start, { ...delta, delta: { type: "video", uri: 7 } }],
+    [created, start, { ...delta, delta: { uri } }],
+    [created, start, { ...delta, delta: { type: "image", uri } }],
+    [created, start, { ...delta, delta: { type: "video", uri } }, { ...delta, delta: { type: "video", uri } }],
+    [created, start, { ...delta, delta: { type: "video", uri, data: "AAAA" } }],
     [created, start, { ...delta, delta: { type: "video", mime_type: "video/mp4", data: "AAAA" } }],
     ...["AAAA", "", null].map((data) => [created, start, { ...delta, delta: { ...delta.delta, data } }]),
     [created, start, delta, delta], [created, start, delta, stop, { ...start, index: 1 }],

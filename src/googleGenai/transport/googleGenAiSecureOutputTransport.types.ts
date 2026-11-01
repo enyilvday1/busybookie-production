@@ -3,7 +3,7 @@ import type { GoogleGenAiInteractionStatus } from "../googleGenAiInteractionCont
 export type GoogleGenAiInteractionReplayResult = Readonly<{
   id: string;
   status: GoogleGenAiInteractionStatus;
-  outputVideo: Readonly<{ type: "video"; mime_type: "video/mp4"; uri: string }> | null;
+  outputVideo: Readonly<{ type: "video"; mime_type?: "video/mp4"; uri: string }> | null;
 }>;
 
 export type GoogleGenAiRecoveryContext = Readonly<{

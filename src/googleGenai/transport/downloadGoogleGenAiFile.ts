@@ -64,7 +64,8 @@ export async function downloadGoogleGenAiFile(
   if (metadata === null || typeof metadata !== "object" || metadata.resource === null || typeof metadata.resource !== "object") fail("DOWNLOAD_URI_INVALID");
   const resource = validateGoogleGenAiFilesDownloadUri(metadata.resource.downloadUri);
   if (metadata.resource.fileId !== resource.fileId || metadata.resource.name !== resource.name) fail("DOWNLOAD_URI_INVALID");
-  if (metadata.mimeType !== "video/mp4") fail("DOWNLOAD_CONTENT_TYPE_INVALID");
+  // "video/unknown" grants no MP4 trust: the response below must prove video/mp4 either way.
+  if (metadata.mimeType !== "video/mp4" && metadata.mimeType !== "video/unknown") fail("DOWNLOAD_CONTENT_TYPE_INVALID");
   const byteCount = metadata.byteCount;
   if (typeof byteCount !== "number" || !Number.isSafeInteger(byteCount) || byteCount <= 0) configuration();
   if (typeof metadata.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(metadata.sha256)) configuration();

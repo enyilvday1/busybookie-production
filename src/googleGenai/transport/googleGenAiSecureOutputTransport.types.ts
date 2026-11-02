@@ -17,11 +17,13 @@ export type GoogleGenAiValidatedFileResource = Readonly<{
   name: string;
   downloadUri: string;
 }>;
+/** Provider metadata evidence only: "video/unknown" names no container, so the download must prove MP4 itself. */
+export type GoogleGenAiVerifiedFileMetadataMimeType = "video/mp4" | "video/unknown";
 export type GoogleGenAiVerifiedFileMetadata = Readonly<{
   resource: GoogleGenAiValidatedFileResource;
   byteCount: number;
   sha256: string;
-  mimeType: "video/mp4";
+  mimeType: GoogleGenAiVerifiedFileMetadataMimeType;
   expirationTime: string;
   expirationTimeMs: number;
 }>;

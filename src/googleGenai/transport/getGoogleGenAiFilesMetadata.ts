@@ -163,7 +163,8 @@ export async function getGoogleGenAiFilesMetadata(
     if (state !== undefined && typeof state !== "string") invalid();
     if (state !== "ACTIVE") throw new GoogleGenAiSecureOutputTransportError("FILE_NOT_ACTIVE");
     if (Object.hasOwn(metadata, "source") && own("source") !== "GENERATED") invalid();
-    if (own("mimeType") !== "video/mp4") throw new GoogleGenAiSecureOutputTransportError("FILE_MIME_INVALID");
+    const mimeType = own("mimeType");
+    if (mimeType !== "video/mp4" && mimeType !== "video/unknown") throw new GoogleGenAiSecureOutputTransportError("FILE_MIME_INVALID");
     const size = own("sizeBytes");
     let byteCount: number;
     if (typeof size === "string") {
@@ -177,7 +178,7 @@ export async function getGoogleGenAiFilesMetadata(
     const expirationTimeMs = expiration(own("expirationTime"));
     if (expirationTimeMs - now() < minimumLifetime) throw new GoogleGenAiSecureOutputTransportError("FILE_EXPIRATION_TOO_CLOSE");
     checkActive();
-    return Object.freeze({ resource, byteCount, sha256, mimeType: "video/mp4", expirationTime: own("expirationTime") as string, expirationTimeMs });
+    return Object.freeze({ resource, byteCount, sha256, mimeType, expirationTime: own("expirationTime") as string, expirationTimeMs });
   } catch (error) {
     throw reason ?? (context.signal.aborted ? parentFailure(context)
       : normalizeDependencyFailure(error, () => new GoogleGenAiSecureOutputTransportError("FILES_METADATA_HTTP_FAILED")));

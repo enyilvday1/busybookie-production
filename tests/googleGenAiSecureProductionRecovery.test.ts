@@ -508,6 +508,42 @@ describe("dormant secure Google production recovery factory", () => {
         expect(vi.mocked(materializeGoogleGenAiSingleShotOutput)).not.toHaveBeenCalled();
         await expectNothingPublished(mediaRoot);
       });
+
+      describe("Files metadata reports video/unknown", () => {
+        const unknownMime = { mimeType: "video/unknown" };
+
+        it.each([
+          ["omitted", {}],
+          ["declared video/mp4", { mime_type: "video/mp4" }],
+        ])("recovers when replay mime_type is %s and the download proves MP4", async (_label, mime) => {
+          const mediaRoot = await submittedShot();
+          const fetchImpl = googleFetch({ replay: () => sseResponse(completedSse(OUTPUT_URI, mime)), metadata: () => metadataResponse(OUTPUT_BYTES, unknownMime) });
+          const result = await reconcile(mediaRoot, createGoogleGenAiSingleShotSecureProductionRecovery(SYNTHETIC_KEY, { fetchImpl, ...fixedClocks() }));
+          expect(result).toMatchObject({ lifecycleState: "COMPLETED", reconciliationMode: "RECOVERED_SUBMISSION", providerExecutionId: INTERACTION_ID });
+          expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([REPLAY_URL, METADATA_URL, OUTPUT_URI]);
+          expect((await readFile(outputPath(mediaRoot))).equals(OUTPUT_BYTES)).toBe(true);
+          expect(result.generationRecord.outputs[0]).toMatchObject({ sha256: sha256Hex(OUTPUT_BYTES), bytes: OUTPUT_BYTES.byteLength, contentType: "video/mp4" });
+          await expect(verifyGoogleGenAiDurableCompletion(mediaRoot, "EP92", "S01")).resolves.toMatchObject({ providerExecutionId: INTERACTION_ID });
+        });
+
+        it("fails closed when the download content-type is video/webm", async () => {
+          const mediaRoot = await submittedShot();
+          const fetchImpl = googleFetch({ replay: omitted, metadata: () => metadataResponse(OUTPUT_BYTES, unknownMime), download: () => downloadResponse(OUTPUT_BYTES, "video/webm") });
+          const error = await settle(reconcile(mediaRoot, createGoogleGenAiSingleShotSecureProductionRecovery(SYNTHETIC_KEY, { fetchImpl, ...fixedClocks() })));
+          expect(error).toMatchObject({ code: "DOWNLOAD_CONTENT_TYPE_INVALID" });
+          expect(callsTo(fetchImpl, OUTPUT_URI)).toBe(1);
+          await expectNothingPublished(mediaRoot);
+        });
+
+        it("fails closed on non-MP4 bytes labeled video/mp4 by the download", async () => {
+          const bytes = Buffer.from("not an mp4 container at all, despite the download label");
+          const mediaRoot = await submittedShot();
+          const fetchImpl = googleFetch({ replay: omitted, metadata: () => metadataResponse(bytes, unknownMime), download: () => downloadResponse(bytes) });
+          const error = await settle(reconcile(mediaRoot, createGoogleGenAiSingleShotSecureProductionRecovery(SYNTHETIC_KEY, { fetchImpl, ...fixedClocks() })));
+          expect(error).toMatchObject({ code: "DOWNLOAD_MP4_INVALID" });
+          await expectNothingPublished(mediaRoot);
+        });
+      });
     });
 
     it("surfaces sanitized typed transport failures without the credential", async () => {

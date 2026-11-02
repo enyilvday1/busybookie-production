@@ -2122,6 +2122,8 @@ type ContentBinding =
 /**
  * Locally revalidates prepared metadata and binds the first validated
  * name/size/SHA for this invocation; a later attempt must match exactly.
+ * Metadata "video/unknown" is not MP4 evidence: the post-download MIME,
+ * size, SHA and container checks remain the only proof.
  */
 function requirePreparedMetadata(
   metadata:
@@ -2142,8 +2144,12 @@ function requirePreparedMetadata(
       "object" ||
     typeof metadata.resource.name !==
       "string" ||
-    metadata.mimeType !==
-      GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE ||
+    (
+      metadata.mimeType !==
+        GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE &&
+      metadata.mimeType !==
+        "video/unknown"
+    ) ||
     !isPositiveSafeInteger(
       metadata.byteCount,
     ) ||

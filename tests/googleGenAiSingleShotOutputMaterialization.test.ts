@@ -2328,6 +2328,56 @@ describe(
             );
 
             it(
+              "publishes video/mp4 from prepared metadata video/unknown once the download proves MP4",
+              async () => {
+                const setup = await uriSetup({ prepared: [metadataFor(URI_BYTES, { mimeType: "video/unknown" })] });
+                const result = await setup.run();
+                expect(result).toMatchObject({
+                  mimeType: "video/mp4",
+                  byteCount: URI_BYTES.byteLength,
+                  sha256: sha256Hex(URI_BYTES),
+                  sourceKind: "URI",
+                  alreadyPresent: false,
+                });
+                expect((await readFile(result.outputPath)).equals(URI_BYTES)).toBe(true);
+              },
+            );
+
+            it(
+              "does not let prepared metadata video/unknown excuse a downloader MIME disagreement",
+              async () => {
+                const setup = await uriSetup({
+                  prepared: [metadataFor(URI_BYTES, { mimeType: "video/unknown" })],
+                  plans: [{ result: { mimeType: "video/webm" as "video/mp4" } }],
+                });
+                await expect(setup.run()).rejects.toMatchObject({ code: "DOWNLOAD_CONTENT_TYPE_INVALID", retryable: false });
+                expect(setup.harness.events).not.toContain("link");
+                await expectOnlyDurableRecords(setup.mediaRoot);
+              },
+            );
+
+            it(
+              "does not let prepared metadata video/unknown excuse invalid MP4 bytes",
+              async () => {
+                const bytes = ftyp(24, "moov");
+                const setup = await uriSetup({ prepared: [metadataFor(bytes, { mimeType: "video/unknown" })], plans: [{ chunks: chunked(bytes, 5) }] });
+                await expect(setup.run()).rejects.toMatchObject({ code: "DOWNLOAD_MP4_INVALID", retryable: false });
+                expect(setup.harness.events).not.toContain("link");
+                await expectOnlyDurableRecords(setup.mediaRoot);
+              },
+            );
+
+            it.each(["video/webm", "VIDEO/UNKNOWN", "video/unknown ", "application/octet-stream", ""])(
+              "rejects prepared metadata MIME %j before any download",
+              async (mimeType) => {
+                const setup = await uriSetup({ prepared: [metadataFor(URI_BYTES, { mimeType: mimeType as "video/unknown" })] });
+                await expect(setup.run()).rejects.toMatchObject({ code: "FILES_METADATA_INVALID", retryable: false });
+                expect(setup.downloadUri).not.toHaveBeenCalled();
+                await expectOnlyDurableRecords(setup.mediaRoot);
+              },
+            );
+
+            it(
               "accepts the smallest structurally valid MP4 prefix",
               async () => {
                 const bytes = ftyp(16, "ftyp", 16);

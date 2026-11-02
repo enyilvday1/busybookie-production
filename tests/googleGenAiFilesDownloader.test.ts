@@ -103,6 +103,7 @@ describe("single-attempt bounded streaming Google file download", () => {
     ["missing resource", { ...metadata, resource: null }, "DOWNLOAD_URI_INVALID"],
     ["null metadata", null, "DOWNLOAD_URI_INVALID"],
     ["mime", { ...metadata, mimeType: "video/webm" }, "DOWNLOAD_CONTENT_TYPE_INVALID"],
+    ...["VIDEO/UNKNOWN", "video/unknown ", "video/*", "application/octet-stream", "", undefined, null, 7].map((mimeType) => [`mime ${String(mimeType)}`, { ...metadata, mimeType }, "DOWNLOAD_CONTENT_TYPE_INVALID"] as const),
     ...[0, -1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1, "1000"].map((byteCount) => [`byteCount ${String(byteCount)}`, { ...metadata, byteCount }, "SECURE_TRANSPORT_CONFIGURATION_INVALID"] as const),
     ...[sha256.toUpperCase(), sha256.slice(1), sha256 + "0", "g".repeat(64), undefined].map((hash, index) => [`sha256 #${index}`, { ...metadata, sha256: hash }, "SECURE_TRANSPORT_CONFIGURATION_INVALID"] as const),
     ...[NaN, 1.5, Infinity, "1"].map((expirationTimeMs) => [`expiry ${String(expirationTimeMs)}`, { ...metadata, expirationTimeMs }, "FILE_EXPIRATION_INVALID"] as const),
@@ -112,6 +113,27 @@ describe("single-attempt bounded streaming Google file download", () => {
     const error = (await capture(downloadGoogleGenAiFile(value as GoogleGenAiVerifiedFileMetadata, collector(), context(), { get apiKey() { return readKey(); }, policy, nowMs: () => now, fetchImpl }))).error;
     expect(error).toMatchObject({ code, retryable: false }); expectSanitized(error);
     expect(fetchImpl).not.toHaveBeenCalled(); expect(readKey).not.toHaveBeenCalled();
+  });
+  describe("metadata video/unknown grants no MP4 trust", () => {
+    const unknownMetadata: GoogleGenAiVerifiedFileMetadata = Object.freeze({ ...metadata, mimeType: "video/unknown" });
+    it("succeeds only on a proven video/mp4 response and returns video/mp4 evidence", async () => {
+      const fetchImpl = vi.fn<GoogleGenAiFetch>(async () => media(stream(), { "content-length": String(bytes.length) })); const sink = collector();
+      const result = await run(fetchImpl, { metadata: unknownMetadata, sink });
+      expect(result).toEqual({ byteCount: bytes.length, sha256, mimeType: "video/mp4" }); expect(Object.isFrozen(result)).toBe(true);
+      expect(joined(sink.chunks)).toEqual(bytes);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(fetchImpl.mock.calls[0]![1].headers).toEqual({ "x-goog-api-key": key, Accept: "video/mp4", "Accept-Encoding": "identity" });
+    });
+    it.each(["video/webm", "video/unknown", "application/octet-stream", ""])("rejects a %j response before reading the body", async (contentType) => {
+      const body = stream(); const reads = observedReads(body); const sink = collector();
+      await expect(run(async () => media(body, { "content-type": contentType }), { metadata: unknownMetadata, sink })).rejects.toMatchObject({ code: "DOWNLOAD_CONTENT_TYPE_INVALID", retryable: false });
+      expect(reads).not.toHaveBeenCalled(); expect(sink.writeChunk).not.toHaveBeenCalled(); expect(body.locked).toBe(false);
+    });
+    it("keeps the size and hash proofs unchanged", async () => {
+      const other = Uint8Array.from(bytes); other[500] = bytes[500]! ^ 1;
+      await expect(run(async () => media(stream(split(other))), { metadata: unknownMetadata })).rejects.toMatchObject({ code: "DOWNLOAD_HASH_MISMATCH" });
+      await expect(run(async () => media(stream(split(bytes.slice(0, 999)))), { metadata: unknownMetadata })).rejects.toMatchObject({ code: "DOWNLOAD_SIZE_MISMATCH" });
+    });
   });
   it("rejects metadata byteCount above the output cap before fetch", async () => {
     const fetchImpl = vi.fn<GoogleGenAiFetch>();

@@ -51,6 +51,13 @@ describe("bounded Files metadata authority", () => {
     expect(Object.hasOwn(init, "body")).toBe(false); expect(init.headers).toEqual({ "x-goog-api-key": key, Accept: "application/json" });
     expect(url).not.toContain(key); expect(new URL(url).search).toBe(""); expect(init.signal!.aborted).toBe(true);
   });
+  it("preserves provider metadata video/unknown exactly, never upgrading it to video/mp4", async () => {
+    const result = await run(async () => response({ ...fixture, mimeType: "video/unknown" }));
+    expect(result.mimeType).toBe("video/unknown");
+    expect(result).toEqual({ resource: { fileId: "test-123", name: fixture.name, downloadUri: uri }, byteCount: 123, sha256: hex, mimeType: "video/unknown", expirationTime: fixture.expirationTime, expirationTimeMs: now + 7200000 });
+    expect(Object.isFrozen(result)).toBe(true); expect(Object.isFrozen(result.resource)).toBe(true);
+    expect(Object.keys(result).sort()).toEqual(["byteCount", "expirationTime", "expirationTimeMs", "mimeType", "resource", "sha256"]);
+  });
   it("rejects URI authority before touching credentials or fetch", async () => {
     const fetchImpl = vi.fn<GoogleGenAiFetch>(); const readKey = vi.fn(() => key);
     await expect(getGoogleGenAiFilesMetadata({ ...request, uri: uri + "&key=SECRET" }, context(), { get apiKey() { return readKey(); }, policy, nowMs: () => now, fetchImpl })).rejects.toMatchObject({ code: "DOWNLOAD_URI_INVALID" });
@@ -86,7 +93,7 @@ describe("bounded Files metadata authority", () => {
     ...["PROCESSING", "FAILED", "UNKNOWN", undefined].map((state) => ["state", state, "FILE_NOT_ACTIVE"]),
     ["state", null, "FILES_METADATA_INVALID"], ["state", 1, "FILES_METADATA_INVALID"],
     ["source", "UPLOADED", "FILES_METADATA_INVALID"], ["source", null, "FILES_METADATA_INVALID"], ["source", 1, "FILES_METADATA_INVALID"],
-    ...["video/webm", "VIDEO/MP4", undefined, null, 7].map((mime) => ["mimeType", mime, "FILE_MIME_INVALID"]),
+    ...["video/webm", "VIDEO/MP4", "VIDEO/UNKNOWN", "video/unknown ", "video/", "application/octet-stream", "", undefined, null, 7].map((mime) => ["mimeType", mime, "FILE_MIME_INVALID"]),
     ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "0", "-1", "01", "+1", "1.5", "1e2", "1 ", "1\n", "9007199254740992", null, undefined].map((size) => ["sizeBytes", size, "FILES_METADATA_INVALID"]),
   ])("rejects invalid metadata field %s=%s with exact classification", async (field, value, code) => {
     const fetchImpl = vi.fn<GoogleGenAiFetch>(async () => response({ ...fixture, [field as string]: value }));

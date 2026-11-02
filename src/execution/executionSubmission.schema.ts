@@ -438,7 +438,7 @@ const VeoExecutionSubmissionV1_3Schema =
 
 // providerExecutionId holds the Google Interaction.id; there is no
 // separate interactionId field.
-const GoogleGenAiExecutionSubmissionV1_4Schema =
+export const GoogleGenAiExecutionSubmissionV1_4Schema =
   z.object({
     schemaVersion:
       z.literal(

@@ -116,7 +116,7 @@ describe("single-attempt bounded streaming Google file download", () => {
   });
   describe("metadata video/unknown grants no MP4 trust", () => {
     const unknownMetadata: GoogleGenAiVerifiedFileMetadata = Object.freeze({ ...metadata, mimeType: "video/unknown" });
-    it("succeeds only on a proven video/mp4 response and returns video/mp4 evidence", async () => {
+    it("returns video/mp4 evidence when the response proves video/mp4", async () => {
       const fetchImpl = vi.fn<GoogleGenAiFetch>(async () => media(stream(), { "content-length": String(bytes.length) })); const sink = collector();
       const result = await run(fetchImpl, { metadata: unknownMetadata, sink });
       expect(result).toEqual({ byteCount: bytes.length, sha256, mimeType: "video/mp4" }); expect(Object.isFrozen(result)).toBe(true);
@@ -124,16 +124,28 @@ describe("single-attempt bounded streaming Google file download", () => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
       expect(fetchImpl.mock.calls[0]![1].headers).toEqual({ "x-goog-api-key": key, Accept: "video/mp4", "Accept-Encoding": "identity" });
     });
-    it.each(["video/webm", "video/unknown", "application/octet-stream", ""])("rejects a %j response before reading the body", async (contentType) => {
+    it("preserves provisional video/unknown response evidence while streaming verified bytes", async () => {
+      const fetchImpl = vi.fn<GoogleGenAiFetch>(async () => media(stream(), { "content-type": "video/unknown", "content-length": String(bytes.length) })); const sink = collector();
+      const result = await run(fetchImpl, { metadata: unknownMetadata, sink });
+      expect(result).toEqual({ byteCount: bytes.length, sha256, mimeType: "video/unknown" }); expect(Object.isFrozen(result)).toBe(true);
+      expect(joined(sink.chunks)).toEqual(bytes);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+    it.each(["video/webm", "application/octet-stream", ""])("rejects a %j response before reading the body", async (contentType) => {
       const body = stream(); const reads = observedReads(body); const sink = collector();
       await expect(run(async () => media(body, { "content-type": contentType }), { metadata: unknownMetadata, sink })).rejects.toMatchObject({ code: "DOWNLOAD_CONTENT_TYPE_INVALID", retryable: false });
       expect(reads).not.toHaveBeenCalled(); expect(sink.writeChunk).not.toHaveBeenCalled(); expect(body.locked).toBe(false);
     });
-    it("keeps the size and hash proofs unchanged", async () => {
+    it("keeps the size and hash proofs unchanged for a video/unknown response", async () => {
       const other = Uint8Array.from(bytes); other[500] = bytes[500]! ^ 1;
-      await expect(run(async () => media(stream(split(other))), { metadata: unknownMetadata })).rejects.toMatchObject({ code: "DOWNLOAD_HASH_MISMATCH" });
-      await expect(run(async () => media(stream(split(bytes.slice(0, 999)))), { metadata: unknownMetadata })).rejects.toMatchObject({ code: "DOWNLOAD_SIZE_MISMATCH" });
+      await expect(run(async () => media(stream(split(other)), { "content-type": "video/unknown" }), { metadata: unknownMetadata })).rejects.toMatchObject({ code: "DOWNLOAD_HASH_MISMATCH" });
+      await expect(run(async () => media(stream(split(bytes.slice(0, 999))), { "content-type": "video/unknown" }), { metadata: unknownMetadata })).rejects.toMatchObject({ code: "DOWNLOAD_SIZE_MISMATCH" });
     });
+  });
+  it("does not let video/mp4 metadata downgrade to a video/unknown response", async () => {
+    const body = stream(); const reads = observedReads(body); const sink = collector();
+    await expect(run(async () => media(body, { "content-type": "video/unknown" }), { sink })).rejects.toMatchObject({ code: "DOWNLOAD_CONTENT_TYPE_INVALID", retryable: false });
+    expect(reads).not.toHaveBeenCalled(); expect(sink.writeChunk).not.toHaveBeenCalled(); expect(body.locked).toBe(false);
   });
   it("rejects metadata byteCount above the output cap before fetch", async () => {
     const fetchImpl = vi.fn<GoogleGenAiFetch>();

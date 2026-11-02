@@ -30,10 +30,12 @@ export type GoogleGenAiVerifiedFileMetadata = Readonly<{
 export type GoogleGenAiOutputChunkSink = Readonly<{
   writeChunk: (chunk: Uint8Array) => Promise<void>;
 }>;
+/** HTTP response MIME evidence only: "video/unknown" is provisional until the materializer proves MP4 bytes. */
+export type GoogleGenAiDownloadedFileMimeType = "video/mp4" | "video/unknown";
 export type GoogleGenAiDownloadedFile = Readonly<{
   byteCount: number;
   sha256: string;
-  mimeType: "video/mp4";
+  mimeType: GoogleGenAiDownloadedFileMimeType;
 }>;
 export type GoogleGenAiReplayInteraction = (
   providerExecutionId: string, context: GoogleGenAiRecoveryContext,

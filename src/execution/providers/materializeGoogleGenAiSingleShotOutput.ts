@@ -2540,8 +2540,18 @@ async function streamUriOutputAttempt(
       downloaded === null ||
       typeof downloaded !==
         "object" ||
-      downloaded.mimeType !==
-        GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE
+      (
+        downloaded.mimeType !==
+          GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE &&
+        downloaded.mimeType !==
+          "video/unknown"
+      ) ||
+      (
+        metadata.mimeType ===
+          GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE &&
+        downloaded.mimeType !==
+          GOOGLE_GENAI_OUTPUT_VIDEO_MIME_TYPE
+      )
     ) {
       throw transportFailure(
         "DOWNLOAD_CONTENT_TYPE_INVALID",

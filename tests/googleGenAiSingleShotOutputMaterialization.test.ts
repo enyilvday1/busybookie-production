@@ -2243,6 +2243,7 @@ describe(
               ["downloader SHA disagreement", { result: { sha256: "0".repeat(64) } }, "DOWNLOAD_HASH_MISMATCH"],
               ["malformed downloader SHA", { result: { sha256: sha256Hex(URI_BYTES).toUpperCase() } }, "DOWNLOAD_HASH_MISMATCH"],
               ["downloader MIME disagreement", { result: { mimeType: "video/webm" as "video/mp4" } }, "DOWNLOAD_CONTENT_TYPE_INVALID"],
+              ["downloader MIME downgrade", { result: { mimeType: "video/unknown" } }, "DOWNLOAD_CONTENT_TYPE_INVALID"],
               ["short local stream with claimed full evidence", {
                 chunks: [URI_BYTES.slice(0, 20)],
                 result: { byteCount: URI_BYTES.byteLength, sha256: sha256Hex(URI_BYTES) },
@@ -2344,6 +2345,25 @@ describe(
             );
 
             it(
+              "publishes video/mp4 from prepared metadata and download response video/unknown only after local MP4 proof",
+              async () => {
+                const setup = await uriSetup({
+                  prepared: [metadataFor(URI_BYTES, { mimeType: "video/unknown" })],
+                  plans: [{ result: { mimeType: "video/unknown" } }],
+                });
+                const result = await setup.run();
+                expect(result).toMatchObject({
+                  mimeType: "video/mp4",
+                  byteCount: URI_BYTES.byteLength,
+                  sha256: sha256Hex(URI_BYTES),
+                  sourceKind: "URI",
+                  alreadyPresent: false,
+                });
+                expect((await readFile(result.outputPath)).equals(URI_BYTES)).toBe(true);
+              },
+            );
+
+            it(
               "does not let prepared metadata video/unknown excuse a downloader MIME disagreement",
               async () => {
                 const setup = await uriSetup({
@@ -2360,7 +2380,7 @@ describe(
               "does not let prepared metadata video/unknown excuse invalid MP4 bytes",
               async () => {
                 const bytes = ftyp(24, "moov");
-                const setup = await uriSetup({ prepared: [metadataFor(bytes, { mimeType: "video/unknown" })], plans: [{ chunks: chunked(bytes, 5) }] });
+                const setup = await uriSetup({ prepared: [metadataFor(bytes, { mimeType: "video/unknown" })], plans: [{ chunks: chunked(bytes, 5), result: { mimeType: "video/unknown" } }] });
                 await expect(setup.run()).rejects.toMatchObject({ code: "DOWNLOAD_MP4_INVALID", retryable: false });
                 expect(setup.harness.events).not.toContain("link");
                 await expectOnlyDurableRecords(setup.mediaRoot);

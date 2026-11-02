@@ -64,7 +64,7 @@ export async function downloadGoogleGenAiFile(
   if (metadata === null || typeof metadata !== "object" || metadata.resource === null || typeof metadata.resource !== "object") fail("DOWNLOAD_URI_INVALID");
   const resource = validateGoogleGenAiFilesDownloadUri(metadata.resource.downloadUri);
   if (metadata.resource.fileId !== resource.fileId || metadata.resource.name !== resource.name) fail("DOWNLOAD_URI_INVALID");
-  // "video/unknown" grants no MP4 trust: the response below must prove video/mp4 either way.
+  // Provider metadata is only evidence; exact video/unknown may proceed only under the narrow response matrix below.
   if (metadata.mimeType !== "video/mp4" && metadata.mimeType !== "video/unknown") fail("DOWNLOAD_CONTENT_TYPE_INVALID");
   const byteCount = metadata.byteCount;
   if (typeof byteCount !== "number" || !Number.isSafeInteger(byteCount) || byteCount <= 0) configuration();
@@ -130,7 +130,9 @@ export async function downloadGoogleGenAiFile(
     if (response.status !== 200) fail("DOWNLOAD_HTTP_FAILED", response.status);
     // Status 200 keeps semantic response failures non-retryable.
     if (!reader) fail("DOWNLOAD_HTTP_FAILED", 200);
-    if (response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "video/mp4") fail("DOWNLOAD_CONTENT_TYPE_INVALID");
+    const responseMimeType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (responseMimeType !== "video/mp4" && responseMimeType !== "video/unknown") fail("DOWNLOAD_CONTENT_TYPE_INVALID");
+    if (metadata.mimeType === "video/mp4" && responseMimeType !== "video/mp4") fail("DOWNLOAD_CONTENT_TYPE_INVALID");
     const encoding = response.headers.get("content-encoding");
     if (encoding !== null && encoding.trim().toLowerCase() !== "identity") fail("DOWNLOAD_HTTP_FAILED", 200);
     const advertised = response.headers.get("content-length");
@@ -163,7 +165,7 @@ export async function downloadGoogleGenAiFile(
     const digest = hash.digest();
     if (digest.length !== expected.length || !timingSafeEqual(digest, expected)) fail("DOWNLOAD_HASH_MISMATCH");
     checkActive();
-    return Object.freeze({ byteCount: count, sha256: digest.toString("hex"), mimeType: "video/mp4" });
+    return Object.freeze({ byteCount: count, sha256: digest.toString("hex"), mimeType: responseMimeType });
   } catch (error) {
     throw reason ?? (context.signal.aborted ? parentFailure(context)
       : normalizeDependencyFailure(error, () => new GoogleGenAiSecureOutputTransportError("DOWNLOAD_HTTP_FAILED")));

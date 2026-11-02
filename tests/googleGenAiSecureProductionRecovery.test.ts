@@ -473,7 +473,7 @@ describe("dormant secure Google production recovery factory", () => {
         await expectNothingPublished(mediaRoot);
       });
 
-      it.each(["video/webm", "application/octet-stream", ""])("fails closed when the download content-type is %j", async (contentType) => {
+      it.each(["video/webm", "video/unknown", "application/octet-stream", ""])("fails closed when the download content-type is %j", async (contentType) => {
         const mediaRoot = await submittedShot();
         const fetchImpl = googleFetch({ replay: omitted, download: () => downloadResponse(OUTPUT_BYTES, contentType) });
         const error = await settle(reconcile(mediaRoot, createGoogleGenAiSingleShotSecureProductionRecovery(SYNTHETIC_KEY, { fetchImpl, ...fixedClocks() })));
@@ -526,6 +526,21 @@ describe("dormant secure Google production recovery factory", () => {
           await expect(verifyGoogleGenAiDurableCompletion(mediaRoot, "EP92", "S01")).resolves.toMatchObject({ providerExecutionId: INTERACTION_ID });
         });
 
+        it("recovers when Files metadata and the download both report video/unknown only after local MP4 proof", async () => {
+          const mediaRoot = await submittedShot();
+          const fetchImpl = googleFetch({
+            replay: omitted,
+            metadata: () => metadataResponse(OUTPUT_BYTES, unknownMime),
+            download: () => downloadResponse(OUTPUT_BYTES, "video/unknown"),
+          });
+          const result = await reconcile(mediaRoot, createGoogleGenAiSingleShotSecureProductionRecovery(SYNTHETIC_KEY, { fetchImpl, ...fixedClocks() }));
+          expect(result).toMatchObject({ lifecycleState: "COMPLETED", reconciliationMode: "RECOVERED_SUBMISSION", providerExecutionId: INTERACTION_ID });
+          expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([REPLAY_URL, METADATA_URL, OUTPUT_URI]);
+          expect((await readFile(outputPath(mediaRoot))).equals(OUTPUT_BYTES)).toBe(true);
+          expect(result.generationRecord.outputs[0]).toMatchObject({ sha256: sha256Hex(OUTPUT_BYTES), bytes: OUTPUT_BYTES.byteLength, contentType: "video/mp4" });
+          await expect(verifyGoogleGenAiDurableCompletion(mediaRoot, "EP92", "S01")).resolves.toMatchObject({ providerExecutionId: INTERACTION_ID });
+        });
+
         it("fails closed when the download content-type is video/webm", async () => {
           const mediaRoot = await submittedShot();
           const fetchImpl = googleFetch({ replay: omitted, metadata: () => metadataResponse(OUTPUT_BYTES, unknownMime), download: () => downloadResponse(OUTPUT_BYTES, "video/webm") });
@@ -535,10 +550,10 @@ describe("dormant secure Google production recovery factory", () => {
           await expectNothingPublished(mediaRoot);
         });
 
-        it("fails closed on non-MP4 bytes labeled video/mp4 by the download", async () => {
+        it("fails closed on non-MP4 bytes even when metadata and download both report video/unknown", async () => {
           const bytes = Buffer.from("not an mp4 container at all, despite the download label");
           const mediaRoot = await submittedShot();
-          const fetchImpl = googleFetch({ replay: omitted, metadata: () => metadataResponse(bytes, unknownMime), download: () => downloadResponse(bytes) });
+          const fetchImpl = googleFetch({ replay: omitted, metadata: () => metadataResponse(bytes, unknownMime), download: () => downloadResponse(bytes, "video/unknown") });
           const error = await settle(reconcile(mediaRoot, createGoogleGenAiSingleShotSecureProductionRecovery(SYNTHETIC_KEY, { fetchImpl, ...fixedClocks() })));
           expect(error).toMatchObject({ code: "DOWNLOAD_MP4_INVALID" });
           await expectNothingPublished(mediaRoot);

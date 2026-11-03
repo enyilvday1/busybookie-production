@@ -243,6 +243,38 @@ export type GoogleGenAiSingleShotSubmissionInput =
       GoogleGenAiSubmissionAcceptedHandler;
   }>;
 
+/**
+ * B5 Slice-2H-B: the narrow reservation authority the submitter needs. It
+ * carries no admission, attempt, hash or provider-execution lineage; callers
+ * map their own durable reservation (legacy shot-scoped or attempt-aware)
+ * onto exactly these four fields.
+ */
+export type GoogleGenAiSingleShotSubmissionReservationIdentity =
+  Readonly<{
+    reservationId:
+      string;
+
+    episodeId:
+      string;
+
+    shotId:
+      string;
+
+    provider:
+      typeof GOOGLE_GENAI_PROVIDER;
+  }>;
+
+export type GoogleGenAiSingleShotReservationIdentitySubmissionInput =
+  Readonly<
+    Omit<
+      GoogleGenAiSingleShotSubmissionInput,
+      "reservation"
+    > & {
+      reservationIdentity:
+        GoogleGenAiSingleShotSubmissionReservationIdentity;
+    }
+  >;
+
 export type GoogleGenAiSingleShotSubmissionDependencies =
   Readonly<{
     createInteraction:
@@ -322,9 +354,134 @@ function requireInteractionId(
   return id;
 }
 
+const GoogleGenAiSingleShotSubmissionReservationIdentitySchema =
+  ExecutionReservationSchema
+    .pick({
+      reservationId:
+        true,
+
+      episodeId:
+        true,
+
+      shotId:
+        true,
+
+      provider:
+        true,
+    });
+
+function requireReservationIdentity(
+  candidate:
+    unknown,
+): GoogleGenAiSingleShotSubmissionReservationIdentity {
+  const identity =
+    GoogleGenAiSingleShotSubmissionReservationIdentitySchema
+      .parse(
+        candidate,
+      );
+
+  if (
+    identity.provider !==
+    GOOGLE_GENAI_PROVIDER
+  ) {
+    throw new Error(
+      `Execution reservation must belong to ${GOOGLE_GENAI_PROVIDER}; received ${identity.provider}.`,
+    );
+  }
+
+  return Object.freeze({
+    reservationId:
+      identity.reservationId,
+
+    episodeId:
+      identity.episodeId,
+
+    shotId:
+      identity.shotId,
+
+    provider:
+      identity.provider,
+  });
+}
+
+/**
+ * Backward-compatible legacy entry: validates the shot-scoped
+ * ExecutionReservation, maps it to the narrow reservation identity and
+ * delegates to the shared core. The kill switch still precedes any
+ * reservation read.
+ */
 export async function submitGoogleGenAiSingleShot(
   input:
     GoogleGenAiSingleShotSubmissionInput,
+
+  dependencies:
+    GoogleGenAiSingleShotSubmissionDependencies,
+): Promise<
+  GoogleGenAiSingleShotSubmissionResult
+> {
+  return submitGoogleGenAiSingleShotCore(
+    input,
+    () => {
+      const reservation =
+        ExecutionReservationSchema
+          .parse(
+            input.reservation,
+          );
+
+      return requireReservationIdentity({
+        reservationId:
+          reservation.reservationId,
+
+        episodeId:
+          reservation.episodeId,
+
+        shotId:
+          reservation.shotId,
+
+        provider:
+          reservation.provider,
+      });
+    },
+    dependencies,
+  );
+}
+
+/**
+ * B5 Slice-2H-B durable-identity submission core. Performs the existing
+ * Google submission behavior for a caller-mapped narrow reservation identity:
+ * the same activation, cost, prompt, source-image and request constraints,
+ * at most one Interaction create and exactly one acceptance callback. It
+ * reads and writes no durable record itself.
+ */
+export async function submitGoogleGenAiSingleShotFromReservationIdentity(
+  input:
+    GoogleGenAiSingleShotReservationIdentitySubmissionInput,
+
+  dependencies:
+    GoogleGenAiSingleShotSubmissionDependencies,
+): Promise<
+  GoogleGenAiSingleShotSubmissionResult
+> {
+  return submitGoogleGenAiSingleShotCore(
+    input,
+    () =>
+      requireReservationIdentity(
+        input.reservationIdentity,
+      ),
+    dependencies,
+  );
+}
+
+// The single physical Google Interaction create authority of this module.
+async function submitGoogleGenAiSingleShotCore(
+  input:
+    Omit<
+      GoogleGenAiSingleShotSubmissionInput,
+      "reservation"
+    >,
+
+  resolveReservationIdentity:
+    () => GoogleGenAiSingleShotSubmissionReservationIdentity,
 
   dependencies:
     GoogleGenAiSingleShotSubmissionDependencies,
@@ -346,19 +503,7 @@ export async function submitGoogleGenAiSingleShot(
   }
 
   const reservation =
-    ExecutionReservationSchema
-      .parse(
-        input.reservation,
-      );
-
-  if (
-    reservation.provider !==
-    GOOGLE_GENAI_PROVIDER
-  ) {
-    throw new Error(
-      `Execution reservation must belong to ${GOOGLE_GENAI_PROVIDER}; received ${reservation.provider}.`,
-    );
-  }
+    resolveReservationIdentity();
 
   if (
     reservation.episodeId !==

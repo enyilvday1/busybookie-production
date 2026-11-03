@@ -2411,6 +2411,12 @@ const B4X_OPERATOR_IMPORTS: Readonly<Record<string, readonly string[]>> = {
     "type:./createExecutionSubmission.js",
     "type:./inspectExecutionLifecycle.js",
     "type:./singleShotExecution.types.js",
+    // B5 Slice-2H-B: the attempt-mode operator takes the attempt authorities by injection (type-only)
+    // and validates attemptNumber with the canonical replacement-attempt schema.
+    "./visualAttemptNumber.schema.js",
+    "type:./createVisualAttemptExecutionReservation.js",
+    "type:./createVisualAttemptExecutionSubmission.js",
+    "type:./inspectVisualAttemptExecutionLifecycle.js",
   ],
   [B4X_OPERATOR_MODULES.composition]: [
     "./providers/createGoogleGenAiSingleShotProductionInteractionCreator.js",
@@ -2544,6 +2550,30 @@ describe(
         expect(source, file).not.toMatch(B4X_OPERATOR_FORBIDDEN_PATTERN);
         if (file !== B4X_OPERATOR_MODULES.cli) expect(source, file).not.toMatch(/loadEnvironment|loadGoogleGenAiActivationPolicy\(/);
       }
+    });
+
+    it("keeps the Slice-2H-B attempt-mode operator and submitter core dormant: no other source or script names them", async () => {
+      // The orchestrator module is reachable from the CLI and the shared seam, so dormancy is enforced by symbol.
+      const allowed: Readonly<Record<string, readonly string[]>> = {
+        executeGoogleGenAiVisualAttemptSingleShot: [B4X_OPERATOR_MODULES.orchestrator],
+        submitGoogleGenAiSingleShotFromReservationIdentity: [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
+        GoogleGenAiSingleShotSubmissionReservationIdentity: ["src/execution/providers/submitGoogleGenAiSingleShot.ts"],
+      };
+      const files = [...await listTypeScriptFiles("src"), ...await listTypeScriptFiles("scripts")];
+      for (const [symbol, owners] of Object.entries(allowed)) {
+        const found: string[] = [];
+        for (const file of files) {
+          if ((await readFile(join(ROOT, file), "utf8")).includes(symbol)) found.push(file);
+        }
+        expect(found.sort(), symbol).toEqual([...owners].sort());
+      }
+      const orchestrator = await readFile(join(ROOT, B4X_OPERATOR_MODULES.orchestrator), "utf8");
+      // One call site per submitter entry; the attempt operator never writes a completion or a legacy record.
+      expect(orchestrator.match(/\bsubmitGoogleGenAiSingleShot\(/g)).toHaveLength(1);
+      expect(orchestrator.match(/\bsubmitGoogleGenAiSingleShotFromReservationIdentity\(/g)).toHaveLength(1);
+      expect(orchestrator.match(/dependencies\.createVisualAttemptReservation\(/g)).toHaveLength(1);
+      expect(orchestrator.match(/dependencies\.createVisualAttemptSubmission\(/g)).toHaveLength(1);
+      expect(orchestrator).not.toMatch(/Completion|claimGoogleGenAiProviderExecutionId|readGoogleGenAiProviderExecutionClaim|googleGenAiProviderExecutionClaim/);
     });
 
     it("keeps the committed activation policy default-off and the shared routing configuration Google-free", async () => {

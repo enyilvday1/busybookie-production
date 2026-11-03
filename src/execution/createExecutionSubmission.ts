@@ -1,4 +1,8 @@
 import {
+  claimGoogleGenAiProviderExecutionId,
+} from "./claimGoogleGenAiProviderExecutionId.js";
+
+import {
   randomUUID,
 } from "node:crypto";
 
@@ -240,6 +244,41 @@ export async function createExecutionSubmission(
       record.episodeId,
       record.shotId,
     );
+
+  if (
+    record.schemaVersion ===
+      "1.4"
+  ) {
+    await claimGoogleGenAiProviderExecutionId(
+      mediaRoot,
+      {
+        lifecycleMode:
+          "LEGACY",
+
+        provider:
+          record.provider,
+
+        providerExecutionId:
+          record.providerExecutionId,
+
+        episodeId:
+          record.episodeId,
+
+        shotId:
+          record.shotId,
+
+        reservationId:
+          record.reservationId,
+
+        submissionPath,
+      },
+      {
+        now:
+          () =>
+            record.submittedAt,
+      },
+    );
+  }
 
   await mkdir(
     dirname(

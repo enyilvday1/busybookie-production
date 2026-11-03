@@ -18,6 +18,7 @@ import { executeSingleShot } from "../src/execution/executeSingleShot.js";
 import { createExecutionCompletionPath } from "../src/execution/executionCompletionPath.js";
 import { createExecutionReservationPath } from "../src/execution/executionReservationPath.js";
 import { createExecutionSubmissionPath } from "../src/execution/executionSubmissionPath.js";
+import { createGoogleGenAiProviderExecutionClaimPath } from "../src/execution/googleGenAiProviderExecutionClaimPath.js";
 import { inspectExecutionLifecycle } from "../src/execution/inspectExecutionLifecycle.js";
 import { createGoogleGenAiSingleShotSecureProductionRecovery } from "../src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.js";
 import { materializeGoogleGenAiSingleShotOutput } from "../src/execution/providers/materializeGoogleGenAiSingleShotOutput.js";
@@ -367,10 +368,15 @@ describe("B5C-X1 shared Google async execution", () => {
     const shot = googleShot();
     expect(await resolveDurableShotVisualGenerationState({ episode: episodeWith(shot), shot, bible, rules, policy, mediaRoot: root }))
       .toMatchObject({ state: "SUBMITTED_RECONCILIATION_REQUIRED" });
-    // Exactly the two durable lifecycle records were written: no completion record, no generation record, no media.
+    // Exactly three durable records were written: the global providerExecutionId claim plus the two lifecycle
+    // records (reservation, submission). No completion record, no generation record, no media.
     const toRelative = (path: string) => relative(root, path).split(sep).join("/");
     const written = (await listTree(root)).filter((file) => !before.includes(file));
-    expect(written).toEqual([toRelative(createExecutionReservationPath(root, "EP90", "S01")), toRelative(createExecutionSubmissionPath(root, "EP90", "S01"))].sort());
+    expect(written).toEqual([
+      toRelative(createGoogleGenAiProviderExecutionClaimPath(root, INTERACTION_ID)),
+      toRelative(createExecutionReservationPath(root, "EP90", "S01")),
+      toRelative(createExecutionSubmissionPath(root, "EP90", "S01")),
+    ].sort());
     expect(written.map((file) => toRelative(join(root, file)))).not.toContain(toRelative(createExecutionCompletionPath(root, "EP90", "S01")));
     expect(written.some((file) => /\.mp4$|generation\.json$/.test(file))).toBe(false);
     expectNoOutputWork();

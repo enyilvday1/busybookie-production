@@ -581,6 +581,7 @@ const DURABLE_SUBMISSION_WRITER =
   "src/execution/createExecutionSubmission.ts";
 
 const DURABLE_SUBMISSION_WRITER_IMPORTS = [
+  "./claimGoogleGenAiProviderExecutionId.js",
   "./executionSubmission.schema.js",
   "./executionSubmissionPath.js",
   "./readExecutionReservation.js",

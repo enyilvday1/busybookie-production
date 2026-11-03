@@ -1,4 +1,8 @@
 import {
+  claimGoogleGenAiProviderExecutionId,
+} from "./claimGoogleGenAiProviderExecutionId.js";
+
+import {
   readVisualAttemptAdmissionEvidence,
 } from "./readVisualAttemptAdmission.js";
 
@@ -305,6 +309,51 @@ export async function createVisualAttemptExecutionSubmission(
     calculateVisualAttemptExecutionRecordSha256(
       serialized,
     );
+
+  await claimGoogleGenAiProviderExecutionId(
+    mediaRoot,
+    {
+      lifecycleMode:
+        "VISUAL_ATTEMPT",
+
+      provider:
+        record.provider,
+
+      providerExecutionId:
+        record.providerExecutionId,
+
+      episodeId:
+        record.episodeId,
+
+      sceneId:
+        record.sceneId,
+
+      shotId:
+        record.shotId,
+
+      attemptNumber:
+        record.attemptNumber,
+
+      admissionId:
+        record.admissionId,
+
+      admissionSha256:
+        record.admissionSha256,
+
+      reservationId:
+        record.reservationId,
+
+      reservationSha256:
+        record.reservationSha256,
+
+      submissionPath,
+    },
+    {
+      now:
+        () =>
+          record.submittedAt,
+    },
+  );
 
   await publishVisualAttemptExecutionRecordCreateOnce(
     submissionPath,

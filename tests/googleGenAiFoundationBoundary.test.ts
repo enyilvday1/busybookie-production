@@ -131,12 +131,16 @@ const GOOGLE_RECONCILIATION_SOURCES = {
     "../googleGenai/googleGenAi.types.js",
     "../googleGenai/transport/googleGenAiSecureOutputTransport.types.js",
     "../googleGenai/transport/googleGenAiSecureOutputTransportError.js",
+    "./createVisualAttemptExecutionCompletion.js",
+    "./createVisualAttemptGenerationRecord.js",
     "./googleGenAiExecutionCompletion.schema.js",
     "./inspectGoogleGenAiExecutionLifecycle.js",
+    "./inspectVisualAttemptExecutionLifecycle.js",
     "./providers/materializeGoogleGenAiSingleShotOutput.js",
     "./providers/persistGoogleGenAiSingleShotCompletion.js",
     "./providers/recoverGoogleGenAiSingleShot.js",
     "./verifyGoogleGenAiDurableCompletion.js",
+    "./verifyVisualAttemptDurableCompletion.js",
   ],
 } as const;
 
@@ -424,6 +428,17 @@ const GOOGLE_RECOVERY_ADAPTER_IMPORTS = [
   "../../googleGenai/googleGenAi.types.js",
   "../../googleGenai/googleGenAiInteractionContract.js",
   "../readExecutionSubmission.js",
+] as const;
+
+const GOOGLE_DURABLE_IDENTITY_SEAMS = {
+  [GOOGLE_OUTPUT_MATERIALIZER]:
+    "materializeGoogleGenAiSingleShotOutputFromDurableIdentity",
+  [GOOGLE_RECOVERY_ADAPTER]:
+    "recoverGoogleGenAiSingleShotFromDurableIdentity",
+} as const;
+
+const GOOGLE_DURABLE_IDENTITY_SEAM_CONSUMERS = [
+  "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
 ] as const;
 
 const GOOGLE_PRODUCTION_INTERACTION_GETTER =
@@ -1300,6 +1315,150 @@ describe(
         ).not.toMatch(
           /@google\/genai|createGoogleGenAiSingleShotProductionInteractionCreator|createGoogleGenAiSingleShotProductionInteractionGetter|submitGoogleGenAiSingleShot|createInteraction|\.create\(|\.cancel\(|\.delete\(|\/veo\/|\/runway\//,
         );
+      },
+    );
+
+    it(
+      "restricts the durable-identity recovery and materialization seams to the Google reconciler",
+      async () => {
+        const sourceFiles = [
+          ...(
+            await listTypeScriptFiles(
+              "src",
+            )
+          ),
+          ...(
+            await listTypeScriptFiles(
+              "scripts",
+            )
+          ),
+        ];
+
+        for (
+          const [
+            definitionFile,
+            symbol,
+          ] of Object.entries(
+            GOOGLE_DURABLE_IDENTITY_SEAMS,
+          )
+        ) {
+          const definition =
+            await readFile(
+              join(
+                ROOT,
+                definitionFile,
+              ),
+              "utf8",
+            );
+
+          expect(
+            definition,
+            definitionFile,
+          ).toMatch(
+            new RegExp(
+              `export\\s+async\\s+function\\s+${symbol}\\s*\\(`,
+            ),
+          );
+
+          const durableStart =
+            definition.indexOf(
+              `export async function ${symbol}(`,
+            );
+
+          const legacySymbol =
+            definitionFile ===
+              GOOGLE_OUTPUT_MATERIALIZER
+              ? "materializeGoogleGenAiSingleShotOutput"
+              : "recoverGoogleGenAiSingleShot";
+
+          const legacyStart =
+            definition.indexOf(
+              `export async function ${legacySymbol}(`,
+              durableStart + 1,
+            );
+
+          expect(
+            durableStart,
+            definitionFile,
+          ).toBeGreaterThanOrEqual(
+            0,
+          );
+
+          expect(
+            legacyStart,
+            definitionFile,
+          ).toBeGreaterThan(
+            durableStart,
+          );
+
+          expect(
+            definition.slice(
+              durableStart,
+              legacyStart,
+            ),
+            definitionFile,
+          ).not.toContain(
+            "readExecutionSubmission",
+          );
+
+          expect(
+            definition.slice(
+              legacyStart,
+            ),
+            definitionFile,
+          ).toContain(
+            "readExecutionSubmission",
+          );
+
+          const consumers: string[] =
+            [];
+
+          for (
+            const file of sourceFiles
+          ) {
+            if (file === definitionFile) {
+              continue;
+            }
+
+            const code =
+              (
+                await readFile(
+                  join(
+                    ROOT,
+                    file,
+                  ),
+                  "utf8",
+                )
+              )
+                .replace(
+                  /\/\*[\s\S]*?\*\//g,
+                  "",
+                )
+                .replace(
+                  /\/\/.*$/gm,
+                  "",
+                );
+
+            if (
+              new RegExp(
+                `\\b${symbol}\\b`,
+              ).test(
+                code,
+              )
+            ) {
+              consumers.push(
+                file,
+              );
+            }
+          }
+
+          expect(
+            consumers.sort(),
+            symbol,
+          ).toEqual([
+            ...GOOGLE_DURABLE_IDENTITY_SEAM_CONSUMERS,
+          ]);
+        }
       },
     );
 

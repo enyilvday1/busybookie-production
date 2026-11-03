@@ -11,8 +11,21 @@ import type {
 } from "./googleGenAiExecutionCompletion.schema.js";
 
 import {
+  createVisualAttemptExecutionCompletion,
+} from "./createVisualAttemptExecutionCompletion.js";
+
+import {
+  createVisualAttemptGenerationRecord,
+} from "./createVisualAttemptGenerationRecord.js";
+
+import {
   inspectGoogleGenAiExecutionLifecycle,
 } from "./inspectGoogleGenAiExecutionLifecycle.js";
+
+import {
+  inspectVisualAttemptExecutionLifecycle,
+  type VisualAttemptExecutionLifecycleInspection,
+} from "./inspectVisualAttemptExecutionLifecycle.js";
 
 import type {
   GoogleGenAiInteractionReplayResult,
@@ -29,6 +42,7 @@ import {
 
 import {
   materializeGoogleGenAiSingleShotOutput,
+  materializeGoogleGenAiSingleShotOutputFromDurableIdentity,
   type GoogleGenAiOutputFileSystem,
   type GoogleGenAiOutputRetriever,
 } from "./providers/materializeGoogleGenAiSingleShotOutput.js";
@@ -40,6 +54,7 @@ import {
 
 import {
   recoverGoogleGenAiSingleShot,
+  recoverGoogleGenAiSingleShotFromDurableIdentity,
   type GoogleGenAiInteractionGetter,
 } from "./providers/recoverGoogleGenAiSingleShot.js";
 
@@ -47,6 +62,11 @@ import {
   verifyGoogleGenAiDurableCompletion,
   type GoogleGenAiDurableCompletionVerification,
 } from "./verifyGoogleGenAiDurableCompletion.js";
+
+import {
+  verifyVisualAttemptDurableCompletion,
+  type VisualAttemptDurableCompletionVerification,
+} from "./verifyVisualAttemptDurableCompletion.js";
 
 /**
  * Dormant Google GenAI lifecycle reconciliation.
@@ -171,6 +191,35 @@ export type GoogleGenAiExecutionLifecycleReconciliationResult =
         string;
     }>;
 
+export type GoogleGenAiVisualAttemptExecutionLifecycleReconciliationInput =
+  Readonly<{
+    mediaRoot: string;
+    episodeId: string;
+    shotId: string;
+    attemptNumber: number;
+  }>;
+
+export type GoogleGenAiVisualAttemptExecutionLifecycleReconciliationResult =
+  | Readonly<{
+      lifecycleState: "COMPLETED";
+      reconciliationMode: "DURABLE_COMPLETION";
+      verification: VisualAttemptDurableCompletionVerification;
+    }>
+  | Readonly<{
+      lifecycleState: "COMPLETED";
+      reconciliationMode: "RECOVERED_SUBMISSION";
+      remoteStatus: "completed";
+      verification: VisualAttemptDurableCompletionVerification;
+    }>;
+
+type SubmittedVisualAttemptExecutionLifecycleInspection =
+  Extract<
+    VisualAttemptExecutionLifecycleInspection,
+    {
+      state: "SUBMITTED";
+    }
+  >;
+
 const FORBIDDEN_CALLER_OVERRIDE_FIELDS =
   Object.freeze([
     "providerExecutionId",
@@ -182,6 +231,15 @@ const FORBIDDEN_CALLER_OVERRIDE_FIELDS =
   ]);
 
 // The superseded split shape is refused rather than adapted.
+const VISUAL_ATTEMPT_FORBIDDEN_CALLER_OVERRIDE_FIELDS =
+  Object.freeze([
+    ...FORBIDDEN_CALLER_OVERRIDE_FIELDS,
+    "admissionId",
+    "admissionSha256",
+    "reservationSha256",
+    "submissionSha256",
+  ]);
+
 const LEGACY_SUBMITTED_RECOVERY_FIELDS =
   Object.freeze([
     "getInteraction",
@@ -746,6 +804,99 @@ export async function reconcileGoogleGenAiExecutionLifecycle(
   }
 }
 
+export async function reconcileGoogleGenAiVisualAttemptExecutionLifecycle(
+  input:
+    GoogleGenAiVisualAttemptExecutionLifecycleReconciliationInput,
+
+  dependencies:
+    GoogleGenAiExecutionLifecycleReconciliationDependencies =
+      {},
+): Promise<
+  GoogleGenAiVisualAttemptExecutionLifecycleReconciliationResult
+> {
+  for (
+    const field of VISUAL_ATTEMPT_FORBIDDEN_CALLER_OVERRIDE_FIELDS
+  ) {
+    if (
+      Object.hasOwn(
+        input,
+        field,
+      )
+    ) {
+      throw new Error(
+        `Google GenAI visual-attempt lifecycle reconciliation does not accept a caller-supplied ${field}; durable attempt records are authoritative.`,
+      );
+    }
+  }
+
+  const inspection =
+    await inspectVisualAttemptExecutionLifecycle(
+      input.mediaRoot,
+      input.episodeId,
+      input.shotId,
+      input.attemptNumber,
+    );
+
+  if (
+    inspection.state ===
+    "COMPLETED"
+  ) {
+    const verification =
+      await verifyVisualAttemptDurableCompletion(
+        input.mediaRoot,
+        input.episodeId,
+        input.shotId,
+        input.attemptNumber,
+      );
+
+    return Object.freeze({
+      lifecycleState:
+        "COMPLETED",
+
+      reconciliationMode:
+        "DURABLE_COMPLETION",
+
+      verification,
+    });
+  }
+
+  if (
+    inspection.state !==
+    "SUBMITTED"
+  ) {
+    throw new Error(
+      `Google GenAI visual-attempt lifecycle reconciliation requires SUBMITTED or COMPLETED state; received ${inspection.state}.`,
+    );
+  }
+
+  const recoveryDependencies =
+    requireSubmittedRecoveryDependencies(
+      dependencies.submittedRecovery,
+    );
+
+  const authority =
+    createSubmittedRecoveryAuthority(
+      inspection.submission.record.submittedAt,
+      recoveryDependencies,
+    );
+
+  try {
+    return await recoverSubmittedGoogleGenAiVisualAttemptExecution(
+      input,
+      inspection,
+      recoveryDependencies,
+      authority,
+    );
+  } catch (error) {
+    throw outwardFailure(
+      authority.reason(),
+      error,
+    );
+  } finally {
+    authority.dispose();
+  }
+}
+
 const CLOSED_ERROR_FIELDS =
   Object.freeze([
     "code",
@@ -858,6 +1009,37 @@ function normalizeReplayDependencyFailure(
   }
 }
 
+async function getSubmittedInteractionObservationOnce(
+  providerExecutionId:
+    string,
+  recoveryDependencies:
+    GoogleGenAiSubmittedRecoveryDependencies,
+  authority:
+    SubmittedRecoveryAuthority,
+): Promise<
+  GoogleGenAiInteractionReplayResult
+> {
+  let observation:
+    GoogleGenAiInteractionReplayResult;
+
+  try {
+    observation =
+      await recoveryDependencies
+        .replayInteraction(
+          providerExecutionId,
+          authority.context,
+        );
+  } catch (error) {
+    throw normalizeReplayDependencyFailure(
+      error,
+    );
+  }
+
+  authority.requireActive();
+
+  return observation;
+}
+
 function isTempCleanupFailure(
   value:
     unknown,
@@ -927,23 +1109,12 @@ async function recoverSubmittedGoogleGenAiExecution(
   // Exactly one replay observation per invocation; it is never refreshed.
   // replayInteraction is a declared dependency seam: its failure is
   // normalized here and never trusted to have been sanitized upstream.
-  let observation:
-    GoogleGenAiInteractionReplayResult;
-
-  try {
-    observation =
-      await recoveryDependencies
-        .replayInteraction(
-          providerExecutionId,
-          authority.context,
-        );
-  } catch (error) {
-    throw normalizeReplayDependencyFailure(
-      error,
+  const observation =
+    await getSubmittedInteractionObservationOnce(
+      providerExecutionId,
+      recoveryDependencies,
+      authority,
     );
-  }
-
-  authority.requireActive();
 
   // Both local adapters return the SAME frozen observation. A changed
   // durable identity fails closed and never causes a second replay.
@@ -1114,5 +1285,245 @@ async function recoverSubmittedGoogleGenAiExecution(
     ...durableFields(
       verification,
     ),
+  });
+}
+
+async function recoverSubmittedGoogleGenAiVisualAttemptExecution(
+  input:
+    GoogleGenAiVisualAttemptExecutionLifecycleReconciliationInput,
+  inspection:
+    SubmittedVisualAttemptExecutionLifecycleInspection,
+  recoveryDependencies:
+    GoogleGenAiSubmittedRecoveryDependencies,
+  authority:
+    SubmittedRecoveryAuthority,
+): Promise<
+  GoogleGenAiVisualAttemptExecutionLifecycleReconciliationResult
+> {
+  authority.requireActive();
+
+  const providerExecutionId =
+    inspection.providerExecutionId;
+
+  const observation =
+    await getSubmittedInteractionObservationOnce(
+      providerExecutionId,
+      recoveryDependencies,
+      authority,
+    );
+
+  const observedInteraction =
+    async (
+      requestedProviderExecutionId:
+        string,
+    ): Promise<GoogleGenAiInteractionReplayResult> => {
+      if (
+        requestedProviderExecutionId !==
+        providerExecutionId
+      ) {
+        throw new Error(
+          "Google GenAI durable providerExecutionId changed after visual-attempt lifecycle inspection; refusing a second replay.",
+        );
+      }
+
+      return observation;
+    };
+
+  const getInteraction:
+    GoogleGenAiInteractionGetter =
+    observedInteraction;
+
+  const retrieveOutput:
+    GoogleGenAiOutputRetriever =
+    observedInteraction;
+
+  const durableIdentity =
+    Object.freeze({
+      episodeId:
+        inspection.episodeId,
+
+      shotId:
+        inspection.shotId,
+
+      providerExecutionId,
+    });
+
+  const recovery =
+    await recoverGoogleGenAiSingleShotFromDurableIdentity(
+      durableIdentity,
+      {
+        getInteraction,
+      },
+    );
+
+  if (
+    recovery.providerExecutionId !==
+    providerExecutionId
+  ) {
+    throw new Error(
+      `Google GenAI visual-attempt recovery returned providerExecutionId ${recovery.providerExecutionId}, which does not match the inspected durable submission ${providerExecutionId}.`,
+    );
+  }
+
+  if (
+    recovery.lifecycleClass ===
+    "PENDING"
+  ) {
+    throw new Error(
+      `Google GenAI interaction ${providerExecutionId} is still pending (remote status ${recovery.remoteStatus}). No durable completion exists yet; reconcile again later. Do not resubmit automatically.`,
+    );
+  }
+
+  if (
+    recovery.lifecycleClass ===
+    "TERMINAL_FAILURE"
+  ) {
+    throw new Error(
+      `Google GenAI interaction ${providerExecutionId} ended without a materializable result (remote status ${recovery.remoteStatus}). No completion was recorded. Do not resubmit automatically; operator review is required.`,
+    );
+  }
+
+  authority.requireActive();
+
+  const materializedOutput =
+    await materializeGoogleGenAiSingleShotOutputFromDurableIdentity(
+      {
+        mediaRoot:
+          input.mediaRoot,
+
+        episodeId:
+          inspection.episodeId,
+
+        shotId:
+          inspection.shotId,
+
+        maxOutputBytes:
+          recoveryDependencies.policy.limits
+            .maxOutputBytes,
+      },
+      durableIdentity,
+      {
+        retrieveOutput,
+
+        prepareUri:
+          recoveryDependencies.prepareUri,
+
+        downloadUri:
+          recoveryDependencies.downloadUri,
+
+        policy:
+          recoveryDependencies.policy,
+
+        context:
+          authority.context,
+
+        ...(recoveryDependencies.outputFileSystem ===
+        undefined
+          ? {}
+          : {
+              fileSystem:
+                recoveryDependencies.outputFileSystem,
+            }),
+      },
+    );
+
+  authority.requireActive();
+
+  const expectedLineage =
+    Object.freeze({
+      episodeId:
+        inspection.episodeId,
+
+      sceneId:
+        inspection.sceneId,
+
+      shotId:
+        inspection.shotId,
+
+      attemptNumber:
+        inspection.attemptNumber,
+
+      expectedAdmissionId:
+        inspection.admissionId,
+
+      expectedAdmissionSha256:
+        inspection.admission.admissionSha256,
+
+      expectedReservationId:
+        inspection.reservationId,
+
+      expectedReservationSha256:
+        inspection.reservation.reservationSha256,
+
+      expectedSubmissionSha256:
+        inspection.submission.submissionSha256,
+    });
+
+  await createVisualAttemptGenerationRecord(
+    input.mediaRoot,
+    {
+      ...expectedLineage,
+
+      expectedProviderExecutionId:
+        providerExecutionId,
+
+      output:
+        Object.freeze({
+          outputPath:
+            materializedOutput.outputPath,
+
+          bytes:
+            materializedOutput.byteCount,
+
+          sha256:
+            materializedOutput.sha256,
+        }),
+    },
+    {
+      ...(recoveryDependencies.now ===
+      undefined
+        ? {}
+        : {
+            now:
+              recoveryDependencies.now,
+          }),
+    },
+  );
+
+  authority.requireActive();
+
+  await createVisualAttemptExecutionCompletion(
+    input.mediaRoot,
+    expectedLineage,
+    {
+      ...(recoveryDependencies.now ===
+      undefined
+        ? {}
+        : {
+            now:
+              recoveryDependencies.now,
+          }),
+    },
+  );
+
+  const verification =
+    await verifyVisualAttemptDurableCompletion(
+      input.mediaRoot,
+      input.episodeId,
+      input.shotId,
+      input.attemptNumber,
+    );
+
+  return Object.freeze({
+    lifecycleState:
+      "COMPLETED",
+
+    reconciliationMode:
+      "RECOVERED_SUBMISSION",
+
+    remoteStatus:
+      "completed",
+
+    verification,
   });
 }

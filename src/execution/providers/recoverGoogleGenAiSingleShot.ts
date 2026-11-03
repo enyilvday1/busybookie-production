@@ -54,6 +54,18 @@ export type GoogleGenAiSingleShotRecoveryInput =
       string;
   }>;
 
+export type GoogleGenAiSingleShotRecoveryIdentity =
+  Readonly<{
+    episodeId:
+      string;
+
+    shotId:
+      string;
+
+    providerExecutionId:
+      string;
+  }>;
+
 export type GoogleGenAiSingleShotRecoveryDependencies =
   Readonly<{
     getInteraction:
@@ -86,6 +98,86 @@ const FORBIDDEN_CALLER_IDENTIFIER_FIELDS =
     "providerExecutionId",
     "interactionId",
   ]);
+
+export async function recoverGoogleGenAiSingleShotFromDurableIdentity(
+  identity:
+    GoogleGenAiSingleShotRecoveryIdentity,
+
+  dependencies:
+    GoogleGenAiSingleShotRecoveryDependencies,
+): Promise<
+  GoogleGenAiSingleShotRecoveryResult
+> {
+  const providerExecutionId =
+    identity.providerExecutionId;
+
+  if (
+    typeof providerExecutionId !==
+      "string" ||
+    !providerExecutionId.trim()
+  ) {
+    throw new Error(
+      "Google GenAI durable recovery identity has an empty providerExecutionId.",
+    );
+  }
+
+  const interaction =
+    await dependencies
+      .getInteraction(
+        providerExecutionId,
+      );
+
+  normalizeGoogleGenAiProviderExecutionId(
+    interaction,
+  );
+
+  if (
+    interaction.id !==
+    providerExecutionId
+  ) {
+    throw new Error(
+      `Google GenAI recovery returned interaction ${JSON.stringify(interaction.id)}, which does not match durable providerExecutionId ${JSON.stringify(providerExecutionId)}.`,
+    );
+  }
+
+  const lifecycleClass =
+    classifyGoogleGenAiInteractionStatus(
+      interaction.status,
+    );
+
+  if (
+    lifecycleClass ===
+    "ACTION_REQUIRED_UNSUPPORTED"
+  ) {
+    throw new Error(
+      `Google GenAI interaction ${providerExecutionId} requires client action, which Busybookie does not support. Operator review is required.`,
+    );
+  }
+
+  const remoteStatus =
+    GOOGLE_GENAI_INTERACTION_STATUSES.find(
+      (status) =>
+        status ===
+        interaction.status,
+    );
+
+  if (remoteStatus === undefined) {
+    throw new Error(
+      `Google GenAI interaction status is not recognized: ${JSON.stringify(interaction.status)}.`,
+    );
+  }
+
+  return Object.freeze({
+    provider:
+      GOOGLE_GENAI_PROVIDER,
+
+    providerExecutionId,
+
+    remoteStatus,
+
+    lifecycleClass,
+  });
+}
 
 export async function recoverGoogleGenAiSingleShot(
   input:
@@ -153,60 +245,16 @@ export async function recoverGoogleGenAiSingleShot(
     );
   }
 
-  const interaction =
-    await dependencies
-      .getInteraction(
-        providerExecutionId,
-      );
+  return recoverGoogleGenAiSingleShotFromDurableIdentity(
+    Object.freeze({
+      episodeId:
+        submission.episodeId,
 
-  normalizeGoogleGenAiProviderExecutionId(
-    interaction,
+      shotId:
+        submission.shotId,
+
+      providerExecutionId,
+    }),
+    dependencies,
   );
-
-  if (
-    interaction.id !==
-    providerExecutionId
-  ) {
-    throw new Error(
-      `Google GenAI recovery returned interaction ${JSON.stringify(interaction.id)}, which does not match durable providerExecutionId ${JSON.stringify(providerExecutionId)}.`,
-    );
-  }
-
-  const lifecycleClass =
-    classifyGoogleGenAiInteractionStatus(
-      interaction.status,
-    );
-
-  if (
-    lifecycleClass ===
-    "ACTION_REQUIRED_UNSUPPORTED"
-  ) {
-    throw new Error(
-      `Google GenAI interaction ${providerExecutionId} requires client action, which Busybookie does not support. Operator review is required.`,
-    );
-  }
-
-  const remoteStatus =
-    GOOGLE_GENAI_INTERACTION_STATUSES.find(
-      (status) =>
-        status ===
-        interaction.status,
-    );
-
-  if (remoteStatus === undefined) {
-    throw new Error(
-      `Google GenAI interaction status is not recognized: ${JSON.stringify(interaction.status)}.`,
-    );
-  }
-
-  return Object.freeze({
-    provider:
-      GOOGLE_GENAI_PROVIDER,
-
-    providerExecutionId,
-
-    remoteStatus,
-
-    lifecycleClass,
-  });
 }

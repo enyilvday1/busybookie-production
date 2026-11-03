@@ -233,6 +233,18 @@ export type GoogleGenAiSingleShotOutputMaterializationInput =
  * inline-only calls may omit them; a URI output requires all four at
  * runtime before any URI work, with no whole-buffer fallback.
  */
+export type GoogleGenAiSingleShotOutputMaterializationIdentity =
+  Readonly<{
+    episodeId:
+      string;
+
+    shotId:
+      string;
+
+    providerExecutionId:
+      string;
+  }>;
+
 export type GoogleGenAiSingleShotOutputMaterializationDependencies =
   Readonly<{
     retrieveOutput:
@@ -2988,9 +3000,12 @@ async function materializeUriOutput(
   }
 }
 
-export async function materializeGoogleGenAiSingleShotOutput(
+export async function materializeGoogleGenAiSingleShotOutputFromDurableIdentity(
   input:
     GoogleGenAiSingleShotOutputMaterializationInput,
+
+  identity:
+    GoogleGenAiSingleShotOutputMaterializationIdentity,
 
   dependencies:
     GoogleGenAiSingleShotOutputMaterializationDependencies,
@@ -3007,7 +3022,7 @@ export async function materializeGoogleGenAiSingleShotOutput(
       )
     ) {
       throw new Error(
-        `Google GenAI output materialization does not accept a caller-supplied ${field}; the durable execution submission is authoritative.`,
+        `Google GenAI output materialization does not accept a caller-supplied ${field}; the durable identity is authoritative.`,
       );
     }
   }
@@ -3017,53 +3032,35 @@ export async function materializeGoogleGenAiSingleShotOutput(
       input.maxOutputBytes,
     );
 
-  const submission =
-    await readExecutionSubmission(
-      input.mediaRoot,
-      input.episodeId,
-      input.shotId,
-    );
-
-  if (!submission) {
-    throw new Error(
-      `Google GenAI output materialization requires a durable execution submission for ${input.episodeId}/${input.shotId}.`,
-    );
-  }
-
   if (
-    submission.provider !==
-    GOOGLE_GENAI_PROVIDER
+    input.episodeId !==
+      identity.episodeId ||
+    input.shotId !==
+      identity.shotId
   ) {
     throw new Error(
-      `Google GenAI output materialization requires a ${GOOGLE_GENAI_PROVIDER} execution submission; received ${submission.provider}.`,
-    );
-  }
-
-  if (
-    Object.hasOwn(
-      submission,
-      "interactionId",
-    )
-  ) {
-    throw new Error(
-      "Google GenAI execution submission must not carry a separate interactionId.",
+      "Google GenAI output materialization input identity does not match the durable identity.",
     );
   }
 
   const providerExecutionId =
-    submission.providerExecutionId;
+    identity.providerExecutionId;
 
-  if (!providerExecutionId.trim()) {
+  if (
+    typeof providerExecutionId !==
+      "string" ||
+    !providerExecutionId.trim()
+  ) {
     throw new Error(
-      "Google GenAI execution submission has an empty providerExecutionId.",
+      "Google GenAI durable output materialization identity has an empty providerExecutionId.",
     );
   }
 
   const outputPath =
     createGoogleGenAiVideoOutputPath(
       input.mediaRoot,
-      submission.episodeId,
-      submission.shotId,
+      identity.episodeId,
+      identity.shotId,
       providerExecutionId,
     );
 
@@ -3297,4 +3294,104 @@ export async function materializeGoogleGenAiSingleShotOutput(
 
     alreadyPresent,
   });
+}
+
+export async function materializeGoogleGenAiSingleShotOutput(
+  input:
+    GoogleGenAiSingleShotOutputMaterializationInput,
+
+  dependencies:
+    GoogleGenAiSingleShotOutputMaterializationDependencies,
+): Promise<
+  GoogleGenAiSingleShotOutputMaterializationResult
+> {
+  for (
+    const field of FORBIDDEN_CALLER_OVERRIDE_FIELDS
+  ) {
+    if (
+      Object.hasOwn(
+        input,
+        field,
+      )
+    ) {
+      throw new Error(
+        `Google GenAI output materialization does not accept a caller-supplied ${field}; the durable execution submission is authoritative.`,
+      );
+    }
+  }
+
+  const maxOutputBytes =
+    requireMaxOutputBytes(
+      input.maxOutputBytes,
+    );
+
+  const mediaRoot =
+    input.mediaRoot;
+
+  const episodeId =
+    input.episodeId;
+
+  const shotId =
+    input.shotId;
+
+  const submission =
+    await readExecutionSubmission(
+      mediaRoot,
+      episodeId,
+      shotId,
+    );
+
+  if (!submission) {
+    throw new Error(
+      `Google GenAI output materialization requires a durable execution submission for ${episodeId}/${shotId}.`,
+    );
+  }
+
+  if (
+    submission.provider !==
+    GOOGLE_GENAI_PROVIDER
+  ) {
+    throw new Error(
+      `Google GenAI output materialization requires a ${GOOGLE_GENAI_PROVIDER} execution submission; received ${submission.provider}.`,
+    );
+  }
+
+  if (
+    Object.hasOwn(
+      submission,
+      "interactionId",
+    )
+  ) {
+    throw new Error(
+      "Google GenAI execution submission must not carry a separate interactionId.",
+    );
+  }
+
+  const providerExecutionId =
+    submission.providerExecutionId;
+
+  if (!providerExecutionId.trim()) {
+    throw new Error(
+      "Google GenAI execution submission has an empty providerExecutionId.",
+    );
+  }
+
+  return materializeGoogleGenAiSingleShotOutputFromDurableIdentity(
+    Object.freeze({
+      mediaRoot,
+      episodeId,
+      shotId,
+      maxOutputBytes,
+    }),
+    Object.freeze({
+      episodeId:
+        submission.episodeId,
+
+      shotId:
+        submission.shotId,
+
+      providerExecutionId,
+    }),
+    dependencies,
+  );
 }

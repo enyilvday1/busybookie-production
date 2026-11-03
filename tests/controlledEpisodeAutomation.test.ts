@@ -79,6 +79,67 @@ describe("controlled visual authority structure", () => {
   });
 });
 
+// B5 Slice-2I-A: a distinct reviewed attempt family with no durable lineage.
+function reviewedAttemptPlan() {
+  const plan = reviewedPlan(); const base = plan.actions[0]!;
+  const action: Record<string, unknown> = { episodeId: base.episodeId, sceneId: base.sceneId, shotId: base.shotId, order: base.order,
+    kind: "VISUAL_ATTEMPT_GENERATE", attemptNumber: 2, expectedAttemptLifecycle: "ADMITTED_ONLY", resolvedProvider: "GOOGLE_GENAI",
+    referenceBinding: structuredClone(base.referenceBinding),
+    costAuthority: { unit: "MICRO_USD", modeledValue: 400000, maxModeledValue: 500000, policySha256: "a".repeat(64) },
+    confirmPaidGeneration: true };
+  return { ...plan, actions: [action] };
+}
+const ATTEMPT_ACTION_KEYS = ["attemptNumber", "confirmPaidGeneration", "costAuthority", "episodeId", "expectedAttemptLifecycle", "kind",
+  "order", "referenceBinding", "resolvedProvider", "sceneId", "shotId"];
+describe("B5 Slice-2I-A reviewed VISUAL_ATTEMPT_GENERATE plan structure", () => {
+  it("accepts the exact attempt action and defensively freezes it", () => {
+    const input = reviewedAttemptPlan();
+    const result = parseEpisodeAutomationPlan(input);
+    if (result.schemaVersion !== "2.0") throw new Error("wrong version");
+    const action = result.actions[0];
+    expect(action).toEqual(input.actions[0]);
+    expect(Object.keys(action).sort()).toEqual(ATTEMPT_ACTION_KEYS);
+    expect(action.kind).toBe("VISUAL_ATTEMPT_GENERATE");
+    if (action.kind !== "VISUAL_ATTEMPT_GENERATE") throw new Error("wrong action kind");
+    expect(Object.isFrozen(action)).toBe(true); expect(Object.isFrozen(action.referenceBinding)).toBe(true);
+    input.actions[0]!.attemptNumber = 3;
+    expect(result.actions[0]).toMatchObject({ kind: "VISUAL_ATTEMPT_GENERATE", attemptNumber: 2 });
+    expect(result.maximumNewProviderCreates).toBe(1);
+  });
+  type AttemptPlan = ReturnType<typeof reviewedAttemptPlan>;
+  const action = (plan: AttemptPlan) => plan.actions[0]!;
+  it.each([
+    ["missing attemptNumber", (plan: AttemptPlan) => { delete action(plan).attemptNumber; }],
+    ...[1, 0, -2, 2.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "2", null].map(value =>
+      [`attemptNumber ${String(value)}`, (plan: AttemptPlan) => { action(plan).attemptNumber = value; }] as const),
+    ...["RUNWAY", "VEO", "google_genai", null].map(value =>
+      [`resolvedProvider ${String(value)}`, (plan: AttemptPlan) => { action(plan).resolvedProvider = value; }] as const),
+    ...["NOTHING", "NOT_ADMITTED", "RESERVED_ONLY", "SUBMITTED", "COMPLETED", undefined].map(value =>
+      [`expectedAttemptLifecycle ${String(value)}`, (plan: AttemptPlan) => { action(plan).expectedAttemptLifecycle = value; }] as const),
+    ...["expectedLifecycle", "admissionId", "admissionSha256", "manifestRawSha256", "promptIdentitySha256", "referenceIdentitySha256",
+      "reservationId", "reservationSha256", "providerExecutionId", "submissionSha256", "force"].map(field =>
+      [`unknown field ${field}`, (plan: AttemptPlan) => { action(plan)[field] = field === "expectedLifecycle" ? "NOTHING" : "a".repeat(64); }] as const),
+    ["unconfirmed", (plan: AttemptPlan) => { action(plan).confirmPaidGeneration = false; }],
+    ["no create allowance", (plan: AttemptPlan) => { plan.maximumNewProviderCreates = 0; }],
+    ["foreign cost unit", (plan: AttemptPlan) => { action(plan).costAuthority = { unit: "USD_CENTS", modeledValue: 40, maxModeledValue: 50, policySha256: "a".repeat(64) }; }],
+    ["cost above its ceiling", (plan: AttemptPlan) => { action(plan).costAuthority = { unit: "MICRO_USD", modeledValue: 6, maxModeledValue: 5, policySha256: "a".repeat(64) }; }],
+    ["unreviewed reference", (plan: AttemptPlan) => { action(plan).referenceBinding = { ...plan.inputBinding.referenceBindings[0]!, sha256: "b".repeat(64) }; }],
+    ["another target order", (plan: AttemptPlan) => { action(plan).order = 2; }],
+    ["lower-case kind", (plan: AttemptPlan) => { action(plan).kind = "visual_attempt_generate"; }],
+  ] as const)("rejects %s", (_label, mutate) => {
+    const input = reviewedAttemptPlan(); mutate(input);
+    expect(() => parseEpisodeAutomationPlan(input)).toThrow();
+  });
+  it("keeps VISUAL_GENERATE structurally distinct: an attempt number is never accepted on it", () => {
+    const legacy = reviewedPlan();
+    expect(() => parseEpisodeAutomationPlan({ ...legacy, actions: [{ ...legacy.actions[0]!, attemptNumber: 2 }] })).toThrow();
+    expect(() => parseEpisodeAutomationPlan({ ...legacy, actions: [{ ...legacy.actions[0]!, expectedAttemptLifecycle: "ADMITTED_ONLY" }] })).toThrow();
+    const attempt = reviewedAttemptPlan();
+    expect(() => parseEpisodeAutomationPlan({ ...attempt, actions: [{ ...action(attempt), kind: "VISUAL_GENERATE" }] })).toThrow();
+    expect(parseEpisodeAutomationPlan(legacy)).toMatchObject({ actions: [{ kind: "VISUAL_GENERATE", expectedLifecycle: "NOTHING" }] });
+  });
+});
+
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function runtimeFixture(provider: "RUNWAY" | "GOOGLE_GENAI" = "RUNWAY") {

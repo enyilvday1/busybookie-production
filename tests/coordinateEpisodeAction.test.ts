@@ -487,6 +487,37 @@ describe("B7 unbound visual admission matrix", () => {
   }
 });
 
+describe("B5 Slice-2I-A visual attempt dormancy", () => {
+  const ATTEMPT = { episodeId: EPISODE, sceneId: SCENE, shotId: SHOT, order: 2, kind: "VISUAL_ATTEMPT_GENERATE", attemptNumber: 2,
+    expectedAttemptLifecycle: "ADMITTED_ONLY", resolvedProvider: "GOOGLE_GENAI", confirmPaidGeneration: true };
+
+  it("an unbound VISUAL_ATTEMPT_GENERATE is an unsupported kind before any dependency call", async () => {
+    const controlled = harness([admittedState("VISUAL_GENERATE")]);
+    await expect(coordinateEpisodeAction(input(ATTEMPT), controlled.deps)).rejects.toThrow(/Unsupported episode coordinator action kind/);
+    expect(allCalls(controlled)).toBe(0);
+  });
+
+  it("a fabricated controlled context carrying an attempt is refused before any dependency call", async () => {
+    const controlled = harness([admittedState("VISUAL_GENERATE")]);
+    await expect(coordinateEpisodeAction({ episodeId: EPISODE, action: ATTEMPT, controlledContext: Object.freeze({ episodeId: EPISODE }) } as never,
+      controlled.deps)).rejects.toMatchObject({ code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(allCalls(controlled)).toBe(0);
+    expect(runnerCalls(controlled)).toEqual({ runSingleShotExecutionCli: 0, runProductionExecutionReconcileCli: 0,
+      runDialogueGenerationCli: 0, runDialogueReconcileCli: 0 });
+  });
+
+  it("the coordinator refuses the reviewed attempt before admission I/O and never forwards an attempt", async () => {
+    const code = (await readFile(new URL("../src/execution/coordinateEpisodeAction.ts", import.meta.url), "utf8"))
+      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const refusal = code.indexOf('action.kind === "VISUAL_ATTEMPT_GENERATE"');
+    expect(refusal).toBeGreaterThan(0);
+    expect(refusal).toBeLessThan(code.indexOf("await assertCheckedEpisodeAdmission("));
+    expect(refusal).toBeLessThan(code.indexOf("dependencies.runSingleShotExecutionCli("));
+    expect(code).toMatch(/throw new BoundEpisodeError\("ACTION_REJECTED"[^;]*Slice-2I-A/);
+    expect(code).not.toMatch(/--attempt|attemptNumber|executeGoogleGenAiVisualAttempt|VisualAttemptExecutionDependencies|inspectVisualAttempt|createVisualAttempt/);
+  });
+});
+
 describe("C6b F dialogue admission matrix (10 dialogue states x 2 dialogue kinds)", () => {
   const ADMITTED = new Set([
     "DIALOGUE_AUDIO_REQUIRED:DIALOGUE_GENERATE",

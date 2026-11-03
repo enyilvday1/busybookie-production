@@ -671,6 +671,11 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
   requireSameBinding(input.action, data.plan.actions[0]);
   if (input.episodeId !== data.plan.episodeId) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   const action = data.plan.actions[0];
+  // B5 Slice-2I-A: a reviewed attempt is representable but not dispatchable.
+  // Refused before any environment, loader, admission, runner or provider.
+  if (action.kind === "VISUAL_ATTEMPT_GENERATE") {
+    throw new BoundEpisodeError("ACTION_REJECTED", { cause: new Error("Visual attempt dispatch is not enabled in Slice-2I-A.") });
+  }
   // Known exact kind, literal confirmation and target before I/O.
   requireConfirmedAction(action); requireValidTarget(input.episodeId, action);
   const target = { episodeId: action.episodeId, sceneId: action.sceneId, shotId: action.shotId, order: action.order };

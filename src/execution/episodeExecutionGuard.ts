@@ -1,4 +1,4 @@
-import type { BoundEpisodePreflight, ControlledEpisodeAutomationPlan } from "./boundEpisodeProduction.types.js";
+import type { BoundEpisodePreflight, ControlledEpisodeAutomationPlan, VisualAttemptSelection } from "./boundEpisodeProduction.types.js";
 import { bindingDigest } from "./boundEpisodeProduction.types.js";
 import type { buildBoundEpisodePreflight } from "./buildBoundEpisodePreflight.js";
 import { randomUUID } from "node:crypto";
@@ -217,7 +217,24 @@ export function assertReviewedEpisodeAction(plan: ControlledEpisodeAutomationPla
     const observed = candidate.observation;
     requireSameBinding([action.reservationId, action.durableProvider, action.reservationSha256, action.submissionSha256, action.providerExecutionIdentitySha256],
       [observed.reservationId, observed.durableProvider, observed.reservationSha256, observed.submissionSha256, observed.providerExecutionIdentitySha256]);
+  } else if (action.kind === "VISUAL_ATTEMPT_GENERATE" && candidate.kind === "VISUAL_ATTEMPT_GENERATE") {
+    // The exact reviewed attempt only; a changed attempt is reviewed-action drift.
+    if (candidate.attemptNumber !== action.attemptNumber || candidate.expectedAttemptLifecycle !== action.expectedAttemptLifecycle) {
+      throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    }
+    requireSameBinding(candidate.referenceBinding, action.referenceBinding);
+    if (candidate.provider !== action.resolvedProvider || candidate.cost.unit !== action.costAuthority.unit ||
+        candidate.cost.modeledValue !== action.costAuthority.modeledValue || candidate.cost.policySha256 !== action.costAuthority.policySha256 ||
+        action.costAuthority.modeledValue > action.costAuthority.maxModeledValue || action.costAuthority.maxModeledValue > candidate.cost.perShotCap) {
+      throw new BoundEpisodeError("COST_ADMISSION_BLOCKED");
+    }
   }
+}
+// The fresh checked re-preflight inspects exactly the reviewed attempt.
+function reviewedVisualAttemptSelection(plan: ControlledEpisodeAutomationPlan): Readonly<{ visualAttemptSelection?: VisualAttemptSelection }> {
+  const action = plan.actions[0];
+  return action.kind === "VISUAL_ATTEMPT_GENERATE"
+    ? { visualAttemptSelection: { shotId: action.shotId, attemptNumber: action.attemptNumber } } : {};
 }
 export async function assertCheckedEpisodeAdmission(context: CheckedEpisodeExecutionContext): Promise<void> {
   const data = checkedEpisodeExecutionData(context);
@@ -226,7 +243,8 @@ export async function assertCheckedEpisodeAdmission(context: CheckedEpisodeExecu
   const fresh = await data.preflight({ episodeId: data.plan.episodeId, scope: data.plan.scope,
     mediaRoot: data.plan.inputBinding.runtimeIdentity.mediaRoot, runtimeIdentity: data.plan.inputBinding.runtimeIdentity,
     expectedBinding: data.plan.inputBinding, evidenceAdoptions: data.plan.evidenceAdoptions,
-    ...(data.plan.inputBinding.runtimeIdentity.ffprobe ? { ffprobeExecutable: data.plan.inputBinding.runtimeIdentity.ffprobe.canonicalPath } : {}) });
+    ...(data.plan.inputBinding.runtimeIdentity.ffprobe ? { ffprobeExecutable: data.plan.inputBinding.runtimeIdentity.ffprobe.canonicalPath } : {}),
+    ...reviewedVisualAttemptSelection(data.plan) });
   assertReviewedEpisodeAction(data.plan, fresh);
   if (bindingDigest(fresh.observations) !== data.plan.observationsSha256) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
 }

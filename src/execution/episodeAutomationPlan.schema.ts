@@ -89,6 +89,10 @@ const BoundGenerate = Target.extend({ kind: z.literal("VISUAL_GENERATE"), expect
 const BoundReconcile = Target.extend({ kind: z.literal("VISUAL_RECONCILE"), expectedLifecycle: z.literal("SUBMITTED"),
   reservationId: z.string().uuid(), durableProvider: Provider, providerExecutionIdentitySha256: Digest,
   submissionSha256: Digest, reservationSha256: Digest, confirmReconciliation: z.literal(true) }).strict();
+// B5 Slice-2I-A: a distinct family; never VISUAL_GENERATE with an attempt.
+const BoundAttemptGenerate = Target.extend({ kind: z.literal("VISUAL_ATTEMPT_GENERATE"), attemptNumber: SafeInteger.min(2),
+  expectedAttemptLifecycle: z.literal("ADMITTED_ONLY"), resolvedProvider: z.literal("GOOGLE_GENAI"),
+  referenceBinding: ReferenceBinding, costAuthority: CostAuthority, confirmPaidGeneration: z.literal(true) }).strict();
 const ControlledPlan = z.object({ schemaVersion: z.literal("2.0"), mode: z.literal("CONTROLLED_VISUAL"),
   episodeId: ExecutionReservationEpisodeIdSchema, scope: Scope, inputBinding: InputBinding,
   inputBindingSha256: Digest, observations: z.array(Observation).min(1), observationsSha256: Digest,
@@ -96,7 +100,7 @@ const ControlledPlan = z.object({ schemaVersion: z.literal("2.0"), mode: z.liter
   maximumNewProviderCreates: z.union([z.literal(0), z.literal(1)]),
   operatingCondition: z.object({ singleOperator: z.literal(true), noConcurrentAuthoring: z.literal(true),
     noUnguardedRunners: z.literal(true) }).strict(),
-  actions: z.tuple([z.discriminatedUnion("kind", [BoundGenerate, BoundReconcile])]),
+  actions: z.tuple([z.discriminatedUnion("kind", [BoundGenerate, BoundReconcile, BoundAttemptGenerate])]),
 }).strict();
 
 function parseControlledPlan(input: unknown): ControlledEpisodeAutomationPlan {
@@ -105,7 +109,7 @@ function parseControlledPlan(input: unknown): ControlledEpisodeAutomationPlan {
   const plan = result.data;
   const action = plan.actions[0];
   if (plan.episodeId !== plan.inputBinding.episodeId || action.episodeId !== plan.episodeId ||
-      plan.maximumNewProviderCreates !== (action.kind === "VISUAL_GENERATE" ? 1 : 0)) {
+      plan.maximumNewProviderCreates !== (action.kind === "VISUAL_RECONCILE" ? 0 : 1)) {
     throw planError("Controlled action identity or create allowance is inconsistent.");
   }
   requireSameBinding(plan.scope, plan.inputBinding.scope);
@@ -125,8 +129,13 @@ function parseControlledPlan(input: unknown): ControlledEpisodeAutomationPlan {
   requireSameBinding(target, { episodeId: action.episodeId, sceneId: action.sceneId, shotId: action.shotId, order: action.order });
   requireSameBinding(plan.observations.map(row => row.target), targets);
   const observed = plan.observations.find(row => row.target.shotId === action.shotId);
-  if (!observed || observed.lifecycle !== action.expectedLifecycle) throw planError("Action observation does not match.");
-  if (action.kind === "VISUAL_GENERATE") {
+  // The attempt lifecycle is not a legacy observation; the legacy row must
+  // merely be unambiguous (legacy COMPLETED neither blocks nor authorizes).
+  if (!observed || (action.kind === "VISUAL_ATTEMPT_GENERATE"
+    ? !["NOTHING", "COMPLETED"].includes(observed.lifecycle) : observed.lifecycle !== action.expectedLifecycle)) {
+    throw planError("Action observation does not match.");
+  }
+  if (action.kind === "VISUAL_GENERATE" || action.kind === "VISUAL_ATTEMPT_GENERATE") {
     if (action.referenceBinding.shotId !== action.shotId || action.referenceBinding.order !== action.order ||
         !action.referenceBinding.approvedAssetIds.includes(action.referenceBinding.assetId) ||
         action.referenceBinding.shotApprovalStatus !== "APPROVED" ||

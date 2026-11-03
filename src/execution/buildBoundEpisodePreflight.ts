@@ -14,6 +14,7 @@ import { resolveDurableEpisodeProductionState } from "./resolveDurableEpisodePro
 import { resolveDurableShotVisualGenerationState } from "./resolveDurableShotVisualGenerationState.js";
 import { resolveDurableShotExecutionReadiness } from "./resolveDurableShotExecutionReadiness.js";
 import { inspectExecutionLifecycle } from "./inspectExecutionLifecycle.js";
+import { inspectVisualAttemptExecutionLifecycle } from "./inspectVisualAttemptExecutionLifecycle.js";
 import { verifyLocalCompletedVisualExecution } from "./verifyLocalCompletedVisualExecution.js";
 import { VisualReferenceAssetRegistrySchema } from "./visualReferenceAsset.schema.js";
 import { verifyApprovedVisualReferenceAsset } from "./verifyApprovedVisualReferenceAsset.js";
@@ -22,7 +23,7 @@ import { DialogueVisualAuthorizationSchema } from "./dialogueVisualAuthorization
 import { createExecutionReservationPath } from "./executionReservationPath.js";
 import { createExecutionSubmissionPath } from "./executionSubmissionPath.js";
 import { createExecutionCompletionPath } from "./executionCompletionPath.js";
-import { ExecutionReservationEpisodeIdSchema } from "./executionReservation.schema.js";
+import { ExecutionReservationEpisodeIdSchema, ExecutionReservationShotIdSchema } from "./executionReservation.schema.js";
 import { evaluateGoogleGenAiLocalAdmission, GoogleGenAiOperatorError } from "./evaluateGoogleGenAiLocalAdmission.js";
 import { buildGoogleGenAiSingleShotPrompt } from "./providers/buildGoogleGenAiSingleShotPrompt.js";
 import { computeGoogleGenAiExpectedCost } from "../googleGenai/googleGenAiExpectedCost.js";
@@ -39,6 +40,7 @@ import { bindingDigest, freezeBoundCopy, requireSameBinding, BoundEpisodeError,
   type ActionCandidate, type BoundEpisodePreflight, type BucketCounts, type EvidenceAdoption, type FileBinding,
   type InputBindingBundle, type Issue, type IssueCode, type KnownCost, type ObservationBinding,
   type ReferenceBinding, type RuntimeIdentity, type Scope, type ShotPreflight, type Target, type VisualProvider,
+  type VisualAttemptObservation, type VisualAttemptSelection,
 } from "./boundEpisodeProduction.types.js";
 
 // Only local readers, pure authorities and local completion verification.
@@ -50,16 +52,39 @@ export type BoundEpisodeReadDependencies = Readonly<{
   resolveDialogue: typeof resolveDurableShotDialogueCompositionState;
   verifyComplete: typeof verifyLocalCompletedVisualExecution;
   verifyReference: typeof verifyApprovedVisualReferenceAsset;
+  // Read only for an explicit visualAttemptSelection.
+  inspectVisualAttempt?: typeof inspectVisualAttemptExecutionLifecycle;
 }>;
 const localReaders: BoundEpisodeReadDependencies = Object.freeze({ readFile: readBoundFile,
   inspectLifecycle: inspectExecutionLifecycle, resolveEpisode: resolveDurableEpisodeProductionState,
   resolveVisual: resolveDurableShotVisualGenerationState, resolveDialogue: resolveDurableShotDialogueCompositionState,
-  verifyComplete: verifyLocalCompletedVisualExecution, verifyReference: verifyApprovedVisualReferenceAsset });
+  verifyComplete: verifyLocalCompletedVisualExecution, verifyReference: verifyApprovedVisualReferenceAsset,
+  inspectVisualAttempt: inspectVisualAttemptExecutionLifecycle });
 export type BoundEpisodePreflightInput = Readonly<{
   episodeId: string; scope?: Scope; mediaRoot: string; ffprobeExecutable?: string;
   runtimeIdentity: RuntimeIdentity; expectedBinding?: InputBindingBundle;
   evidenceAdoptions?: readonly EvidenceAdoption[];
+  visualAttemptSelection?: VisualAttemptSelection;
 }>;
+// Exactly { shotId, attemptNumber }: no caller lineage, provider, scene or
+// reference field, and never an inferred or incremented attempt.
+function requireVisualAttemptSelection(value: unknown): VisualAttemptSelection {
+  if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new TypeError("Invalid visual attempt selection.");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 2 || !keys.includes("shotId") || !keys.includes("attemptNumber") ||
+      !Object.hasOwn(descriptors.shotId!, "value") || !Object.hasOwn(descriptors.attemptNumber!, "value")) {
+    throw new TypeError("Invalid visual attempt selection.");
+  }
+  const attemptNumber: unknown = descriptors.attemptNumber!.value;
+  const shot = ExecutionReservationShotIdSchema.safeParse(descriptors.shotId!.value);
+  if (typeof attemptNumber !== "number" || !Number.isSafeInteger(attemptNumber) || attemptNumber < 2 || !shot.success) {
+    throw new TypeError("Invalid visual attempt selection.");
+  }
+  return Object.freeze({ shotId: shot.data, attemptNumber });
+}
 export function episodeIssue(code: IssueCode, target: Target | null, phase: Issue["phase"], cause?: unknown,
   actionMayHaveEffects = false): Issue {
   const field = (key: string): string | null => {
@@ -105,6 +130,11 @@ export async function readSelectedVisualPostObservation(mediaRoot: string, targe
 export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInput,
   dependencies: BoundEpisodeReadDependencies = localReaders): Promise<BoundEpisodePreflight> {
   const episodeId = ExecutionReservationEpisodeIdSchema.parse(input.episodeId);
+  // Rejected before any read; absent means exactly the legacy preflight.
+  const selection = input.visualAttemptSelection === undefined ? null : requireVisualAttemptSelection(input.visualAttemptSelection);
+  let attemptObservation: VisualAttemptObservation | null = selection === null ? null
+    : { shotId: selection.shotId, attemptNumber: selection.attemptNumber, lifecycle: "UNEVALUATED", reasons: [] };
+  let attemptCandidate: Extract<ActionCandidate, { kind: "VISUAL_ATTEMPT_GENERATE" }> | null = null;
   const root = input.runtimeIdentity.repositoryRoot;
   if (resolve(root) !== root || input.runtimeIdentity.mediaRoot !== input.mediaRoot) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   if (input.ffprobeExecutable && input.ffprobeExecutable !== input.runtimeIdentity.ffprobe?.canonicalPath) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
@@ -371,6 +401,7 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
       handoffCompatibility: (observation.durableProvider ?? resolvedProvider) === "GOOGLE_GENAI" ? "HANDOFF_UNSUPPORTED_FOR_PROVIDER"
         : (observation.durableProvider ?? resolvedProvider) ? "SUPPORTED_PROVIDER" : "UNKNOWN" });
   }
+  if (selection) await evaluateVisualAttempt(selection);
   // A second read detects observed drift; it is not a claim of hostile-writer
   // resistance or immutable path handles. Controlled no-edit ownership remains
   // an independent execution prerequisite.
@@ -404,6 +435,87 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
   }
   return finish(rows, targets, observations, fatal, binding, scope);
 
+  // B5 Slice-2I-A: inspect exactly the selected attempt once. Its durable
+  // attempt lifecycle is the only authority; the legacy shot lifecycle
+  // (including Attempt-1 COMPLETED) neither blocks nor grants it. Google
+  // policies are bound for every valid selection, independent of lifecycle.
+  async function evaluateVisualAttempt(selected: VisualAttemptSelection): Promise<void> {
+    const matches = entries.filter(row => row.target.shotId === selected.shotId);
+    const entry = matches.length === 1 ? matches[0]! : null;
+    const target = entry?.target ?? null;
+    const row = rows.find(shot => shot.shotId === selected.shotId);
+    const reasons: Issue[] = [];
+    let lifecycle: VisualAttemptObservation["lifecycle"] = "UNEVALUATED";
+    const record = (): void => {
+      attemptObservation = { shotId: selected.shotId, attemptNumber: selected.attemptNumber, lifecycle, reasons };
+    };
+    if (!entry || !row || !scope.shotIds.includes(selected.shotId)) {
+      reasons.push(episodeIssue("INPUT_BINDING_DRIFT", target, "LOAD")); return record();
+    }
+    try {
+      const inspected = await (dependencies.inspectVisualAttempt ?? inspectVisualAttemptExecutionLifecycle)(
+        input.mediaRoot, episodeId, selected.shotId, selected.attemptNumber);
+      const state: unknown = inspected.state;
+      lifecycle = state === "NOT_ADMITTED" || state === "ADMITTED_ONLY" || state === "RESERVED_ONLY" ||
+        state === "SUBMITTED" || state === "COMPLETED" ? state : "INVALID";
+      if (lifecycle === "INVALID") reasons.push(episodeIssue("INVALID_DURABLE_STATE", target, "OBSERVATION"));
+      else if (lifecycle === "NOT_ADMITTED") reasons.push(episodeIssue("PROVIDER_ADMISSION_BLOCKED", target, "ADMISSION"));
+      else if (lifecycle === "RESERVED_ONLY") reasons.push(episodeIssue("RESERVED_ONLY_MANUAL_ADJUDICATION", target, "ADMISSION"));
+      else if (lifecycle === "SUBMITTED") reasons.push(episodeIssue("SUBMITTED_RECOVERY_REQUIRED", target, "ADMISSION"));
+      if (inspected.state === "ADMITTED_ONLY" && lifecycle === "ADMITTED_ONLY") {
+        const admission = inspected.admission?.record;
+        if (!admission || admission.status !== "ADMITTED" ||
+            inspected.episodeId !== episodeId || admission.episodeId !== episodeId ||
+            inspected.sceneId !== entry.target.sceneId || admission.sceneId !== entry.target.sceneId ||
+            inspected.shotId !== selected.shotId || admission.shotId !== selected.shotId ||
+            inspected.attemptNumber !== selected.attemptNumber || admission.attemptNumber !== selected.attemptNumber ||
+            inspected.provider !== "GOOGLE_GENAI" || admission.provider !== "GOOGLE_GENAI") {
+          lifecycle = "INVALID"; reasons.push(episodeIssue("INVALID_DURABLE_STATE", target, "OBSERVATION"));
+        } else {
+          // Control-plane freshness only: the single reviewed raw MANIFEST is
+          // the admitted manifest. The attempt operator rechecks it again.
+          const manifests = [...new Map(files.filter(file => file.role === "MANIFEST").map(file => [file.canonicalPath, file])).values()];
+          const manifest = manifests.length === 1 ? manifests[0]! : null;
+          if (!manifest?.exists || typeof manifest.rawSha256 !== "string" || !/^[0-9a-f]{64}$/.test(manifest.rawSha256) ||
+              manifest.rawSha256 !== admission.manifestRawSha256) reasons.push(episodeIssue("INPUT_BINDING_DRIFT", target, "OBSERVATION"));
+        }
+      }
+    } catch (error) { lifecycle = "INVALID"; reasons.push(episodeIssue("INVALID_DURABLE_STATE", target, "OBSERVATION", error)); }
+    const { shot } = entry;
+    let cost: KnownCost | null = null;
+    try {
+      const p = required(await load(resolve(root, "config/google-genai-policy.json"), "GOOGLE_POLICY", v => GoogleGenAiPolicySchema.parse(v), true));
+      const pricingHash = files[files.length - 1]!.rawSha256!;
+      const a = required(await load(resolve(root, "config/google-genai-activation-policy.json"), "GOOGLE_ACTIVATION", v => GoogleGenAiActivationPolicySchema.parse(v), true));
+      const hash = files[files.length - 1]!.rawSha256!;
+      const expected = computeGoogleGenAiExpectedCost({ resolution: "720p", pricing: p.pricing, cost: a.cost });
+      cost = { status: "KNOWN", unit: "MICRO_USD", modeledValue: checked(expected.expectedMicroUsd), perShotCap: checked(expected.maxExpectedCostMicroUsd),
+        policySha256: hash, pricingSha256: pricingHash, normalizedMicroUsd: { status: "KNOWN", value: expected.expectedMicroUsd },
+        billingKnown: false, costScope: "NEW_GENERATION_ESTIMATE", includesReserve: true };
+      if (!a.admission.newSubmissionsEnabled) {
+        reasons.push(episodeIssue("PROVIDER_ACTIVATION_BLOCKED", target, "ADMISSION", new GoogleGenAiOperatorError("NEW_SUBMISSIONS_DISABLED", "ADMISSION")));
+      }
+      if (shot.generation.provider !== "GOOGLE_GENAI") throw new BoundEpisodeError("PROVIDER_ADMISSION_BLOCKED");
+      await evaluateGoogleGenAiLocalAdmission(context, shot, a);
+      buildGoogleGenAiSingleShotPrompt(shot);
+      if (!row.selectedReference) {
+        reasons.push(episodeIssue(row.referenceBindings.length > 1 ? "REFERENCE_SELECTION_REQUIRED" : "REFERENCE_UNAVAILABLE", target, "ADMISSION"));
+      } else {
+        await readGoogleGenAiReferenceImage({ mediaRoot: input.mediaRoot, sourceImagePath: row.selectedReference.canonicalAbsolutePath,
+          expectedMimeType: row.selectedReference.contentType, maxBytes: a.limits.maxReferenceImageBytes });
+      }
+    } catch (error) {
+      const code: IssueCode = error instanceof BoundEpisodeError ? error.code
+        : error instanceof GoogleGenAiOperatorError ? "PROVIDER_ADMISSION_BLOCKED" : "COST_ADMISSION_BLOCKED";
+      reasons.push(episodeIssue(code, target, code === "INPUT_BINDING_DRIFT" ? "OBSERVATION" : "ADMISSION", error));
+    }
+    if (lifecycle === "ADMITTED_ONLY" && !reasons.length && cost && row.selectedReference) {
+      attemptCandidate = { ...entry.target, kind: "VISUAL_ATTEMPT_GENERATE", attemptNumber: selected.attemptNumber,
+        expectedAttemptLifecycle: "ADMITTED_ONLY", provider: "GOOGLE_GENAI", referenceBinding: row.selectedReference, cost };
+    }
+    record();
+  }
+
   async function finish(shots: readonly ShotPreflight[], targets: readonly Target[] | null,
     observed: readonly ObservationBinding[], fatalReasons: readonly Issue[], binding: InputBindingBundle | null,
     scope: Scope): Promise<BoundEpisodePreflight> {
@@ -419,7 +531,11 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
     try {
       await lstat(resolve(input.mediaRoot, "generated-video", episodeId, ".episode-execution-guard.json")); ownership = "CONFLICT";
     } catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) ownership = "UNKNOWN"; }
-    if (complete && alignment && frontier?.inScope && !shots.some(shot => shot.disposition === "ERROR")) {
+    if (selection) {
+      // The selected attempt is the only visual generation candidate under
+      // consideration; no fresh frontier is ever substituted for it.
+      if (complete && alignment && !ambiguity && !shots.some(shot => shot.disposition === "ERROR") && attemptCandidate) candidate = attemptCandidate;
+    } else if (complete && alignment && frontier?.inScope && !shots.some(shot => shot.disposition === "ERROR")) {
       const target = { episodeId, sceneId: frontier.sceneId, shotId: frontier.shotId, order: frontier.order };
       if (frontier.disposition === "READY" && !ambiguity && frontier.selectedReference && frontier.resolvedProvider && frontier.cost.status === "KNOWN") {
         candidate = { ...target, kind: "VISUAL_GENERATE", expectedLifecycle: "NOTHING", provider: frontier.resolvedProvider,
@@ -457,8 +573,9 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
       completion: complete && alignment && shots.filter(shot => shot.inScope).every(shot => shot.disposition === "COMPLETED")
         ? scope.kind === "EPISODE_SCOPE" ? "VISUAL_PRODUCTION_COMPLETE" : "SELECTED_SCOPE_COMPLETE" : "INCOMPLETE",
       intentAlignment: alignment ? "REVIEWED" : "REVIEW_REQUIRED", handoff,
-      generationMayBeAuthorized: candidate?.kind === "VISUAL_GENERATE" && ownership === "ABSENT",
+      generationMayBeAuthorized: (candidate?.kind === "VISUAL_GENERATE" || candidate?.kind === "VISUAL_ATTEMPT_GENERATE") && ownership === "ABSENT",
       recoveryMayBeAuthorized: candidate?.kind === "VISUAL_RECONCILE" && ownership === "ABSENT",
-      ownership: { observed: ownership, requiresAcquisition: true } });
+      ownership: { observed: ownership, requiresAcquisition: true },
+      ...(attemptObservation ? { visualAttempt: attemptObservation } : {}) });
   }
 }

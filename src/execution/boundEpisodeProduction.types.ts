@@ -45,7 +45,18 @@ export type BoundVisualAction =
       referenceBinding: ReferenceBinding; costAuthority: CostAuthority; confirmPaidGeneration: true }>
   | Readonly<Target & { kind: "VISUAL_RECONCILE"; expectedLifecycle: "SUBMITTED"; reservationId: string;
       durableProvider: VisualProvider; providerExecutionIdentitySha256: string; submissionSha256: string;
-      reservationSha256: string; confirmReconciliation: true }>;
+      reservationSha256: string; confirmReconciliation: true }>
+  // B5 Slice-2I-A: an explicitly selected, durably admitted replacement
+  // attempt. Admission/reservation/provider lineage stays durable authority.
+  | Readonly<Target & { kind: "VISUAL_ATTEMPT_GENERATE"; attemptNumber: number; expectedAttemptLifecycle: "ADMITTED_ONLY";
+      resolvedProvider: "GOOGLE_GENAI"; referenceBinding: ReferenceBinding; costAuthority: CostAuthority; confirmPaidGeneration: true }>;
+// Explicit caller selection only; the episode comes from the preflight input.
+export type VisualAttemptSelection = Readonly<{ shotId: string; attemptNumber: number }>;
+export type VisualAttemptObservation = DeepReadonly<{
+  shotId: string; attemptNumber: number;
+  lifecycle: "NOT_ADMITTED" | "ADMITTED_ONLY" | "RESERVED_ONLY" | "SUBMITTED" | "COMPLETED" | "INVALID" | "UNEVALUATED";
+  reasons: readonly Issue[];
+}>;
 export type ControlledEpisodeAutomationPlan = DeepReadonly<{
   schemaVersion: "2.0"; mode: "CONTROLLED_VISUAL"; episodeId: string; scope: Scope;
   inputBinding: InputBindingBundle; inputBindingSha256: string; observations: readonly ObservationBinding[];
@@ -98,7 +109,9 @@ export type ActionCandidate =
   | Readonly<Target & { kind: "VISUAL_GENERATE"; expectedLifecycle: "NOTHING"; provider: VisualProvider;
       referenceBinding: ReferenceBinding; cost: KnownCost; observationSha256: string }>
   | Readonly<Target & { kind: "VISUAL_RECONCILE"; expectedLifecycle: "SUBMITTED"; provider: VisualProvider;
-      observation: ObservationBinding; observationSha256: string }>;
+      observation: ObservationBinding; observationSha256: string }>
+  | Readonly<Target & { kind: "VISUAL_ATTEMPT_GENERATE"; attemptNumber: number; expectedAttemptLifecycle: "ADMITTED_ONLY";
+      provider: "GOOGLE_GENAI"; referenceBinding: ReferenceBinding; cost: KnownCost }>;
 export type VisualCompletion = "INCOMPLETE" | "VISUAL_PRODUCTION_COMPLETE" | "SELECTED_SCOPE_COMPLETE";
 export type ReadonlyHandoffReport = DeepReadonly<{ issues: readonly Issue[]; editorialReady: false;
   e9Consumption: "NOT_INTEGRATED_IN_PAID_VISUAL_PATH" }>;
@@ -114,6 +127,8 @@ export type BoundEpisodePreflight = DeepReadonly<{
   intentAlignment: "REVIEW_REQUIRED" | "REVIEWED"; handoff: ReadonlyHandoffReport;
   generationMayBeAuthorized: boolean; recoveryMayBeAuthorized: boolean;
   ownership: { observed: "ABSENT" | "CONFLICT" | "UNKNOWN"; requiresAcquisition: true };
+  // Present only for an explicit visualAttemptSelection.
+  visualAttempt?: VisualAttemptObservation;
 }>;
 export type BoundEpisodeActionResult = DeepReadonly<{
   episodeId: string; action: BoundVisualAction | null; beforePlan: BoundEpisodePreflight; afterPlan: BoundEpisodePreflight | null;

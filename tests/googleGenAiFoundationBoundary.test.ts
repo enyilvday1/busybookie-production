@@ -52,6 +52,8 @@ const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  // B5 Slice-2D: read-only attempt-aware lifecycle inspection (generation-record/output identity only).
+  "src/execution/inspectVisualAttemptExecutionLifecycle.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
   "src/execution/providers/materializeGoogleGenAiSingleShotOutput.ts",
@@ -176,6 +178,8 @@ const GOOGLE_RECONCILIATION_FORBIDDEN_PATTERN =
 
 const GOOGLE_READ_ONLY_RECONCILIATION_SOURCES = [
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  // B5 Slice-2D: attempt-aware inspection is read-only by contract.
+  "src/execution/inspectVisualAttemptExecutionLifecycle.ts",
   "src/execution/verifyGoogleGenAiDurableCompletion.ts",
 ] as const;
 
@@ -272,6 +276,36 @@ const VISUAL_ATTEMPT_COMPLETION_WRITER_FOUNDATION_IMPORTS = [
   "../googleGenai/output/googleGenAiVideoOutputPath.js",
 ] as const;
 
+// B5 Slice-2D: read-only attempt-aware lifecycle inspector. It may consume only
+// the generation-record schema/path and canonical output path authorities, and
+// the four attempt-aware evidence readers; never a writer, provider module,
+// legacy lifecycle reader, activation policy or SDK.
+const VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR =
+  "src/execution/inspectVisualAttemptExecutionLifecycle.ts";
+
+const VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_FOUNDATION_IMPORTS = [
+  "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+  "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+  "../googleGenai/output/googleGenAiVideoOutputPath.js",
+] as const;
+
+const VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_IMPORTS = [
+  "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+  "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+  "../googleGenai/output/googleGenAiVideoOutputPath.js",
+  "./readVisualAttemptAdmission.js",
+  "./readVisualAttemptExecutionCompletion.js",
+  "./readVisualAttemptExecutionReservation.js",
+  "./readVisualAttemptExecutionSubmission.js",
+  "./visualAttemptExecutionLifecycle.schema.js",
+  "./visualAttemptNumber.schema.js",
+  "node:crypto",
+  "node:fs/promises",
+] as const;
+
+const VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_FORBIDDEN_PATTERN =
+  /@google\/genai|process\.env|loadEnvironment|\bfetch\s*\(|node:https?|node:net|node:child_process|\/providers\/|\/transport\/|googleGenAi\.types|readGoogleGenAiGenerationRecord|newSubmissionsEnabled|ActivationPolicy|\breadExecution(?:Reservation|Submission|Completion)\b|\bcreateExecution(?:Reservation|Submission|Completion)\b|\bcreateVisualAttempt|visualAttemptExecutionRecordPersistence|publishVisualAttemptExecutionRecordCreateOnce|\blstat\b|\brealpath\b|\bstat\s*\(|createReadStream|\/runway\/|\/veo\/|\/routing\/|\/cli\//;
+
 const GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN =
   /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion|createVisualAttemptExecutionCompletion|readVisualAttemptExecutionCompletion/;
 
@@ -280,6 +314,8 @@ const GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS = [
   "src/execution/classifyExecutionLifecycle.ts",
   "src/execution/createVisualAttemptExecutionCompletion.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  // B5 Slice-2D: read-only attempt-aware inspection (completion reader + generation-record schema/path).
+  "src/execution/inspectVisualAttemptExecutionLifecycle.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/readGoogleGenAiExecutionCompletion.ts",
   "src/execution/reconcileGoogleGenAiExecutionLifecycle.ts",
@@ -455,6 +491,8 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
   "src/execution/inspectExecutionLifecycle.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
+  // B5 Slice-2D: names only the canonical Google output index constant.
+  "src/execution/inspectVisualAttemptExecutionLifecycle.ts",
   "src/execution/providers/buildGoogleGenAiSingleShotPrompt.ts",
   "src/execution/providers/createGoogleGenAiSingleShotProductionInteractionCreator.ts",
   "src/execution/providers/createGoogleGenAiSingleShotSecureProductionRecovery.ts",
@@ -884,6 +922,20 @@ describe(
         ).toEqual(
           [
             ...VISUAL_ATTEMPT_COMPLETION_WRITER_FOUNDATION_IMPORTS,
+          ].sort(),
+        );
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR,
+              ),
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            ...VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_FOUNDATION_IMPORTS,
           ].sort(),
         );
 
@@ -1508,6 +1560,98 @@ describe(
         ).toEqual([
           ...GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS,
         ]);
+      },
+    );
+
+    it(
+      "keeps the attempt-aware visual lifecycle inspector on its exact read-only import set with no SDK, provider, legacy lifecycle, writer, activation, or output-byte authority",
+      async () => {
+        const raw =
+          await readFile(
+            join(
+              ROOT,
+              VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR,
+            ),
+            "utf8",
+          );
+
+        const code =
+          raw
+            .replace(
+              /\/\*[\s\S]*?\*\//g,
+              "",
+            )
+            .replace(
+              /\/\/.*$/gm,
+              "",
+            );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                raw,
+              ),
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            ...VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_IMPORTS,
+          ].sort(),
+        );
+
+        expect(
+          RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+            raw,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          importSpecifiers(
+            raw,
+          ).filter(
+            (specifier) =>
+              GOOGLE_ACTIVATION_AUTHORITY_SPECIFIER_PATTERN.test(
+                specifier,
+              ),
+          ),
+        ).toEqual(
+          [],
+        );
+
+        expect(
+          VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_FORBIDDEN_PATTERN.test(
+            code,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          GOOGLE_COMPLETION_PERSISTENCE_FORBIDDEN_PATTERN.test(
+            code,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN.test(
+            code,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          READ_ONLY_FORBIDDEN_WRITE_PATTERN.test(
+            code,
+          ),
+        ).toBe(
+          false,
+        );
       },
     );
 

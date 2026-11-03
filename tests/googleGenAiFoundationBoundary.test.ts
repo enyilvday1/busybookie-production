@@ -48,6 +48,8 @@ const APPROVED_FOUNDATION_CONSUMERS = [
   // B5C-X1: the single shared composition point for the reused Google orchestrator.
   "src/execution/createProductionSingleShotExecutionDependencies.ts",
   "src/execution/createVisualAttemptExecutionCompletion.ts",
+  // B5 Slice-2F: dormant attempt-aware generation-record writer (record schema/path and output path only).
+  "src/execution/createVisualAttemptGenerationRecord.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
@@ -201,6 +203,17 @@ const GOOGLE_COMPLETION_PERSISTENCE_SOURCES = {
     "node:fs/promises",
     "node:path",
   ],
+  "src/execution/createVisualAttemptGenerationRecord.ts": [
+    "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+    "../googleGenai/output/googleGenAiVideoOutputPath.js",
+    "./inspectVisualAttemptExecutionLifecycle.js",
+    "./visualAttemptExecutionRecordPersistence.js",
+    "node:crypto",
+    "node:fs/promises",
+    "node:path",
+    "node:util",
+  ],
   "src/execution/readVisualAttemptExecutionCompletion.ts": [
     "./visualAttemptExecutionLifecycle.schema.js",
     "./visualAttemptExecutionPaths.js",
@@ -276,6 +289,35 @@ const VISUAL_ATTEMPT_COMPLETION_WRITER_FOUNDATION_IMPORTS = [
   "../googleGenai/output/googleGenAiVideoOutputPath.js",
 ] as const;
 
+// B5 Slice-2F: dormant attempt-aware Google generation-record writer. It takes
+// identity only from the Slice-2D inspector, verifies already-present canonical
+// output bytes read-only and publishes through the shared create-once helper;
+// never an evidence reader, legacy lifecycle, provider, transport, output
+// creation, completion writer, activation policy or SDK.
+const VISUAL_ATTEMPT_GENERATION_RECORD_WRITER =
+  "src/execution/createVisualAttemptGenerationRecord.ts";
+
+const VISUAL_ATTEMPT_GENERATION_RECORD_WRITER_FOUNDATION_IMPORTS = [
+  "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+  "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+  "../googleGenai/output/googleGenAiVideoOutputPath.js",
+] as const;
+
+const VISUAL_ATTEMPT_GENERATION_RECORD_WRITER_IMPORTS = [
+  "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+  "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+  "../googleGenai/output/googleGenAiVideoOutputPath.js",
+  "./inspectVisualAttemptExecutionLifecycle.js",
+  "./visualAttemptExecutionRecordPersistence.js",
+  "node:crypto",
+  "node:fs/promises",
+  "node:path",
+  "node:util",
+] as const;
+
+const VISUAL_ATTEMPT_GENERATION_RECORD_WRITER_FORBIDDEN_PATTERN =
+  /@google\/genai|process\.env|loadEnvironment|\bfetch\s*\(|node:https?|node:net|node:child_process|\/providers\/|\/transport\/|googleGenAi\.types|readGoogleGenAiGenerationRecord|newSubmissionsEnabled|ActivationPolicy|ActivationLimits|\breadExecution(?:Reservation|Submission|Completion)\b|\bcreateExecution(?:Reservation|Submission|Completion)\b|inspectGoogleGenAiExecutionLifecycle|\binspectExecutionLifecycle\b|readVisualAttemptAdmission|readVisualAttemptExecution|createVisualAttemptExecution|retrieveOutput|materialize|recoverGoogleGenAi|persistGoogleGenAi|submitGoogleGenAi|interactions\.|\bfiles\.|createReadStream|createWriteStream|\/runway\/|\/veo\/|\/routing\/|\/cli\//;
+
 // B5 Slice-2D: read-only attempt-aware lifecycle inspector. It may consume only
 // the generation-record schema/path and canonical output path authorities, and
 // the four attempt-aware evidence readers; never a writer, provider module,
@@ -307,12 +349,14 @@ const VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_FORBIDDEN_PATTERN =
   /@google\/genai|process\.env|loadEnvironment|\bfetch\s*\(|node:https?|node:net|node:child_process|\/providers\/|\/transport\/|googleGenAi\.types|readGoogleGenAiGenerationRecord|newSubmissionsEnabled|ActivationPolicy|\breadExecution(?:Reservation|Submission|Completion)\b|\bcreateExecution(?:Reservation|Submission|Completion)\b|\bcreateVisualAttempt|visualAttemptExecutionRecordPersistence|publishVisualAttemptExecutionRecordCreateOnce|\blstat\b|\brealpath\b|\bstat\s*\(|createReadStream|\/runway\/|\/veo\/|\/routing\/|\/cli\//;
 
 const GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN =
-  /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion|createVisualAttemptExecutionCompletion|readVisualAttemptExecutionCompletion/;
+  /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion|createVisualAttemptExecutionCompletion|readVisualAttemptExecutionCompletion|createVisualAttemptGenerationRecord/;
 
 const GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS = [
   // B5C-R1: type-only Google COMPLETED lifecycle variant.
   "src/execution/classifyExecutionLifecycle.ts",
   "src/execution/createVisualAttemptExecutionCompletion.ts",
+  // B5 Slice-2F: dormant generation-record writer (schema/path only); nothing imports the writer itself.
+  "src/execution/createVisualAttemptGenerationRecord.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   // B5 Slice-2D: read-only attempt-aware inspection (completion reader + generation-record schema/path).
   "src/execution/inspectVisualAttemptExecutionLifecycle.ts",
@@ -482,6 +526,8 @@ const APPROVED_EXECUTION_GOOGLE_REFERENCES = [
   "src/execution/cli/runSingleShotExecutionCli.ts",
   "src/execution/createExecutionSubmission.ts",
   "src/execution/createProductionSingleShotExecutionDependencies.ts",
+  // B5 Slice-2F: names only the canonical Google output index and generation-record constants.
+  "src/execution/createVisualAttemptGenerationRecord.ts",
   "src/execution/episodeAutomationPlan.schema.ts",
   "src/execution/evaluateGoogleGenAiLocalAdmission.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
@@ -936,6 +982,20 @@ describe(
         ).toEqual(
           [
             ...VISUAL_ATTEMPT_LIFECYCLE_INSPECTOR_FOUNDATION_IMPORTS,
+          ].sort(),
+        );
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                VISUAL_ATTEMPT_GENERATION_RECORD_WRITER,
+              ),
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            ...VISUAL_ATTEMPT_GENERATION_RECORD_WRITER_FOUNDATION_IMPORTS,
           ].sort(),
         );
 
@@ -1648,6 +1708,150 @@ describe(
         expect(
           READ_ONLY_FORBIDDEN_WRITE_PATTERN.test(
             code,
+          ),
+        ).toBe(
+          false,
+        );
+      },
+    );
+
+    it(
+      "keeps the dormant attempt-aware generation-record writer on its exact import set with no SDK, provider, legacy lifecycle, evidence reader, output creation, completion writer, or non-create-once write authority",
+      async () => {
+        const raw =
+          await readFile(
+            join(
+              ROOT,
+              VISUAL_ATTEMPT_GENERATION_RECORD_WRITER,
+            ),
+            "utf8",
+          );
+
+        const code =
+          raw
+            .replace(
+              /\/\*[\s\S]*?\*\//g,
+              "",
+            )
+            .replace(
+              /\/\/.*$/gm,
+              "",
+            );
+
+        expect(
+          [
+            ...new Set(
+              importSpecifiers(
+                raw,
+              ),
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            ...VISUAL_ATTEMPT_GENERATION_RECORD_WRITER_IMPORTS,
+          ].sort(),
+        );
+
+        expect(
+          RUNTIME_GOOGLE_SDK_IMPORT_PATTERN.test(
+            raw,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          importSpecifiers(
+            raw,
+          ).filter(
+            (specifier) =>
+              GOOGLE_ACTIVATION_AUTHORITY_SPECIFIER_PATTERN.test(
+                specifier,
+              ),
+          ),
+        ).toEqual(
+          [],
+        );
+
+        expect(
+          VISUAL_ATTEMPT_GENERATION_RECORD_WRITER_FORBIDDEN_PATTERN.test(
+            raw,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          GOOGLE_COMPLETION_PERSISTENCE_FORBIDDEN_PATTERN.test(
+            raw,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          GOOGLE_RECOVERY_RUNTIME_FORBIDDEN_PATTERN.test(
+            raw,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          PROVIDER_OUTPUT_HELPER_PATTERN.test(
+            raw,
+          ),
+        ).toBe(
+          false,
+        );
+
+        // The only write is the shared create-once publication; no direct
+        // filesystem mutation API or writable open flag appears in code.
+        expect(
+          READ_ONLY_FORBIDDEN_WRITE_PATTERN.test(
+            code,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          code.match(
+            /\bpublishVisualAttemptExecutionRecordCreateOnce\s*\(/g,
+          ) ?? [],
+        ).toHaveLength(
+          1,
+        );
+
+        expect(
+          code.match(
+            /\binspectVisualAttemptExecutionLifecycle\s*\(/g,
+          ) ?? [],
+        ).toHaveLength(
+          2,
+        );
+
+        expect(
+          code,
+        ).toMatch(
+          /open\(\s*outputPath,\s*"r",\s*\)/,
+        );
+
+        expect(
+          (
+            GOOGLE_READ_ONLY_RECONCILIATION_SOURCES as readonly string[]
+          ).includes(
+            VISUAL_ATTEMPT_GENERATION_RECORD_WRITER,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          (
+            APPROVED_RUNTIME_GOOGLE_SDK_IMPORTERS as readonly string[]
+          ).includes(
+            VISUAL_ATTEMPT_GENERATION_RECORD_WRITER,
           ),
         ).toBe(
           false,

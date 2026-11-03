@@ -47,6 +47,7 @@ const APPROVED_FOUNDATION_CONSUMERS = [
   "src/execution/cli/runGoogleGenAiOperatorCli.ts",
   // B5C-X1: the single shared composition point for the reused Google orchestrator.
   "src/execution/createProductionSingleShotExecutionDependencies.ts",
+  "src/execution/createVisualAttemptExecutionCompletion.ts",
   "src/execution/executeGoogleGenAiOperatorSingleShot.ts",
   "src/execution/executionSubmission.schema.ts",
   "src/execution/googleGenAiExecutionCompletion.schema.ts",
@@ -182,6 +183,25 @@ const READ_ONLY_FORBIDDEN_WRITE_PATTERN =
   /\bwriteFile\b|\blink\s*\(|\bunlink\b|\bmkdir\b|\brename\b|\bcopyFile\b|\bappendFile\b|\btruncate\b|["'](?:w|wx|a|a\+|r\+|w\+)["']/;
 
 const GOOGLE_COMPLETION_PERSISTENCE_SOURCES = {
+  "src/execution/createVisualAttemptExecutionCompletion.ts": [
+    "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+    "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+    "../googleGenai/output/googleGenAiVideoOutputPath.js",
+    "./readVisualAttemptAdmission.js",
+    "./readVisualAttemptExecutionReservation.js",
+    "./readVisualAttemptExecutionSubmission.js",
+    "./visualAttemptExecutionLifecycle.schema.js",
+    "./visualAttemptExecutionPaths.js",
+    "./visualAttemptExecutionRecordPersistence.js",
+    "node:crypto",
+    "node:fs/promises",
+    "node:path",
+  ],
+  "src/execution/readVisualAttemptExecutionCompletion.ts": [
+    "./visualAttemptExecutionLifecycle.schema.js",
+    "./visualAttemptExecutionPaths.js",
+    "./visualAttemptExecutionRecordPersistence.js",
+  ],
   "src/googleGenai/audit/googleGenAiGenerationRecord.schema.ts": [
     "../../execution/executionReservation.schema.js",
     "../googleGenAi.types.js",
@@ -243,12 +263,22 @@ const GOOGLE_COMPLETION_PERSISTENCE_ADAPTER_FOUNDATION_IMPORTS = [
   "../../googleGenai/output/googleGenAiVideoOutputPath.js",
 ] as const;
 
+const VISUAL_ATTEMPT_COMPLETION_WRITER =
+  "src/execution/createVisualAttemptExecutionCompletion.ts";
+
+const VISUAL_ATTEMPT_COMPLETION_WRITER_FOUNDATION_IMPORTS = [
+  "../googleGenai/audit/googleGenAiGenerationRecord.schema.js",
+  "../googleGenai/audit/googleGenAiGenerationRecordPath.js",
+  "../googleGenai/output/googleGenAiVideoOutputPath.js",
+] as const;
+
 const GOOGLE_COMPLETION_PERSISTENCE_MODULE_PATTERN =
-  /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion/;
+  /googleGenAiGenerationRecord|googleGenAiExecutionCompletion|readGoogleGenAiGenerationRecord|readGoogleGenAiExecutionCompletion|persistGoogleGenAiSingleShotCompletion|createVisualAttemptExecutionCompletion|readVisualAttemptExecutionCompletion/;
 
 const GOOGLE_COMPLETION_PERSISTENCE_IMPORTERS = [
   // B5C-R1: type-only Google COMPLETED lifecycle variant.
   "src/execution/classifyExecutionLifecycle.ts",
+  "src/execution/createVisualAttemptExecutionCompletion.ts",
   "src/execution/inspectGoogleGenAiExecutionLifecycle.ts",
   "src/execution/providers/persistGoogleGenAiSingleShotCompletion.ts",
   "src/execution/readGoogleGenAiExecutionCompletion.ts",
@@ -840,6 +870,20 @@ describe(
         ).toEqual(
           [
             ...GOOGLE_COMPLETION_PERSISTENCE_ADAPTER_FOUNDATION_IMPORTS,
+          ].sort(),
+        );
+
+        expect(
+          [
+            ...new Set(
+              consumerImports.get(
+                VISUAL_ATTEMPT_COMPLETION_WRITER,
+              ),
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            ...VISUAL_ATTEMPT_COMPLETION_WRITER_FOUNDATION_IMPORTS,
           ].sort(),
         );
 

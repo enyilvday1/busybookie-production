@@ -511,11 +511,11 @@ describe("B5 Slice-2I-B visual attempt controlled dispatch boundary", () => {
       .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     // The attempt number is validated by the canonical replacement schema.
     expect(code).toMatch(/function requireConfirmedAttempt\([\s\S]*?VisualReplacementAttemptNumberSchema\s*\.parse\(\s*action\.attemptNumber,?\s*\)/);
-    const validation = code.indexOf('action.kind === "VISUAL_ATTEMPT_GENERATE") visualAttemptSelection = requireConfirmedAttempt(');
+    const validation = /if\s*\(\s*action\.kind\s*===\s*"VISUAL_ATTEMPT_GENERATE"\s*\)\s*\{\s*visualAttemptSelection\s*=\s*requireConfirmedAttempt\(\s*input\.episodeId\s*,\s*action\s*,?\s*\)\s*;\s*\}/.exec(code);
     const admission = code.indexOf("await assertCheckedEpisodeAdmission(");
     const dispatch = /action\.kind === "VISUAL_ATTEMPT_GENERATE"\)\s*\{[^}]*?dependencies\.runSingleShotExecutionCli\(\[([^\]]*)\]([^;]*);/.exec(code);
-    expect(validation).toBeGreaterThan(0);
-    expect(admission).toBeGreaterThan(validation);
+    expect(validation).not.toBeNull();
+    expect(admission).toBeGreaterThan(validation!.index + validation![0].length);
     expect(dispatch).not.toBeNull();
     expect(dispatch!.index).toBeGreaterThan(admission);
     const argv = dispatch![1]!;
@@ -524,6 +524,15 @@ describe("B5 Slice-2I-B visual attempt controlled dispatch boundary", () => {
     expect(dispatch![2]).toMatch(/input\.controlledContext\s*\)$/);
     expect(code).not.toMatch(/executeGoogleGenAiVisualAttemptSingleShot|inspectVisualAttemptExecutionLifecycle|createVisualAttemptExecutionReservation|createVisualAttemptExecutionSubmission|@google\/genai/);
     expect(code).not.toMatch(/executeGoogleGenAiVisualAttempt|VisualAttemptExecutionDependencies|inspectVisualAttempt|createVisualAttempt/);
+  });
+
+  it("the controlled attempt recovery branch dispatches only through the secured runner with the exact selection and context", async () => {
+    const code = (await readFile(new URL("../src/execution/coordinateEpisodeAction.ts", import.meta.url), "utf8"))
+      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const dispatch = /else\s+if\s*\(\s*action\.kind\s*===\s*"VISUAL_ATTEMPT_RECONCILE"\s*\)\s*\{\s*(await\s+dependencies\s*\.\s*runProductionVisualAttemptExecutionReconcile\([\s\S]*?)\}\s*else\s*\{/.exec(code);
+    expect(dispatch).not.toBeNull();
+    expect(dispatch![1]).toMatch(/^await\s+dependencies\s*\.\s*runProductionVisualAttemptExecutionReconcile\(\s*\{\s*episodeId\s*:\s*action\.episodeId\s*,\s*shotId\s*:\s*action\.shotId\s*,\s*attemptNumber\s*:\s*action\.attemptNumber\s*,?\s*\}\s*,\s*undefined\s*,\s*input\.controlledContext\s*,?\s*\)\s*;\s*$/);
+    expect(code.match(/dependencies\s*\.\s*runProductionVisualAttemptExecutionReconcile\s*\(/g)).toHaveLength(1);
   });
 });
 
@@ -769,7 +778,7 @@ describe("C6b L source boundary", () => {
   const sourceUrl = new URL("../src/execution/coordinateEpisodeAction.ts", import.meta.url);
   const strip = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  it("imports only canonical loaders, the read-only media-root resolver, id schemas, C4 and the four secured runners", async () => {
+  it("imports only canonical loaders, the read-only media-root resolver, id schemas, C4 and the five secured runners", async () => {
     const source = await readFile(sourceUrl, "utf8");
     const imports = [...source.matchAll(/import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"([^"]+)"/g)].map(
       (match) => `${match[2]}:${match[1]!.replace(/\s+/g, "")}`,
@@ -780,6 +789,7 @@ describe("C6b L source boundary", () => {
       "../validation/loadCharacterBible.js", "../validation/loadEnvironment.js", "../validation/loadEpisodeManifest.js",
       "../validation/loadProductionRules.js", "../validation/loadProviderRoutingPolicy.js", "../validation/validateMediaRoot.js",
       "./cli/runProductionExecutionReconcileCli.js", "./cli/runSingleShotExecutionCli.js", "./executionReservation.schema.js", "./resolveDurableEpisodeProductionState.js",
+      "./cli/runProductionVisualAttemptExecutionReconcile.js",
       "./visualAttemptNumber.schema.js",
       "./verifyVisualAttemptDurableCompletion.js",
     ]);

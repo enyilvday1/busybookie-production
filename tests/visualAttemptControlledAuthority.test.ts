@@ -75,10 +75,12 @@ async function fixture(options: Readonly<{ provider?: "RUNWAY" | "GOOGLE_GENAI";
   for (const name of ["characters.json", "provider-routing-policy.json", "runway-policy.json", "veo-policy.json", "google-genai-policy.json", "google-genai-activation-policy.json"]) {
     await writeFile(join(repositoryRoot, "config", name), await readFile(join("config", name)));
   }
-  if (options.activation ?? true) {
-    // Synthetic copy only; the repository activation policy stays default-off.
+  {
+    // Synthetic fixture owns its activation value explicitly. Repository
+    // activation state must never leak into this test contract.
     const path = join(repositoryRoot, "config/google-genai-activation-policy.json");
-    const policy = JSON.parse(await readFile(path, "utf8")); policy.admission.newSubmissionsEnabled = true;
+    const policy = JSON.parse(await readFile(path, "utf8"));
+    policy.admission.newSubmissionsEnabled = options.activation ?? true;
     await writeFile(path, JSON.stringify(policy));
   }
   const rules = ProductionRulesSchema.parse(JSON.parse(await readFile("config/production-rules.json", "utf8")));
@@ -120,11 +122,69 @@ function select(f: Fixture, attemptNumber = 2, extra: Readonly<{ evidenceAdoptio
   return buildBoundEpisodePreflight({ ...f.input, visualAttemptSelection: { shotId: "S01", attemptNumber }, ...extra }, dependencies);
 }
 
-function syntheticLifecycle(patch: (lifecycle: Extract<AttemptLifecycle, { state: "ADMITTED_ONLY" }>) => object) {
+function syntheticAttemptLifecycle(
+  lifecycle:
+    Extract<AttemptLifecycle, { state: "ADMITTED_ONLY" }>,
+
+  patch:
+    Readonly<Record<string, unknown>>,
+): AttemptLifecycle {
+  const next:
+    Readonly<Record<string, unknown>> = {
+      ...lifecycle,
+      ...patch,
+    };
+
+  if (next.state !== "SUBMITTED") {
+    return next as unknown as AttemptLifecycle;
+  }
+
+  return {
+    ...next,
+
+    reservationId:
+      "b5-synthetic-attempt2-reservation",
+
+    reservation: {
+      reservationSha256:
+        "e".repeat(64),
+    },
+
+    submission: {
+      submissionSha256:
+        "f".repeat(64),
+
+      record: {
+        provider:
+          "GOOGLE_GENAI",
+
+        providerExecutionId:
+          "v1_b5-synthetic-attempt2-interaction",
+      },
+    },
+  } as unknown as AttemptLifecycle;
+}
+
+function syntheticLifecycle(
+  patch:
+    (
+      lifecycle:
+        Extract<AttemptLifecycle, { state: "ADMITTED_ONLY" }>,
+    ) => Readonly<Record<string, unknown>>,
+) {
   return vi.fn(async (...args: Parameters<typeof inspectVisualAttemptExecutionLifecycle>) => {
     const lifecycle = await inspectVisualAttemptExecutionLifecycle(...args);
-    if (lifecycle.state !== "ADMITTED_ONLY") throw new Error("Synthetic lifecycle needs an admitted base.");
-    return { ...lifecycle, ...patch(lifecycle) } as unknown as AttemptLifecycle;
+
+    if (lifecycle.state !== "ADMITTED_ONLY") {
+      throw new Error(
+        "Synthetic lifecycle needs an admitted base.",
+      );
+    }
+
+    return syntheticAttemptLifecycle(
+      lifecycle,
+      patch(lifecycle),
+    );
   });
 }
 
@@ -321,7 +381,6 @@ describe("D. only ADMITTED_ONLY yields a candidate", () => {
   });
   it.each([
     ["RESERVED_ONLY", "RESERVED_ONLY", "RESERVED_ONLY_MANUAL_ADJUDICATION"],
-    ["SUBMITTED", "SUBMITTED", "SUBMITTED_RECOVERY_REQUIRED"],
     ["COMPLETED", "COMPLETED", null],
     ["RECONCILING", "INVALID", "INVALID_DURABLE_STATE"],
     [undefined, "INVALID", "INVALID_DURABLE_STATE"],
@@ -332,6 +391,105 @@ describe("D. only ADMITTED_ONLY yields a candidate", () => {
     if (code) expect(codes(report)).toContain(code);
     expect(report.nextActionCandidate).toBeNull(); expect(report.generationMayBeAuthorized).toBe(false);
   });
+
+  it("a valid synthetic SUBMITTED attempt yields exactly one zero-create recovery candidate", async () => {
+    const f = await fixture();
+    await admit(f);
+
+    const report =
+      await select(
+        f,
+        2,
+        {},
+        readers(
+          syntheticLifecycle(
+            () => ({
+              state:
+                "SUBMITTED",
+            }),
+          ),
+        ),
+      );
+
+    expect(
+      report.visualAttempt,
+    ).toMatchObject({
+      shotId:
+        "S01",
+
+      attemptNumber:
+        2,
+
+      lifecycle:
+        "SUBMITTED",
+    });
+
+    expect(
+      codes(
+        report,
+      ),
+    ).toContain(
+      "SUBMITTED_RECOVERY_REQUIRED",
+    );
+
+    expect(
+      report.nextActionCandidate,
+    ).toEqual({
+      episodeId:
+        "EP02",
+
+      sceneId:
+        "SC01",
+
+      shotId:
+        "S01",
+
+      order:
+        2,
+
+      kind:
+        "VISUAL_ATTEMPT_RECONCILE",
+
+      attemptNumber:
+        2,
+
+      expectedAttemptLifecycle:
+        "SUBMITTED",
+
+      provider:
+        "GOOGLE_GENAI",
+
+      reservationId:
+        "b5-synthetic-attempt2-reservation",
+
+      reservationSha256:
+        "e".repeat(64),
+
+      submissionSha256:
+        "f".repeat(64),
+
+      providerExecutionIdentitySha256:
+        rawSha256(
+          JSON.stringify([
+            "GOOGLE_GENAI",
+            "v1_b5-synthetic-attempt2-interaction",
+          ]),
+        ),
+    });
+
+    expect(
+      report.generationMayBeAuthorized,
+    ).toBe(
+      false,
+    );
+
+    expect(
+      report.recoveryMayBeAuthorized,
+    ).toBe(
+      true,
+    );
+  });
+
   it("malformed durable admission evidence fails closed", async () => {
     const f = await fixture();
     const path = createVisualAttemptAdmissionPath(f.mediaRoot, "EP02", "S01", 2);
@@ -479,7 +637,7 @@ async function admitExact(f: Fixture, overrides: Readonly<{ promptIdentitySha256
 
 function legacyPlan(before: BoundEpisodePreflight, evidenceAdoptions: readonly EvidenceAdoption[] = []): ControlledEpisodeAutomationPlan {
   const candidate = before.nextActionCandidate;
-  if (!before.binding || !before.bindingSha256 || !candidate || candidate.kind === "VISUAL_ATTEMPT_GENERATE") throw new Error("Fixture needs a legacy candidate.");
+  if (!before.binding || !before.bindingSha256 || !candidate || candidate.kind === "VISUAL_ATTEMPT_GENERATE" || candidate.kind === "VISUAL_ATTEMPT_RECONCILE") throw new Error("Fixture needs a legacy candidate.");
   const target = { episodeId: candidate.episodeId, sceneId: candidate.sceneId, shotId: candidate.shotId, order: candidate.order };
   const action = candidate.kind === "VISUAL_GENERATE"
     ? { ...target, kind: candidate.kind, expectedLifecycle: candidate.expectedLifecycle, resolvedProvider: candidate.provider,
@@ -625,7 +783,24 @@ describe("L. coordinator dispatch and attempt-aware post-action adjudication", (
     let settled = false;
     const inspector = vi.fn(async (...args: Parameters<typeof inspectVisualAttemptExecutionLifecycle>) => {
       const lifecycle = await inspectVisualAttemptExecutionLifecycle(...args);
-      return (settled && post && "state" in post ? { ...lifecycle, ...post } : lifecycle) as unknown as AttemptLifecycle;
+      if (
+        settled &&
+        post &&
+        "state" in post
+      ) {
+        if (lifecycle.state !== "ADMITTED_ONLY") {
+          throw new Error(
+            "Synthetic post-state needs an admitted Attempt base.",
+          );
+        }
+
+        return syntheticAttemptLifecycle(
+          lifecycle,
+          post,
+        );
+      }
+
+      return lifecycle;
     });
     const preflight = vi.fn(buildBoundEpisodePreflight);
     preflight.mockImplementation(input => buildBoundEpisodePreflight(input, readers(inspector)));

@@ -65,6 +65,7 @@ import type {
 import type {
   GoogleGenAiSubmittedRecoveryDependencies,
   reconcileGoogleGenAiExecutionLifecycle,
+  reconcileGoogleGenAiVisualAttemptExecutionLifecycle,
 } from "../reconcileGoogleGenAiExecutionLifecycle.js";
 
 import {
@@ -126,6 +127,9 @@ export type RunExecutionReconcileCliDependencies =
 
     reconcileGoogleLifecycle?:
       typeof reconcileGoogleGenAiExecutionLifecycle;
+
+    reconcileGoogleVisualAttemptLifecycle?:
+      typeof reconcileGoogleGenAiVisualAttemptExecutionLifecycle;
 
     createGoogleSubmittedRecovery?:
       (

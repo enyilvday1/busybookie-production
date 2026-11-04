@@ -326,7 +326,15 @@ export async function runEpisodeAutomationCli(
       evidenceAdoptions: plan.evidenceAdoptions, ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}),
       // B5 Slice-2I-B: exactly the frozen action's shot and attempt; never an
       // argument, environment value, scan or increment.
-      ...(action.kind === "VISUAL_ATTEMPT_GENERATE" ? { visualAttemptSelection: { shotId: action.shotId, attemptNumber: action.attemptNumber } } : {}) });
+      ...((action.kind === "VISUAL_ATTEMPT_GENERATE" ||
+          action.kind === "VISUAL_ATTEMPT_RECONCILE")
+        ? {
+            visualAttemptSelection: {
+              shotId: action.shotId,
+              attemptNumber: action.attemptNumber,
+            },
+          }
+        : {}) });
     report(result); setExit(result.completion === "INCOMPLETE" || !result.inventory.complete ? 1 : 0); return;
   }
   let freshSession: FreshEpisodeOperatorSession | undefined;

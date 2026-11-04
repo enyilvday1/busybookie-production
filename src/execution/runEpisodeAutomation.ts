@@ -167,7 +167,15 @@ async function runControlledEpisodeAutomation(plan: ControlledEpisodeAutomationP
       runtimeIdentity: runtime, expectedBinding: plan.inputBinding, evidenceAdoptions: plan.evidenceAdoptions,
       ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}),
       // Exactly the frozen action's shot and attempt; never inferred or scanned.
-      ...(action.kind === "VISUAL_ATTEMPT_GENERATE" ? { visualAttemptSelection: { shotId: action.shotId, attemptNumber: action.attemptNumber } } : {}) });
+      ...((action.kind === "VISUAL_ATTEMPT_GENERATE" ||
+          action.kind === "VISUAL_ATTEMPT_RECONCILE")
+        ? {
+            visualAttemptSelection: {
+              shotId: action.shotId,
+              attemptNumber: action.attemptNumber,
+            },
+          }
+        : {}) });
     try { assertReviewedEpisodeAction(plan, beforePlan); }
     catch (cause) {
       if (!(cause instanceof BoundEpisodeError)) throw cause;

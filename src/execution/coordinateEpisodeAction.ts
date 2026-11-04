@@ -52,6 +52,10 @@ import {
 } from "./cli/runProductionExecutionReconcileCli.js";
 
 import {
+  runProductionVisualAttemptExecutionReconcile,
+} from "./cli/runProductionVisualAttemptExecutionReconcile.js";
+
+import {
   runSingleShotExecutionCli,
 } from "./cli/runSingleShotExecutionCli.js";
 
@@ -160,6 +164,9 @@ export type CoordinateEpisodeActionDependencies =
     runProductionExecutionReconcileCli:
       typeof runProductionExecutionReconcileCli;
 
+    runProductionVisualAttemptExecutionReconcile:
+      typeof runProductionVisualAttemptExecutionReconcile;
+
     runDialogueGenerationCli:
       typeof runDialogueGenerationCli;
 
@@ -189,6 +196,7 @@ export const episodeCoordinatorProductionDependencies:
 
       runSingleShotExecutionCli,
       runProductionExecutionReconcileCli,
+      runProductionVisualAttemptExecutionReconcile,
       runDialogueGenerationCli,
       runDialogueReconcileCli,
       verifyVisualAttemptDurableCompletion,
@@ -754,8 +762,46 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
   // Known exact kind, literal confirmation and target before I/O. A reviewed
   // attempt carries its exact selection into both pre- and post-action preflight.
   let visualAttemptSelection: VisualAttemptSelection | null = null;
-  if (action.kind === "VISUAL_ATTEMPT_GENERATE") visualAttemptSelection = requireConfirmedAttempt(input.episodeId, action);
-  else { requireConfirmedAction(action); requireValidTarget(input.episodeId, action); }
+  if (action.kind === "VISUAL_ATTEMPT_GENERATE") {
+    visualAttemptSelection =
+      requireConfirmedAttempt(
+        input.episodeId,
+        action,
+      );
+  } else if (action.kind === "VISUAL_ATTEMPT_RECONCILE") {
+    if (
+      action.confirmReconciliation !==
+      true
+    ) {
+      throw new BoundEpisodeError(
+        "OPERATING_CONDITION_UNESTABLISHED",
+      );
+    }
+
+    visualAttemptSelection =
+      Object.freeze({
+        shotId:
+          ExecutionReservationShotIdSchema
+            .parse(
+              action.shotId,
+            ),
+
+        attemptNumber:
+          VisualReplacementAttemptNumberSchema
+            .parse(
+              action.attemptNumber,
+            ),
+      });
+  } else {
+    requireConfirmedAction(
+      action,
+    );
+
+    requireValidTarget(
+      input.episodeId,
+      action,
+    );
+  }
   const target = { episodeId: action.episodeId, sceneId: action.sceneId, shotId: action.shotId, order: action.order };
   let before = data.beforePlan;
   const preflightInput = { episodeId: input.episodeId, scope: data.plan.scope,
@@ -784,6 +830,22 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
       await dependencies.runSingleShotExecutionCli(["--episode", action.episodeId, "--shot", action.shotId,
         "--image", action.referenceBinding.canonicalAbsolutePath, "--attempt", String(action.attemptNumber),
         "--confirm-paid-generation"], undefined, input.controlledContext);
+    } else if (action.kind === "VISUAL_ATTEMPT_RECONCILE") {
+      await dependencies
+        .runProductionVisualAttemptExecutionReconcile(
+          {
+            episodeId:
+              action.episodeId,
+
+            shotId:
+              action.shotId,
+
+            attemptNumber:
+              action.attemptNumber,
+          },
+          undefined,
+          input.controlledContext,
+        );
     } else {
       await dependencies.runProductionExecutionReconcileCli(["--episode", action.episodeId, "--shot", action.shotId], undefined, input.controlledContext);
     }

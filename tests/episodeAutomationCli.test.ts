@@ -800,7 +800,7 @@ describe("B5 Slice-2I-B episode CLI carries a reviewed visual attempt", () => {
     const code = (await read("src/execution/cli/runEpisodeAutomationCli.ts")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     expect(code).not.toMatch(/--attempt|process\.env\.\w*ATTEMPT|readdir|opendir|attemptNumber\s*[+-]|options\.attempt/i);
     expect(code.match(/visualAttemptSelection/g)).toHaveLength(1);
-    expect(code).toMatch(/\{ visualAttemptSelection: \{ shotId: action\.shotId, attemptNumber: action\.attemptNumber \} \}/);
+    expect(code).toMatch(/\{\s*visualAttemptSelection:\s*\{\s*shotId:\s*action\.shotId,\s*attemptNumber:\s*action\.attemptNumber,?\s*\},?\s*\}/);
   });
 
   it.each([

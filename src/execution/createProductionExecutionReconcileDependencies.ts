@@ -58,6 +58,7 @@ import {
 // network-free to import and construct; no creator or submitter is wired.
 import {
   reconcileGoogleGenAiExecutionLifecycle,
+  reconcileGoogleGenAiVisualAttemptExecutionLifecycle,
 } from "./reconcileGoogleGenAiExecutionLifecycle.js";
 
 import {
@@ -108,6 +109,9 @@ export type ProductionExecutionReconcileCompositionDependencies =
     reconcileGoogleLifecycle:
       typeof reconcileGoogleGenAiExecutionLifecycle;
 
+    reconcileGoogleVisualAttemptLifecycle:
+      typeof reconcileGoogleGenAiVisualAttemptExecutionLifecycle;
+
     createGoogleSubmittedRecovery:
       typeof createGoogleGenAiSingleShotSecureProductionRecovery;
   }>;
@@ -141,6 +145,9 @@ const defaultDependencies:
 
     reconcileGoogleLifecycle:
       reconcileGoogleGenAiExecutionLifecycle,
+
+    reconcileGoogleVisualAttemptLifecycle:
+      reconcileGoogleGenAiVisualAttemptExecutionLifecycle,
 
     createGoogleSubmittedRecovery:
       createGoogleGenAiSingleShotSecureProductionRecovery,
@@ -207,6 +214,10 @@ export function createProductionExecutionReconcileDependencies(
     reconcileGoogleLifecycle:
       dependencies
         .reconcileGoogleLifecycle,
+
+    reconcileGoogleVisualAttemptLifecycle:
+      dependencies
+        .reconcileGoogleVisualAttemptLifecycle,
 
     createGoogleSubmittedRecovery:
       dependencies

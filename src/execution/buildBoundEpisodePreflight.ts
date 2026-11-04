@@ -134,7 +134,10 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
   const selection = input.visualAttemptSelection === undefined ? null : requireVisualAttemptSelection(input.visualAttemptSelection);
   let attemptObservation: VisualAttemptObservation | null = selection === null ? null
     : { shotId: selection.shotId, attemptNumber: selection.attemptNumber, lifecycle: "UNEVALUATED", reasons: [] };
-  let attemptCandidate: Extract<ActionCandidate, { kind: "VISUAL_ATTEMPT_GENERATE" }> | null = null;
+  let attemptCandidate:
+      | Extract<ActionCandidate, { kind: "VISUAL_ATTEMPT_GENERATE" }>
+      | Extract<ActionCandidate, { kind: "VISUAL_ATTEMPT_RECONCILE" }>
+      | null = null;
   const root = input.runtimeIdentity.repositoryRoot;
   if (resolve(root) !== root || input.runtimeIdentity.mediaRoot !== input.mediaRoot) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   if (input.ffprobeExecutable && input.ffprobeExecutable !== input.runtimeIdentity.ffprobe?.canonicalPath) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
@@ -480,7 +483,72 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
               manifest.rawSha256 !== admission.manifestRawSha256) reasons.push(episodeIssue("INPUT_BINDING_DRIFT", target, "OBSERVATION"));
         }
       }
+
+      if (inspected.state === "SUBMITTED" && lifecycle === "SUBMITTED") {
+        const reservationSha256 =
+          inspected.reservation.reservationSha256;
+
+        const submissionSha256 =
+          inspected.submission.submissionSha256;
+
+        const submission =
+          inspected.submission.record;
+
+        if (
+          inspected.episodeId !== episodeId ||
+          inspected.sceneId !== entry.target.sceneId ||
+          inspected.shotId !== selected.shotId ||
+          inspected.attemptNumber !== selected.attemptNumber ||
+          inspected.provider !== "GOOGLE_GENAI" ||
+          submission.provider !== "GOOGLE_GENAI" ||
+          typeof inspected.reservationId !== "string" ||
+          typeof reservationSha256 !== "string" ||
+          !/^[0-9a-f]{64}$/.test(reservationSha256) ||
+          typeof submissionSha256 !== "string" ||
+          !/^[0-9a-f]{64}$/.test(submissionSha256) ||
+          typeof submission.providerExecutionId !== "string" ||
+          submission.providerExecutionId.trim().length === 0
+        ) {
+          lifecycle =
+            "INVALID";
+
+          reasons.push(
+            episodeIssue(
+              "INVALID_DURABLE_STATE",
+              target,
+              "OBSERVATION",
+            ),
+          );
+        } else {
+          attemptCandidate = {
+            ...entry.target,
+            kind:
+              "VISUAL_ATTEMPT_RECONCILE",
+            attemptNumber:
+              selected.attemptNumber,
+            expectedAttemptLifecycle:
+              "SUBMITTED",
+            provider:
+              "GOOGLE_GENAI",
+            reservationId:
+              inspected.reservationId,
+            reservationSha256,
+            submissionSha256,
+            providerExecutionIdentitySha256:
+              bindingDigest([
+                submission.provider,
+                submission.providerExecutionId,
+              ]),
+          };
+        }
+      }
     } catch (error) { lifecycle = "INVALID"; reasons.push(episodeIssue("INVALID_DURABLE_STATE", target, "OBSERVATION", error)); }
+
+    if (lifecycle === "SUBMITTED") {
+      record();
+      return;
+    }
+
     const { shot } = entry;
     let cost: KnownCost | null = null;
     try {
@@ -574,7 +642,10 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
         ? scope.kind === "EPISODE_SCOPE" ? "VISUAL_PRODUCTION_COMPLETE" : "SELECTED_SCOPE_COMPLETE" : "INCOMPLETE",
       intentAlignment: alignment ? "REVIEWED" : "REVIEW_REQUIRED", handoff,
       generationMayBeAuthorized: (candidate?.kind === "VISUAL_GENERATE" || candidate?.kind === "VISUAL_ATTEMPT_GENERATE") && ownership === "ABSENT",
-      recoveryMayBeAuthorized: candidate?.kind === "VISUAL_RECONCILE" && ownership === "ABSENT",
+      recoveryMayBeAuthorized:
+        (candidate?.kind === "VISUAL_RECONCILE" ||
+          candidate?.kind === "VISUAL_ATTEMPT_RECONCILE") &&
+        ownership === "ABSENT",
       ownership: { observed: ownership, requiresAcquisition: true },
       ...(attemptObservation ? { visualAttempt: attemptObservation } : {}) });
   }

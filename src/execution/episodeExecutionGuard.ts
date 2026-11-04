@@ -228,13 +228,46 @@ export function assertReviewedEpisodeAction(plan: ControlledEpisodeAutomationPla
         action.costAuthority.modeledValue > action.costAuthority.maxModeledValue || action.costAuthority.maxModeledValue > candidate.cost.perShotCap) {
       throw new BoundEpisodeError("COST_ADMISSION_BLOCKED");
     }
+  } else if (action.kind === "VISUAL_ATTEMPT_RECONCILE" && candidate.kind === "VISUAL_ATTEMPT_RECONCILE") {
+    if (
+      candidate.attemptNumber !== action.attemptNumber ||
+      candidate.expectedAttemptLifecycle !== action.expectedAttemptLifecycle ||
+      candidate.provider !== action.durableProvider
+    ) {
+      throw new BoundEpisodeError(
+        "INPUT_BINDING_DRIFT",
+      );
+    }
+
+    requireSameBinding(
+      [
+        action.reservationId,
+        action.reservationSha256,
+        action.submissionSha256,
+        action.providerExecutionIdentitySha256,
+      ],
+      [
+        candidate.reservationId,
+        candidate.reservationSha256,
+        candidate.submissionSha256,
+        candidate.providerExecutionIdentitySha256,
+      ],
+    );
   }
 }
 // The fresh checked re-preflight inspects exactly the reviewed attempt.
 function reviewedVisualAttemptSelection(plan: ControlledEpisodeAutomationPlan): Readonly<{ visualAttemptSelection?: VisualAttemptSelection }> {
   const action = plan.actions[0];
-  return action.kind === "VISUAL_ATTEMPT_GENERATE"
-    ? { visualAttemptSelection: { shotId: action.shotId, attemptNumber: action.attemptNumber } } : {};
+
+  return action.kind === "VISUAL_ATTEMPT_GENERATE" ||
+    action.kind === "VISUAL_ATTEMPT_RECONCILE"
+    ? {
+        visualAttemptSelection: {
+          shotId: action.shotId,
+          attemptNumber: action.attemptNumber,
+        },
+      }
+    : {};
 }
 export async function assertCheckedEpisodeAdmission(context: CheckedEpisodeExecutionContext): Promise<void> {
   const data = checkedEpisodeExecutionData(context);

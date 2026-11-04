@@ -55,6 +55,15 @@ export function buildControlledEpisodeAutomationPlan(input: BuildControlledEpiso
         referenceBinding: candidate.referenceBinding, costAuthority: { unit: candidate.cost.unit, modeledValue: candidate.cost.modeledValue,
           maxModeledValue: candidate.cost.perShotCap, policySha256: candidate.cost.policySha256 }, confirmPaidGeneration: true };
       break;
+    case "VISUAL_ATTEMPT_RECONCILE":
+      // Recovery preserves the exact selected attempt and submitted lineage.
+      action = { ...target, kind: candidate.kind, attemptNumber: candidate.attemptNumber,
+        expectedAttemptLifecycle: candidate.expectedAttemptLifecycle,
+        reservationId: candidate.reservationId, durableProvider: candidate.provider,
+        providerExecutionIdentitySha256: candidate.providerExecutionIdentitySha256,
+        submissionSha256: candidate.submissionSha256, reservationSha256: candidate.reservationSha256,
+        confirmReconciliation: true };
+      break;
     default: {
       const unsupported: never = candidate;
       void unsupported;
@@ -65,7 +74,11 @@ export function buildControlledEpisodeAutomationPlan(input: BuildControlledEpiso
   const plan = parseEpisodeAutomationPlan({ schemaVersion: "2.0", mode: "CONTROLLED_VISUAL", episodeId: preflight.episodeId,
     scope: preflight.scope, inputBinding: preflight.binding, inputBindingSha256: preflight.bindingSha256,
     observations: preflight.observations, observationsSha256: preflight.observationsSha256, evidenceAdoptions,
-    maximumNewProviderCreates: candidate.kind === "VISUAL_RECONCILE" ? 0 : 1, operatingCondition: OPERATING_CONDITION,
+    maximumNewProviderCreates:
+      candidate.kind === "VISUAL_RECONCILE" ||
+      candidate.kind === "VISUAL_ATTEMPT_RECONCILE"
+        ? 0
+        : 1, operatingCondition: OPERATING_CONDITION,
     actions: [action] });
   if (plan.schemaVersion !== "2.0") throw buildError("the parser did not return a controlled plan.");
   return plan;

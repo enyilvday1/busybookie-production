@@ -106,6 +106,11 @@ describe(
               "reconcileGoogleLifecycle",
             ),
 
+          reconcileGoogleVisualAttemptLifecycle:
+            makeMock(
+              "reconcileGoogleVisualAttemptLifecycle",
+            ),
+
           createGoogleSubmittedRecovery:
             makeMock(
               "createGoogleSubmittedRecovery",
@@ -137,6 +142,7 @@ describe(
           "resumeVeoOperation",
           "recoverVeoOutput",
           "reconcileGoogleLifecycle",
+          "reconcileGoogleVisualAttemptLifecycle",
           "createGoogleSubmittedRecovery",
         ]);
 

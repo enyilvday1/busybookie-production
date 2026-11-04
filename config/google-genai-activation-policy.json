@@ -3,7 +3,7 @@
   "provider": "GOOGLE_GENAI",
   "model": "gemini-omni-1.1-flash",
   "admission": {
-    "newSubmissionsEnabled": false
+    "newSubmissionsEnabled": true
   },
   "cost": {
     "fixedPointUnit": "MICRO_USD",

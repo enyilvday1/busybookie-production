@@ -1,7 +1,9 @@
 export { EpisodeActionPostStateResolutionError } from "./boundEpisodeProduction.types.js";
 import { EpisodeActionPostStateResolutionError } from "./boundEpisodeProduction.types.js";
 import { BoundEpisodeError, BoundEpisodeActionError, freezeBoundCopy, requireSameBinding,
-  type BoundEpisodeActionResult, type BoundVisualAction, type BoundEpisodePreflight, type IssueCode } from "./boundEpisodeProduction.types.js";
+  type BoundEpisodeActionResult, type BoundVisualAction, type BoundEpisodePreflight, type IssueCode,
+  type VisualAttemptSelection } from "./boundEpisodeProduction.types.js";
+import { VisualReplacementAttemptNumberSchema } from "./visualAttemptNumber.schema.js";
 import { checkedEpisodeExecutionData, assertCheckedEpisodeAdmission, admitEpisodeCoordinatorDispatch,
   episodeInvocationCounts, type CheckedEpisodeExecutionContext } from "./episodeExecutionGuard.js";
 import { episodeIssue, readSelectedVisualPostObservation } from "./buildBoundEpisodePreflight.js";
@@ -64,6 +66,10 @@ import {
   type DurableEpisodeShotProductionState,
   type ResolveDurableEpisodeProductionStateInput,
 } from "./resolveDurableEpisodeProductionState.js";
+
+import {
+  verifyVisualAttemptDurableCompletion,
+} from "./verifyVisualAttemptDurableCompletion.js";
 
 // C6b guarded coordinator: exactly one explicitly requested, explicitly
 // confirmed action per invocation, admitted only from the current C4 state
@@ -159,6 +165,11 @@ export type CoordinateEpisodeActionDependencies =
 
     runDialogueReconcileCli:
       typeof runDialogueReconcileCli;
+
+    // Read-only attempt-aware durable completion authority; never recovers,
+    // materializes, writes or contacts a provider.
+    verifyVisualAttemptDurableCompletion:
+      typeof verifyVisualAttemptDurableCompletion;
   }>;
 
 export const episodeCoordinatorProductionDependencies:
@@ -180,6 +191,7 @@ export const episodeCoordinatorProductionDependencies:
       runProductionExecutionReconcileCli,
       runDialogueGenerationCli,
       runDialogueReconcileCli,
+      verifyVisualAttemptDurableCompletion,
     });
 const defaultDependencies = episodeCoordinatorProductionDependencies;
 
@@ -367,6 +379,74 @@ function requireValidTarget(
 
       return;
   }
+}
+
+// B5 Slice-2I-B: a reviewed attempt's literal confirmation and target, before
+// any I/O. The selection is exactly the frozen action's shot and attempt; it
+// is never inferred, incremented or scanned.
+function requireConfirmedAttempt(
+  episodeId:
+    string,
+
+  action:
+    Extract<BoundVisualAction, { kind: "VISUAL_ATTEMPT_GENERATE" }>,
+): VisualAttemptSelection {
+  if (
+    action.confirmPaidGeneration !==
+    true
+  ) {
+    throw new Error(
+      "VISUAL_ATTEMPT_GENERATE requires confirmPaidGeneration === true.",
+    );
+  }
+
+  DialogueReservationSceneIdSchema
+    .parse(
+      action.sceneId,
+    );
+
+  ExecutionReservationEpisodeIdSchema
+    .parse(
+      episodeId,
+    );
+
+  return Object.freeze({
+    shotId:
+      ExecutionReservationShotIdSchema
+        .parse(
+          action.shotId,
+        ),
+    attemptNumber:
+      VisualReplacementAttemptNumberSchema
+        .parse(
+          action.attemptNumber,
+        ),
+  });
+}
+
+// A resolved verification is not enough: it must be a COMPLETED lineage of
+// exactly the reviewed episode, scene, shot and selected attempt.
+function verifiesSelectedAttempt(
+  verification:
+    unknown,
+
+  target:
+    Readonly<{ episodeId: string; sceneId: string; shotId: string }>,
+
+  selection:
+    VisualAttemptSelection,
+): boolean {
+  if (typeof verification !== "object" || verification === null) return false;
+  const candidate = verification as Record<string, unknown>;
+  const lifecycle = candidate.lifecycle;
+  if (typeof lifecycle !== "object" || lifecycle === null) return false;
+  const completed = lifecycle as Record<string, unknown>;
+  return completed.state === "COMPLETED" && [candidate, completed].every(identity =>
+    identity.episodeId === target.episodeId &&
+    identity.sceneId === target.sceneId &&
+    identity.shotId === target.shotId &&
+    identity.shotId === selection.shotId &&
+    identity.attemptNumber === selection.attemptNumber);
 }
 
 function requireTargetShot(
@@ -671,19 +751,18 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
   requireSameBinding(input.action, data.plan.actions[0]);
   if (input.episodeId !== data.plan.episodeId) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   const action = data.plan.actions[0];
-  // B5 Slice-2I-A: a reviewed attempt is representable but not dispatchable.
-  // Refused before any environment, loader, admission, runner or provider.
-  if (action.kind === "VISUAL_ATTEMPT_GENERATE") {
-    throw new BoundEpisodeError("ACTION_REJECTED", { cause: new Error("Visual attempt dispatch is not enabled in Slice-2I-A.") });
-  }
-  // Known exact kind, literal confirmation and target before I/O.
-  requireConfirmedAction(action); requireValidTarget(input.episodeId, action);
+  // Known exact kind, literal confirmation and target before I/O. A reviewed
+  // attempt carries its exact selection into both pre- and post-action preflight.
+  let visualAttemptSelection: VisualAttemptSelection | null = null;
+  if (action.kind === "VISUAL_ATTEMPT_GENERATE") visualAttemptSelection = requireConfirmedAttempt(input.episodeId, action);
+  else { requireConfirmedAction(action); requireValidTarget(input.episodeId, action); }
   const target = { episodeId: action.episodeId, sceneId: action.sceneId, shotId: action.shotId, order: action.order };
   let before = data.beforePlan;
   const preflightInput = { episodeId: input.episodeId, scope: data.plan.scope,
     mediaRoot: data.plan.inputBinding.runtimeIdentity.mediaRoot, runtimeIdentity: data.plan.inputBinding.runtimeIdentity,
     evidenceAdoptions: data.plan.evidenceAdoptions,
-    ...(data.plan.inputBinding.runtimeIdentity.ffprobe ? { ffprobeExecutable: data.plan.inputBinding.runtimeIdentity.ffprobe.canonicalPath } : {}) };
+    ...(data.plan.inputBinding.runtimeIdentity.ffprobe ? { ffprobeExecutable: data.plan.inputBinding.runtimeIdentity.ffprobe.canonicalPath } : {}),
+    ...(visualAttemptSelection ? { visualAttemptSelection } : {}) };
   try {
     await assertCheckedEpisodeAdmission(input.controlledContext);
     before = await data.preflight({ ...preflightInput, expectedBinding: data.plan.inputBinding });
@@ -700,6 +779,11 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
     if (action.kind === "VISUAL_GENERATE") {
       await dependencies.runSingleShotExecutionCli(["--episode", action.episodeId, "--shot", action.shotId,
         "--image", action.referenceBinding.canonicalAbsolutePath, "--confirm-paid-generation"], undefined, input.controlledContext);
+    } else if (action.kind === "VISUAL_ATTEMPT_GENERATE") {
+      // Transport only: the secured runner re-derives authority from the checked context.
+      await dependencies.runSingleShotExecutionCli(["--episode", action.episodeId, "--shot", action.shotId,
+        "--image", action.referenceBinding.canonicalAbsolutePath, "--attempt", String(action.attemptNumber),
+        "--confirm-paid-generation"], undefined, input.controlledContext);
     } else {
       await dependencies.runProductionExecutionReconcileCli(["--episode", action.episodeId, "--shot", action.shotId], undefined, input.controlledContext);
     }
@@ -712,17 +796,44 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
   catch (cause) { postCause = cause; }
   const counts = episodeInvocationCounts(data.invocation);
   const effects = counts.dispatchAllowanceConsumed === 1 || counts.recoveryDispatchCount === 1;
-  const row = after?.shots.find(row => row.shotId === action.shotId && row.sceneId === action.sceneId);
+  // An attempt is never adjudicated from the legacy (Attempt-1) shot row.
+  const row = visualAttemptSelection ? undefined : after?.shots.find(row => row.shotId === action.shotId && row.sceneId === action.sceneId);
   let selectedPostObservation = row?.lifecycle ?? null;
   let selectedObservationCause: unknown;
-  if (!row) {
+  if (!row && !visualAttemptSelection) {
     try { selectedPostObservation = await readSelectedVisualPostObservation(preflightInput.mediaRoot, target); }
     catch (cause) { selectedObservationCause = cause; }
   }
+  const observedAttempt = after?.visualAttempt;
+  const attempt = visualAttemptSelection && observedAttempt && observedAttempt.shotId === visualAttemptSelection.shotId &&
+    observedAttempt.attemptNumber === visualAttemptSelection.attemptNumber ? observedAttempt.lifecycle : null;
+  const drifted = after?.bindingSha256 !== data.plan.inputBindingSha256 && after !== null;
+  // An exact selected COMPLETED observation is only a claim; the read-only
+  // durable verifier must prove exactly that attempt or the action fails closed.
+  let attemptCompletionVerified = false; let attemptVerificationCause: unknown;
+  if (visualAttemptSelection && attempt === "COMPLETED" && !drifted) {
+    try {
+      attemptCompletionVerified = verifiesSelectedAttempt(await dependencies.verifyVisualAttemptDurableCompletion(
+        preflightInput.mediaRoot, action.episodeId, action.shotId, visualAttemptSelection.attemptNumber), target, visualAttemptSelection);
+    } catch (cause) { attemptVerificationCause = cause; }
+  }
   let status: BoundEpisodeActionResult["status"] = "UNRESOLVED";
   let stopReason: IssueCode | null = "POST_ACTION_STATE_UNRESOLVED";
-  if (after?.bindingSha256 !== data.plan.inputBindingSha256 && after !== null) stopReason = "INPUT_BINDING_DRIFT";
-  else if (row?.completionVerification === "FAILED") stopReason = "LOCAL_COMPLETION_VERIFICATION_FAILED";
+  if (drifted) stopReason = "INPUT_BINDING_DRIFT";
+  else if (visualAttemptSelection) {
+    // B5 Slice-2I-B: only the selected attempt's attempt-aware observation
+    // adjudicates. The attempt orchestrator stops at SUBMITTED, so a normal
+    // create is STOPPED for later recovery; only a durably verified exact
+    // COMPLETED attempt is success.
+    if (attempt === "SUBMITTED") { status = "STOPPED"; stopReason = "SUBMITTED_RECOVERY_REQUIRED"; }
+    else if (attempt === "RESERVED_ONLY") { status = "STOPPED"; stopReason = "RESERVED_ONLY_MANUAL_ADJUDICATION"; }
+    else if (attempt === "ADMITTED_ONLY") { status = "REJECTED"; stopReason = lowerFailed ? "ACTION_REJECTED" : "UNEXPECTED_PROVIDER_RESULT"; }
+    else if (attempt === "COMPLETED" && attemptCompletionVerified) {
+      status = lowerFailed ? "STOPPED" : "ACTION_COMPLETED"; stopReason = lowerFailed ? "ACTION_REJECTED" : null;
+    } else if (attempt === "COMPLETED") stopReason = "LOCAL_COMPLETION_VERIFICATION_FAILED";
+    else if (attempt === "INVALID") stopReason = "INVALID_DURABLE_STATE";
+    // NOT_ADMITTED, UNEVALUATED or absent stay UNRESOLVED.
+  } else if (row?.completionVerification === "FAILED") stopReason = "LOCAL_COMPLETION_VERIFICATION_FAILED";
   else if (row?.disposition === "COMPLETED" && row.completionVerification === "VERIFIED") {
     status = lowerFailed ? "STOPPED" : "ACTION_COMPLETED";
     stopReason = lowerFailed ? "ACTION_REJECTED" : action.kind === "VISUAL_GENERATE" && after?.completion === "INCOMPLETE" ? "MAX_CREATE_COUNT_REACHED" : null;
@@ -738,7 +849,7 @@ async function coordinateBoundEpisodeAction(input: CoordinateBoundEpisodeActionI
     afterPlan: after, selectedPostObservation, status, stopReason, ...counts, observedNewCreateCount: counts.dispatchAllowanceConsumed === 0 ? 0 : "UNKNOWN",
     visualCompletion: after?.completion ?? "INCOMPLETE", handoff: after?.handoff ?? before.handoff,
     remainingWork: after?.remainingWork ?? before.remainingWork, actionMayHaveEffects: effects,
-    issues: status === "ACTION_COMPLETED" ? [] : [episodeIssue(stopReason ?? "ACTION_REJECTED", target, "POST_ACTION", lowerCause ?? postCause, effects),
+    issues: status === "ACTION_COMPLETED" ? [] : [episodeIssue(stopReason ?? "ACTION_REJECTED", target, "POST_ACTION", lowerCause ?? postCause ?? attemptVerificationCause, effects),
       ...(selectedObservationCause === undefined ? [] : [episodeIssue("POST_ACTION_STATE_UNRESOLVED", target, "POST_ACTION", selectedObservationCause, effects)])] });
   if (lowerFailed || postCause !== undefined) throw new BoundEpisodeActionError(result, lowerFailed ? lowerCause : postCause, postCause);
   return result;

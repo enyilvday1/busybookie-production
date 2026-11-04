@@ -28,6 +28,13 @@ vi.mock("../src/execution/coordinateEpisodeAction.js", async (importOriginal) =>
   const actual = await importOriginal<typeof import("../src/execution/coordinateEpisodeAction.js")>();
   return { ...actual, coordinateEpisodeAction: vi.fn() };
 });
+// Pass-through spies: guard acquisition, fresh sessions and checked contexts stay observable.
+vi.mock("../src/execution/episodeExecutionGuard.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/execution/episodeExecutionGuard.js")>();
+  return { ...actual, acquireEpisodeExecutionGuard: vi.fn(actual.acquireEpisodeExecutionGuard),
+    createFreshEpisodeOperatorSession: vi.fn(actual.createFreshEpisodeOperatorSession),
+    createCheckedEpisodeExecutionContext: vi.fn(actual.createCheckedEpisodeExecutionContext) };
+});
 // Pass-through spy so the real bounded reader can be observed.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -55,11 +62,16 @@ import {
   type EpisodeCoordinatorAction,
   type EpisodeCoordinatorRunner,
 } from "../src/execution/coordinateEpisodeAction.js";
-import { MAX_EPISODE_AUTOMATION_PLAN_BYTES } from "../src/execution/episodeAutomationPlan.schema.js";
+import { MAX_EPISODE_AUTOMATION_PLAN_BYTES, parseEpisodeAutomationPlan } from "../src/execution/episodeAutomationPlan.schema.js";
 import { resolveDurableEpisodeProductionState } from "../src/execution/resolveDurableEpisodeProductionState.js";
 import type { DurableEpisodeProductionState } from "../src/execution/resolveDurableEpisodeProductionState.js";
 import { EpisodeAutomationError, type EpisodeAutomationResult } from "../src/execution/runEpisodeAutomation.js";
 import { loadEnvironment } from "../src/validation/loadEnvironment.js";
+import { runSingleShotExecutionCli } from "../src/execution/cli/runSingleShotExecutionCli.js";
+import { runProductionExecutionReconcileCli } from "../src/execution/cli/runProductionExecutionReconcileCli.js";
+import { BoundEpisodeError, bindingDigest, type BoundEpisodeActionResult } from "../src/execution/boundEpisodeProduction.types.js";
+import { acquireEpisodeExecutionGuard, consumeFreshEpisodeOperatorSession, createCheckedEpisodeExecutionContext,
+  createFreshEpisodeOperatorSession, type FreshEpisodeOperatorSession } from "../src/execution/episodeExecutionGuard.js";
 
 const EPISODE = "EP02";
 const VG = { kind: "VISUAL_GENERATE", sceneId: "SC01", shotId: "S02", confirmPaidGeneration: true } as const;
@@ -587,5 +599,281 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
     const script = (await read("scripts/episode-automation.ts")).replace(/\r\n/g, "\n");
     expect(script).not.toMatch(/process\.exit\s*\(/);
     expect(script).toContain("process.exitCode = 1;");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B5 Slice-2I-B (R39F): the official episode CLI carries an already-reviewed
+// VISUAL_ATTEMPT_GENERATE plan. The frozen action is the only attempt identity.
+// Synthetic plans only; lower automation is a probe, so no media, guard or provider.
+
+type ControlledKind = "VISUAL_GENERATE" | "VISUAL_RECONCILE" | "VISUAL_ATTEMPT_GENERATE";
+const digest = (character: string) => character.repeat(64);
+const SYNTHETIC_MEDIA = resolve(tmpdir(), "busybookie-r39f-synthetic-media");
+
+function controlledPlan(kind: ControlledKind, actionOverrides: Readonly<Record<string, unknown>> = {}) {
+  const target = { episodeId: EPISODE, sceneId: "SC01", shotId: "S01", order: 1 };
+  const scope = { kind: "EPISODE_SCOPE", shotIds: ["S01"] };
+  const referenceBinding = { shotId: "S01", order: 1, assetId: "ref", mediaRootRelativePath: "references/ref.png",
+    canonicalAbsolutePath: join(SYNTHETIC_MEDIA, "references/ref.png"), sha256: digest("c"), bytes: 1, contentType: "image/png",
+    shotApprovalStatus: "APPROVED", approvedAssetIds: ["ref"] };
+  const inputBinding = { bindingVersion: "1.0", episodeId: EPISODE, scope, orderedTargets: [target],
+    fileBindings: [{ role: "MANIFEST", canonicalPath: join(SYNTHETIC_MEDIA, "repo/episodes/EP02/episode.json"), exists: true,
+      rawSha256: digest("f"), bytes: 1 }],
+    referenceBindings: [referenceBinding],
+    runtimeIdentity: { reviewedRevision: "a".repeat(40), repositoryRoot: join(SYNTHETIC_MEDIA, "repo"), mediaRoot: SYNTHETIC_MEDIA,
+      physicalMediaRoot: SYNTHETIC_MEDIA, executableInputs: [{ role: "RUNTIME", canonicalPath: join(SYNTHETIC_MEDIA, "repo/runtime.txt"),
+        exists: true, rawSha256: digest("e"), bytes: 1 }], ffprobe: null } };
+  const submitted = { reservationId: "00000000-0000-4000-8000-000000000001", durableProvider: "RUNWAY", reservationSha256: digest("1"),
+    submissionSha256: digest("2"), providerExecutionIdentitySha256: digest("3") };
+  const observation = { target, lifecycle: kind === "VISUAL_RECONCILE" ? "SUBMITTED" : "NOTHING",
+    ...(kind === "VISUAL_RECONCILE" ? submitted : { reservationId: null, durableProvider: null, reservationSha256: null,
+      submissionSha256: null, providerExecutionIdentitySha256: null }),
+    completionSha256: null, generationRecordSha256: null, outputIdentitySha256: null };
+  const action = kind === "VISUAL_RECONCILE"
+    ? { ...target, kind, expectedLifecycle: "SUBMITTED", ...submitted, confirmReconciliation: true }
+    : kind === "VISUAL_GENERATE"
+      ? { ...target, kind, expectedLifecycle: "NOTHING", resolvedProvider: "RUNWAY", referenceBinding,
+        costAuthority: { unit: "RUNWAY_CREDITS", modeledValue: 60, maxModeledValue: 60, policySha256: digest("9") }, confirmPaidGeneration: true }
+      : { ...target, kind, attemptNumber: 2, expectedAttemptLifecycle: "ADMITTED_ONLY", resolvedProvider: "GOOGLE_GENAI", referenceBinding,
+        costAuthority: { unit: "MICRO_USD", modeledValue: 1513600, maxModeledValue: 1513600, policySha256: digest("9") }, confirmPaidGeneration: true };
+  return { schemaVersion: "2.0", mode: "CONTROLLED_VISUAL", episodeId: EPISODE, scope, inputBinding,
+    inputBindingSha256: bindingDigest(inputBinding), observations: [observation], observationsSha256: bindingDigest([observation]),
+    evidenceAdoptions: [], maximumNewProviderCreates: kind === "VISUAL_RECONCILE" ? 0 : 1,
+    operatingCondition: { singleOperator: true, noConcurrentAuthoring: true, noUnguardedRunners: true },
+    actions: [{ ...action, ...actionOverrides }] };
+}
+
+const STOPPED_RESULT = Object.freeze({ status: "STOPPED", stopReason: "SUBMITTED_RECOVERY_REQUIRED", dispatchAllowanceConsumed: 1,
+  observedNewCreateCount: 1, recoveryDispatchCount: 0, afterPlan: null, visualCompletion: "INCOMPLETE" }) as unknown as BoundEpisodeActionResult;
+
+function controlledHarness(plan: unknown) {
+  const readPlanText = vi.fn(async (_path: string) => JSON.stringify(plan));
+  // Probe for the existing runEpisodeAutomation: it alone mints the checked context.
+  const runAutomation = vi.fn(async (_plan: unknown, _dependencies: unknown, _session?: FreshEpisodeOperatorSession) => STOPPED_RESULT);
+  const buildPreflight = vi.fn(async (_input: Record<string, unknown>) => ({ completion: "INCOMPLETE", inventory: { complete: true } }));
+  const readRuntimeIdentity = vi.fn(async () => { throw new Error("Runtime identity must not be read for a plan file."); });
+  const writeStdout = vi.fn((_text: string) => undefined);
+  const setExitCode = vi.fn((_code: 0 | 1) => undefined);
+  return { readPlanText, runAutomation, buildPreflight, writeStdout, setExitCode,
+    deps: { readPlanText, runAutomation, buildPreflight, readRuntimeIdentity, writeStdout, setExitCode } as unknown as RunEpisodeAutomationCliDependencies };
+}
+
+const LEGACY_PLAN_ONLY_KEYS = ["episodeId", "evidenceAdoptions", "expectedBinding", "mediaRoot", "runtimeIdentity", "scope"];
+
+describe("B5 Slice-2I-B episode CLI carries a reviewed visual attempt", () => {
+  const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
+
+  beforeEach(() => {
+    vi.mocked(coordinateEpisodeAction).mockClear();
+    vi.mocked(runSingleShotExecutionCli).mockClear();
+    vi.mocked(runProductionExecutionReconcileCli).mockClear();
+    vi.mocked(loadEnvironment).mockClear();
+    vi.mocked(acquireEpisodeExecutionGuard).mockClear();
+    vi.mocked(createFreshEpisodeOperatorSession).mockClear();
+    vi.mocked(createCheckedEpisodeExecutionContext).mockClear();
+  });
+
+  function expectNoLowerAuthority() {
+    expect(acquireEpisodeExecutionGuard).not.toHaveBeenCalled();
+    expect(createCheckedEpisodeExecutionContext).not.toHaveBeenCalled();
+    expect(coordinateEpisodeAction).not.toHaveBeenCalled();
+    expect(runSingleShotExecutionCli).not.toHaveBeenCalled();
+    expect(runProductionExecutionReconcileCli).not.toHaveBeenCalled();
+    expect(loadEnvironment).not.toHaveBeenCalled();
+  }
+
+  it("the synthetic fixtures are accepted by the real plan parser", () => {
+    for (const kind of ["VISUAL_GENERATE", "VISUAL_RECONCILE", "VISUAL_ATTEMPT_GENERATE"] as const) {
+      expect(parseEpisodeAutomationPlan(controlledPlan(kind)).actions[0]!.kind).toBe(kind);
+    }
+  });
+
+  it("A. an attempt plan runs once through runEpisodeAutomation on a fresh GENERATION session", async () => {
+    const plan = controlledPlan("VISUAL_ATTEMPT_GENERATE");
+    const h = controlledHarness(plan);
+    await runEpisodeAutomationCli(["--plan", "p.json", "--confirm-paid-generation"], h.deps);
+
+    expect(h.runAutomation).toHaveBeenCalledTimes(1);
+    const [passed, lowerDependencies, session] = h.runAutomation.mock.calls[0]!;
+    expect(passed).toEqual(parseEpisodeAutomationPlan(plan));
+    expect(lowerDependencies).toBeUndefined();
+    expect(session).toMatchObject({ confirmation: "GENERATION" });
+    expect(createFreshEpisodeOperatorSession).toHaveBeenCalledTimes(1);
+    expect(createFreshEpisodeOperatorSession).toHaveBeenCalledWith("GENERATION", true);
+    // The session is genuine, single-use and GENERATION only.
+    expect(() => consumeFreshEpisodeOperatorSession(session, "RECONCILIATION")).toThrow(BoundEpisodeError);
+    expect(() => consumeFreshEpisodeOperatorSession(session, "GENERATION")).not.toThrow();
+    expect(() => consumeFreshEpisodeOperatorSession(session, "GENERATION")).toThrow(BoundEpisodeError);
+    // The CLI neither preflights nor mints a checked context for execution; runEpisodeAutomation does.
+    expect(h.buildPreflight).not.toHaveBeenCalled();
+    expectNoLowerAuthority();
+    expect(h.setExitCode).toHaveBeenCalledWith(1);
+  });
+
+  it.each([[["--confirm-reconciliation"]], [[]]])("B. an attempt plan with %j fails closed before any session or automation", async (extra) => {
+    const h = controlledHarness(controlledPlan("VISUAL_ATTEMPT_GENERATE"));
+    await expect(runEpisodeAutomationCli(["--plan", "p.json", ...extra], h.deps))
+      .rejects.toMatchObject({ name: "BoundEpisodeError", code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(h.runAutomation).not.toHaveBeenCalled();
+    expect(h.buildPreflight).not.toHaveBeenCalled();
+    expect(h.writeStdout).not.toHaveBeenCalled();
+    expect(createFreshEpisodeOperatorSession).not.toHaveBeenCalled();
+    expectNoLowerAuthority();
+  });
+
+  it.each([
+    ["VISUAL_GENERATE", "--confirm-paid-generation", "GENERATION", "--confirm-reconciliation"],
+    ["VISUAL_RECONCILE", "--confirm-reconciliation", "RECONCILIATION", "--confirm-paid-generation"],
+  ] as const)("C/D. legacy %s keeps %s -> %s and refuses %s", async (kind, flag, family, wrong) => {
+    const refused = controlledHarness(controlledPlan(kind));
+    await expect(runEpisodeAutomationCli(["--plan", "p.json", wrong], refused.deps))
+      .rejects.toMatchObject({ code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(refused.runAutomation).not.toHaveBeenCalled();
+
+    const h = controlledHarness(controlledPlan(kind));
+    await runEpisodeAutomationCli(["--plan", "p.json", flag], h.deps);
+    expect(h.runAutomation).toHaveBeenCalledTimes(1);
+    expect(h.runAutomation.mock.calls[0]![2]).toMatchObject({ confirmation: family });
+    expect(createFreshEpisodeOperatorSession).toHaveBeenCalledTimes(1);
+    expect(createFreshEpisodeOperatorSession).toHaveBeenCalledWith(family, true);
+    expect(h.buildPreflight).not.toHaveBeenCalled();
+  });
+
+  it.each([2, 3, 7])("E. plan-only attempt %i preflights exactly the frozen { shotId, attemptNumber }", async (attemptNumber) => {
+    const plan = controlledPlan("VISUAL_ATTEMPT_GENERATE", { attemptNumber });
+    const h = controlledHarness(plan);
+    await runEpisodeAutomationCli(["--plan", "p.json", "--plan-only", "--json"], h.deps);
+
+    expect(h.buildPreflight).toHaveBeenCalledTimes(1);
+    const [input] = h.buildPreflight.mock.calls[0]!;
+    expect(input.visualAttemptSelection).toStrictEqual({ shotId: "S01", attemptNumber });
+    expect(Object.keys(input).sort()).toEqual([...LEGACY_PLAN_ONLY_KEYS, "visualAttemptSelection"].sort());
+    expect(input).toMatchObject({ episodeId: EPISODE, scope: plan.scope, mediaRoot: SYNTHETIC_MEDIA,
+      expectedBinding: plan.inputBinding, runtimeIdentity: plan.inputBinding.runtimeIdentity, evidenceAdoptions: [] });
+    expect(JSON.parse(h.writeStdout.mock.calls[0]![0])).toEqual({ completion: "INCOMPLETE", inventory: { complete: true } });
+    expect(h.setExitCode).toHaveBeenCalledWith(1);
+  });
+
+  it.each(["VISUAL_GENERATE", "VISUAL_RECONCILE"] as const)("E. legacy %s plan-only preflight is unchanged and carries no attempt selection", async (kind) => {
+    const plan = controlledPlan(kind);
+    const h = controlledHarness(plan);
+    await runEpisodeAutomationCli(["--plan", "p.json", "--plan-only", "--json"], h.deps);
+    const [input] = h.buildPreflight.mock.calls[0]!;
+    expect(Object.keys(input).sort()).toEqual(LEGACY_PLAN_ONLY_KEYS);
+    expect("visualAttemptSelection" in input).toBe(false);
+    expect(input).toMatchObject({ expectedBinding: plan.inputBinding, mediaRoot: SYNTHETIC_MEDIA });
+  });
+
+  it("F. plan-only attempt is read-only: no session, guard, checked context, coordinator, runner, environment or network", async () => {
+    const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Real network tripwire."));
+    const h = controlledHarness(controlledPlan("VISUAL_ATTEMPT_GENERATE"));
+    await runEpisodeAutomationCli(["--plan", "p.json", "--plan-only"], h.deps);
+    expect(h.readPlanText).toHaveBeenCalledTimes(1);
+    expect(h.buildPreflight).toHaveBeenCalledTimes(1);
+    expect(h.runAutomation).not.toHaveBeenCalled();
+    expect(createFreshEpisodeOperatorSession).not.toHaveBeenCalled();
+    expectNoLowerAuthority();
+    expect(network).not.toHaveBeenCalled();
+    expect(() => parseEpisodeAutomationCliArgs(["--plan", "p.json", "--plan-only", "--confirm-paid-generation"])).toThrow(/Plan-only accepts no confirmation/);
+  });
+
+  it.each([
+    [["--plan", "a.json", "--attempt", "2"]],
+    [["--plan", "a.json", "--confirm-paid-generation", "--attempt", "2"]],
+    [["--plan", "a.json", "--plan-only", "--attempt", "2"]],
+    [["--plan", "a.json", "--attempt=2"]],
+    [["--episode", "EP02", "--plan-only", "--attempt", "2"]],
+  ])("G. the episode CLI accepts no attempt argument: %j", async (args) => {
+    expect(() => parseEpisodeAutomationCliArgs(args)).toThrow(/Unknown episode automation CLI argument: --attempt/);
+    const h = controlledHarness(controlledPlan("VISUAL_ATTEMPT_GENERATE"));
+    await expect(runEpisodeAutomationCli(args, h.deps)).rejects.toThrow(/--attempt/);
+    expect(h.readPlanText).not.toHaveBeenCalled();
+    expect(h.buildPreflight).not.toHaveBeenCalled();
+    expect(h.runAutomation).not.toHaveBeenCalled();
+  });
+
+  it("G. the CLI derives the attempt only from the frozen action: no argument, environment, scan or increment", async () => {
+    const options = parseEpisodeAutomationCliArgs(["--plan", "a.json", "--confirm-paid-generation"]);
+    expect(Object.keys(options).some(key => /attempt/i.test(key))).toBe(false);
+    expect(await read("src/execution/cli/episodeAutomationCliArgs.ts")).not.toMatch(/attempt/i);
+    const code = (await read("src/execution/cli/runEpisodeAutomationCli.ts")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toMatch(/--attempt|process\.env\.\w*ATTEMPT|readdir|opendir|attemptNumber\s*[+-]|options\.attempt/i);
+    expect(code.match(/visualAttemptSelection/g)).toHaveLength(1);
+    expect(code).toMatch(/\{ visualAttemptSelection: \{ shotId: action\.shotId, attemptNumber: action\.attemptNumber \} \}/);
+  });
+
+  it.each([
+    ["attempt 1", { attemptNumber: 1 }],
+    ["attempt 0", { attemptNumber: 0 }],
+    ["a negative attempt", { attemptNumber: -2 }],
+    ["a fractional attempt", { attemptNumber: 2.5 }],
+    ["a string attempt", { attemptNumber: "2" }],
+    ["an unsafe attempt", { attemptNumber: Number.MAX_SAFE_INTEGER + 1 }],
+    ["a missing attempt", { attemptNumber: undefined }],
+    ["a non-admitted lifecycle", { expectedAttemptLifecycle: "SUBMITTED" }],
+    ["a non-Google provider", { resolvedProvider: "RUNWAY" }],
+    ["no paid confirmation", { confirmPaidGeneration: false }],
+    ["a smuggled second attempt field", { attempt: 3 }],
+    ["an out-of-scope shot", { shotId: "S02" }],
+    ["a mismatched scene", { sceneId: "SC02" }],
+  ])("H. %s fails through the existing plan authority before preflight, session or automation", async (_label, overrides) => {
+    for (const mode of [["--confirm-paid-generation"], ["--plan-only"]]) {
+      const h = controlledHarness(controlledPlan("VISUAL_ATTEMPT_GENERATE", overrides));
+      await expect(runEpisodeAutomationCli(["--plan", "p.json", ...mode], h.deps))
+        .rejects.toThrow(/Episode automation plan is invalid|Controlled episode operation stopped \(INPUT_BINDING_DRIFT\)/);
+      expect(h.readPlanText).toHaveBeenCalledTimes(1);
+      expect(h.buildPreflight).not.toHaveBeenCalled();
+      expect(h.runAutomation).not.toHaveBeenCalled();
+      expect(h.writeStdout).not.toHaveBeenCalled();
+    }
+    expect(createFreshEpisodeOperatorSession).not.toHaveBeenCalled();
+    expectNoLowerAuthority();
+  });
+
+  it("I/J. the thin script and the package entrypoint are unchanged", async () => {
+    expect((await read("scripts/episode-automation.ts")).replace(/\r\n/g, "\n").trimEnd()).toBe([
+      "import {",
+      "  formatEpisodeAutomationCliError,",
+      "  runEpisodeAutomationCli,",
+      "} from \"../src/execution/cli/runEpisodeAutomationCli.js\";",
+      "",
+      "runEpisodeAutomationCli().catch(",
+      "  (error: unknown) => {",
+      "    console.error(",
+      "      formatEpisodeAutomationCliError(",
+      "        error,",
+      "      ),",
+      "    );",
+      "",
+      "    process.exitCode = 1;",
+      "  },",
+      ");",
+    ].join("\n"));
+    const pkg = JSON.parse(await read("package.json")) as { scripts: Record<string, string> };
+    expect(pkg.scripts["episode:automate"]).toBe("tsx scripts/episode-automation.ts");
+    expect(Object.entries(pkg.scripts).filter(([name, command]) => /attempt/i.test(name) || /attempt/i.test(command))).toEqual([]);
+  });
+
+  it("K. runEpisodeAutomationCli holds no provider, attempt-writer, runner, routing or checked-context authority", async () => {
+    const code = (await read("src/execution/cli/runEpisodeAutomationCli.ts")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toMatch(new RegExp(["executeGoogleGenAiVisualAttemptSingleShot", "executeGoogleGenAiOperatorSingleShot",
+      "submitGoogleGenAiSingleShot", "FromReservationIdentity", "createVisualAttemptExecution(?:Reservation|Submission|Completion)",
+      "createVisualAttemptGenerationRecord", "createVisualAttemptAdmission", "ProviderExecutionId", "executeProductionVisualAttemptSingleShot",
+      "createProductionSingleShotExecutionDependencies", "runSingleShotExecutionCli", "runProductionExecutionReconcileCli",
+      "createCheckedEpisodeExecutionContext", "acquireEpisodeExecutionGuard", "coordinateEpisodeAction\\s*\\(", "@google\\/genai",
+      "GoogleGenAi", "GOOGLE_GENAI", "GEMINI", "ProviderRouting", "evaluateShotProvider"].join("|")));
+    const specifiers = [...new Set([...code.matchAll(/(?:from\s+|import\s*\(\s*)"([^"]+)"/g)].map(match => match[1]))].sort();
+    expect(specifiers).toEqual(["node:fs", "node:fs/promises", "node:path", "../coordinateEpisodeAction.js", "../episodeAutomationPlan.schema.js",
+      "../runEpisodeAutomation.js", "../boundEpisodeProduction.types.js", "../buildBoundEpisodePreflight.js", "../episodeInputBinding.js",
+      "../episodeExecutionGuard.js", "./episodeAutomationCliArgs.js"].sort());
+    // Coordinator and guard are type-only statically; the lazy guard import mints only a fresh session.
+    expect(code).toMatch(/import type \{\s*EpisodeCoordinatorAction,\s*\} from "\.\.\/coordinateEpisodeAction\.js";/);
+    expect(code).toMatch(/import type \{ FreshEpisodeOperatorSession \} from "\.\.\/episodeExecutionGuard\.js";/);
+    expect(code.match(/\(await import\("[^"]+"\)\)\.\w+/g)).toEqual([
+      "(await import(\"../runEpisodeAutomation.js\")).runEpisodeAutomation",
+      "(await import(\"../episodeExecutionGuard.js\")).createFreshEpisodeOperatorSession",
+    ]);
+    expect(code.match(/\.runAutomation\(/g)).toHaveLength(1);
   });
 });

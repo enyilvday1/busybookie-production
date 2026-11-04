@@ -2552,10 +2552,12 @@ describe(
       }
     });
 
-    it("keeps the Slice-2H-B attempt-mode operator and submitter core dormant: no other source or script names them", async () => {
-      // The orchestrator module is reachable from the CLI and the shared seam, so dormancy is enforced by symbol.
+    it("keeps the Slice-2H-B attempt-mode operator reachable only through the one Slice-2I-B shared seam and the submitter core orchestrator-owned", async () => {
+      // The orchestrator module is reachable from the CLI and the shared seam, so the graph is enforced by symbol.
+      // B5 Slice-2I-B: the shared composition seam is the only other runtime namer of the attempt operator;
+      // automation, the coordinator, the shared CLI, scripts and routing never name it.
       const allowed: Readonly<Record<string, readonly string[]>> = {
-        executeGoogleGenAiVisualAttemptSingleShot: [B4X_OPERATOR_MODULES.orchestrator],
+        executeGoogleGenAiVisualAttemptSingleShot: [B4X_OPERATOR_MODULES.orchestrator, X1_SHARED_GOOGLE_COMPOSITION],
         submitGoogleGenAiSingleShotFromReservationIdentity: [B4X_OPERATOR_MODULES.orchestrator, "src/execution/providers/submitGoogleGenAiSingleShot.ts"],
         GoogleGenAiSingleShotSubmissionReservationIdentity: ["src/execution/providers/submitGoogleGenAiSingleShot.ts"],
       };
@@ -2574,6 +2576,18 @@ describe(
       expect(orchestrator.match(/dependencies\.createVisualAttemptReservation\(/g)).toHaveLength(1);
       expect(orchestrator.match(/dependencies\.createVisualAttemptSubmission\(/g)).toHaveLength(1);
       expect(orchestrator).not.toMatch(/Completion|claimGoogleGenAiProviderExecutionId|readGoogleGenAiProviderExecutionClaim|googleGenAiProviderExecutionClaim/);
+      // The seam composes the attempt operator at exactly one default site, from the existing attempt
+      // inspector and create-once attempt writers only; it never names the reservation-identity submitter.
+      const seam = await readFile(join(ROOT, X1_SHARED_GOOGLE_COMPOSITION), "utf8");
+      expect(seam.match(/executeGoogleGenAiVisualAttemptSingleShot\s*\)\(/g)).toHaveLength(1);
+      expect(seam.match(/inspectVisualAttemptLifecycle:\s*inspectVisualAttemptExecutionLifecycle,/g)).toHaveLength(1);
+      expect(seam.match(/\bcreateVisualAttemptExecutionReservation\(/g)).toHaveLength(1);
+      expect(seam.match(/createVisualAttemptSubmission:\s*createVisualAttemptExecutionSubmission,/g)).toHaveLength(1);
+      expect(seam).not.toMatch(/FromReservationIdentity|createVisualAttemptExecutionCompletion|createVisualAttemptGenerationRecord|createVisualAttemptAdmission/);
+      for (const file of ["src/execution/runEpisodeAutomation.ts", "src/execution/coordinateEpisodeAction.ts", "src/execution/cli/runSingleShotExecutionCli.ts",
+        "src/execution/cli/runEpisodeAutomationCli.ts", "src/routing/evaluateShotProvider.ts"]) {
+        expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/executeGoogleGenAiVisualAttemptSingleShot|executeGoogleGenAiOperatorSingleShot/);
+      }
     });
 
     it("keeps the committed activation policy default-off and the shared routing configuration Google-free", async () => {

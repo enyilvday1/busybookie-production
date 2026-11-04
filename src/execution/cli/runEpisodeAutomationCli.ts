@@ -320,14 +320,20 @@ export async function runEpisodeAutomationCli(
   if (options.planOnly) {
     if (plan.schemaVersion !== "2.0") throw new BoundEpisodeError("LEGACY_VISUAL_PLAN_REQUIRES_CONVERSION");
     const runtime = plan.inputBinding.runtimeIdentity;
+    const action = plan.actions[0];
     const result = await (dependencies.buildPreflight ?? buildBoundEpisodePreflight)({ episodeId: plan.episodeId, scope: plan.scope,
       mediaRoot: runtime.mediaRoot, runtimeIdentity: runtime, expectedBinding: plan.inputBinding,
-      evidenceAdoptions: plan.evidenceAdoptions, ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}) });
+      evidenceAdoptions: plan.evidenceAdoptions, ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}),
+      // B5 Slice-2I-B: exactly the frozen action's shot and attempt; never an
+      // argument, environment value, scan or increment.
+      ...(action.kind === "VISUAL_ATTEMPT_GENERATE" ? { visualAttemptSelection: { shotId: action.shotId, attemptNumber: action.attemptNumber } } : {}) });
     report(result); setExit(result.completion === "INCOMPLETE" || !result.inventory.complete ? 1 : 0); return;
   }
   let freshSession: FreshEpisodeOperatorSession | undefined;
   if (plan.schemaVersion === "2.0") {
-    const family = plan.actions[0].kind === "VISUAL_GENERATE" ? "GENERATION" : "RECONCILIATION";
+    // B5 Slice-2I-B: a reviewed attempt is paid generation; only a reconcile is recovery.
+    const kind = plan.actions[0].kind;
+    const family = kind === "VISUAL_GENERATE" || kind === "VISUAL_ATTEMPT_GENERATE" ? "GENERATION" : "RECONCILIATION";
     if (options.confirmation !== family) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
     // Lazy import keeps dotenv, secured production factories and guard write
     // capabilities out of plan-only/structural-validation module loading.

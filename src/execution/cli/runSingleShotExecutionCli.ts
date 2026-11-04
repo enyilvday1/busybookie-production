@@ -41,6 +41,8 @@ import {
 
 import {
   createProductionSingleShotExecutionDependencies,
+  executeProductionVisualAttemptSingleShot,
+  type ProductionSingleShotExecutionCredentialSource,
 } from "../createProductionSingleShotExecutionDependencies.js";
 
 import {
@@ -86,7 +88,34 @@ export type RunSingleShotExecutionCliDependencies =
 
     executeSingleShot:
       typeof executeSingleShot;
+
+    // B5 Slice-2I-B: the shared attempt-mode composition point; reached only
+    // for a checked, reviewed VISUAL_ATTEMPT_GENERATE.
+    executeVisualAttempt?:
+      typeof executeProductionVisualAttemptSingleShot;
   }>;
+
+function credentialSource(
+  env:
+    ReturnType<typeof loadEnvironment>,
+): ProductionSingleShotExecutionCredentialSource {
+  return {
+    ...(
+      env.RUNWAYML_API_SECRET === undefined
+        ? {}
+        : {
+            RUNWAYML_API_SECRET: env.RUNWAYML_API_SECRET
+          }
+    ),
+    ...(
+      env.GEMINI_API_KEY === undefined
+        ? {}
+        : {
+            GEMINI_API_KEY: env.GEMINI_API_KEY
+          }
+    ),
+  };
+}
 
 const defaultDependencies:
   RunSingleShotExecutionCliDependencies =
@@ -119,12 +148,23 @@ export async function runSingleShotExecutionCli(
     args
   );
 
+  // B5 Slice-2I-B: --attempt is transport, never authority. Without a genuine
+  // checked context nothing is loaded, composed, reserved or sent.
+  if (options.attemptNumber !== undefined && !checkedContext) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
   if (!options.confirmPaidGeneration) throw new BoundEpisodeError("ACTION_REJECTED");
   if (checkedContext) {
     const data = checkedEpisodeExecutionData(checkedContext);
     const action = data.plan.actions[0];
-    if (action.kind !== "VISUAL_GENERATE" || options.episodeId !== action.episodeId || options.shotId !== action.shotId ||
-        options.sourceImagePath !== action.referenceBinding.canonicalAbsolutePath) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    if (options.attemptNumber === undefined) {
+      if (action.kind !== "VISUAL_GENERATE" || options.episodeId !== action.episodeId || options.shotId !== action.shotId ||
+          options.sourceImagePath !== action.referenceBinding.canonicalAbsolutePath) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    } else if (action.kind !== "VISUAL_ATTEMPT_GENERATE" || action.episodeId !== data.plan.episodeId || options.episodeId !== action.episodeId ||
+        options.shotId !== action.shotId || options.attemptNumber !== action.attemptNumber ||
+        options.sourceImagePath !== action.referenceBinding.canonicalAbsolutePath || action.confirmPaidGeneration !== true ||
+        action.expectedAttemptLifecycle !== "ADMITTED_ONLY" || action.resolvedProvider !== "GOOGLE_GENAI") {
+      // The transport can never select a different attempt than the reviewed action.
+      throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    }
     await assertCheckedEpisodeAdmission(checkedContext);
     const original = dependencies;
     const required = <T>(value: T | null): T => { if (value === null) throw new BoundEpisodeError("INPUT_BINDING_DRIFT"); return value; };
@@ -181,6 +221,27 @@ export async function runSingleShotExecutionCli(
   if (checkedContext && mediaRoot !== checkedEpisodeExecutionData(checkedContext).plan.inputBinding.runtimeIdentity.mediaRoot) {
     throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   }
+  if (checkedContext && options.attemptNumber !== undefined) {
+    // The reviewed attempt's own lifecycle is adjudicated by the attempt
+    // orchestrator; the legacy (Attempt-1) shot lifecycle is never consulted.
+    // Exactly one generation allowance, then exactly one composed execution.
+    consumeEpisodeGenerationAllowance(checkedEpisodeExecutionData(checkedContext).invocation);
+    await (dependencies.executeVisualAttempt ?? executeProductionVisualAttemptSingleShot)(
+      credentialSource(env),
+      {
+        episode,
+        shotId: options.shotId,
+        bible,
+        rules,
+        mediaRoot,
+        sourceImagePath: options.sourceImagePath,
+        confirmPaidGeneration: options.confirmPaidGeneration,
+        attemptNumber: options.attemptNumber,
+      },
+      checkedContext,
+    );
+    return;
+  }
   const standaloneGuard = checkedContext ? null : await (async () => {
     const manifest = await readBoundFile({ root: process.cwd(), canonicalPath: resolve(process.cwd(), "episodes", options.episodeId, "episode.json"),
       role: "MANIFEST", maxBytes: 1048576 });
@@ -221,22 +282,11 @@ export async function runSingleShotExecutionCli(
     );
   }
 
-  const executionDependencies = dependencies.createDependencies({
-    ...(
-      env.RUNWAYML_API_SECRET === undefined
-        ? {}
-        : {
-            RUNWAYML_API_SECRET: env.RUNWAYML_API_SECRET
-          }
-    ),
-    ...(
-      env.GEMINI_API_KEY === undefined
-        ? {}
-        : {
-            GEMINI_API_KEY: env.GEMINI_API_KEY
-          }
-    ),
-  });
+  const executionDependencies = dependencies.createDependencies(
+    credentialSource(
+      env
+    )
+  );
 
   // The secured executor owns readiness, confirmation, verification and the
   // durable lifecycle. In particular, only its verified path reaches a provider.

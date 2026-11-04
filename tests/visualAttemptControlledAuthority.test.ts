@@ -13,7 +13,6 @@ import { acquireEpisodeExecutionGuard, admitEpisodeCoordinatorDispatch, assertCh
   episodeInvocationCounts, releaseEpisodeExecutionGuard, type EpisodeGuardContext } from "../src/execution/episodeExecutionGuard.js";
 import { coordinateEpisodeAction, type CoordinateEpisodeActionDependencies } from "../src/execution/coordinateEpisodeAction.js";
 import { runEpisodeAutomation } from "../src/execution/runEpisodeAutomation.js";
-import { parseSingleShotExecutionCliArgs } from "../src/execution/cli/singleShotExecutionCliArgs.js";
 import { inspectExecutionLifecycle } from "../src/execution/inspectExecutionLifecycle.js";
 import { inspectVisualAttemptExecutionLifecycle } from "../src/execution/inspectVisualAttemptExecutionLifecycle.js";
 import { createVisualAttemptAdmission } from "../src/execution/createVisualAttemptAdmission.js";
@@ -31,10 +30,21 @@ import { createExecutionCompletion } from "../src/execution/createExecutionCompl
 import { buildRunwayGenerationRecord } from "../src/runway/audit/buildRunwayGenerationRecord.js";
 import { writeRunwayGenerationRecord } from "../src/runway/audit/writeRunwayGenerationRecord.js";
 import { createRunwayVideoOutputPath } from "../src/runway/output/runwayOutputPath.js";
+import { runSingleShotExecutionCli, type RunSingleShotExecutionCliDependencies } from "../src/execution/cli/runSingleShotExecutionCli.js";
+import { executeProductionVisualAttemptSingleShot } from "../src/execution/createProductionSingleShotExecutionDependencies.js";
+import { buildGoogleGenAiSingleShotPrompt } from "../src/execution/providers/buildGoogleGenAiSingleShotPrompt.js";
+import { BoundEpisodeActionError, type BoundEpisodeActionResult } from "../src/execution/boundEpisodeProduction.types.js";
+import { verifyVisualAttemptDurableCompletion, type VisualAttemptDurableCompletionVerification } from "../src/execution/verifyVisualAttemptDurableCompletion.js";
 
 // B5 Slice-2I-A: explicit attempt selection -> exact ADMITTED_ONLY authority
-// -> reviewed VISUAL_ATTEMPT_GENERATE -> genuine checked context, and nothing
-// further. Synthetic temporary media roots only; no provider or network.
+// -> reviewed VISUAL_ATTEMPT_GENERATE -> genuine checked context.
+// B5 Slice-2I-B: -> fresh GENERATION session -> coordinator -> secured CLI
+// transport -> shared seam -> attempt operator, stopping at SUBMITTED.
+// Synthetic temporary media roots only; the SDK is a tripwire, network is
+// rejected and every provider interaction is a synthetic in-process fake.
+vi.mock("@google/genai", () => ({
+  GoogleGenAI: vi.fn(() => { throw new Error("The real Google SDK must never be constructed by the Slice-2I tests."); }),
+}));
 
 type AttemptLifecycle = Awaited<ReturnType<typeof inspectVisualAttemptExecutionLifecycle>>;
 
@@ -89,11 +99,12 @@ async function fixture(options: Readonly<{ provider?: "RUNWAY" | "GOOGLE_GENAI";
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function admit(f: Fixture, overrides: Readonly<{ attemptNumber?: number; sceneId?: string; manifestRawSha256?: string }> = {}) {
+async function admit(f: Fixture, overrides: Readonly<{ attemptNumber?: number; sceneId?: string; manifestRawSha256?: string;
+  promptIdentitySha256?: string; referenceIdentitySha256?: string }> = {}) {
   const attemptNumber = overrides.attemptNumber ?? 2;
   return createVisualAttemptAdmission(f.mediaRoot, { attemptNumber, episodeId: "EP02", sceneId: overrides.sceneId ?? "SC01", shotId: "S01",
     provider: "GOOGLE_GENAI", manifestRawSha256: overrides.manifestRawSha256 ?? rawSha256(await readFile(f.manifest)),
-    promptIdentitySha256: "b".repeat(64), referenceIdentitySha256: "c".repeat(64),
+    promptIdentitySha256: overrides.promptIdentitySha256 ?? "b".repeat(64), referenceIdentitySha256: overrides.referenceIdentitySha256 ?? "c".repeat(64),
     previousAttemptNumber: attemptNumber - 1, previousAttemptQcSha256: "d".repeat(64) });
 }
 
@@ -118,8 +129,14 @@ function syntheticLifecycle(patch: (lifecycle: Extract<AttemptLifecycle, { state
 }
 
 const OPERATING = { singleOperator: true, noConcurrentAuthoring: true, noUnguardedRunners: true } as const;
+// The parsed (frozen) attempt fixture, refined only after runtime validation of its single action.
+type VisualAttemptAction = Extract<ControlledEpisodeAutomationPlan["actions"][number], { kind: "VISUAL_ATTEMPT_GENERATE" }>;
+type VisualAttemptPlan = Omit<ControlledEpisodeAutomationPlan, "actions"> & Readonly<{ actions: readonly [VisualAttemptAction] }>;
+function isVisualAttemptPlan(plan: ControlledEpisodeAutomationPlan): plan is VisualAttemptPlan {
+  return plan.actions.length === 1 && plan.actions[0].kind === "VISUAL_ATTEMPT_GENERATE";
+}
 function attemptPlan(before: BoundEpisodePreflight, overrides: Readonly<Record<string, unknown>> = {},
-  evidenceAdoptions: readonly EvidenceAdoption[] = []): ControlledEpisodeAutomationPlan {
+  evidenceAdoptions: readonly EvidenceAdoption[] = []): VisualAttemptPlan {
   const candidate = before.nextActionCandidate;
   if (!before.binding || !before.bindingSha256 || candidate?.kind !== "VISUAL_ATTEMPT_GENERATE") throw new Error("Fixture needs an attempt candidate.");
   const plan = parseEpisodeAutomationPlan({ schemaVersion: "2.0", mode: "CONTROLLED_VISUAL", episodeId: "EP02", scope: before.scope,
@@ -131,16 +148,17 @@ function attemptPlan(before: BoundEpisodePreflight, overrides: Readonly<Record<s
       costAuthority: { unit: candidate.cost.unit, modeledValue: candidate.cost.modeledValue, maxModeledValue: candidate.cost.perShotCap,
         policySha256: candidate.cost.policySha256 }, confirmPaidGeneration: true, ...overrides }] });
   if (plan.schemaVersion !== "2.0") throw new Error("Wrong fixture schema.");
+  if (!isVisualAttemptPlan(plan)) throw new Error("Fixture needs a VISUAL_ATTEMPT_GENERATE action.");
   return plan;
 }
 
-async function checked(f: Fixture, plan: ControlledEpisodeAutomationPlan, beforePlan: BoundEpisodePreflight) {
+async function checked(f: Fixture, plan: ControlledEpisodeAutomationPlan, beforePlan: BoundEpisodePreflight,
+  preflight = vi.fn(buildBoundEpisodePreflight)) {
   const manifest = plan.inputBinding.fileBindings.find(file => file.role === "MANIFEST")!.rawSha256!;
   const guard = await acquireEpisodeExecutionGuard({ mediaRoot: f.mediaRoot, episodeId: "EP02", manifestRawSha256: manifest, sessionId: randomUUID() });
   guards.push(guard);
   const invocation = createEpisodeInvocation("EP02", 1);
   const verifyRuntime = vi.fn(async () => undefined);
-  const preflight = vi.fn(buildBoundEpisodePreflight);
   const context = await createCheckedEpisodeExecutionContext({ plan, beforePlan, guard, invocation, preflight, verifyRuntime });
   return { context, guard, invocation, verifyRuntime, preflight };
 }
@@ -152,7 +170,7 @@ function tripwires() {
     loadProviderRoutingPolicy: trip("loadProviderRoutingPolicy"), resolveMediaRoot: trip("resolveMediaRoot"),
     resolveEpisodeProductionState: trip("resolveEpisodeProductionState"), runSingleShotExecutionCli: trip("runSingleShotExecutionCli"),
     runProductionExecutionReconcileCli: trip("runProductionExecutionReconcileCli"), runDialogueGenerationCli: trip("runDialogueGenerationCli"),
-    runDialogueReconcileCli: trip("runDialogueReconcileCli") };
+    runDialogueReconcileCli: trip("runDialogueReconcileCli"), verifyVisualAttemptDurableCompletion: trip("verifyVisualAttemptDurableCompletion") };
   return { dependencies, typed: dependencies as unknown as CoordinateEpisodeActionDependencies,
     calls: () => Object.values(dependencies).reduce((total, fn) => total + fn.mock.calls.length, 0) };
 }
@@ -442,48 +460,388 @@ describe("H. genuine checked authority", () => {
   });
 });
 
-describe("I. Slice-2I-A dormancy", () => {
-  it("coordinateEpisodeAction refuses the genuine reviewed attempt before any I/O, runner, reservation or provider", async () => {
+// ---------------------------------------------------------------------------
+// B5 Slice-2I-B controlled dispatch.
+
+const ATTEMPT_SELECTION = { shotId: "S01", attemptNumber: 2 } as const;
+const INTERACTION_ID = "v1_b5-2ib-synthetic-attempt2-interaction";
+const tripwireNetwork = () => vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Real network tripwire."));
+const attemptState = async (f: Fixture) => (await inspectVisualAttemptExecutionLifecycle(f.mediaRoot, "EP02", "S01", 2)).state;
+
+function shotS01(f: Fixture) {
+  return f.episode.scenes.flatMap(scene => scene.shots).find(shot => shot.id === "S01")!;
+}
+// Admission identities equal to what the real attempt operator will derive.
+async function admitExact(f: Fixture, overrides: Readonly<{ promptIdentitySha256?: string; referenceIdentitySha256?: string }> = {}) {
+  return admit(f, { promptIdentitySha256: overrides.promptIdentitySha256 ?? rawSha256(buildGoogleGenAiSingleShotPrompt(shotS01(f))),
+    referenceIdentitySha256: overrides.referenceIdentitySha256 ?? rawSha256(await readFile(join(f.mediaRoot, "references/ref.png"))) });
+}
+
+function legacyPlan(before: BoundEpisodePreflight, evidenceAdoptions: readonly EvidenceAdoption[] = []): ControlledEpisodeAutomationPlan {
+  const candidate = before.nextActionCandidate;
+  if (!before.binding || !before.bindingSha256 || !candidate || candidate.kind === "VISUAL_ATTEMPT_GENERATE") throw new Error("Fixture needs a legacy candidate.");
+  const target = { episodeId: candidate.episodeId, sceneId: candidate.sceneId, shotId: candidate.shotId, order: candidate.order };
+  const action = candidate.kind === "VISUAL_GENERATE"
+    ? { ...target, kind: candidate.kind, expectedLifecycle: candidate.expectedLifecycle, resolvedProvider: candidate.provider,
+      referenceBinding: candidate.referenceBinding, costAuthority: { unit: candidate.cost.unit, modeledValue: candidate.cost.modeledValue,
+        maxModeledValue: candidate.cost.perShotCap, policySha256: candidate.cost.policySha256 }, confirmPaidGeneration: true }
+    : { ...target, kind: candidate.kind, expectedLifecycle: candidate.expectedLifecycle, reservationId: candidate.observation.reservationId,
+      durableProvider: candidate.observation.durableProvider, providerExecutionIdentitySha256: candidate.observation.providerExecutionIdentitySha256,
+      submissionSha256: candidate.observation.submissionSha256, reservationSha256: candidate.observation.reservationSha256, confirmReconciliation: true };
+  const plan = parseEpisodeAutomationPlan({ schemaVersion: "2.0", mode: "CONTROLLED_VISUAL", episodeId: "EP02", scope: before.scope,
+    inputBinding: before.binding, inputBindingSha256: before.bindingSha256, observations: before.observations,
+    observationsSha256: before.observationsSha256, evidenceAdoptions, maximumNewProviderCreates: candidate.kind === "VISUAL_GENERATE" ? 1 : 0,
+    operatingCondition: OPERATING, actions: [action] });
+  if (plan.schemaVersion !== "2.0") throw new Error("Wrong fixture schema.");
+  return plan;
+}
+
+function sessionProbe() {
+  const coordinateAction = vi.fn(async () => ({ status: "STOPPED" }) as unknown as BoundEpisodeActionResult);
+  return { coordinateAction, typed: coordinateAction as unknown as typeof coordinateEpisodeAction };
+}
+
+// Every shared-CLI dependency is a tripwire except, where given, the synthetic environment,
+// media-root validation and the shared attempt composition point.
+function cliDependencies(f: Fixture, live: Readonly<{ executeVisualAttempt?: RunSingleShotExecutionCliDependencies["executeVisualAttempt"] }> = {}) {
+  const trip = (name: string) => vi.fn(() => { throw new Error(`${name} must not be reached.`); });
+  const dependencies = { loadEnvironment: live.executeVisualAttempt ? vi.fn(() => ({ GEMINI_API_KEY: "synthetic-b5-2ib-credential" })) : trip("loadEnvironment"),
+    loadEpisodeManifest: trip("loadEpisodeManifest"), loadCharacterBible: trip("loadCharacterBible"), loadProductionRules: trip("loadProductionRules"),
+    loadProviderRoutingPolicy: trip("loadProviderRoutingPolicy"), validateEpisodeProduction: trip("validateEpisodeProduction"),
+    validateMediaRoot: live.executeVisualAttempt ? vi.fn(async () => f.mediaRoot) : trip("validateMediaRoot"),
+    inspectExecutionLifecycle: trip("inspectExecutionLifecycle"), createDependencies: trip("createDependencies"),
+    executeSingleShot: trip("executeSingleShot"), executeVisualAttempt: live.executeVisualAttempt ? vi.fn(live.executeVisualAttempt) : trip("executeVisualAttempt") };
+  return { dependencies, typed: dependencies as unknown as RunSingleShotExecutionCliDependencies,
+    calls: () => Object.values(dependencies).reduce((total, fn) => total + fn.mock.calls.length, 0) };
+}
+const attemptArgs = (overrides: Readonly<{ episode?: string; shot?: string; image?: string; attempt?: string }> = {}, image = "") => [
+  "--episode", overrides.episode ?? "EP02", "--shot", overrides.shot ?? "S01", "--image", overrides.image ?? image,
+  "--attempt", overrides.attempt ?? "2", "--confirm-paid-generation"];
+
+describe("I. Slice-2I-B unbound and fabricated attempts stay closed", () => {
+  it("the unbound coordinator path still refuses VISUAL_ATTEMPT_GENERATE before any I/O", async () => {
+    const deps = tripwires();
+    await expect(coordinateEpisodeAction({ episodeId: "EP02", action: { kind: "VISUAL_ATTEMPT_GENERATE", sceneId: "SC01", shotId: "S01",
+      attemptNumber: 2, confirmPaidGeneration: true } as never }, deps.typed)).rejects.toThrow(/Unsupported episode coordinator action kind/);
+    expect(deps.calls()).toBe(0);
+  });
+  it("a fabricated controlled context fails closed before any I/O", async () => {
     const f = await fixture(); await admit(f);
-    const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Real network tripwire."));
+    const plan = attemptPlan(await select(f)); const deps = tripwires();
+    await expect(coordinateEpisodeAction({ episodeId: "EP02", action: plan.actions[0], controlledContext: Object.freeze({ episodeId: "EP02" }) }, deps.typed))
+      .rejects.toMatchObject({ code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(deps.calls()).toBe(0); expect(await attemptState(f)).toBe("ADMITTED_ONLY");
+  });
+});
+
+describe("J. fresh operator session family", () => {
+  it("VISUAL_ATTEMPT_GENERATE consumes a single-use GENERATION session and preflights exactly the frozen attempt", async () => {
+    const f = await fixture(); await admit(f); const network = tripwireNetwork();
+    const plan = attemptPlan(await select(f)); const probe = sessionProbe(); const buildPreflight = vi.fn(buildBoundEpisodePreflight);
+    const deps = { coordinateAction: probe.typed, verifyRuntime: vi.fn(async () => undefined), buildPreflight };
+    const session = createFreshEpisodeOperatorSession("GENERATION", true);
+    await expect(runEpisodeAutomation(plan, deps, session)).resolves.toMatchObject({ status: "STOPPED" });
+    expect(probe.coordinateAction).toHaveBeenCalledTimes(1);
+    const [input] = buildPreflight.mock.calls[0]!;
+    expect(input).toMatchObject({ episodeId: "EP02", expectedBinding: plan.inputBinding, visualAttemptSelection: ATTEMPT_SELECTION });
+    expect(input.visualAttemptSelection).toEqual(ATTEMPT_SELECTION);
+    await expect(runEpisodeAutomation(plan, deps, session)).rejects.toMatchObject({ code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(probe.coordinateAction).toHaveBeenCalledTimes(1); expect(network).not.toHaveBeenCalled();
+    await expect(readFile(episodeExecutionGuardPath(f.mediaRoot, "EP02"))).rejects.toThrow();
+  });
+  it("a RECONCILIATION session never authorizes attempt generation", async () => {
+    const f = await fixture(); await admit(f); const network = tripwireNetwork();
+    const plan = attemptPlan(await select(f)); const probe = sessionProbe(); const buildPreflight = vi.fn(buildBoundEpisodePreflight);
+    await expect(runEpisodeAutomation(plan, { coordinateAction: probe.typed, verifyRuntime: vi.fn(async () => undefined), buildPreflight },
+      createFreshEpisodeOperatorSession("RECONCILIATION", true))).rejects.toMatchObject({ name: "BoundEpisodeError", code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(probe.coordinateAction).not.toHaveBeenCalled(); expect(buildPreflight).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled();
+    await expect(readFile(episodeExecutionGuardPath(f.mediaRoot, "EP02"))).rejects.toThrow();
+    expect(await attemptState(f)).toBe("ADMITTED_ONLY");
+  });
+  it("legacy VISUAL_GENERATE keeps GENERATION and VISUAL_RECONCILE keeps RECONCILIATION, with no attempt selection", async () => {
+    const g = await fixture(); const generate = legacyPlan(await buildBoundEpisodePreflight(g.input));
+    const r = await fixture({ provider: "RUNWAY" }); await accepted(r, "S11"); const adoptions = await reviewedEvidence(r);
+    const reconcile = legacyPlan(await buildBoundEpisodePreflight({ ...r.input, evidenceAdoptions: adoptions }), adoptions);
+    for (const [plan, family, wrong] of [[generate, "GENERATION", "RECONCILIATION"], [reconcile, "RECONCILIATION", "GENERATION"]] as const) {
+      const probe = sessionProbe(); const buildPreflight = vi.fn(buildBoundEpisodePreflight);
+      const deps = { coordinateAction: probe.typed, verifyRuntime: vi.fn(async () => undefined), buildPreflight };
+      await expect(runEpisodeAutomation(plan, deps, createFreshEpisodeOperatorSession(wrong, true))).rejects.toMatchObject({ code: "OPERATING_CONDITION_UNESTABLISHED" });
+      expect(probe.coordinateAction).not.toHaveBeenCalled();
+      await runEpisodeAutomation(plan, deps, createFreshEpisodeOperatorSession(family, true));
+      expect(probe.coordinateAction).toHaveBeenCalledTimes(1);
+      expect("visualAttemptSelection" in buildPreflight.mock.calls[0]![0]).toBe(false);
+    }
+  });
+});
+
+describe("K. shared CLI: --attempt is transport, never authority", () => {
+  it("a direct --attempt invocation without a checked context fails before environment, composition or provider work", async () => {
+    const f = await fixture(); await admit(f); const network = tripwireNetwork(); const cli = cliDependencies(f);
+    await expect(runSingleShotExecutionCli(attemptArgs({}, join(f.mediaRoot, "references/ref.png")), cli.typed))
+      .rejects.toMatchObject({ name: "BoundEpisodeError", code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(cli.calls()).toBe(0); expect(network).not.toHaveBeenCalled(); expect(await attemptState(f)).toBe("ADMITTED_ONLY");
+  });
+  it("a fabricated checked context fails closed", async () => {
+    const f = await fixture(); await admit(f); const cli = cliDependencies(f);
+    await expect(runSingleShotExecutionCli(attemptArgs({}, join(f.mediaRoot, "references/ref.png")), cli.typed, Object.freeze({ episodeId: "EP02" })))
+      .rejects.toMatchObject({ code: "OPERATING_CONDITION_UNESTABLISHED" });
+    expect(cli.calls()).toBe(0);
+  });
+  it.each([
+    ["attempt", { attempt: "3" }], ["episode", { episode: "EP03" }], ["shot", { shot: "S11" }], ["image", { image: "C:/elsewhere/ref.png" }],
+  ] as const)("a transport %s differing from the reviewed action is drift before any work", async (_label, overrides) => {
+    const f = await fixture(); await admit(f);
     const before = await select(f); const plan = attemptPlan(before);
-    const { context, invocation, preflight, verifyRuntime } = await checked(f, plan, before); const deps = tripwires();
-    const error: unknown = await coordinateEpisodeAction({ episodeId: "EP02", action: plan.actions[0], controlledContext: context }, deps.typed)
-      .catch((cause: unknown) => cause);
-    expect(error).toMatchObject({ name: "BoundEpisodeError", code: "ACTION_REJECTED" });
-    expect((error as Error).cause).toBeInstanceOf(Error);
-    expect(String(((error as Error).cause as Error).message)).toMatch(/not enabled in Slice-2I-A/);
-    expect(deps.calls()).toBe(0); expect(preflight).not.toHaveBeenCalled(); expect(verifyRuntime).not.toHaveBeenCalled();
+    const { context, preflight, verifyRuntime, invocation } = await checked(f, plan, before); const cli = cliDependencies(f);
+    await expect(runSingleShotExecutionCli(attemptArgs(overrides, plan.actions[0].referenceBinding.canonicalAbsolutePath), cli.typed, context))
+      .rejects.toMatchObject({ code: "INPUT_BINDING_DRIFT" });
+    expect(cli.calls()).toBe(0); expect(preflight).not.toHaveBeenCalled(); expect(verifyRuntime).not.toHaveBeenCalled();
     expect(episodeInvocationCounts(invocation)).toEqual({ dispatchAllowanceConsumed: 0, recoveryDispatchCount: 0 });
-    expect(() => admitEpisodeCoordinatorDispatch(invocation)).not.toThrow(); // The dispatch latch was never taken.
-    expect((await inspectVisualAttemptExecutionLifecycle(f.mediaRoot, "EP02", "S01", 2)).state).toBe("ADMITTED_ONLY");
-    await expect(readFile(createVisualAttemptExecutionReservationPath(f.mediaRoot, "EP02", "S01", 2))).rejects.toThrow();
+  });
+  it("an attempt context cannot run the legacy path, a legacy context cannot run an attempt, and confirmation stays literal", async () => {
+    const f = await fixture(); await admit(f);
+    const before = await select(f); const plan = attemptPlan(before); const image = plan.actions[0].referenceBinding.canonicalAbsolutePath;
+    const { context } = await checked(f, plan, before); const cli = cliDependencies(f);
+    await expect(runSingleShotExecutionCli(["--episode", "EP02", "--shot", "S01", "--image", image, "--confirm-paid-generation"], cli.typed, context))
+      .rejects.toMatchObject({ code: "INPUT_BINDING_DRIFT" });
+    await expect(runSingleShotExecutionCli(["--episode", "EP02", "--shot", "S01", "--image", image, "--attempt", "2"], cli.typed, context))
+      .rejects.toMatchObject({ code: "ACTION_REJECTED" });
+    const g = await fixture(); const legacyBefore = await buildBoundEpisodePreflight(g.input); const legacy = legacyPlan(legacyBefore);
+    const { context: legacyContext } = await checked(g, legacy, legacyBefore);
+    const legacyAction = legacy.actions[0];
+    if (legacyAction.kind !== "VISUAL_GENERATE") throw new Error("Fixture needs VISUAL_GENERATE.");
+    await expect(runSingleShotExecutionCli(["--episode", "EP02", "--shot", legacyAction.shotId, "--image", legacyAction.referenceBinding.canonicalAbsolutePath,
+      "--attempt", "2", "--confirm-paid-generation"], cli.typed, legacyContext)).rejects.toMatchObject({ code: "INPUT_BINDING_DRIFT" });
+    expect(cli.calls()).toBe(0);
+  });
+});
+
+describe("L. coordinator dispatch and attempt-aware post-action adjudication", () => {
+  // The checked preflight observes exactly the selected attempt; after the runner settles the
+  // attempt inspector reports the synthetic post-state.
+  async function dispatch(f: Fixture, post: (() => Promise<void>) | Readonly<{ state: string }> | null, evidenceAdoptions: readonly EvidenceAdoption[] = [],
+    options: Readonly<{ verifier?: (...args: Parameters<typeof verifyVisualAttemptDurableCompletion>) => Promise<unknown>; runnerFails?: boolean }> = {}) {
+    const before = await select(f, 2, { evidenceAdoptions }); const plan = attemptPlan(before, {}, evidenceAdoptions);
+    let settled = false;
+    const inspector = vi.fn(async (...args: Parameters<typeof inspectVisualAttemptExecutionLifecycle>) => {
+      const lifecycle = await inspectVisualAttemptExecutionLifecycle(...args);
+      return (settled && post && "state" in post ? { ...lifecycle, ...post } : lifecycle) as unknown as AttemptLifecycle;
+    });
+    const preflight = vi.fn(buildBoundEpisodePreflight);
+    preflight.mockImplementation(input => buildBoundEpisodePreflight(input, readers(inspector)));
+    const issued = await checked(f, plan, before, preflight); const deps = tripwires();
+    const runner = vi.fn(async () => {
+      if (typeof post === "function") await post(); settled = true;
+      if (options.runnerFails) throw new Error("Synthetic lower-runner failure after settling.");
+    });
+    deps.dependencies.runSingleShotExecutionCli = runner as never;
+    if (options.verifier) deps.dependencies.verifyVisualAttemptDurableCompletion = vi.fn(options.verifier) as never;
+    const outcome: unknown = await coordinateEpisodeAction({ episodeId: "EP02", action: plan.actions[0], controlledContext: issued.context }, deps.typed)
+      .catch((cause: unknown) => cause);
+    if (outcome instanceof Error && !options.runnerFails) throw outcome;
+    const result = outcome instanceof BoundEpisodeActionError ? outcome.result : outcome as BoundEpisodeActionResult;
+    return { ...issued, plan, runner, deps, result, outcome, verifier: deps.dependencies.verifyVisualAttemptDurableCompletion };
+  }
+  // A synthetic verification shaped like the durable verifier's result, for exactly EP02/SC01/S01/a2.
+  function verification(patch: Readonly<Record<string, unknown>> = {}, lifecyclePatch: Readonly<Record<string, unknown>> = {}) {
+    const identity = { episodeId: "EP02", sceneId: "SC01", shotId: "S01", attemptNumber: 2 };
+    return { ...identity, provider: "GOOGLE_GENAI", lifecycle: { ...identity, state: "COMPLETED", ...lifecyclePatch }, ...patch } as unknown as
+      VisualAttemptDurableCompletionVerification;
+  }
+  function expectExactSelection(preflight: Readonly<{ mock: Readonly<{ calls: readonly (readonly unknown[])[] }> }>, plan: ControlledEpisodeAutomationPlan) {
+    const inputs = preflight.mock.calls.map(call => call[0] as Record<string, unknown>);
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
+    for (const input of inputs) expect(input.visualAttemptSelection).toEqual(ATTEMPT_SELECTION);
+    expect(inputs.at(-2)).toMatchObject({ expectedBinding: plan.inputBinding });
+    expect("expectedBinding" in inputs.at(-1)!).toBe(false);
+  }
+
+  it("delegates exactly once through the secured runner with the exact reviewed transport and stops SUBMITTED for recovery", async () => {
+    const f = await fixture(); await admit(f); const network = tripwireNetwork();
+    const { runner, preflight, plan, invocation, result, context, deps } = await dispatch(f, { state: "SUBMITTED" });
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]).toEqual([["--episode", "EP02", "--shot", "S01", "--image", plan.actions[0].referenceBinding.canonicalAbsolutePath,
+      "--attempt", "2", "--confirm-paid-generation"], undefined, context]);
+    expect(deps.dependencies.runProductionExecutionReconcileCli).not.toHaveBeenCalled();
+    expect(deps.dependencies.verifyVisualAttemptDurableCompletion).not.toHaveBeenCalled();
+    expectExactSelection(preflight, plan);
+    expect(result).toMatchObject({ status: "STOPPED", stopReason: "SUBMITTED_RECOVERY_REQUIRED", selectedPostObservation: null,
+      afterPlan: { visualAttempt: { shotId: "S01", attemptNumber: 2, lifecycle: "SUBMITTED" } } });
+    expect(() => admitEpisodeCoordinatorDispatch(invocation)).toThrow(); // The exactly-once latch was taken.
     expect(network).not.toHaveBeenCalled();
   });
-  it.each(["GENERATION", "RECONCILIATION"] as const)("runEpisodeAutomation with a %s session never dispatches an attempt plan", async family => {
+  it("a durable RESERVED_ONLY attempt stops for manual adjudication without retry or fallback", async () => {
+    const f = await fixture(); const admission = await admit(f);
+    const { runner, result, deps } = await dispatch(f, async () => {
+      await createVisualAttemptExecutionReservation(f.mediaRoot, { episodeId: "EP02", sceneId: "SC01", shotId: "S01", attemptNumber: 2,
+        provider: "GOOGLE_GENAI", expectedAdmissionId: admission.record.admissionId, expectedAdmissionSha256: admission.admissionSha256 });
+    });
+    expect(result).toMatchObject({ status: "STOPPED", stopReason: "RESERVED_ONLY_MANUAL_ADJUDICATION", afterPlan: { visualAttempt: { lifecycle: "RESERVED_ONLY" } } });
+    expect(runner).toHaveBeenCalledTimes(1); expect(deps.dependencies.runProductionExecutionReconcileCli).not.toHaveBeenCalled();
+    expect(deps.dependencies.verifyVisualAttemptDurableCompletion).not.toHaveBeenCalled();
+    expect(await attemptState(f)).toBe("RESERVED_ONLY");
+  });
+  it("legacy Attempt-1 COMPLETED never masquerades as Attempt-2 completion", async () => {
+    const f = await fixture(); await complete(f, "S01", await accepted(f, "S01")); await admit(f);
+    const attempt1 = await inspectExecutionLifecycle(f.mediaRoot, "EP02", "S01");
+    // Even an injected verifier that would vouch for Attempt 2 is never consulted while it is ADMITTED_ONLY.
+    const { result, preflight, plan, verifier } = await dispatch(f, null, await reviewedEvidence(f), { verifier: async () => verification() });
+    expect(verifier).not.toHaveBeenCalled();
+    expect(result.afterPlan?.shots.find(row => row.shotId === "S01")).toMatchObject({ disposition: "COMPLETED", completionVerification: "VERIFIED" });
+    expect(result).toMatchObject({ status: "REJECTED", stopReason: "UNEXPECTED_PROVIDER_RESULT", selectedPostObservation: null,
+      afterPlan: { visualAttempt: { lifecycle: "ADMITTED_ONLY" } } });
+    expect(result.status).not.toBe("ACTION_COMPLETED");
+    expectExactSelection(preflight, plan);
+    expect(await inspectExecutionLifecycle(f.mediaRoot, "EP02", "S01")).toEqual(attempt1);
+  });
+  it.each([
+    ["NOT_ADMITTED", "UNRESOLVED", "POST_ACTION_STATE_UNRESOLVED"],
+    ["RECONCILING", "UNRESOLVED", "INVALID_DURABLE_STATE"],
+  ] as const)("an attempt post-state %s is never success (%s)", async (state, status, stopReason) => {
     const f = await fixture(); await admit(f);
-    const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Real network tripwire."));
-    const plan = attemptPlan(await select(f)); const deps = tripwires();
-    const coordinateAction = vi.fn((...args: Parameters<typeof coordinateEpisodeAction>) => coordinateEpisodeAction(args[0] as never, deps.typed));
-    const outcome: unknown = await runEpisodeAutomation(plan, { coordinateAction: coordinateAction as unknown as typeof coordinateEpisodeAction,
-      verifyRuntime: vi.fn(async () => undefined), buildPreflight: buildBoundEpisodePreflight }, createFreshEpisodeOperatorSession(family, true))
+    const { result, deps } = await dispatch(f, { state });
+    expect(result).toMatchObject({ status, stopReason });
+    expect(deps.dependencies.verifyVisualAttemptDurableCompletion).not.toHaveBeenCalled();
+  });
+  it("ADMITTED_ONLY after a normal return never consults the completion verifier", async () => {
+    const f = await fixture(); await admit(f);
+    const { result, verifier } = await dispatch(f, null, [], { verifier: async () => verification() });
+    expect(result).toMatchObject({ status: "REJECTED", stopReason: "UNEXPECTED_PROVIDER_RESULT", afterPlan: { visualAttempt: { lifecycle: "ADMITTED_ONLY" } } });
+    expect(verifier).not.toHaveBeenCalled();
+  });
+  it("a fabricated COMPLETED lifecycle is refused by the real durable verifier", async () => {
+    const f = await fixture(); await admit(f); const network = tripwireNetwork();
+    // The synthetic post-state says COMPLETED; the real read-only verifier inspects the durable attempt (still ADMITTED_ONLY).
+    const { result, verifier, runner, deps } = await dispatch(f, { state: "COMPLETED" }, [], { verifier: verifyVisualAttemptDurableCompletion });
+    expect(verifier).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(verifier).mock.calls[0]).toEqual([f.mediaRoot, "EP02", "S01", 2]);
+    expect(result).toMatchObject({ status: "UNRESOLVED", stopReason: "LOCAL_COMPLETION_VERIFICATION_FAILED",
+      afterPlan: { visualAttempt: { lifecycle: "COMPLETED" } } });
+    expect(result.status).not.toBe("ACTION_COMPLETED");
+    expect(result.issues[0]).toMatchObject({ code: "LOCAL_COMPLETION_VERIFICATION_FAILED", phase: "POST_ACTION", lowerCause: { name: "Error" } });
+    expect(runner).toHaveBeenCalledTimes(1); expect(deps.calls()).toBe(2);
+    expect(await attemptState(f)).toBe("ADMITTED_ONLY"); expect(network).not.toHaveBeenCalled();
+  });
+  it("an exact selected COMPLETED attempt proven by the injected durable verifier is ACTION_COMPLETED, without retry or recovery", async () => {
+    const f = await fixture(); await admit(f); const network = tripwireNetwork();
+    const { result, verifier, runner, deps, invocation } = await dispatch(f, { state: "COMPLETED" }, [], { verifier: async () => verification() });
+    expect(result).toMatchObject({ status: "ACTION_COMPLETED", stopReason: null, issues: [],
+      afterPlan: { visualAttempt: { shotId: "S01", attemptNumber: 2, lifecycle: "COMPLETED" } } });
+    expect(vi.mocked(verifier).mock.calls).toEqual([[f.mediaRoot, "EP02", "S01", 2]]);
+    // Exactly the one runner dispatch and the one read-only verification: no retry, fallback or recovery runner.
+    expect(runner).toHaveBeenCalledTimes(1); expect(deps.calls()).toBe(2);
+    expect(deps.dependencies.runProductionExecutionReconcileCli).not.toHaveBeenCalled();
+    expect(() => admitEpisodeCoordinatorDispatch(invocation)).toThrow(); // The exactly-once latch was taken.
+    expect(network).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["episodeId", () => verification({ episodeId: "EP03" })], ["sceneId", () => verification({ sceneId: "SC02" })],
+    ["shotId", () => verification({ shotId: "S10" })], ["attemptNumber", () => verification({ attemptNumber: 3 })],
+    ["lifecycle episodeId", () => verification({}, { episodeId: "EP03" })], ["lifecycle sceneId", () => verification({}, { sceneId: "SC02" })],
+    ["lifecycle shotId", () => verification({}, { shotId: "S10" })], ["lifecycle attemptNumber", () => verification({}, { attemptNumber: 3 })],
+    ["lifecycle state", () => verification({}, { state: "SUBMITTED" })], ["missing lifecycle", () => verification({ lifecycle: null })],
+    ["null verification", () => null], ["string verification", () => "COMPLETED"],
+  ] as ReadonlyArray<readonly [string, () => unknown]>)("a verification with a mismatched or malformed %s fails closed", async (_label, make) => {
+    const f = await fixture(); await admit(f);
+    const { result, verifier } = await dispatch(f, { state: "COMPLETED" }, [], { verifier: async () => make() });
+    expect(verifier).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ status: "UNRESOLVED", stopReason: "LOCAL_COMPLETION_VERIFICATION_FAILED" });
+    expect(result.status).not.toBe("ACTION_COMPLETED");
+  });
+  it("a throwing durable verifier fails closed with its sanitized cause", async () => {
+    const f = await fixture(); await admit(f);
+    const { result, verifier } = await dispatch(f, { state: "COMPLETED" }, [], {
+      verifier: async () => { throw Object.assign(new Error("Synthetic durable output drift."), { code: "OUTPUT_DRIFT" }); } });
+    expect(verifier).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ status: "UNRESOLVED", stopReason: "LOCAL_COMPLETION_VERIFICATION_FAILED",
+      issues: [{ code: "LOCAL_COMPLETION_VERIFICATION_FAILED", lowerCause: { name: "Error", code: "OUTPUT_DRIFT" } }] });
+    expect(JSON.stringify(result)).not.toContain("Synthetic durable output drift.");
+  });
+  it("a lower-runner failure is never turned into a normal success by a verified COMPLETED attempt", async () => {
+    const f = await fixture(); await admit(f);
+    const { outcome, result, verifier, runner } = await dispatch(f, { state: "COMPLETED" }, [], { verifier: async () => verification(), runnerFails: true });
+    expect(outcome).toBeInstanceOf(BoundEpisodeActionError);
+    expect(result).toMatchObject({ status: "STOPPED", stopReason: "ACTION_REJECTED" });
+    expect(verifier).toHaveBeenCalledTimes(1); expect(runner).toHaveBeenCalledTimes(1);
+  });
+  it("a runner failure with the attempt still ADMITTED_ONLY is rejected and rethrown with the observation", async () => {
+    const f = await fixture(); await admit(f);
+    const before = await select(f); const plan = attemptPlan(before);
+    const { context } = await checked(f, plan, before); const deps = tripwires();
+    const runner = vi.fn(async () => { throw new Error("Synthetic lower-runner refusal."); });
+    deps.dependencies.runSingleShotExecutionCli = runner as never;
+    const error: unknown = await coordinateEpisodeAction({ episodeId: "EP02", action: plan.actions[0], controlledContext: context }, deps.typed)
       .catch((cause: unknown) => cause);
-    if (outcome !== null && typeof outcome === "object" && "status" in outcome) {
-      expect(outcome).toMatchObject({ status: "REJECTED", dispatchAllowanceConsumed: 0, actionMayHaveEffects: false });
-    } else expect(outcome).toMatchObject({ name: "BoundEpisodeError" });
-    expect(coordinateAction).not.toHaveBeenCalled(); expect(deps.calls()).toBe(0); expect(network).not.toHaveBeenCalled();
+    expect(error).toBeInstanceOf(BoundEpisodeActionError);
+    expect((error as BoundEpisodeActionError).result).toMatchObject({ status: "REJECTED", stopReason: "ACTION_REJECTED" });
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("M. end to end through the secured CLI, shared seam and existing attempt operator (synthetic provider)", () => {
+  async function run(f: Fixture) {
+    const network = tripwireNetwork();
+    const plan = attemptPlan(await select(f));
+    const createInteraction = vi.fn(async () => ({ id: INTERACTION_ID }));
+    const executeVisualAttempt: NonNullable<RunSingleShotExecutionCliDependencies["executeVisualAttempt"]> = (credentials, request, context) =>
+      executeProductionVisualAttemptSingleShot(credentials, request, context, { prepareGoogleInteraction: (() => ({ createInteraction })) as never });
+    const cli = cliDependencies(f, { executeVisualAttempt }); const coordinator = tripwires();
+    const runner = vi.fn((args: readonly string[], _dependencies: unknown, context: unknown) =>
+      runSingleShotExecutionCli(args, cli.typed, context as never));
+    coordinator.dependencies.runSingleShotExecutionCli = runner as never;
+    const coordinateAction = vi.fn((input: Parameters<typeof coordinateEpisodeAction>[0]) => coordinateEpisodeAction(input as never, coordinator.typed));
+    const buildPreflight = vi.fn(buildBoundEpisodePreflight);
+    const outcome: unknown = await runEpisodeAutomation(plan, { coordinateAction: coordinateAction as unknown as typeof coordinateEpisodeAction,
+      verifyRuntime: vi.fn(async () => undefined), buildPreflight }, createFreshEpisodeOperatorSession("GENERATION", true))
+      .catch((cause: unknown) => cause);
+    return { network, plan, createInteraction, cli, coordinator, runner, coordinateAction, buildPreflight, outcome };
+  }
+
+  it("creates exactly one synthetic provider job, persists only the attempt reservation/submission and stops SUBMITTED", async () => {
+    const f = await fixture(); await admitExact(f);
+    const { network, createInteraction, cli, coordinator, runner, coordinateAction, buildPreflight, outcome } = await run(f);
+    expect(outcome).toMatchObject({ status: "STOPPED", stopReason: "SUBMITTED_RECOVERY_REQUIRED", dispatchAllowanceConsumed: 1,
+      actionMayHaveEffects: true, afterPlan: { visualAttempt: { shotId: "S01", attemptNumber: 2, lifecycle: "SUBMITTED" } } });
+    expect(coordinateAction).toHaveBeenCalledTimes(1); expect(runner).toHaveBeenCalledTimes(1);
+    expect(cli.dependencies.executeVisualAttempt).toHaveBeenCalledTimes(1); expect(createInteraction).toHaveBeenCalledTimes(1);
+    for (const name of ["inspectExecutionLifecycle", "createDependencies", "executeSingleShot"] as const) expect(cli.dependencies[name]).not.toHaveBeenCalled();
+    expect(coordinator.dependencies.runProductionExecutionReconcileCli).not.toHaveBeenCalled();
+    for (const [input] of buildPreflight.mock.calls) expect(input.visualAttemptSelection).toEqual(ATTEMPT_SELECTION);
+    expect(await attemptState(f)).toBe("SUBMITTED");
+    expect((await inspectExecutionLifecycle(f.mediaRoot, "EP02", "S01")).state).toBe("NOTHING");
+    expect(network).not.toHaveBeenCalled();
     await expect(readFile(episodeExecutionGuardPath(f.mediaRoot, "EP02"))).rejects.toThrow();
-    expect((await inspectVisualAttemptExecutionLifecycle(f.mediaRoot, "EP02", "S01", 2)).state).toBe("ADMITTED_ONLY");
   });
-  it("exposes no --attempt CLI surface", () => {
-    expect(() => parseSingleShotExecutionCliArgs(["--episode", "EP02", "--shot", "S01", "--image", "C:/media/ref.png",
-      "--attempt", "2", "--confirm-paid-generation"])).toThrow(/Unknown single-shot execution CLI argument: --attempt/);
+  it.each([
+    ["prompt", { promptIdentitySha256: "b".repeat(64) }, "PROMPT_INVALID"],
+    ["reference", { referenceIdentitySha256: "c".repeat(64) }, "REFERENCE_IMAGE_REJECTED"],
+  ] as const)("keeps the 2H-B admitted %s identity gate active: no reservation, no create", async (_label, overrides, code) => {
+    const f = await fixture(); await admitExact(f, overrides);
+    const { createInteraction, runner, outcome } = await run(f);
+    expect(outcome).toBeInstanceOf(BoundEpisodeActionError);
+    const result = (outcome as BoundEpisodeActionError).result;
+    expect(result).toMatchObject({ status: "REJECTED", stopReason: "ACTION_REJECTED", afterPlan: { visualAttempt: { lifecycle: "ADMITTED_ONLY" } } });
+    expect(result.issues[0]?.lowerCause).toMatchObject({ name: "GoogleGenAiOperatorError", code });
+    expect(runner).toHaveBeenCalledTimes(1); expect(createInteraction).not.toHaveBeenCalled();
+    expect(await attemptState(f)).toBe("ADMITTED_ONLY");
+    await expect(readFile(createVisualAttemptExecutionReservationPath(f.mediaRoot, "EP02", "S01", 2))).rejects.toThrow();
   });
-  it("the control-plane sources wire no attempt operator, production factory, reservation writer or CLI attempt", async () => {
-    for (const path of ["src/execution/buildBoundEpisodePreflight.ts", "src/execution/episodeExecutionGuard.ts",
-      "src/execution/coordinateEpisodeAction.ts", "src/execution/episodeAutomationPlan.schema.ts", "src/execution/boundEpisodeProduction.types.ts"]) {
+  it("the control plane names no attempt operator, writer or provider authority", async () => {
+    for (const path of ["src/execution/buildBoundEpisodePreflight.ts", "src/execution/episodeExecutionGuard.ts", "src/execution/runEpisodeAutomation.ts",
+      "src/execution/coordinateEpisodeAction.ts", "src/execution/episodeAutomationPlan.schema.ts", "src/execution/boundEpisodeProduction.types.ts",
+      "src/execution/cli/runSingleShotExecutionCli.ts"]) {
       const code = (await readFile(path, "utf8")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-      expect(code, path).not.toMatch(/executeGoogleGenAiVisualAttemptSingleShot|createProductionGoogleGenAiVisualAttemptExecutionDependencies|createVisualAttemptExecution(?:Reservation|Submission|Completion)|createVisualAttemptGenerationRecord|createVisualAttemptAdmission|--attempt|@google\/genai|process\.env/);
+      expect(code, path).not.toMatch(/executeGoogleGenAiVisualAttemptSingleShot|createVisualAttemptExecution(?:Reservation|Submission|Completion)|createVisualAttemptGenerationRecord|createVisualAttemptAdmission|FromReservationIdentity|@google\/genai|process\.env/);
+    }
+    // The read-only attempt completion verifier is reached only through the dependency seam, behind the unchanged inventory gate.
+    const coordinator = (await readFile("src/execution/coordinateEpisodeAction.ts", "utf8")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(coordinator.match(/dependencies\.verifyVisualAttemptDurableCompletion\(/g)).toHaveLength(1);
+    expect(coordinator.match(/verifyVisualAttemptDurableCompletion\(/g)).toHaveLength(1);
+    expect(coordinator).toContain('if (!after?.inventory.complete && status === "ACTION_COMPLETED") { status = "UNRESOLVED"; stopReason = "POST_ACTION_STATE_UNRESOLVED"; }');
+    // Only the coordinator emits the --attempt transport; only the shared CLI parser accepts it.
+    for (const path of ["src/execution/buildBoundEpisodePreflight.ts", "src/execution/episodeExecutionGuard.ts", "src/execution/runEpisodeAutomation.ts",
+      "src/execution/episodeAutomationPlan.schema.ts", "src/execution/boundEpisodeProduction.types.ts"]) {
+      expect(await readFile(path, "utf8"), path).not.toMatch(/--attempt/);
     }
   });
 });

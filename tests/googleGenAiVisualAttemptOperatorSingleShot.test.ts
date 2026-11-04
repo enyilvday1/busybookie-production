@@ -1023,8 +1023,10 @@ describe("2H-B legacy compatibility and the submitter seam (S-V)", () => {
     expect(legacy).toMatch(/submitGoogleGenAiSingleShot\(/);
     expect(legacy).not.toMatch(/FromReservationIdentity|VisualAttempt|requireAdmittedManifestBinding/);
     expect(legacy).toMatch(/checkedContext\?: CheckedEpisodeExecutionContext,/);
-    for (const file of ["src/execution/cli/runGoogleGenAiOperatorCli.ts", "src/execution/createProductionSingleShotExecutionDependencies.ts", "src/execution/cli/runSingleShotExecutionCli.ts"]) {
+    for (const file of ["src/execution/cli/runGoogleGenAiOperatorCli.ts", "src/execution/cli/runSingleShotExecutionCli.ts"]) {
       expect(await readFile(join(process.cwd(), file), "utf8"), file).not.toMatch(/executeGoogleGenAiVisualAttemptSingleShot|FromReservationIdentity/);
     }
+    // B5 Slice-2I-B: the shared composition seam may compose the attempt operator, never the reservation-identity submitter.
+    expect(await readFile(join(process.cwd(), "src/execution/createProductionSingleShotExecutionDependencies.ts"), "utf8")).not.toMatch(/FromReservationIdentity/);
   });
 });

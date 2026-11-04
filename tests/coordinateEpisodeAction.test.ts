@@ -487,7 +487,7 @@ describe("B7 unbound visual admission matrix", () => {
   }
 });
 
-describe("B5 Slice-2I-A visual attempt dormancy", () => {
+describe("B5 Slice-2I-B visual attempt controlled dispatch boundary", () => {
   const ATTEMPT = { episodeId: EPISODE, sceneId: SCENE, shotId: SHOT, order: 2, kind: "VISUAL_ATTEMPT_GENERATE", attemptNumber: 2,
     expectedAttemptLifecycle: "ADMITTED_ONLY", resolvedProvider: "GOOGLE_GENAI", confirmPaidGeneration: true };
 
@@ -506,15 +506,24 @@ describe("B5 Slice-2I-A visual attempt dormancy", () => {
       runDialogueGenerationCli: 0, runDialogueReconcileCli: 0 });
   });
 
-  it("the coordinator refuses the reviewed attempt before admission I/O and never forwards an attempt", async () => {
+  it("the controlled path validates the reviewed attempt before admission, then dispatches only through the secured runner", async () => {
     const code = (await readFile(new URL("../src/execution/coordinateEpisodeAction.ts", import.meta.url), "utf8"))
       .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    const refusal = code.indexOf('action.kind === "VISUAL_ATTEMPT_GENERATE"');
-    expect(refusal).toBeGreaterThan(0);
-    expect(refusal).toBeLessThan(code.indexOf("await assertCheckedEpisodeAdmission("));
-    expect(refusal).toBeLessThan(code.indexOf("dependencies.runSingleShotExecutionCli("));
-    expect(code).toMatch(/throw new BoundEpisodeError\("ACTION_REJECTED"[^;]*Slice-2I-A/);
-    expect(code).not.toMatch(/--attempt|attemptNumber|executeGoogleGenAiVisualAttempt|VisualAttemptExecutionDependencies|inspectVisualAttempt|createVisualAttempt/);
+    // The attempt number is validated by the canonical replacement schema.
+    expect(code).toMatch(/function requireConfirmedAttempt\([\s\S]*?VisualReplacementAttemptNumberSchema\s*\.parse\(\s*action\.attemptNumber,?\s*\)/);
+    const validation = code.indexOf('action.kind === "VISUAL_ATTEMPT_GENERATE") visualAttemptSelection = requireConfirmedAttempt(');
+    const admission = code.indexOf("await assertCheckedEpisodeAdmission(");
+    const dispatch = /action\.kind === "VISUAL_ATTEMPT_GENERATE"\)\s*\{[^}]*?dependencies\.runSingleShotExecutionCli\(\[([^\]]*)\]([^;]*);/.exec(code);
+    expect(validation).toBeGreaterThan(0);
+    expect(admission).toBeGreaterThan(validation);
+    expect(dispatch).not.toBeNull();
+    expect(dispatch!.index).toBeGreaterThan(admission);
+    const argv = dispatch![1]!;
+    expect(argv.match(/"--[a-z-]+"/g)).toEqual(["--episode", "--shot", "--image", "--attempt", "--confirm-paid-generation"].map(flag => `"${flag}"`));
+    expect(argv).toMatch(/"--attempt",\s*String\(action\.attemptNumber\),\s*"--confirm-paid-generation"/);
+    expect(dispatch![2]).toMatch(/input\.controlledContext\s*\)$/);
+    expect(code).not.toMatch(/executeGoogleGenAiVisualAttemptSingleShot|inspectVisualAttemptExecutionLifecycle|createVisualAttemptExecutionReservation|createVisualAttemptExecutionSubmission|@google\/genai/);
+    expect(code).not.toMatch(/executeGoogleGenAiVisualAttempt|VisualAttemptExecutionDependencies|inspectVisualAttempt|createVisualAttempt/);
   });
 });
 
@@ -771,6 +780,8 @@ describe("C6b L source boundary", () => {
       "../validation/loadCharacterBible.js", "../validation/loadEnvironment.js", "../validation/loadEpisodeManifest.js",
       "../validation/loadProductionRules.js", "../validation/loadProviderRoutingPolicy.js", "../validation/validateMediaRoot.js",
       "./cli/runProductionExecutionReconcileCli.js", "./cli/runSingleShotExecutionCli.js", "./executionReservation.schema.js", "./resolveDurableEpisodeProductionState.js",
+      "./visualAttemptNumber.schema.js",
+      "./verifyVisualAttemptDurableCompletion.js",
     ]);
     expect(imports.every(entry => [...permitted].some(path => entry.startsWith(path + ":")))).toBe(true);
     expect(source).not.toMatch(/\bimport\s*\(|\brequire\s*\(/);
@@ -781,6 +792,13 @@ describe("C6b L source boundary", () => {
     expect(code).not.toMatch(
       /createDialogueVisualAuthorization|createDialoguePlacementDecision|VisualReferenceAssetRegistry|admitDialogueLineGeneration|inspectDialogueGenerationAdmissionLedger|generation-admission|executeSingleShot|executeDialogue\w*|Runway\w*ProductionExecutor|Runway\w*ProductionReconciler|reconcileExecutionLifecycle|reconcileDialogueLifecycle|createExecutionReservation|createDialogue\w*Reservation|RunwayML|GoogleGenAI|@runwayml|@google|compose\w*|render\w*|node:fs|writeFile|mkdir|copyFile|unlink|\bvalidateMediaRoot\s*\(|RUNWAYML_API_SECRET|GEMINI_API_KEY|\.message\b/,
     );
-    expect(code.match(/dependencies\s*\.\s*run\w+Cli\s*\(/g)).toHaveLength(4);
+    // Legacy VISUAL_GENERATE and controlled VISUAL_ATTEMPT_GENERATE each own one
+    // secured single-shot call site; every other runner has exactly one.
+    const callSites = (runner: string) => code.match(new RegExp(`dependencies\\s*\\.\\s*${runner}\\s*\\(`, "g"))?.length ?? 0;
+    expect(callSites("runSingleShotExecutionCli")).toBe(2);
+    expect(callSites("runProductionExecutionReconcileCli")).toBe(1);
+    expect(callSites("runDialogueGenerationCli")).toBe(1);
+    expect(callSites("runDialogueReconcileCli")).toBe(1);
+    expect(code.match(/dependencies\s*\.\s*run\w+Cli\s*\(/g)).toHaveLength(5);
   });
 });

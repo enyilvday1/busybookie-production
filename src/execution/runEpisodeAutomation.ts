@@ -149,7 +149,9 @@ export async function runEpisodeAutomation(
 async function runControlledEpisodeAutomation(plan: ControlledEpisodeAutomationPlan,
   dependencies: RunEpisodeAutomationDependencies, session?: FreshEpisodeOperatorSession): Promise<BoundEpisodeActionResult> {
   const action = plan.actions[0];
-  const sessionId = consumeFreshEpisodeOperatorSession(session, action.kind === "VISUAL_GENERATE" ? "GENERATION" : "RECONCILIATION");
+  // B5 Slice-2I-B: a reviewed attempt is paid generation; only a reconcile is recovery.
+  const sessionId = consumeFreshEpisodeOperatorSession(session,
+    action.kind === "VISUAL_GENERATE" || action.kind === "VISUAL_ATTEMPT_GENERATE" ? "GENERATION" : "RECONCILIATION");
   const manifest = plan.inputBinding.fileBindings.find(file => file.role === "MANIFEST");
   if (!manifest?.rawSha256) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   const runtime = plan.inputBinding.runtimeIdentity;
@@ -163,7 +165,9 @@ async function runControlledEpisodeAutomation(plan: ControlledEpisodeAutomationP
     const preflight = dependencies.buildPreflight ?? buildBoundEpisodePreflight;
     const beforePlan = await preflight({ episodeId: plan.episodeId, scope: plan.scope, mediaRoot: runtime.mediaRoot,
       runtimeIdentity: runtime, expectedBinding: plan.inputBinding, evidenceAdoptions: plan.evidenceAdoptions,
-      ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}) });
+      ...(runtime.ffprobe ? { ffprobeExecutable: runtime.ffprobe.canonicalPath } : {}),
+      // Exactly the frozen action's shot and attempt; never inferred or scanned.
+      ...(action.kind === "VISUAL_ATTEMPT_GENERATE" ? { visualAttemptSelection: { shotId: action.shotId, attemptNumber: action.attemptNumber } } : {}) });
     try { assertReviewedEpisodeAction(plan, beforePlan); }
     catch (cause) {
       if (!(cause instanceof BoundEpisodeError)) throw cause;

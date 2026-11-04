@@ -34,16 +34,31 @@ import {
 
 import {
   executeGoogleGenAiOperatorSingleShot,
+  executeGoogleGenAiVisualAttemptSingleShot,
   GOOGLE_GENAI_OPERATOR_RESOLUTION,
 } from "./executeGoogleGenAiOperatorSingleShot.js";
 
 import type {
   GoogleGenAiOperatorPolicies,
+  GoogleGenAiVisualAttemptExecuteRequest,
+  GoogleGenAiVisualAttemptExecuteResult,
 } from "./executeGoogleGenAiOperatorSingleShot.js";
 
 import {
   inspectExecutionLifecycle,
 } from "./inspectExecutionLifecycle.js";
+
+import {
+  inspectVisualAttemptExecutionLifecycle,
+} from "./inspectVisualAttemptExecutionLifecycle.js";
+
+import {
+  createVisualAttemptExecutionReservation,
+} from "./createVisualAttemptExecutionReservation.js";
+
+import {
+  createVisualAttemptExecutionSubmission,
+} from "./createVisualAttemptExecutionSubmission.js";
 
 import {
   loadGoogleGenAiActivationPolicy,
@@ -147,6 +162,60 @@ async function loadProductionGooglePolicies(): Promise<GoogleGenAiOperatorPolici
   };
 }
 
+function requireBound<T>(value: T | null): T {
+  if (value === null) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+  return value;
+}
+
+// Checked mode: the Google policies are the reviewed bound files only.
+async function loadCheckedGooglePolicies(checkedContext: CheckedEpisodeExecutionContext): Promise<GoogleGenAiOperatorPolicies> {
+  return {
+    activationPolicy: requireBound(await readCheckedEpisodeJson(checkedContext, "GOOGLE_ACTIVATION", value => GoogleGenAiActivationPolicySchema.parse(value))),
+    googlePolicy: requireBound(await readCheckedEpisodeJson(checkedContext, "GOOGLE_POLICY", value => GoogleGenAiPolicySchema.parse(value))),
+  };
+}
+
+// Checked mode: the reviewed registry, after every bound input is rechecked.
+function createCheckedVisualReferenceVerifier(checkedContext: CheckedEpisodeExecutionContext): NonNullable<SingleShotExecutionDependencies["verifyVisualReference"]> {
+  const verifier = createProductionVisualReferenceVerifier({
+    readRegistry: async () => requireBound(await readCheckedEpisodeJson(checkedContext, "REFERENCE_REGISTRY", value => VisualReferenceAssetRegistrySchema.parse(value))),
+    verifyAsset: verifyApprovedVisualReferenceAsset,
+  });
+  return async request => { await recheckEpisodeExecutionBindings(checkedContext); return verifier(request); };
+}
+
+// The credential is read only here, which the orchestrators call after their
+// activation, confirmation and admission checks.
+function prepareGoogleSubmission(
+  credentialSource:
+    ProductionSingleShotExecutionCredentialSource,
+  prepareGoogleInteraction:
+    typeof createGoogleGenAiOperatorProductionDependencies | undefined,
+): Readonly<{ createInteraction: ReturnType<typeof createGoogleGenAiOperatorProductionDependencies>["createInteraction"] }> {
+  const apiKey =
+    credentialSource
+      .GEMINI_API_KEY;
+
+  if (
+    apiKey ===
+    undefined
+  ) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured.",
+    );
+  }
+
+  return {
+    createInteraction:
+      (
+        prepareGoogleInteraction ??
+        createGoogleGenAiOperatorProductionDependencies
+      )(
+        apiKey,
+      ).createInteraction,
+  };
+}
+
 const defaultDependencies:
   ProductionSingleShotExecutionCompositionDependencies =
   Object.freeze({
@@ -183,16 +252,12 @@ export function createProductionSingleShotExecutionDependencies(
 ): SingleShotExecutionDependencies {
   if (checkedContext) {
     const original = dependencies;
-    const required = <T>(value: T | null): T => { if (value === null) throw new BoundEpisodeError("INPUT_BINDING_DRIFT"); return value; };
-    const verifier = createProductionVisualReferenceVerifier({
-      readRegistry: async () => required(await readCheckedEpisodeJson(checkedContext, "REFERENCE_REGISTRY", value => VisualReferenceAssetRegistrySchema.parse(value))),
-      verifyAsset: verifyApprovedVisualReferenceAsset,
-    });
+    const required = requireBound;
     dependencies = {
       ...original,
       readDialogueVisualAuthorization: async (_root, _episode, shotId) =>
         readCheckedEpisodeJson(checkedContext, `AUTHORIZATION:${shotId}`, value => DialogueVisualAuthorizationSchema.parse(value)),
-      verifyVisualReference: async request => { await recheckEpisodeExecutionBindings(checkedContext); return verifier(request); },
+      verifyVisualReference: createCheckedVisualReferenceVerifier(checkedContext),
       createReservation: async (root, request) => {
         await assertCheckedEpisodeAdmission(checkedContext);
         return original.createReservation(root, request);
@@ -213,10 +278,7 @@ export function createProductionSingleShotExecutionDependencies(
           return async (...args) => { await recheckEpisodeExecutionBindings(checkedContext); return run(...args); };
         },
       }),
-      loadGooglePolicies: async () => ({
-        activationPolicy: required(await readCheckedEpisodeJson(checkedContext, "GOOGLE_ACTIVATION", value => GoogleGenAiActivationPolicySchema.parse(value))),
-        googlePolicy: required(await readCheckedEpisodeJson(checkedContext, "GOOGLE_POLICY", value => GoogleGenAiPolicySchema.parse(value))),
-      }),
+      loadGooglePolicies: () => loadCheckedGooglePolicies(checkedContext),
       submitGoogle: (request, googleDependencies) => (original.submitGoogle ?? executeGoogleGenAiOperatorSingleShot)(request, googleDependencies, checkedContext),
     };
   }
@@ -357,30 +419,11 @@ export function createProductionSingleShotExecutionDependencies(
             loadProductionGooglePolicies,
 
           prepareSubmission:
-            () => {
-              const apiKey =
-                credentialSource
-                  .GEMINI_API_KEY;
-
-              if (
-                apiKey ===
-                undefined
-              ) {
-                throw new Error(
-                  "GEMINI_API_KEY is not configured.",
-                );
-              }
-
-              return {
-                createInteraction:
-                  (
-                    dependencies.prepareGoogleInteraction ??
-                    createGoogleGenAiOperatorProductionDependencies
-                  )(
-                    apiKey,
-                  ).createInteraction,
-              };
-            },
+            () =>
+              prepareGoogleSubmission(
+                credentialSource,
+                dependencies.prepareGoogleInteraction,
+              ),
 
           inspectLifecycle:
             inspectExecutionLifecycle,
@@ -419,4 +462,83 @@ export function createProductionSingleShotExecutionDependencies(
     executeVeo,
     executeGoogleSubmission,
   });
+}
+
+// B5 Slice-2I-B: the single shared attempt-mode composition point. The caller
+// supplies no lineage; the request carries only the reviewed identity.
+export type ProductionVisualAttemptRequest =
+  Omit<GoogleGenAiVisualAttemptExecuteRequest, "resolution">;
+
+export type ProductionVisualAttemptCompositionDependencies =
+  Readonly<{
+    prepareGoogleInteraction?:
+      typeof createGoogleGenAiOperatorProductionDependencies;
+
+    executeAttempt?:
+      typeof executeGoogleGenAiVisualAttemptSingleShot;
+  }>;
+
+// Composes the existing attempt orchestrator from the checked Google policy,
+// credential and reference composition above plus the existing attempt
+// inspector and create-once attempt writers. The orchestrator keeps every
+// attempt lifecycle, manifest, reference, cost and single-create gate and
+// stops at SUBMITTED; nothing here retries, falls back or writes a completion.
+export function executeProductionVisualAttemptSingleShot(
+  credentialSource:
+    ProductionSingleShotExecutionCredentialSource,
+
+  request:
+    ProductionVisualAttemptRequest,
+
+  checkedContext:
+    CheckedEpisodeExecutionContext,
+
+  dependencies:
+    ProductionVisualAttemptCompositionDependencies =
+      {},
+): Promise<GoogleGenAiVisualAttemptExecuteResult> {
+  return (
+    dependencies.executeAttempt ??
+    executeGoogleGenAiVisualAttemptSingleShot
+  )(
+    {
+      ...request,
+      resolution:
+        GOOGLE_GENAI_OPERATOR_RESOLUTION,
+    },
+    {
+      loadPolicies:
+        () =>
+          loadCheckedGooglePolicies(
+            checkedContext,
+          ),
+
+      prepareSubmission:
+        () =>
+          prepareGoogleSubmission(
+            credentialSource,
+            dependencies.prepareGoogleInteraction,
+          ),
+
+      inspectVisualAttemptLifecycle:
+        inspectVisualAttemptExecutionLifecycle,
+
+      verifyVisualReference:
+        createCheckedVisualReferenceVerifier(
+          checkedContext,
+        ),
+
+      // As for the checked shared reservation: the reviewed attempt must
+      // still be admitted immediately before its durable reservation.
+      createVisualAttemptReservation:
+        async (...args) => {
+          await assertCheckedEpisodeAdmission(checkedContext);
+          return createVisualAttemptExecutionReservation(...args);
+        },
+
+      createVisualAttemptSubmission:
+        createVisualAttemptExecutionSubmission,
+    },
+    checkedContext,
+  );
 }

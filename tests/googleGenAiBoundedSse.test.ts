@@ -488,3 +488,158 @@ describe("status_update usage and terminal done (synthetic, evidence-shaped)", (
     }
   });
 });
+
+/* R40W-I5BK parser diagnostic-stage assertions */
+describe("R40W-I5BK closed parser diagnostic stages", () => {
+  function captureFailure(
+    run: () => unknown,
+  ): GoogleGenAiSecureOutputTransportError {
+    try {
+      run();
+    } catch (error) {
+      expect(error).toBeInstanceOf(
+        GoogleGenAiSecureOutputTransportError,
+      );
+
+      return error as GoogleGenAiSecureOutputTransportError;
+    }
+
+    throw new Error(
+      "Expected parser failure.",
+    );
+  }
+
+  it("reports identity mismatch through the closed stage while retaining the existing error code", () => {
+    const failure =
+      captureFailure(() =>
+        parse([
+          {
+            event_type:
+              "interaction.created",
+            interaction: {
+              id:
+                "different_interaction",
+              status:
+                "in_progress",
+            },
+          },
+        ]),
+      );
+
+    expect(failure).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_IDENTITY_MISMATCH",
+      retryable:
+        false,
+    });
+  });
+
+  it("reports an unknown structural key without embedding that key or its value in the stage", () => {
+    const providerValue =
+      "SYNTHETIC_PROVIDER_SECRET";
+
+    const failure =
+      captureFailure(() =>
+        parse([
+          {
+            event_type:
+              "interaction.created",
+            interaction: {
+              id,
+              status:
+                "in_progress",
+              unsupported_provider_field:
+                providerValue,
+            },
+          },
+        ]),
+      );
+
+    expect(failure).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_UNKNOWN_KEY",
+      retryable:
+        false,
+    });
+
+    const rendered =
+      String(failure) +
+      JSON.stringify(failure) +
+      String(failure.stack);
+
+    expect(rendered).not.toContain(
+      providerValue,
+    );
+
+    expect(failure.stage).not.toContain(
+      "unsupported_provider_field",
+    );
+  });
+
+  it("classifies a non-string continuation token without exposing its value", () => {
+    const failure =
+      captureFailure(() =>
+        parse([
+          {
+            event_type:
+              "interaction.created",
+            interaction: {
+              id,
+              status:
+                "in_progress",
+              continuation_token:
+                123,
+            },
+          },
+        ]),
+      );
+
+    expect(failure).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_CONTINUATION_TOKEN_CHANGED",
+      retryable:
+        false,
+    });
+  });
+
+  it("classifies an invalid terminal frame using provider-neutral vocabulary", () => {
+    const completedText =
+      sequence
+        .map((value) =>
+          frame(value),
+        )
+        .join("");
+
+    const p =
+      parser();
+
+    const failure =
+      captureFailure(() =>
+        p.push(
+          encoder.encode(
+            completedText +
+            "event: done\ndata: invalid-terminal-value\n\n",
+          ),
+        ),
+      );
+
+    expect(failure).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_TERMINAL_FRAME_CHANGED",
+      retryable:
+        false,
+    });
+
+    expect(failure.stage).not.toMatch(
+      /DONE|SECRET|https?:\/\//,
+    );
+  });
+});

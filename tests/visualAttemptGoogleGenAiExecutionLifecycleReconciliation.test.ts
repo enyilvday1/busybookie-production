@@ -2033,3 +2033,120 @@ describe(
     );
   },
 );
+
+/* R40W-I5BK attempt-aware diagnostic-stage assertions */
+describe("R40W-I5BK attempt-aware diagnostic stage boundary", () => {
+  it("preserves the closed stage through Attempt-2 reconciliation with one replay and no durable mutation", async () => {
+    const fixture =
+      await makeFixture(
+        "SUBMITTED",
+      );
+
+    const before =
+      await snapshotTree(
+        fixture.mediaRoot,
+      );
+
+    const {
+      GoogleGenAiSecureOutputTransportError,
+    } =
+      await import(
+        "../src/googleGenai/transport/googleGenAiSecureOutputTransportError.js"
+      );
+
+    const raw =
+      new GoogleGenAiSecureOutputTransportError(
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+        {
+          stage:
+            "SSE_STATUS_UNKNOWN",
+        },
+      );
+
+    const replayInteraction =
+      vi.fn<GoogleGenAiReplayInteraction>(
+        async () => {
+          throw raw;
+        },
+      );
+
+    const spies =
+      recoverySpies(
+        "completed",
+        {
+          replayInteraction,
+        },
+      );
+
+    let outward:
+      unknown;
+
+    try {
+      await reconcile(
+        fixture.mediaRoot,
+        spies.dependencies,
+      );
+
+      throw new Error(
+        "Expected Attempt-2 reconciliation failure.",
+      );
+    } catch (error) {
+      outward =
+        error;
+    }
+
+    expect(outward).not.toBe(
+      raw,
+    );
+
+    expect(outward).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_STATUS_UNKNOWN",
+      retryable:
+        false,
+    });
+
+    expect(
+      replayInteraction,
+    ).toHaveBeenCalledTimes(
+      1,
+    );
+
+    expect(
+      spies.prepareUri,
+    ).not.toHaveBeenCalled();
+
+    expect(
+      spies.downloadUri,
+    ).not.toHaveBeenCalled();
+
+    expect(
+      vi.mocked(
+        materializeGoogleGenAiSingleShotOutputFromDurableIdentity,
+      ),
+    ).not.toHaveBeenCalled();
+
+    expect(
+      await snapshotTree(
+        fixture.mediaRoot,
+      ),
+    ).toStrictEqual(
+      before,
+    );
+
+    const rendered =
+      String(outward) +
+      JSON.stringify(outward) +
+      String(
+        outward instanceof Error
+          ? outward.stack
+          : "",
+      );
+
+    expect(rendered).not.toMatch(
+      /RAW_PROVIDER_SECRET|x-goog-api-key/,
+    );
+  });
+});

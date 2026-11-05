@@ -1,9 +1,21 @@
 import { classifyGoogleGenAiInteractionStatus } from "../googleGenAiInteractionContract.js";
 import type { GoogleGenAiInteractionReplayResult, GoogleGenAiSecureOutputTransportPolicy } from "./googleGenAiSecureOutputTransport.types.js";
-import { GoogleGenAiSecureOutputTransportError } from "./googleGenAiSecureOutputTransportError.js";
+import {
+  GoogleGenAiSecureOutputTransportError,
+  type GoogleGenAiReplayContractStage,
+} from "./googleGenAiSecureOutputTransportError.js";
 
 function malformed(): never { throw new GoogleGenAiSecureOutputTransportError("SSE_MALFORMED_EVENT"); }
-function changed(): never { throw new GoogleGenAiSecureOutputTransportError("INTERACTION_REPLAY_CONTRACT_CHANGED"); }
+function changed(
+  stage: GoogleGenAiReplayContractStage,
+): never {
+  throw new GoogleGenAiSecureOutputTransportError(
+    "INTERACTION_REPLAY_CONTRACT_CHANGED",
+    {
+      stage,
+    },
+  );
+}
 
 /** Iterative lexical pre-pass over an already byte-bounded JSON string. No provider-object recursion. */
 function rejectDuplicateGoogleGenAiJsonKeys(json: string): void {
@@ -53,21 +65,21 @@ function rejectDuplicateGoogleGenAiJsonKeys(json: string): void {
 export { rejectDuplicateGoogleGenAiJsonKeys };
 
 function record(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) changed();
+  if (value === null || typeof value !== "object" || Array.isArray(value)) changed("SSE_VALUE_NOT_OBJECT");
   return value as Record<string, unknown>;
 }
 function keys(value: Record<string, unknown>, allowed: readonly string[]): void {
-  if (Object.keys(value).some((key) => !allowed.includes(key))) changed();
+  if (Object.keys(value).some((key) => !allowed.includes(key))) changed("SSE_UNKNOWN_KEY");
 }
 function exactKeys(value: Record<string, unknown>, required: readonly string[]): void {
   keys(value, required);
-  if (required.some((key) => !Object.hasOwn(value, key))) changed();
+  if (required.some((key) => !Object.hasOwn(value, key))) changed("SSE_REQUIRED_KEY_MISSING");
 }
 function finiteNumber(value: unknown): void {
-  if (typeof value !== "number" || !Number.isFinite(value)) changed();
+  if (typeof value !== "number" || !Number.isFinite(value)) changed("SSE_INVALID_NUMBER");
 }
 function boundedArray(value: unknown): unknown[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 16) changed();
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) changed("SSE_INVALID_BOUNDED_ARRAY");
   return value as unknown[];
 }
 
@@ -83,7 +95,7 @@ function modalityCounts(value: unknown): void {
   for (const entry of boundedArray(value)) {
     const count = record(entry);
     exactKeys(count, ["modality", "tokens"]);
-    if (typeof count.modality !== "string" || count.modality.length === 0) changed();
+    if (typeof count.modality !== "string" || count.modality.length === 0) changed("SSE_USAGE_SHAPE_CHANGED");
     finiteNumber(count.tokens);
   }
 }
@@ -128,31 +140,31 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
   const steps = new Map<number, { kind: "thought" | "model_output"; closed: boolean }>();
 
   const observation = (): GoogleGenAiInteractionReplayResult => {
-    if (status === undefined) changed();
+    if (status === undefined) changed("SSE_STATUS_MISSING");
     return Object.freeze({ id: providerExecutionId, status, outputVideo: status === "completed" ? video : null });
   };
   const readStatus = (value: unknown): GoogleGenAiInteractionReplayResult["status"] => {
-    try { classifyGoogleGenAiInteractionStatus(value); } catch { changed(); }
+    try { classifyGoogleGenAiInteractionStatus(value); } catch { changed("SSE_STATUS_UNKNOWN"); }
     return value as GoogleGenAiInteractionReplayResult["status"];
   };
-  const identity = (value: unknown): void => { if (value !== providerExecutionId) changed(); };
+  const identity = (value: unknown): void => { if (value !== providerExecutionId) changed("SSE_IDENTITY_MISMATCH"); };
   const update = (value: unknown): void => {
     const next = readStatus(value);
-    if ((status === "completed" && next !== "completed") || (status === "in_progress" && next === "queued")) changed();
+    if ((status === "completed" && next !== "completed") || (status === "in_progress" && next === "queued")) changed("SSE_STATUS_REGRESSION");
     status = next;
     if (next !== "queued" && next !== "in_progress" && next !== "completed") result = observation();
   };
   const reduce = (event: Record<string, unknown>): void => {
-    if (result) changed();
+    if (result) changed("SSE_EVENT_AFTER_TERMINAL");
     const kind = event.event_type;
     if (kind === "error") throw new GoogleGenAiSecureOutputTransportError("SSE_PROVIDER_ERROR");
     if (kind === "interaction.created" || kind === "interaction.completed") {
       keys(event, ["event_type", "event_id", "interaction"]);
       const interaction = record(event.interaction);
       keys(interaction, ["id", "status", "created", "updated", "model", "agent", "object", "service_tier", "usage", "steps", "continuation_token"]);
-      if (Object.hasOwn(interaction, "steps") && !Array.isArray(interaction.steps)) changed();
+      if (Object.hasOwn(interaction, "steps") && !Array.isArray(interaction.steps)) changed("SSE_INTERACTION_SNAPSHOT_CHANGED");
       if (Object.hasOwn(interaction, "continuation_token") &&
-          typeof interaction.continuation_token !== "string") changed();
+          typeof interaction.continuation_token !== "string") changed("SSE_CONTINUATION_TOKEN_CHANGED");
       // Google lifecycle SSE events may include steps and continuation_token
       // snapshots. They are compatibility-only context, never recovery
       // authority: ordered step.start/step.delta/step.stop events remain
@@ -160,17 +172,17 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
       // decoding from a continuation token.
       identity(interaction.id);
       if (kind === "interaction.created") {
-        if (created) changed();
+        if (created) changed("SSE_INTERACTION_SNAPSHOT_CHANGED");
         created = true;
         update(interaction.status);
       } else {
-        if (!created || interaction.status !== "completed" || !video || [...steps.values()].some((step) => !step.closed)) changed();
+        if (!created || interaction.status !== "completed" || !video || [...steps.values()].some((step) => !step.closed)) changed("SSE_COMPLETION_PRECONDITION_FAILED");
         update(interaction.status);
         result = observation();
       }
       return;
     }
-    if (!created) changed();
+    if (!created) changed("SSE_EVENT_BEFORE_CREATED");
     if (kind === "interaction.status_update") {
       keys(event, ["event_type", "event_id", "interaction_id", "status", "usage"]);
       identity(event.interaction_id);
@@ -178,35 +190,35 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
       update(event.status);
       return;
     }
-    if (kind !== "step.start" && kind !== "step.delta" && kind !== "step.stop") changed();
-    if (!Number.isSafeInteger(event.index) || (event.index as number) < 0) changed();
+    if (kind !== "step.start" && kind !== "step.delta" && kind !== "step.stop") changed("SSE_EVENT_KIND_UNKNOWN");
+    if (!Number.isSafeInteger(event.index) || (event.index as number) < 0) changed("SSE_EVENT_INDEX_INVALID");
     const index = event.index as number;
     if (kind === "step.start") {
       keys(event, ["event_type", "event_id", "index", "step"]);
-      if (steps.has(index) || index <= lastStart) changed();
+      if (steps.has(index) || index <= lastStart) changed("SSE_STEP_ORDER_INVALID");
       const step = record(event.step);
       if (step.type === "thought") {
         keys(step, ["type", "signature", "summary"]);
-        if (step.signature !== undefined && typeof step.signature !== "string") changed();
+        if (step.signature !== undefined && typeof step.signature !== "string") changed("SSE_STEP_SHAPE_CHANGED");
         if (step.summary !== undefined) {
-          if (!Array.isArray(step.summary)) changed();
+          if (!Array.isArray(step.summary)) changed("SSE_STEP_SHAPE_CHANGED");
           for (const content of step.summary as unknown[]) {
             const text = record(content);
             keys(text, ["type", "text"]);
-            if (text.type !== "text" || typeof text.text !== "string") changed();
+            if (text.type !== "text" || typeof text.text !== "string") changed("SSE_STEP_SHAPE_CHANGED");
           }
         }
       } else if (step.type === "model_output") {
         keys(step, ["type", "content"]);
-        if (modelStepSeen || (step.content !== undefined && (!Array.isArray(step.content) || step.content.length !== 0))) changed();
+        if (modelStepSeen || (step.content !== undefined && (!Array.isArray(step.content) || step.content.length !== 0))) changed("SSE_STEP_SHAPE_CHANGED");
         modelStepSeen = true;
-      } else changed();
+      } else changed("SSE_STEP_SHAPE_CHANGED");
       steps.set(index, { kind: step.type as "thought" | "model_output", closed: false });
       lastStart = index;
       return;
     }
     const step = steps.get(index);
-    if (!step || step.closed) changed();
+    if (!step || step.closed) changed("SSE_STEP_STATE_INVALID");
     if (kind === "step.stop") {
       keys(event, ["event_type", "event_id", "index", "step_usage", "usage"]);
       step.closed = true;
@@ -217,20 +229,20 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
     if (step.kind === "thought") {
       if (delta.type === "thought_signature") {
         keys(delta, ["type", "signature"]);
-        if (delta.signature !== undefined && typeof delta.signature !== "string") changed();
+        if (delta.signature !== undefined && typeof delta.signature !== "string") changed("SSE_THOUGHT_DELTA_CHANGED");
       } else if (delta.type === "thought_summary") {
         keys(delta, ["type", "content"]);
         if (delta.content !== undefined) {
           const content = record(delta.content);
           keys(content, ["type", "text"]);
-          if (content.type !== "text" || typeof content.text !== "string") changed();
+          if (content.type !== "text" || typeof content.text !== "string") changed("SSE_THOUGHT_DELTA_CHANGED");
         }
-      } else changed();
+      } else changed("SSE_THOUGHT_DELTA_CHANGED");
     } else {
       keys(delta, ["type", "mime_type", "uri", "resolution"]);
       // An omitted mime_type stays omitted: absence is not evidence, and Files metadata and the download prove the type.
       const declaresMime = Object.hasOwn(delta, "mime_type");
-      if (video || delta.type !== "video" || (declaresMime && delta.mime_type !== "video/mp4") || typeof delta.uri !== "string" || !delta.uri.trim()) changed();
+      if (video || delta.type !== "video" || (declaresMime && delta.mime_type !== "video/mp4") || typeof delta.uri !== "string" || !delta.uri.trim()) changed("SSE_VIDEO_DELTA_CHANGED");
       video = Object.freeze({ type: "video", ...(declaresMime ? { mime_type: "video/mp4" as const } : {}), uri: delta.uri as string });
     }
   };
@@ -258,12 +270,12 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
       else if (field === "data") data.push(value);
       else malformed();
     }
-    if (data.length === 0) { if (name !== undefined || idSeen) malformed(); if (result) changed(); return; }
+    if (data.length === 0) { if (name !== undefined || idSeen) malformed(); if (result) changed("SSE_RESULT_TRAILING_EVENT"); return; }
     if (name === undefined) malformed();
     // Post-completion grammar (B4Y2E2): after a valid interaction.completed only ONE exact framed
     // `done` / `[DONE]` event may occur, then EOF. Checked before any JSON parsing.
     if (result || name === "done") {
-      if (result?.status !== "completed" || doneSeen || name !== "done" || idSeen || commentSeen || data.length !== 1 || data[0] !== "[DONE]") changed();
+      if (result?.status !== "completed" || doneSeen || name !== "done" || idSeen || commentSeen || data.length !== 1 || data[0] !== "[DONE]") changed("SSE_TERMINAL_FRAME_CHANGED");
       doneSeen = true;
       return;
     }
@@ -274,7 +286,7 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
     if (event === null || typeof event !== "object" || Array.isArray(event)) malformed();
     const object = event as Record<string, unknown>;
     if (object.event_type !== name) malformed();
-    if (object.event_id !== undefined && typeof object.event_id !== "string") changed();
+    if (object.event_id !== undefined && typeof object.event_id !== "string") changed("SSE_EVENT_ID_CHANGED");
     reduce(object);
   };
   const lineEnd = (): void => {
@@ -294,7 +306,7 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
   };
   return Object.freeze({
     push(chunk: Uint8Array): GoogleGenAiInteractionReplayResult | undefined {
-      if (finished || (result && status !== "completed")) changed();
+      if (finished || (result && status !== "completed")) changed("SSE_PUSH_AFTER_TERMINAL");
       if (!(chunk instanceof Uint8Array)) malformed();
       for (const byte of chunk) {
         if (pendingCR) {
@@ -320,13 +332,13 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
       return status === "completed" ? undefined : result;
     },
     finish(): GoogleGenAiInteractionReplayResult {
-      if (finished) changed();
+      if (finished) changed("SSE_FINISH_REPEATED");
       finished = true;
       if (pendingCR) { pendingCR = false; lineEnd(); }
       if (result && status !== "completed") return result;
       if (length !== 0 || [...steps.values()].some((step) => !step.closed)) malformed();
       if (result) return result;
-      if (!created || (status !== "queued" && status !== "in_progress")) changed();
+      if (!created || (status !== "queued" && status !== "in_progress")) changed("SSE_FINAL_PENDING_STATE_INVALID");
       return observation();
     },
   });

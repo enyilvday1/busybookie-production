@@ -3548,3 +3548,122 @@ describe("B4V8C reconciler declared replay-dependency error boundary", () => {
     b4v8cExpectSanitized(outward, raw);
   });
 });
+
+/* R40W-I5BK generic reconciliation diagnostic-stage assertions */
+describe("R40W-I5BK generic reconciliation diagnostic stage boundary", () => {
+  it("preserves only the closed stage through reconciliation after exactly one replay and no materialization", async () => {
+    const mediaRoot =
+      await submittedShot();
+
+    const before =
+      await snapshot(
+        mediaRoot,
+      );
+
+    const raw =
+      new GoogleGenAiSecureOutputTransportError(
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+        {
+          stage:
+            "SSE_IDENTITY_MISMATCH",
+        },
+      );
+
+    const replayInteraction =
+      vi.fn<GoogleGenAiReplayInteraction>(
+        async () => {
+          throw raw;
+        },
+      );
+
+    const spies =
+      recoverySpies({
+        replayInteraction,
+      });
+
+    let outward:
+      unknown;
+
+    try {
+      await reconcile(
+        mediaRoot,
+        spies.dependencies,
+      );
+
+      throw new Error(
+        "Expected reconciliation failure.",
+      );
+    } catch (error) {
+      outward =
+        error;
+    }
+
+    expect(outward).not.toBe(
+      raw,
+    );
+
+    expect(outward).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_IDENTITY_MISMATCH",
+      retryable:
+        false,
+    });
+
+    expect(
+      replayInteraction,
+    ).toHaveBeenCalledTimes(
+      1,
+    );
+
+    expect(
+      spies.prepareUri,
+    ).not.toHaveBeenCalled();
+
+    expect(
+      spies.downloadUri,
+    ).not.toHaveBeenCalled();
+
+    expect(
+      await exists(
+        recordPath(
+          mediaRoot,
+        ),
+      ),
+    ).toBe(
+      false,
+    );
+
+    expect(
+      await exists(
+        completionPath(
+          mediaRoot,
+        ),
+      ),
+    ).toBe(
+      false,
+    );
+
+    expect(
+      await snapshot(
+        mediaRoot,
+      ),
+    ).toStrictEqual(
+      before,
+    );
+
+    const rendered =
+      String(outward) +
+      JSON.stringify(outward) +
+      String(
+        outward instanceof Error
+          ? outward.stack
+          : "",
+      );
+
+    expect(rendered).not.toMatch(
+      /RAW_PROVIDER_SECRET|x-goog-api-key/,
+    );
+  });
+});

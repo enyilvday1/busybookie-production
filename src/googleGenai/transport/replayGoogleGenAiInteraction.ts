@@ -4,10 +4,10 @@ import { createGoogleGenAiInteractionSseParser } from "./parseGoogleGenAiInterac
 
 // Closed-error boundary: a dependency-owned error is never trusted by identity or instanceof
 // alone. Semantic fields are read only as OWN DATA descriptors (no getter ever runs), and the
-// trusted constructor must round-trip code/attempt/httpStatus/retryable exactly. Only the fresh
+// trusted constructor must round-trip code/attempt/httpStatus/stage/retryable exactly. Only the fresh
 // reconstruction crosses; message/stack/cause/custom data never do. Malformed candidates fail
 // closed as nonretryable configuration errors; ordinary errors keep the frozen stage fallback.
-const CLOSED_ERROR_FIELDS = ["code", "attempt", "httpStatus", "retryable"] as const;
+const CLOSED_ERROR_FIELDS = ["code", "attempt", "httpStatus", "stage", "retryable"] as const;
 function ownDataField(error: object, field: typeof CLOSED_ERROR_FIELDS[number]): { value: unknown } | undefined {
   const descriptor = Reflect.getOwnPropertyDescriptor(error, field);
   return descriptor !== undefined && "value" in descriptor ? { value: descriptor.value } : undefined;
@@ -16,15 +16,18 @@ function normalizeDependencyFailure(error: unknown, ordinaryFallback: () => Goog
   const invalid = () => new GoogleGenAiSecureOutputTransportError("SECURE_TRANSPORT_CONFIGURATION_INVALID");
   try {
     if (!(error instanceof GoogleGenAiSecureOutputTransportError)) return ordinaryFallback();
-    const [code, attempt, httpStatus, retryable] = CLOSED_ERROR_FIELDS.map((field) => ownDataField(error, field));
-    if (!code || !attempt || !httpStatus || !retryable || typeof code.value !== "string" || typeof retryable.value !== "boolean"
+    const [code, attempt, httpStatus, stage, retryable] = CLOSED_ERROR_FIELDS.map((field) => ownDataField(error, field));
+    if (!code || !attempt || !httpStatus || !stage || !retryable || typeof code.value !== "string" || typeof retryable.value !== "boolean"
       || (attempt.value !== undefined && typeof attempt.value !== "number")
-      || (httpStatus.value !== undefined && typeof httpStatus.value !== "number")) return invalid();
+      || (httpStatus.value !== undefined && typeof httpStatus.value !== "number")
+      || (stage.value !== undefined && typeof stage.value !== "string")) return invalid();
     const rebuilt = new GoogleGenAiSecureOutputTransportError(code.value as GoogleGenAiSecureOutputTransportError["code"], {
       ...(attempt.value === undefined ? {} : { attempt: attempt.value as number }),
       ...(httpStatus.value === undefined ? {} : { httpStatus: httpStatus.value as number }),
+      ...(stage.value === undefined ? {} : { stage: stage.value as NonNullable<GoogleGenAiSecureOutputTransportError["stage"]> }),
     });
     return rebuilt.code === code.value && Object.is(rebuilt.attempt, attempt.value) && Object.is(rebuilt.httpStatus, httpStatus.value)
+      && Object.is(rebuilt.stage, stage.value)
       && rebuilt.retryable === retryable.value ? rebuilt : invalid();
   } catch {
     return invalid();
@@ -70,7 +73,13 @@ export async function replayGoogleGenAiInteraction(
   dependencies: Readonly<{ apiKey: string; policy: GoogleGenAiSecureOutputTransportPolicy; fetchImpl?: GoogleGenAiFetch }>,
 ): Promise<GoogleGenAiInteractionReplayResult> {
   if (typeof providerExecutionId !== "string" || !/^[A-Za-z0-9_-]+$/.test(providerExecutionId)) {
-    throw new GoogleGenAiSecureOutputTransportError("INTERACTION_REPLAY_CONTRACT_CHANGED");
+    throw new GoogleGenAiSecureOutputTransportError(
+      "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      {
+        stage:
+          "REPLAY_PROVIDER_EXECUTION_ID_INVALID",
+      },
+    );
   }
   const key = typeof dependencies.apiKey === "string" ? dependencies.apiKey.trim() : "";
   if (!key || !/^[\x21-\x7e]+$/.test(key)) throw new GoogleGenAiSecureOutputTransportError("CREDENTIALS_INVALID");
@@ -79,7 +88,13 @@ export async function replayGoogleGenAiInteraction(
   const url = new URL(`https://generativelanguage.googleapis.com${path}?stream=true&include_input=false`);
   if (url.origin !== "https://generativelanguage.googleapis.com" || url.protocol !== "https:" || url.hostname !== "generativelanguage.googleapis.com"
     || url.port || url.username || url.password || url.hash || url.pathname !== path || url.search !== "?stream=true&include_input=false") {
-    throw new GoogleGenAiSecureOutputTransportError("INTERACTION_REPLAY_CONTRACT_CHANGED");
+    throw new GoogleGenAiSecureOutputTransportError(
+      "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      {
+        stage:
+          "REPLAY_URL_CONTRACT_CHANGED",
+      },
+    );
   }
   // Snapshot only structural operational values; later caller mutation cannot change an in-flight replay.
   const limits = Object.freeze({

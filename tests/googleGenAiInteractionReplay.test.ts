@@ -624,3 +624,227 @@ describe("completed replay termination: EOF-only release with one exact done fra
     },
   );
 });
+
+/* R40W-I5BK replay diagnostic-stage assertions */
+describe("R40W-I5BK closed replay diagnostic stage boundary", () => {
+  it("classifies an unsupported durable interaction ID before fetch", async () => {
+    const fetchImpl =
+      vi.fn<GoogleGenAiFetch>();
+
+    await expect(
+      run(
+        fetchImpl,
+        policy(),
+        context().ctx,
+        "bad/id",
+      ),
+    ).rejects.toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "REPLAY_PROVIDER_EXECUTION_ID_INVALID",
+      retryable:
+        false,
+    });
+
+    expect(
+      fetchImpl,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("preserves a parser diagnostic stage across replay normalization with exactly one fetch", async () => {
+    const fetchImpl =
+      vi.fn<GoogleGenAiFetch>(
+        async () =>
+          body(
+            frame({
+              event_type:
+                "interaction.created",
+              interaction: {
+                id:
+                  "wrong_interaction",
+                status:
+                  "in_progress",
+              },
+            }),
+          ),
+      );
+
+    const {
+      error,
+    } =
+      await capture(
+        run(
+          fetchImpl,
+        ),
+      );
+
+    expect(error).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_IDENTITY_MISMATCH",
+      retryable:
+        false,
+    });
+
+    expect(
+      fetchImpl,
+    ).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it("round-trips a genuine closed diagnostic stage through the replay dependency boundary", async () => {
+    const raw =
+      new GoogleGenAiSecureOutputTransportError(
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+        {
+          stage:
+            "SSE_STATUS_UNKNOWN",
+        },
+      );
+
+    const fetchImpl =
+      vi.fn<GoogleGenAiFetch>(
+        async () => {
+          throw raw;
+        },
+      );
+
+    const {
+      error,
+    } =
+      await capture(
+        run(
+          fetchImpl,
+        ),
+      );
+
+    expect(error).not.toBe(
+      raw,
+    );
+
+    expect(error).toMatchObject({
+      code:
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+      stage:
+        "SSE_STATUS_UNKNOWN",
+      retryable:
+        false,
+    });
+
+    expect(
+      fetchImpl,
+    ).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it("fails a contradictory code/stage pair closed", () => {
+    const failure =
+      new GoogleGenAiSecureOutputTransportError(
+        "SSE_HTTP_FAILED",
+        {
+          stage:
+            "SSE_IDENTITY_MISMATCH",
+        } as never,
+      );
+
+    expect(failure).toMatchObject({
+      code:
+        "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+      stage:
+        undefined,
+      retryable:
+        false,
+    });
+  });
+
+  it("fails a free-form diagnostic stage closed", () => {
+    const failure =
+      new GoogleGenAiSecureOutputTransportError(
+        "INTERACTION_REPLAY_CONTRACT_CHANGED",
+        {
+          stage:
+            "RAW_PROVIDER_SECRET",
+        } as never,
+      );
+
+    expect(failure).toMatchObject({
+      code:
+        "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+      stage:
+        undefined,
+      retryable:
+        false,
+    });
+
+    expect(
+      JSON.stringify(
+        failure,
+      ),
+    ).not.toContain(
+      "RAW_PROVIDER_SECRET",
+    );
+  });
+
+  it("never executes an accessor-backed stage descriptor during replay normalization", async () => {
+    b4v8cGetterReads.count =
+      0;
+
+    const raw =
+      b4v8cForged(
+        {
+          code:
+            "INTERACTION_REPLAY_CONTRACT_CHANGED",
+          attempt:
+            undefined,
+          httpStatus:
+            undefined,
+          retryable:
+            false,
+        },
+        [
+          "stage",
+        ],
+      );
+
+    const fetchImpl =
+      vi.fn<GoogleGenAiFetch>(
+        async () => {
+          throw raw;
+        },
+      );
+
+    const {
+      error,
+    } =
+      await capture(
+        run(
+          fetchImpl,
+        ),
+      );
+
+    expect(
+      b4v8cGetterReads.count,
+    ).toBe(
+      0,
+    );
+
+    expect(error).toMatchObject({
+      code:
+        "SECURE_TRANSPORT_CONFIGURATION_INVALID",
+      stage:
+        undefined,
+      retryable:
+        false,
+    });
+
+    expect(
+      fetchImpl,
+    ).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+});

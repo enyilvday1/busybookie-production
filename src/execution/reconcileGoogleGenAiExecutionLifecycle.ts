@@ -902,6 +902,7 @@ const CLOSED_ERROR_FIELDS =
     "code",
     "attempt",
     "httpStatus",
+    "stage",
     "retryable",
   ] as const);
 
@@ -909,7 +910,7 @@ const CLOSED_ERROR_FIELDS =
  * Closed-error boundary for the declared replay dependency. A failure is
  * never trusted by identity or instanceof alone: semantic fields are read
  * only as OWN DATA descriptors (no getter executes), and the trusted
- * constructor must round-trip code/attempt/httpStatus/retryable exactly.
+ * constructor must round-trip code/attempt/httpStatus/stage/retryable exactly.
  * Only that fresh reconstruction crosses. Anything else (ordinary errors,
  * malformed, inherited, accessor-backed or contradictory representations)
  * becomes the existing nonretryable SECURE_TRANSPORT_CONFIGURATION_INVALID,
@@ -950,6 +951,7 @@ function normalizeReplayDependencyFailure(
       code,
       attempt,
       httpStatus,
+      stage,
       retryable,
     ] =
       fields.map(
@@ -967,7 +969,10 @@ function normalizeReplayDependencyFailure(
           "number") ||
       (httpStatus !== undefined &&
         typeof httpStatus !==
-          "number")
+          "number") ||
+      (stage !== undefined &&
+        typeof stage !==
+          "string")
     ) {
       return configuration();
     }
@@ -987,6 +992,13 @@ function normalizeReplayDependencyFailure(
             : {
                 httpStatus,
               }),
+
+          ...(stage === undefined
+            ? {}
+            : {
+                stage:
+                  stage as NonNullable<GoogleGenAiSecureOutputTransportError["stage"]>,
+              }),
         },
       );
 
@@ -999,6 +1011,10 @@ function normalizeReplayDependencyFailure(
       Object.is(
         rebuilt.httpStatus,
         httpStatus,
+      ) &&
+      Object.is(
+        rebuilt.stage,
+        stage,
       ) &&
       rebuilt.retryable ===
         retryable

@@ -1,5 +1,6 @@
 import {
   GOOGLE_GENAI_ACTIVATION_LIMITS,
+  GOOGLE_GENAI_HISTORICAL_REMOTE_RECOVERY_HORIZON_MS,
 } from "../../googleGenai/googleGenAiActivationLimits.js";
 
 import type {
@@ -44,6 +45,10 @@ import type {
  * later, separately authorized gate.
  */
 
+export type GoogleGenAiRecoveryAuthority =
+  | "AUTOMATED"
+  | "OPERATOR_HISTORICAL";
+
 export type GoogleGenAiSecureProductionRecoveryOptions =
   Readonly<{
     fetchImpl?:
@@ -71,7 +76,10 @@ const INVALID_OPTIONS_MESSAGE =
  * activation-limits authority. Values are read from the authority, never
  * restated here; cost and submission-only limits are excluded.
  */
-function selectSecureTransportPolicy():
+function selectSecureTransportPolicy(
+  authority:
+    GoogleGenAiRecoveryAuthority,
+):
 GoogleGenAiSecureOutputTransportPolicy {
   const {
     limits,
@@ -123,7 +131,10 @@ GoogleGenAiSecureOutputTransportPolicy {
     recovery:
       Object.freeze({
         automatedRemoteRecoveryHorizonMs:
-          recovery.automatedRemoteRecoveryHorizonMs,
+          authority ===
+            "OPERATOR_HISTORICAL"
+            ? GOOGLE_GENAI_HISTORICAL_REMOTE_RECOVERY_HORIZON_MS
+            : recovery.automatedRemoteRecoveryHorizonMs,
 
         filesMinRemainingLifetimeMs:
           recovery.filesMinRemainingLifetimeMs,
@@ -152,6 +163,10 @@ export function createGoogleGenAiSingleShotSecureProductionRecovery(
   options:
     GoogleGenAiSecureProductionRecoveryOptions =
       {},
+
+  recoveryAuthority:
+    GoogleGenAiRecoveryAuthority =
+      "AUTOMATED",
 ): GoogleGenAiSubmittedRecoveryDependencies {
   // Validated once and never echoed; the transports re-check per request.
   const key =
@@ -175,15 +190,33 @@ export function createGoogleGenAiSingleShotSecureProductionRecovery(
     options === null ||
     typeof options !==
       "object" ||
+    Object.keys(
+      options,
+    ).some(
+      key =>
+        ![
+          "fetchImpl",
+          "nowMs",
+          "monotonicNowMs",
+        ].includes(
+          key,
+        ),
+    ) ||
     [
       options.fetchImpl,
       options.nowMs,
       options.monotonicNowMs,
     ].some(
-      (value) =>
+      value =>
         value !== undefined &&
         typeof value !==
           "function",
+    ) ||
+    (
+      recoveryAuthority !==
+        "AUTOMATED" &&
+      recoveryAuthority !==
+        "OPERATOR_HISTORICAL"
     )
   ) {
     throw new Error(
@@ -192,7 +225,9 @@ export function createGoogleGenAiSingleShotSecureProductionRecovery(
   }
 
   const policy =
-    selectSecureTransportPolicy();
+    selectSecureTransportPolicy(
+      recoveryAuthority,
+    );
 
   const nowMs =
     options.nowMs ??

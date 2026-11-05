@@ -186,7 +186,21 @@ describe("fresh restart derives continuation only from verified durable evidence
     };
     const runners = { ...episodeCoordinatorProductionDependencies, runSingleShotExecutionCli: generate,
       runProductionExecutionReconcileCli: (args: readonly string[] | undefined, _deps: unknown, context?: Parameters<typeof runProductionExecutionReconcileCli>[2]) =>
-        runProductionExecutionReconcileCli(args, { createDependencies: () => cli, runCli: runExecutionReconcileCli }, context) };
+        runProductionExecutionReconcileCli(args, {
+          createDependencies: () => ({
+            ...cli,
+
+            createGoogleHistoricalSubmittedRecovery:
+              () => {
+                throw new Error(
+                  "Historical Google recovery must not run in the standard restart fixture.",
+                );
+              },
+          }),
+
+          runCli:
+            runExecutionReconcileCli,
+        }, context) };
     function coordinate(input: CoordinateBoundEpisodeActionInput): Promise<BoundEpisodeActionResult>;
     function coordinate(input: CoordinateEpisodeActionInput): Promise<CoordinateEpisodeActionResult>;
     function coordinate(input: CoordinateBoundEpisodeActionInput | CoordinateEpisodeActionInput) {
@@ -205,6 +219,41 @@ describe("fresh restart derives continuation only from verified durable evidence
   }, 30000);
   it("disabled Google retains exact-job recovery and verified visual completion while editorial handoff stays unsupported", async () => {
     const f = await fixture("GOOGLE_GENAI");
+
+    // This test proves that disabling NEW Google submissions does not hide
+    // or invalidate recovery of an already durable Google submission.
+    // Make that operating condition explicit in the isolated fixture instead
+    // of inheriting the repository's current activation switch.
+    const activationPolicyPath =
+      join(
+        f.repositoryRoot,
+        "config/google-genai-activation-policy.json",
+      );
+
+    const activationPolicy =
+      JSON.parse(
+        await readFile(
+          activationPolicyPath,
+          "utf8",
+        ),
+      ) as {
+        admission: {
+          newSubmissionsEnabled: boolean;
+        };
+      };
+
+    activationPolicy
+      .admission
+      .newSubmissionsEnabled =
+        false;
+
+    await writeFile(
+      activationPolicyPath,
+      JSON.stringify(
+        activationPolicy,
+      ),
+    );
+
     f.episode.scenes = [{ ...f.episode.scenes[0]!, id: "SC01", shots: [{ ...f.episode.scenes[0]!.shots[0]!, id: "S01", order: 1 }] }];
     await f.save();
     const reservation = await createExecutionReservation(f.mediaRoot, { episodeId: "EP02", shotId: "S01", provider: "GOOGLE_GENAI" });

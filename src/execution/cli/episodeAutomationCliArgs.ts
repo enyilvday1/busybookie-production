@@ -1,12 +1,21 @@
 import { ExecutionReservationEpisodeIdSchema, ExecutionReservationShotIdSchema } from "../executionReservation.schema.js";
 export type EpisodeAutomationCliOptions = Readonly<{
   planPath?: string; episodeId?: string; validateOnly: boolean; planOnly: boolean; json: boolean;
-  shotIds: readonly string[] | null; confirmation: "GENERATION" | "RECONCILIATION" | null;
+  shotIds: readonly string[] | null;
+  confirmation:
+    | "GENERATION"
+    | "RECONCILIATION"
+    | "HISTORICAL_RECONCILIATION"
+    | null;
 }>;
 export function parseEpisodeAutomationCliArgs(args: readonly string[]): EpisodeAutomationCliOptions {
   const seen = new Set<string>(); let planPath: string | undefined; let episodeId: string | undefined;
   let validateOnly = false; let planOnly = false; let json = false; let shotIds: string[] | null = null;
-  let confirmation: "GENERATION" | "RECONCILIATION" | null = null;
+  let confirmation:
+    | "GENERATION"
+    | "RECONCILIATION"
+    | "HISTORICAL_RECONCILIATION"
+    | null = null;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
     if (seen.has(flag)) throw new Error(`Duplicate episode automation CLI argument: ${flag}`);
@@ -24,9 +33,19 @@ export function parseEpisodeAutomationCliArgs(args: readonly string[]): EpisodeA
     } else if (flag === "--validate-only") validateOnly = true;
     else if (flag === "--plan-only") planOnly = true;
     else if (flag === "--json") json = true;
-    else if (flag === "--confirm-paid-generation" || flag === "--confirm-reconciliation") {
+    else if (
+      flag === "--confirm-paid-generation" ||
+      flag === "--confirm-reconciliation" ||
+      flag === "--confirm-historical-reconciliation"
+    ) {
       if (confirmation) throw new Error("Confirmation families are mutually exclusive.");
-      confirmation = flag === "--confirm-paid-generation" ? "GENERATION" : "RECONCILIATION";
+
+      confirmation =
+        flag === "--confirm-paid-generation"
+          ? "GENERATION"
+          : flag === "--confirm-historical-reconciliation"
+            ? "HISTORICAL_RECONCILIATION"
+            : "RECONCILIATION";
     } else throw new Error(flag.startsWith("-") ? `Unknown episode automation CLI argument: ${flag.split("=")[0]}` : "Unexpected positional episode automation CLI argument.");
   }
   if (planPath === undefined && episodeId === undefined) throw new Error("--plan is required unless --episode --plan-only is supplied.");

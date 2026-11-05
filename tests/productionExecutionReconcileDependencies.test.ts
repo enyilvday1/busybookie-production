@@ -115,6 +115,11 @@ describe(
             makeMock(
               "createGoogleSubmittedRecovery",
             ),
+
+          createGoogleHistoricalSubmittedRecovery:
+            makeMock(
+              "createGoogleHistoricalSubmittedRecovery",
+            ),
         } satisfies
           ProductionExecutionReconcileCompositionDependencies;
 
@@ -144,6 +149,7 @@ describe(
           "reconcileGoogleLifecycle",
           "reconcileGoogleVisualAttemptLifecycle",
           "createGoogleSubmittedRecovery",
+          "createGoogleHistoricalSubmittedRecovery",
         ]);
 
         for (

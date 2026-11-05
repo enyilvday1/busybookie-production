@@ -148,10 +148,36 @@ export async function runEpisodeAutomation(
 
 async function runControlledEpisodeAutomation(plan: ControlledEpisodeAutomationPlan,
   dependencies: RunEpisodeAutomationDependencies, session?: FreshEpisodeOperatorSession): Promise<BoundEpisodeActionResult> {
-  const action = plan.actions[0];
-  // B5 Slice-2I-B: a reviewed attempt is paid generation; only a reconcile is recovery.
-  const sessionId = consumeFreshEpisodeOperatorSession(session,
-    action.kind === "VISUAL_GENERATE" || action.kind === "VISUAL_ATTEMPT_GENERATE" ? "GENERATION" : "RECONCILIATION");
+  const action =
+    plan.actions[0];
+
+  const generation =
+    action.kind ===
+      "VISUAL_GENERATE" ||
+    action.kind ===
+      "VISUAL_ATTEMPT_GENERATE";
+
+  const requiredConfirmation =
+    generation
+      ? "GENERATION"
+      : action.kind ===
+            "VISUAL_ATTEMPT_RECONCILE" &&
+          session?.confirmation ===
+            "HISTORICAL_RECONCILIATION"
+        ? "HISTORICAL_RECONCILIATION"
+        : "RECONCILIATION";
+
+  const sessionId =
+    consumeFreshEpisodeOperatorSession(
+      session,
+      requiredConfirmation,
+    );
+
+  const recoveryAuthority =
+    requiredConfirmation ===
+      "HISTORICAL_RECONCILIATION"
+      ? "OPERATOR_HISTORICAL_RECONCILIATION"
+      : "STANDARD_RECONCILIATION";
   const manifest = plan.inputBinding.fileBindings.find(file => file.role === "MANIFEST");
   if (!manifest?.rawSha256) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   const runtime = plan.inputBinding.runtimeIdentity;
@@ -185,7 +211,12 @@ async function runControlledEpisodeAutomation(plan: ControlledEpisodeAutomationP
         issues: [episodeIssue(cause.code, { episodeId: action.episodeId, sceneId: action.sceneId, shotId: action.shotId, order: action.order }, "ADMISSION", cause)] });
       return result;
     }
-    const invocation = createEpisodeInvocation(plan.episodeId, plan.maximumNewProviderCreates);
+    const invocation =
+      createEpisodeInvocation(
+        plan.episodeId,
+        plan.maximumNewProviderCreates,
+        recoveryAuthority,
+      );
     const controlledContext = await createCheckedEpisodeExecutionContext({ plan, beforePlan, guard, invocation, preflight, verifyRuntime });
     // Exactly one C6b delegation. No loop, no fallback, no second recovery and
     // no implicit advancement to a different frontier after a stale action.

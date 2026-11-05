@@ -107,26 +107,153 @@ export async function releaseEpisodeExecutionGuard(context: EpisodeGuardContext)
 }
 
 export type InvocationContext = Readonly<{ episodeId: string }>;
-type Allowance = { limit: 0 | 1; generation: 0 | 1; recovery: 0 | 1; dispatch: boolean };
-const invocations = new WeakMap<InvocationContext, Allowance>();
-export type FreshEpisodeOperatorSession = Readonly<{ sessionId: string; confirmation: "GENERATION" | "RECONCILIATION" }>;
-const freshOperatorSessions = new WeakSet<FreshEpisodeOperatorSession>();
-export function createFreshEpisodeOperatorSession(confirmation: "GENERATION" | "RECONCILIATION", literalConfirmation: true): FreshEpisodeOperatorSession {
-  if (literalConfirmation !== true || (confirmation !== "GENERATION" && confirmation !== "RECONCILIATION")) {
-    throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
+
+export type EpisodeOperatorConfirmation =
+  | "GENERATION"
+  | "RECONCILIATION"
+  | "HISTORICAL_RECONCILIATION";
+
+export type EpisodeRecoveryAuthority =
+  | "STANDARD_RECONCILIATION"
+  | "OPERATOR_HISTORICAL_RECONCILIATION";
+
+type Allowance = {
+  limit: 0 | 1;
+  generation: 0 | 1;
+  recovery: 0 | 1;
+  dispatch: boolean;
+  recoveryAuthority: EpisodeRecoveryAuthority;
+};
+
+const invocations =
+  new WeakMap<InvocationContext, Allowance>();
+
+export type FreshEpisodeOperatorSession =
+  Readonly<{
+    sessionId: string;
+    confirmation: EpisodeOperatorConfirmation;
+  }>;
+
+const freshOperatorSessions =
+  new WeakSet<FreshEpisodeOperatorSession>();
+
+export function createFreshEpisodeOperatorSession(
+  confirmation: EpisodeOperatorConfirmation,
+  literalConfirmation: true,
+): FreshEpisodeOperatorSession {
+  if (
+    literalConfirmation !== true ||
+    ![
+      "GENERATION",
+      "RECONCILIATION",
+      "HISTORICAL_RECONCILIATION",
+    ].includes(
+      confirmation,
+    )
+  ) {
+    throw new BoundEpisodeError(
+      "OPERATING_CONDITION_UNESTABLISHED",
+    );
   }
-  const session = Object.freeze({ sessionId: randomUUID(), confirmation });
-  freshOperatorSessions.add(session); return session;
+
+  const session =
+    Object.freeze({
+      sessionId:
+        randomUUID(),
+
+      confirmation,
+    });
+
+  freshOperatorSessions.add(
+    session,
+  );
+
+  return session;
 }
-export function consumeFreshEpisodeOperatorSession(session: FreshEpisodeOperatorSession | undefined,
-  confirmation: "GENERATION" | "RECONCILIATION"): string {
-  if (!session || !freshOperatorSessions.has(session) || session.confirmation !== confirmation) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
-  freshOperatorSessions.delete(session); return session.sessionId;
+
+export function consumeFreshEpisodeOperatorSession(
+  session:
+    FreshEpisodeOperatorSession | undefined,
+
+  confirmation:
+    EpisodeOperatorConfirmation,
+): string {
+  if (
+    !session ||
+    !freshOperatorSessions.has(
+      session,
+    ) ||
+    session.confirmation !==
+      confirmation
+  ) {
+    throw new BoundEpisodeError(
+      "OPERATING_CONDITION_UNESTABLISHED",
+    );
+  }
+
+  freshOperatorSessions.delete(
+    session,
+  );
+
+  return session.sessionId;
 }
-export function createEpisodeInvocation(episodeId: string, limit: 0 | 1): InvocationContext {
-  const context = Object.freeze({ episodeId: ExecutionReservationEpisodeIdSchema.parse(episodeId) });
-  invocations.set(context, { limit, generation: 0, recovery: 0, dispatch: false });
+
+export function createEpisodeInvocation(
+  episodeId: string,
+  limit: 0 | 1,
+  recoveryAuthority:
+    EpisodeRecoveryAuthority =
+      "STANDARD_RECONCILIATION",
+): InvocationContext {
+  if (
+    recoveryAuthority ===
+      "OPERATOR_HISTORICAL_RECONCILIATION" &&
+    limit !== 0
+  ) {
+    throw new BoundEpisodeError(
+      "OPERATING_CONDITION_UNESTABLISHED",
+    );
+  }
+
+  const context =
+    Object.freeze({
+      episodeId:
+        ExecutionReservationEpisodeIdSchema
+          .parse(
+            episodeId,
+          ),
+    });
+
+  invocations.set(
+    context,
+    {
+      limit,
+      generation: 0,
+      recovery: 0,
+      dispatch: false,
+      recoveryAuthority,
+    },
+  );
+
   return context;
+}
+
+export function episodeInvocationRecoveryAuthority(
+  context:
+    InvocationContext,
+): EpisodeRecoveryAuthority {
+  const state =
+    invocations.get(
+      context,
+    );
+
+  if (!state) {
+    throw new BoundEpisodeError(
+      "OPERATING_CONDITION_UNESTABLISHED",
+    );
+  }
+
+  return state.recoveryAuthority;
 }
 export function admitEpisodeCoordinatorDispatch(context: InvocationContext): void {
   const state = invocations.get(context);

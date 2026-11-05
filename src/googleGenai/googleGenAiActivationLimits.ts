@@ -30,6 +30,17 @@ export type GoogleGenAiVideoResolution =
 export const GOOGLE_GENAI_VIDEO_DELIVERY =
   "uri" as const;
 
+/**
+ * Explicit-operator historical recovery horizon.
+ *
+ * This authority is deliberately separate from ordinary automated recovery.
+ * The standard recovery policy remains 24 hours. Historical recovery can
+ * select this fixed six-day limit only through a separately checked,
+ * process-local operator authority; callers never provide a duration.
+ */
+export const GOOGLE_GENAI_HISTORICAL_REMOTE_RECOVERY_HORIZON_MS =
+  518_400_000 as const;
+
 export const GOOGLE_GENAI_ACTIVATION_LIMITS =
   Object.freeze({
     cost:

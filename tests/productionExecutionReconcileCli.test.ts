@@ -32,7 +32,11 @@ describe(
             marker:
               "production-reconcile-dependencies",
           }) as unknown as
-            RunExecutionReconcileCliDependencies;
+            ReturnType<
+              RunProductionExecutionReconcileCliDependencies[
+                "createDependencies"
+              ]
+            >;
 
         const createDependencies =
           vi.fn<

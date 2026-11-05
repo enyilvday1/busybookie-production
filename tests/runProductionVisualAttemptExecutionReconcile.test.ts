@@ -21,6 +21,9 @@ const guardMocks =
 
       consumeEpisodeRecoveryDispatch:
         vi.fn(),
+
+      episodeInvocationRecoveryAuthority:
+        vi.fn(),
     }),
   );
 
@@ -48,6 +51,10 @@ vi.mock(
       consumeEpisodeRecoveryDispatch:
         guardMocks
           .consumeEpisodeRecoveryDispatch,
+
+      episodeInvocationRecoveryAuthority:
+        guardMocks
+          .episodeInvocationRecoveryAuthority,
     };
   },
 );
@@ -159,6 +166,18 @@ function harness(
         submittedRecovery,
     );
 
+  const historicalSubmittedRecovery =
+    Object.freeze({
+      marker:
+        "historical-submitted-recovery",
+    });
+
+  const createGoogleHistoricalSubmittedRecovery =
+    vi.fn(
+      () =>
+        historicalSubmittedRecovery,
+    );
+
   const loadEnvironment =
     vi.fn(
       () => ({
@@ -177,6 +196,7 @@ function harness(
           reconcile,
 
         createGoogleSubmittedRecovery,
+        createGoogleHistoricalSubmittedRecovery,
 
         loadEnvironment,
       }),
@@ -202,10 +222,18 @@ function harness(
         (() => undefined),
     );
 
+  guardMocks
+    .episodeInvocationRecoveryAuthority
+    .mockReturnValue(
+      "STANDARD_RECONCILIATION",
+    );
+
   return {
     submittedRecovery,
+    historicalSubmittedRecovery,
     reconcile,
     createGoogleSubmittedRecovery,
+    createGoogleHistoricalSubmittedRecovery,
     loadEnvironment,
     createDependencies,
   };
@@ -787,6 +815,90 @@ describe(
 
         expect(
           h.reconcile,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+      },
+    );
+
+    it(
+      "selects the historical factory only from checked invocation authority",
+      async () => {
+        const checked =
+          checkedData();
+
+        const h =
+          harness({
+            checked,
+          });
+
+        guardMocks
+          .episodeInvocationRecoveryAuthority
+          .mockReturnValue(
+            "OPERATOR_HISTORICAL_RECONCILIATION",
+          );
+
+        const context =
+          Object.freeze({
+            marker:
+              "checked-context",
+          });
+
+        await expect(
+          runProductionVisualAttemptExecutionReconcile(
+            {
+              episodeId:
+                EPISODE_ID,
+
+              shotId:
+                SHOT_ID,
+
+              attemptNumber:
+                ATTEMPT_NUMBER,
+            },
+            {
+              createDependencies:
+                h.createDependencies,
+            } as never,
+            context as never,
+          ),
+        ).resolves.toBeUndefined();
+
+        expect(
+          h.createGoogleSubmittedRecovery,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          h.createGoogleHistoricalSubmittedRecovery,
+        ).toHaveBeenCalledExactlyOnceWith(
+          "synthetic-gemini-key",
+        );
+
+        expect(
+          h.reconcile,
+        ).toHaveBeenCalledWith(
+          {
+            mediaRoot:
+              MEDIA_ROOT,
+
+            episodeId:
+              EPISODE_ID,
+
+            shotId:
+              SHOT_ID,
+
+            attemptNumber:
+              ATTEMPT_NUMBER,
+          },
+          {
+            submittedRecovery:
+              h.historicalSubmittedRecovery,
+          },
+        );
+
+        expect(
+          guardMocks
+            .consumeEpisodeRecoveryDispatch,
         ).toHaveBeenCalledTimes(
           1,
         );

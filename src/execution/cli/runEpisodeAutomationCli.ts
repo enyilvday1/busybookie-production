@@ -339,13 +339,57 @@ export async function runEpisodeAutomationCli(
   }
   let freshSession: FreshEpisodeOperatorSession | undefined;
   if (plan.schemaVersion === "2.0") {
-    // B5 Slice-2I-B: a reviewed attempt is paid generation; only a reconcile is recovery.
-    const kind = plan.actions[0].kind;
-    const family = kind === "VISUAL_GENERATE" || kind === "VISUAL_ATTEMPT_GENERATE" ? "GENERATION" : "RECONCILIATION";
-    if (options.confirmation !== family) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
+    // Historical recovery is not another plan action. It is a stronger
+    // operator confirmation accepted only for an exact attempt reconcile.
+    const kind =
+      plan.actions[0].kind;
+
+    const generation =
+      kind === "VISUAL_GENERATE" ||
+      kind === "VISUAL_ATTEMPT_GENERATE";
+
+    const confirmation =
+      options.confirmation;
+
+    if (generation) {
+      if (
+        confirmation !==
+          "GENERATION"
+      ) {
+        throw new BoundEpisodeError(
+          "OPERATING_CONDITION_UNESTABLISHED",
+        );
+      }
+    } else if (
+      kind ===
+        "VISUAL_ATTEMPT_RECONCILE"
+    ) {
+      if (
+        confirmation !==
+          "RECONCILIATION" &&
+        confirmation !==
+          "HISTORICAL_RECONCILIATION"
+      ) {
+        throw new BoundEpisodeError(
+          "OPERATING_CONDITION_UNESTABLISHED",
+        );
+      }
+    } else if (
+      confirmation !==
+        "RECONCILIATION"
+    ) {
+      throw new BoundEpisodeError(
+        "OPERATING_CONDITION_UNESTABLISHED",
+      );
+    }
+
     // Lazy import keeps dotenv, secured production factories and guard write
     // capabilities out of plan-only/structural-validation module loading.
-    freshSession = (await import("../episodeExecutionGuard.js")).createFreshEpisodeOperatorSession(family, true);
+    freshSession =
+      (await import("../episodeExecutionGuard.js")).createFreshEpisodeOperatorSession(
+        confirmation,
+        true,
+      );
   } else {
     if (options.json) throw new Error("Legacy dialogue execution has no controlled visual JSON result.");
     if (options.confirmation) throw new Error("Legacy dialogue execution does not accept visual confirmation flags.");

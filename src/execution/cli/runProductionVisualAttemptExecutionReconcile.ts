@@ -6,6 +6,7 @@ import {
   assertCheckedEpisodeAdmission,
   checkedEpisodeExecutionData,
   consumeEpisodeRecoveryDispatch,
+  episodeInvocationRecoveryAuthority,
   type CheckedEpisodeExecutionContext,
 } from "../episodeExecutionGuard.js";
 
@@ -90,9 +91,18 @@ export async function runProductionVisualAttemptExecutionReconcile(
     production
       .reconcileGoogleVisualAttemptLifecycle;
 
+  const recoveryAuthority =
+    episodeInvocationRecoveryAuthority(
+      checked.invocation,
+    );
+
   const createSubmittedRecovery =
-    production
-      .createGoogleSubmittedRecovery;
+    recoveryAuthority ===
+      "OPERATOR_HISTORICAL_RECONCILIATION"
+      ? production
+          .createGoogleHistoricalSubmittedRecovery
+      : production
+          .createGoogleSubmittedRecovery;
 
   if (
     !reconcile ||

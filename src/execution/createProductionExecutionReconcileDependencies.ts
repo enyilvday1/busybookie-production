@@ -114,6 +114,9 @@ export type ProductionExecutionReconcileCompositionDependencies =
 
     createGoogleSubmittedRecovery:
       typeof createGoogleGenAiSingleShotSecureProductionRecovery;
+
+    createGoogleHistoricalSubmittedRecovery:
+      typeof createGoogleGenAiSingleShotSecureProductionRecovery;
   }>;
 
 const defaultDependencies:
@@ -151,13 +154,31 @@ const defaultDependencies:
 
     createGoogleSubmittedRecovery:
       createGoogleGenAiSingleShotSecureProductionRecovery,
+
+    createGoogleHistoricalSubmittedRecovery:
+      (
+        apiKey,
+        options,
+      ) =>
+        createGoogleGenAiSingleShotSecureProductionRecovery(
+          apiKey,
+          options,
+          "OPERATOR_HISTORICAL",
+        ),
   });
+
+export type ProductionExecutionReconcileRuntimeDependencies =
+  RunExecutionReconcileCliDependencies &
+  Readonly<{
+    createGoogleHistoricalSubmittedRecovery:
+      typeof createGoogleGenAiSingleShotSecureProductionRecovery;
+  }>;
 
 export function createProductionExecutionReconcileDependencies(
   dependencies:
     ProductionExecutionReconcileCompositionDependencies =
       defaultDependencies,
-): RunExecutionReconcileCliDependencies {
+): ProductionExecutionReconcileRuntimeDependencies {
   return Object.freeze({
     loadEnvironment:
       dependencies
@@ -222,5 +243,9 @@ export function createProductionExecutionReconcileDependencies(
     createGoogleSubmittedRecovery:
       dependencies
         .createGoogleSubmittedRecovery,
+
+    createGoogleHistoricalSubmittedRecovery:
+      dependencies
+        .createGoogleHistoricalSubmittedRecovery,
   });
 }

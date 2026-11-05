@@ -202,7 +202,21 @@ export async function execute(request: WorkerRequest) {
     runSingleShotExecutionCli: (args: readonly string[] | undefined, _deps: unknown, context?: Parameters<typeof runSingleShotExecutionCli>[2]) =>
       request.mode === "recover" ? forbidden() : runSingleShotExecutionCli(args, generate, context),
     runProductionExecutionReconcileCli: (args: readonly string[] | undefined, _deps: unknown, context?: Parameters<typeof runProductionExecutionReconcileCli>[2]) =>
-      runProductionExecutionReconcileCli(args, { createDependencies: () => cli, runCli: runExecutionReconcileCli }, context),
+      runProductionExecutionReconcileCli(args, {
+        createDependencies: () => ({
+          ...cli,
+
+          createGoogleHistoricalSubmittedRecovery:
+            () => {
+              throw new Error(
+                "Historical Google recovery must not run in the standard budget/restart fixture.",
+              );
+            },
+        }),
+
+        runCli:
+          runExecutionReconcileCli,
+      }, context),
   };
   function coordinate(args: CoordinateBoundEpisodeActionInput): Promise<BoundEpisodeActionResult>;
   function coordinate(args: CoordinateEpisodeActionInput): Promise<CoordinateEpisodeActionResult>;

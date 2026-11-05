@@ -79,6 +79,100 @@ describe("one bounded same-ID logical replay", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+
+  it("accepts SDK-documented lifecycle interaction.steps snapshots without treating them as recovery evidence", async () => {
+    const sourceId = "interaction_steps_snapshot";
+    const body = [
+      `event: interaction.created`,
+      `data: ${JSON.stringify({
+        event_type: "interaction.created",
+        interaction: {
+          id: sourceId,
+          status: "in_progress",
+          steps: [],
+        },
+      })}`,
+      ``,
+      `event: interaction.status_update`,
+      `data: ${JSON.stringify({
+        event_type: "interaction.status_update",
+        interaction_id: sourceId,
+        status: "in_progress",
+      })}`,
+      ``,
+      ``,
+    ].join("\n");
+
+    const fetchImpl = vi.fn(async () =>
+      new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+        },
+      }),
+    );
+
+    const result = await replayGoogleGenAiInteraction(
+      sourceId,
+      context().ctx,
+      {
+        apiKey: "synthetic-key",
+        policy: policy(),
+        fetchImpl,
+      },
+    );
+
+    expect(result).toMatchObject({
+      id: sourceId,
+      status: "in_progress",
+      outputVideo: null,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a malformed non-array lifecycle interaction.steps field", async () => {
+    const sourceId = "interaction_steps_invalid";
+    const body = [
+      `event: interaction.created`,
+      `data: ${JSON.stringify({
+        event_type: "interaction.created",
+        interaction: {
+          id: sourceId,
+          status: "in_progress",
+          steps: {},
+        },
+      })}`,
+      ``,
+      ``,
+    ].join("\n");
+
+    const fetchImpl = vi.fn(async () =>
+      new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+        },
+      }),
+    );
+
+    await expect(
+      replayGoogleGenAiInteraction(
+        sourceId,
+        context().ctx,
+        {
+          apiKey: "synthetic-key",
+          policy: policy(),
+          fetchImpl,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "INTERACTION_REPLAY_CONTRACT_CHANGED",
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["queued", "in_progress", "failed", "cancelled", "incomplete", "budget_exceeded", "requires_action"])("does not retry a valid %s observation", async (status) => {
     const fetchImpl = vi.fn<GoogleGenAiFetch>(async () => body(pending(status)));
     expect(await run(fetchImpl)).toEqual({ id, status, outputVideo: null });

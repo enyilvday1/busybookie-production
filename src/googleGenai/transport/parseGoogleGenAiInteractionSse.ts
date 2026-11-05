@@ -149,7 +149,11 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
     if (kind === "interaction.created" || kind === "interaction.completed") {
       keys(event, ["event_type", "event_id", "interaction"]);
       const interaction = record(event.interaction);
-      keys(interaction, ["id", "status", "created", "updated", "model", "agent", "object", "service_tier", "usage"]);
+      keys(interaction, ["id", "status", "created", "updated", "model", "agent", "object", "service_tier", "usage", "steps"]);
+      if (Object.hasOwn(interaction, "steps") && !Array.isArray(interaction.steps)) changed();
+      // Google lifecycle SSE events may include a steps snapshot. It is
+      // compatibility-only context, never recovery evidence: ordered
+      // step.start/step.delta/step.stop events remain authoritative here.
       identity(interaction.id);
       if (kind === "interaction.created") {
         if (created) changed();

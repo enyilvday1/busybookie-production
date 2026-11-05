@@ -59,6 +59,78 @@ describe("bounded raw Interaction SSE", () => {
     expect(result.outputVideo).toEqual({ type: "video", mime_type: "video/mp4", uri });
   });
 
+  it("accepts lifecycle continuation_token as compatibility-only context", () => {
+    expect(
+      parse([
+        {
+          ...created,
+          interaction: {
+            id,
+            status: "in_progress",
+            continuation_token: "opaque-synthetic-token",
+          },
+        },
+      ]),
+    ).toEqual({
+      id,
+      status: "in_progress",
+      outputVideo: null,
+    });
+  });
+
+  it("rejects non-string lifecycle continuation_token", () => {
+    code(() =>
+      parse([
+        {
+          ...created,
+          interaction: {
+            id,
+            status: "in_progress",
+            continuation_token: 123,
+          },
+        },
+      ]),
+    );
+  });
+
+  it("accepts lifecycle steps arrays as compatibility-only snapshots", () => {
+    expect(
+      parse([
+        created,
+        start,
+        delta,
+        stop,
+        {
+          ...complete,
+          interaction: {
+            id,
+            status: "completed",
+            steps: [],
+          },
+        },
+      ]),
+    ).toEqual({
+      id,
+      status: "completed",
+      outputVideo: delta.delta,
+    });
+  });
+
+  it("rejects non-array lifecycle steps snapshots", () => {
+    code(() =>
+      parse([
+        {
+          ...created,
+          interaction: {
+            id,
+            status: "in_progress",
+            steps: {},
+          },
+        },
+      ]),
+    );
+  });
+
   it("accepts the exact B7E5D1 observed stream shape: no frame carries mime_type", () => {
     const interactionFields = { object: "interaction", model: "gemini-omni-1.1-flash" };
     const modality = (value: string) => ({ modality: value, tokens: 1 });
@@ -151,7 +223,6 @@ describe("bounded raw Interaction SSE", () => {
     [created, complete], [created, start, delta, complete],
     [created, start, delta, stop, { ...complete, interaction: { id: "wrong", status: "completed" } }],
     [created, start, delta, stop, { ...complete, interaction: { id, status: "in_progress" } }],
-    [created, start, delta, stop, { ...complete, interaction: { id, status: "completed", steps: [] } }],
     [created, { event_type: "interaction.status_update", interaction_id: id, status: "queued" }],
     [created, { event_type: "interaction.status_update", interaction_id: id, status: "completed" }, { event_type: "interaction.status_update", interaction_id: id, status: "in_progress" }],
     [...sequence, complete],

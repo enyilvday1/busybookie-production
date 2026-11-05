@@ -149,11 +149,15 @@ export function createGoogleGenAiInteractionSseParser(input: Readonly<{
     if (kind === "interaction.created" || kind === "interaction.completed") {
       keys(event, ["event_type", "event_id", "interaction"]);
       const interaction = record(event.interaction);
-      keys(interaction, ["id", "status", "created", "updated", "model", "agent", "object", "service_tier", "usage", "steps"]);
+      keys(interaction, ["id", "status", "created", "updated", "model", "agent", "object", "service_tier", "usage", "steps", "continuation_token"]);
       if (Object.hasOwn(interaction, "steps") && !Array.isArray(interaction.steps)) changed();
-      // Google lifecycle SSE events may include a steps snapshot. It is
-      // compatibility-only context, never recovery evidence: ordered
-      // step.start/step.delta/step.stop events remain authoritative here.
+      if (Object.hasOwn(interaction, "continuation_token") &&
+          typeof interaction.continuation_token !== "string") changed();
+      // Google lifecycle SSE events may include steps and continuation_token
+      // snapshots. They are compatibility-only context, never recovery
+      // authority: ordered step.start/step.delta/step.stop events remain
+      // authoritative here, and BusyBookie does not automatically continue
+      // decoding from a continuation token.
       identity(interaction.id);
       if (kind === "interaction.created") {
         if (created) changed();

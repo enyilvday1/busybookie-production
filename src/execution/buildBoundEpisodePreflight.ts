@@ -602,7 +602,13 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
     if (selection) {
       // The selected attempt is the only visual generation candidate under
       // consideration; no fresh frontier is ever substituted for it.
-      if (complete && alignment && !ambiguity && !shots.some(shot => shot.disposition === "ERROR") && attemptCandidate) candidate = attemptCandidate;
+      const selectedAttemptAlignmentSatisfied =
+        attemptCandidate?.kind === "VISUAL_ATTEMPT_RECONCILE" ||
+        alignment;
+      if (complete && selectedAttemptAlignmentSatisfied && !ambiguity &&
+          !shots.some(shot => shot.disposition === "ERROR") && attemptCandidate) {
+        candidate = attemptCandidate;
+      }
     } else if (complete && alignment && frontier?.inScope && !shots.some(shot => shot.disposition === "ERROR")) {
       const target = { episodeId, sceneId: frontier.sceneId, shotId: frontier.shotId, order: frontier.order };
       if (frontier.disposition === "READY" && !ambiguity && frontier.selectedReference && frontier.resolvedProvider && frontier.cost.status === "KNOWN") {

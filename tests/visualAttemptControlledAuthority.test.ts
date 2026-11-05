@@ -392,6 +392,104 @@ describe("D. only ADMITTED_ONLY yields a candidate", () => {
     expect(report.nextActionCandidate).toBeNull(); expect(report.generationMayBeAuthorized).toBe(false);
   });
 
+  it("legacy Attempt-1 COMPLETED without evidence adoption does not block exact Attempt-2 SUBMITTED recovery", async () => {
+    const f = await fixture();
+
+    await complete(
+      f,
+      "S01",
+      await accepted(
+        f,
+        "S01",
+      ),
+    );
+
+    await admit(f);
+
+    const report =
+      await select(
+        f,
+        2,
+        {},
+        readers(
+          syntheticLifecycle(
+            () => ({
+              state:
+                "SUBMITTED",
+            }),
+          ),
+        ),
+      );
+
+    expect(
+      report.shots.find(
+        row =>
+          row.shotId === "S01",
+      ),
+    ).toMatchObject({
+      disposition:
+        "COMPLETED",
+
+      completionVerification:
+        "VERIFIED",
+
+      intentAlignment:
+        "UNATTESTED_EXISTING_EVIDENCE",
+    });
+
+    expect(
+      report.visualAttempt,
+    ).toMatchObject({
+      shotId:
+        "S01",
+
+      attemptNumber:
+        2,
+
+      lifecycle:
+        "SUBMITTED",
+    });
+
+    expect(
+      report.nextActionCandidate,
+    ).toMatchObject({
+      episodeId:
+        "EP02",
+
+      sceneId:
+        "SC01",
+
+      shotId:
+        "S01",
+
+      attemptNumber:
+        2,
+
+      kind:
+        "VISUAL_ATTEMPT_RECONCILE",
+
+      expectedAttemptLifecycle:
+        "SUBMITTED",
+
+      provider:
+        "GOOGLE_GENAI",
+    });
+
+    expect(
+      report.intentAlignment,
+    ).toBe(
+      "REVIEW_REQUIRED",
+    );
+
+    expect(
+      report.recoveryMayBeAuthorized,
+    ).toBe(true);
+
+    expect(
+      report.generationMayBeAuthorized,
+    ).toBe(false);
+  });
+
   it("a valid synthetic SUBMITTED attempt yields exactly one zero-create recovery candidate", async () => {
     const f = await fixture();
     await admit(f);

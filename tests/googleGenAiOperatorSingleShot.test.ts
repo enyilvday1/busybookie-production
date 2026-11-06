@@ -85,6 +85,13 @@ function enabledPolicies(overrides: Partial<{ activation: LoadedGoogleGenAiActiv
   };
 }
 
+function disabledPolicies(): GoogleGenAiOperatorPolicies {
+  return {
+    activationPolicy: { ...committedActivationPolicy, admission: { newSubmissionsEnabled: false } },
+    googlePolicy,
+  };
+}
+
 function episodeWith(mutate: (shot: Shot, episode: EpisodeManifest) => void = () => undefined): EpisodeManifest {
   const episode = structuredClone(baseEpisode);
   mutate(episode.scenes[0]!.shots[0]!, episode);
@@ -218,9 +225,9 @@ describe("operator-only Google execute: synthetic success", () => {
 });
 
 describe("operator-only Google execute: deterministic admission precedes the reservation", () => {
-  it("refuses with the committed default-off policy before any credential, lifecycle, reservation or create", async () => {
-    expect(committedActivationPolicy.admission.newSubmissionsEnabled).toBe(false);
-    const h = await harness({ policies: { activationPolicy: committedActivationPolicy, googlePolicy } });
+  it("refuses with an explicit disabled policy before any credential, lifecycle, reservation or create", async () => {
+    expect(disabledPolicies().activationPolicy.admission.newSubmissionsEnabled).toBe(false);
+    const h = await harness({ policies: disabledPolicies() });
     await expectRefusedBeforeReservation(h, "NEW_SUBMISSIONS_DISABLED");
     expect(h.events).toEqual(["policies"]);
   });

@@ -79,7 +79,7 @@ vi.mock("../src/execution/providers/persistGoogleGenAiSingleShotCompletion.js", 
 const { GoogleGenAI } = await import("@google/genai");
 
 const ROOT = process.cwd();
-const ACTIVATION_POLICY_SHA256 = "12c2728465972de9df3d3c0ba7fef539ad8802ae5b8161ad83c57409bd268ffb";
+const ACTIVATION_POLICY_SHA256 = "63a96b639b66b0346236e04368fd7f5bed9101a9bd262b4a10ed840dfa9393cb";
 const INTERACTION_ID = "v1_ChdnZW1pbmktb21uaS1pbnRlcmFjdGlvbi0xMjM";
 const SYNTHETIC_KEY = "synthetic-x1-key-not-a-secret";
 const SENTINEL_KEY = "SENTINEL-X1-CREDENTIAL";
@@ -91,6 +91,7 @@ let bible: CharacterBible;
 let rules: ProductionRules;
 let policy: ProviderRoutingPolicy;
 let enabledPolicies: GoogleGenAiOperatorPolicies;
+let disabledPolicies: GoogleGenAiOperatorPolicies;
 let fetchSpy: ReturnType<typeof vi.spyOn>;
 const temporaryDirectories: string[] = [];
 
@@ -99,8 +100,10 @@ beforeAll(async () => {
     loadEpisodeManifest("EP90"), loadCharacterBible(), loadProductionRules(), loadProviderRoutingPolicy(), loadGoogleGenAiActivationPolicy(), loadGoogleGenAiPolicy(),
   ]);
   [episode, bible, rules, policy] = [loadedEpisode, loadedBible, loadedRules, loadedPolicy];
-  // In-memory only: the committed policy file stays newSubmissionsEnabled=false.
+  // Explicit in-memory copies keep enabled and disabled admission contracts
+  // independent from the committed production activation state.
   enabledPolicies = { activationPolicy: { ...activationPolicy, admission: { newSubmissionsEnabled: true } }, googlePolicy };
+  disabledPolicies = { activationPolicy: { ...activationPolicy, admission: { newSubmissionsEnabled: false } }, googlePolicy };
 });
 beforeEach(() => {
   vi.clearAllMocks();
@@ -155,7 +158,7 @@ function request(root: string, imagePath: string, shot: Shot = googleShot()) {
 }
 
 type SharedOptions = Partial<{
-  policies: "COMMITTED" | "ENABLED";
+  policies: "COMMITTED" | "ENABLED" | "DISABLED";
   createInteraction: () => Promise<{ id: unknown }>;
   createSubmission: ProductionSingleShotExecutionCompositionDependencies["createSubmission"];
   realCredentialValidation: boolean;
@@ -174,7 +177,12 @@ function shared(credentials: { GEMINI_API_KEY?: string }, options: SharedOptions
     createCompletion: trip("createCompletion"),
     prepareRunwayExecutor: trip("prepareRunwayExecutor"),
     prepareVeoExecutor: trip("prepareVeoExecutor"),
-    loadGooglePolicies: vi.fn(async () => { events.push("policies"); return enabledPolicies; }),
+    loadGooglePolicies: vi.fn(async () => {
+      events.push("policies");
+      return options.policies === "DISABLED"
+        ? disabledPolicies
+        : enabledPolicies;
+    }),
     prepareGoogleInteraction: vi.fn((apiKey: string) => { events.push("prepare"); expect(apiKey.length).toBeGreaterThan(0); return { createInteraction, submittedRecovery: {} } as never; }),
     submitGoogle: vi.fn(executeGoogleGenAiOperatorSingleShot),
   };
@@ -320,14 +328,14 @@ describe("B5C-X1 shared Google async execution", () => {
     expect(await listTree(root)).toEqual(before);
   });
 
-  it("X1.7 the real committed policy (false) refuses NEW_SUBMISSIONS_DISABLED before credential, lifecycle, reservation or create", async () => {
+  it("X1.7 an explicit disabled policy refuses NEW_SUBMISSIONS_DISABLED before credential, lifecycle, reservation or create", async () => {
     const bytes = await readFile(join(ROOT, "config", "google-genai-activation-policy.json"));
     expect(sha256Hex(bytes)).toBe(ACTIVATION_POLICY_SHA256);
-    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ admission: { newSubmissionsEnabled: false } });
+    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ admission: { newSubmissionsEnabled: true } });
     for (const credentials of [{}, { GEMINI_API_KEY: "" }, { GEMINI_API_KEY: SYNTHETIC_KEY }]) {
       const { root, imagePath } = await mediaRoot();
       const before = await listTree(root);
-      const { dependencies, spies } = shared(credentials, { policies: "COMMITTED", realCredentialValidation: true });
+      const { dependencies, spies } = shared(credentials, { policies: "DISABLED", realCredentialValidation: true });
       await expectOperatorRefusal(executeSingleShot(request(root, imagePath), dependencies), "NEW_SUBMISSIONS_DISABLED");
       expect(createGoogleGenAiOperatorProductionDependencies).not.toHaveBeenCalled();
       expect(spies.createReservation).not.toHaveBeenCalled();
@@ -336,7 +344,7 @@ describe("B5C-X1 shared Google async execution", () => {
       expect(await inspectExecutionLifecycle(root, "EP90", "S01")).toEqual({ state: "NOTHING" });
       expect(await listTree(root)).toEqual(before);
     }
-    expect(loadGoogleGenAiActivationPolicy).toHaveBeenCalledTimes(3);
+    expect(loadGoogleGenAiActivationPolicy).not.toHaveBeenCalled();
     expect(sha256Hex(await readFile(join(ROOT, "config", "google-genai-activation-policy.json")))).toBe(ACTIVATION_POLICY_SHA256);
     expectNoOutputWork();
   });
@@ -591,6 +599,6 @@ describe("B5C-X1 shared Google async execution", () => {
     expect(importers.sort()).toEqual(["src/execution/cli/runGoogleGenAiOperatorCli.ts", "src/execution/createProductionSingleShotExecutionDependencies.ts"]);
     const bytes = await readFile(join(ROOT, "config", "google-genai-activation-policy.json"));
     expect(sha256Hex(bytes)).toBe(ACTIVATION_POLICY_SHA256);
-    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ admission: { newSubmissionsEnabled: false } });
+    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ admission: { newSubmissionsEnabled: true } });
   });
 });

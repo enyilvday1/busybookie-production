@@ -443,7 +443,12 @@ describe("B5C-R1 shared reconcile dispatch to the existing Google reconciler", (
   });
 
   it("R1.15 newSubmissionsEnabled=false blocks a NEW submission but not recovery of an EXISTING one", async () => {
-    const activationPolicy = await loadGoogleGenAiActivationPolicy();
+    const committedActivationPolicy = await loadGoogleGenAiActivationPolicy();
+    expect(committedActivationPolicy.admission.newSubmissionsEnabled).toBe(true);
+    const activationPolicy = {
+      ...committedActivationPolicy,
+      admission: { newSubmissionsEnabled: false },
+    };
     expect(activationPolicy.admission.newSubmissionsEnabled).toBe(false);
     const createInteraction = vi.fn(async () => { throw new Error("create must not be reached"); });
     await expect(submitGoogleGenAiSingleShot({ activationPolicy } as unknown as Parameters<typeof submitGoogleGenAiSingleShot>[0], { createInteraction } as never)).rejects.toBeInstanceOf(GoogleGenAiNewSubmissionsDisabledError);

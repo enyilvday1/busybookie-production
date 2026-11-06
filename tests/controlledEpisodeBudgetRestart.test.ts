@@ -148,6 +148,10 @@ describe("B7D fresh-process restart accounting through published secured executi
 
   it("M disabled Google blocks frontier matching with no create or cross-provider fallback", async () => {
     const f = await make("GOOGLE_GENAI");
+    const activationPath = join(f.repositoryRoot, "config/google-genai-activation-policy.json");
+    const activation = JSON.parse(await readFile(activationPath, "utf8"));
+    activation.admission.newSubmissionsEnabled = false;
+    await writeFile(activationPath, JSON.stringify(activation));
     const e = await child({ f, scenario: "M-disabled-google-new-generation", mode: "denyGoogle" });
     counts(e, 0, 0, 0, 0, 0); unchanged(e); expect(e.status).toBe("REJECTED");
     expect(e.generationAllowance).toBe(0); expect(e.frontierAfter).toBe("PROVIDER_ACTIVATION_BLOCKED");

@@ -230,7 +230,7 @@ describe(
     );
 
     it(
-      "keeps new Google submissions disabled in the checked-in policy",
+      "keeps new Google submissions enabled in the checked-in policy",
       async () => {
         const policy =
           await loadGoogleGenAiActivationPolicy();
@@ -239,7 +239,7 @@ describe(
           policy.admission,
         ).toStrictEqual({
           newSubmissionsEnabled:
-            false,
+            true,
         });
       },
     );
@@ -261,7 +261,7 @@ describe(
 
           admission: {
             newSubmissionsEnabled:
-              false,
+              true,
           },
 
           cost: {

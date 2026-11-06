@@ -2590,9 +2590,9 @@ describe(
       }
     });
 
-    it("keeps the committed activation policy default-off and the shared routing configuration Google-free", async () => {
+    it("keeps the committed activation policy enabled and the shared routing configuration Google-free", async () => {
       const policy: unknown = JSON.parse(await readFile(join(ROOT, "config/google-genai-activation-policy.json"), "utf8"));
-      expect(policy).toMatchObject({ admission: { newSubmissionsEnabled: false } });
+      expect(policy).toMatchObject({ admission: { newSubmissionsEnabled: true } });
       for (const file of ["config/provider-routing-policy.json", "src/schemas/providerRoutingPolicy.schema.ts"]) {
         expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/GOOGLE_GENAI|GoogleGenAi|gemini-omni/);
       }
@@ -2601,7 +2601,7 @@ describe(
         expect(await readFile(join(ROOT, file), "utf8"), file).not.toMatch(/GoogleGenAi|googleGenai|gemini-omni|@google\/genai/);
       }
       // B5C-S1: selection eligibility only. The rules vocabulary and the enabled list each name GOOGLE_GENAI exactly once;
-      // paid submission stays governed solely by the activation policy above (still false).
+      // paid submission stays governed solely by the activation policy above (now enabled).
       for (const file of ["config/production-rules.json", "src/schemas/productionRules.schema.ts"]) {
         const source = await readFile(join(ROOT, file), "utf8");
         expect(source.match(/GOOGLE_GENAI/g), file).toHaveLength(1);

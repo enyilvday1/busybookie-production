@@ -111,6 +111,10 @@ describe("full read-only episode preflight", () => {
   });
   it("blocks disabled Google with original admission code and no network", async () => {
     const f = await fixture("GOOGLE_GENAI");
+    const activationPath = join(f.repositoryRoot, "config/google-genai-activation-policy.json");
+    const activation = JSON.parse(await readFile(activationPath, "utf8"));
+    activation.admission.newSubmissionsEnabled = false;
+    await writeFile(activationPath, JSON.stringify(activation));
     const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("provider network tripwire"));
     const result = await buildBoundEpisodePreflight(f.input);
     expect(result.shots[0]!.disposition).toBe("BLOCKED");

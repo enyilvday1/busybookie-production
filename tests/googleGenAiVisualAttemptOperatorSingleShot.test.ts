@@ -156,6 +156,13 @@ function enabledPolicies(overrides: Partial<{ activation: LoadedGoogleGenAiActiv
   };
 }
 
+function disabledPolicies(): GoogleGenAiOperatorPolicies {
+  return {
+    activationPolicy: { ...committedActivationPolicy, admission: { newSubmissionsEnabled: false } },
+    googlePolicy,
+  };
+}
+
 function episodeWith(mutate: (shot: Shot, episode: EpisodeManifest) => void = () => undefined): EpisodeManifest {
   const episode = structuredClone(baseEpisode);
   mutate(shotOf(episode), episode);
@@ -462,9 +469,9 @@ describe("2H-B attempt operator: request surface", () => {
 });
 
 describe("2H-B attempt operator: activation and paid confirmation (M, N)", () => {
-  it("refuses with the committed default-off policy before any credential, lifecycle, reservation or create", async () => {
-    expect(committedActivationPolicy.admission.newSubmissionsEnabled).toBe(false);
-    const h = await harness({ policies: { activationPolicy: committedActivationPolicy, googlePolicy } });
+  it("refuses with an explicit disabled policy before any credential, lifecycle, reservation or create", async () => {
+    expect(disabledPolicies().activationPolicy.admission.newSubmissionsEnabled).toBe(false);
+    const h = await harness({ policies: disabledPolicies() });
     await expectRefusedBeforeReservation(h, "NEW_SUBMISSIONS_DISABLED");
     expect(h.events).toEqual(["policies"]);
     expect(h.calls()).toMatchObject({ prepare: 0, inspect: 0 });
@@ -945,7 +952,7 @@ describe("2H-B legacy compatibility and the submitter seam (S-V)", () => {
     const createInteraction = vi.fn(async () => ({ id: INTERACTION_ID }));
     const onSubmissionAccepted = vi.fn(async () => undefined);
 
-    await expect(submitGoogleGenAiSingleShot({ ...shared, activationPolicy: committedActivationPolicy, reservation: "not-a-reservation", onSubmissionAccepted }, { createInteraction }))
+    await expect(submitGoogleGenAiSingleShot({ ...shared, activationPolicy: disabledPolicies().activationPolicy, reservation: "not-a-reservation", onSubmissionAccepted }, { createInteraction }))
       .rejects.toBeInstanceOf(GoogleGenAiNewSubmissionsDisabledError);
     await expect(submitGoogleGenAiSingleShot({ ...shared, reservation: { ...reservation.record, provider: "RUNWAY" }, onSubmissionAccepted }, { createInteraction }))
       .rejects.toThrow("Execution reservation must belong to GOOGLE_GENAI; received RUNWAY.");

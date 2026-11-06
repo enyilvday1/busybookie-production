@@ -27,7 +27,7 @@ import { validateEpisodeProduction } from "../src/validation/validateEpisodeProd
 // B5C-S1 explicit Google selection. Three layers stay distinct:
 //   S1  selection eligibility  - GOOGLE_GENAI may be explicitly selected (schema + production rules + routing);
 //   X1  shared submission      - present: readiness is EXECUTABLE; shared execution delegates to the injected Google submitter;
-//   B5D paid activation        - absent: config/google-genai-activation-policy.json keeps newSubmissionsEnabled=false.
+//   B5D paid activation        - present: config/google-genai-activation-policy.json keeps newSubmissionsEnabled=true.
 vi.mock("../src/execution/resolveDurableShotExecutionReadiness.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/execution/resolveDurableShotExecutionReadiness.js")>();
   return { ...original, resolveDurableShotExecutionReadiness: vi.fn(original.resolveDurableShotExecutionReadiness) };
@@ -116,12 +116,12 @@ describe("B5C-S1 explicit Google selection", () => {
     }
   });
 
-  it("S1.2 real production rules enable GOOGLE_GENAI selection while the activation policy keeps paid submission off", async () => {
+  it("S1.2 real production rules enable GOOGLE_GENAI selection while the activation policy enables paid submission", async () => {
     expect(rules.generation.supportedProviders.filter((provider) => provider === "GOOGLE_GENAI")).toEqual(["GOOGLE_GENAI"]);
     const google = shotWith("GOOGLE_GENAI");
     expect(() => validateEpisodeProduction(episodeWith(google), bible, rules)).not.toThrow();
     const activation = await loadGoogleGenAiActivationPolicy();
-    expect(activation.admission.newSubmissionsEnabled).toBe(false);
+    expect(activation.admission.newSubmissionsEnabled).toBe(true);
   });
 
   it("S1.3 a visual-only shot explicitly naming GOOGLE_GENAI routes to GOOGLE_GENAI", () => {
@@ -194,8 +194,8 @@ describe("B5C-S1 explicit Google selection", () => {
       prepareRunwayExecutor,
       prepareVeoExecutor,
     });
-    // B5C-X1: the committed activation policy (false) refuses inside the Google orchestrator.
-    await expect(executeSingleShot(request(shotWith("GOOGLE_GENAI"), root), production)).rejects.toThrow("NEW_SUBMISSIONS_DISABLED");
+    // B5D: committed activation is enabled; the credential gate still prevents provider authority here.
+    await expect(executeSingleShot(request(shotWith("GOOGLE_GENAI"), root), production)).rejects.toThrow("CREDENTIAL_INVALID");
     for (const spy of [prepareRunwayExecutor, prepareVeoExecutor, trip.verifyVisualReference, trip.createReservation, trip.createSubmission, trip.createCompletion]) {
       expect(spy).not.toHaveBeenCalled();
     }
@@ -230,8 +230,8 @@ describe("B5C-S1 explicit Google selection", () => {
     await expect(executeSingleShot(request(google, await mediaRoot()), tripDependencies())).rejects.toThrow(NO_GOOGLE_SUBMITTER);
     expect(loadGoogleGenAiActivationPolicy).not.toHaveBeenCalled();
     const bytes = await readFile(join(ROOT, "config", "google-genai-activation-policy.json"));
-    expect(createHash("sha256").update(bytes).digest("hex")).toBe("12c2728465972de9df3d3c0ba7fef539ad8802ae5b8161ad83c57409bd268ffb");
-    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ admission: { newSubmissionsEnabled: false } });
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe("63a96b639b66b0346236e04368fd7f5bed9101a9bd262b4a10ed840dfa9393cb");
+    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ admission: { newSubmissionsEnabled: true } });
   });
 
   it("S1.14 historical EP90 stays a RUNWAY manifest while R1 lifecycle ownership still comes from the durable reservation", async () => {

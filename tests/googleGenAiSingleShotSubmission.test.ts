@@ -103,6 +103,9 @@ let checkedInActivationPolicy:
 let enabledActivationPolicy:
   LoadedGoogleGenAiActivationPolicy;
 
+let disabledActivationPolicy:
+  LoadedGoogleGenAiActivationPolicy;
+
 beforeAll(
   async () => {
     policySnapshot =
@@ -111,13 +114,23 @@ beforeAll(
     checkedInActivationPolicy =
       await loadGoogleGenAiActivationPolicy();
 
-    // Test-only copy: the checked-in policy stays default-off.
+    // Test-only copies isolate enabled and disabled admission contracts
+    // from the checked-in production activation state.
     enabledActivationPolicy = {
       ...checkedInActivationPolicy,
 
       admission: {
         newSubmissionsEnabled:
           true,
+      },
+    };
+
+    disabledActivationPolicy = {
+      ...checkedInActivationPolicy,
+
+      admission: {
+        newSubmissionsEnabled:
+          false,
       },
     };
   },
@@ -1369,10 +1382,10 @@ describe(
         );
 
         it(
-          "rejects every new submission under the checked-in default-off activation policy",
+          "rejects every new submission under an explicit disabled activation policy",
           async () => {
             expect(
-              checkedInActivationPolicy
+              disabledActivationPolicy
                 .admission
                 .newSubmissionsEnabled,
             ).toBe(
@@ -1382,7 +1395,7 @@ describe(
             await expectNoCreate(
               async () => ({
                 activationPolicy:
-                  checkedInActivationPolicy,
+                  disabledActivationPolicy,
               }),
               /new submissions are disabled/i,
             );
@@ -1406,7 +1419,7 @@ describe(
                   )),
 
                   activationPolicy:
-                    checkedInActivationPolicy,
+                    disabledActivationPolicy,
 
                   reservation:
                     "not-a-reservation",

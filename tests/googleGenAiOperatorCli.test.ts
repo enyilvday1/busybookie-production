@@ -75,6 +75,7 @@ async function mediaRootWithImage(): Promise<{ mediaRoot: string; imagePath: str
 }
 
 const enabled = (): LoadedGoogleGenAiActivationPolicy => ({ ...committedActivationPolicy, admission: { newSubmissionsEnabled: true } });
+const disabled = (): LoadedGoogleGenAiActivationPolicy => ({ ...committedActivationPolicy, admission: { newSubmissionsEnabled: false } });
 
 type Io = { stdout: string[]; stderr: string[] };
 
@@ -289,9 +290,9 @@ describe("operator CLI execute", () => {
     expect((await inspectExecutionLifecycle(mediaRoot, "EP90", "S01")).state).toBe("SUBMITTED");
   });
 
-  it("refuses with the committed default-off policy: exit 3, no credential construction, no reservation, no create", async () => {
+  it("refuses with an explicit disabled policy: exit 3, no credential construction, no reservation, no create", async () => {
     const { mediaRoot, imagePath } = await mediaRootWithImage();
-    const { dependencies, io, spies } = cliDependencies(mediaRoot, imagePath, {}, { activation: committedActivationPolicy });
+    const { dependencies, io, spies } = cliDependencies(mediaRoot, imagePath, {}, { activation: disabled() });
     const fields = expectFailure(io, 3, await runGoogleGenAiOperatorCli(executeArgs(imagePath), dependencies), "NEW_SUBMISSIONS_DISABLED");
     expect(fields).toMatchObject({ SUBCOMMAND: "execute", STAGE: "ADMISSION", STATE_CHANGE: "NONE", RETRYABLE: "NO" });
     expect(spies.createDependencies).not.toHaveBeenCalled();
@@ -363,7 +364,7 @@ describe("operator CLI execute", () => {
 
   it("does not rethrow or change the exit code when stderr itself fails", async () => {
     const { mediaRoot, imagePath } = await mediaRootWithImage();
-    const { dependencies } = cliDependencies(mediaRoot, imagePath, { writeStderr: () => { throw new Error("broken pipe"); } }, { activation: committedActivationPolicy });
+    const { dependencies } = cliDependencies(mediaRoot, imagePath, { writeStderr: () => { throw new Error("broken pipe"); } }, { activation: disabled() });
     await expect(runGoogleGenAiOperatorCli(executeArgs(imagePath), dependencies)).resolves.toBe(3);
   });
 
@@ -384,9 +385,9 @@ describe("operator CLI reconcile", () => {
   it("recovers an existing Google submission with new submissions disabled, via the real secure factory and reconciler (exit 0)", async () => {
     const { mediaRoot, imagePath } = await mediaRootWithImage();
     await googleSubmittedShot(mediaRoot);
-    expect(committedActivationPolicy.admission.newSubmissionsEnabled).toBe(false);
+    expect(disabled().admission.newSubmissionsEnabled).toBe(false);
     const fetchImpl = googleFetch();
-    const { dependencies, io, spies } = cliDependencies(mediaRoot, imagePath, { loadActivationPolicy: vi.fn(() => loadGoogleGenAiActivationPolicy()) }, { activation: committedActivationPolicy, fetchImpl });
+    const { dependencies, io, spies } = cliDependencies(mediaRoot, imagePath, { loadActivationPolicy: vi.fn(() => loadGoogleGenAiActivationPolicy()) }, { activation: disabled(), fetchImpl });
 
     const exitCode = await runGoogleGenAiOperatorCli(RECONCILE_ARGS, dependencies);
     expect(io.stderr).toEqual([]);

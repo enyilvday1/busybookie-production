@@ -397,13 +397,92 @@ describe("status_update usage and terminal done (synthetic, evidence-shaped)", (
     ["17 invocations", { ...usage(), model_invocation_token_counts: Array.from({ length: 17 }, invocation) }],
     ["empty modality", { ...usage(), input_tokens_by_modality: [count("", 1)] }],
     ["numeric modality", { ...usage(), input_tokens_by_modality: [{ modality: 5, tokens: 1 }] }],
-    ["missing modality", { ...usage(), input_tokens_by_modality: [{ tokens: 1 }] }],
-    ["missing tokens", { ...usage(), input_tokens_by_modality: [{ modality: "MODALITY_A" }] }],
   ])("N-U rejects usage with %s", (_name, value) => code(() => parseFull(withUsage(value))));
 
-  it.each(Object.keys(usage()))("N-U7 rejects usage missing required member %s", (member) => {
-    const value = usage(); delete value[member];
-    code(() => parse(withUsage(value)));
+  it.each(Object.keys(usage()))("N-U7 accepts usage missing optional member %s", (member) => {
+    const value = usage();
+    delete value[member];
+
+    expect(parse(withUsage(value))).toEqual({
+      id,
+      status: "completed",
+      outputVideo: delta.delta,
+    });
+  });
+
+  it("accepts an empty usage object because every documented Usage member is optional", () => {
+    expect(parse(withUsage({}))).toEqual({
+      id,
+      status: "completed",
+      outputVideo: delta.delta,
+    });
+  });
+
+  it("accepts optional ModalityTokens members and optional legacy invocation detail arrays", () => {
+    const value = usage();
+
+    value.input_tokens_by_modality = [
+      { modality: "text" },
+      { tokens: 2 },
+      {},
+    ];
+
+    value.model_invocation_token_counts = [
+      {},
+      {
+        prompt_tokens_details: [
+          { modality: "text" },
+          { tokens: 3 },
+          {},
+        ],
+      },
+    ];
+
+    expect(parseFull(withUsage(value))).toEqual({
+      id,
+      status: "completed",
+      outputVideo: delta.delta,
+    });
+  });
+
+  it("accepts the currently documented optional usage additions while keeping their shapes closed", () => {
+    const value = usage();
+
+    value.cached_tokens_by_modality = [
+      count("text", 5),
+    ];
+
+    value.tool_use_tokens_by_modality = [
+      count("text", 6),
+    ];
+
+    value.grounding_tool_count = [
+      {
+        type: "google_search",
+        count: 1,
+      },
+      {
+        type: "google_maps",
+        count: 2,
+      },
+    ];
+
+    expect(parseFull(withUsage(value))).toEqual({
+      id,
+      status: "completed",
+      outputVideo: delta.delta,
+    });
+  });
+
+  it.each([
+    ["cached modality object", { ...usage(), cached_tokens_by_modality: {} }],
+    ["tool-use modality primitive", { ...usage(), tool_use_tokens_by_modality: 4 }],
+    ["grounding object", { ...usage(), grounding_tool_count: {} }],
+    ["unknown grounding type", { ...usage(), grounding_tool_count: [{ type: "unknown", count: 1 }] }],
+    ["grounding count string", { ...usage(), grounding_tool_count: [{ type: "google_search", count: "1" }] }],
+    ["unknown grounding member", { ...usage(), grounding_tool_count: [{ type: "google_search", count: 1, extra: true }] }],
+  ])("rejects malformed present documented optional usage field: %s", (_name, value) => {
+    code(() => parseFull(withUsage(value)));
   });
 
   it("N-U5 rejects a non-finite usage number (1e400 decodes to Infinity)", () => {

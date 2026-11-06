@@ -71,10 +71,6 @@ function record(value: unknown): Record<string, unknown> {
 function keys(value: Record<string, unknown>, allowed: readonly string[]): void {
   if (Object.keys(value).some((key) => !allowed.includes(key))) changed("SSE_UNKNOWN_KEY");
 }
-function exactKeys(value: Record<string, unknown>, required: readonly string[]): void {
-  keys(value, required);
-  if (required.some((key) => !Object.hasOwn(value, key))) changed("SSE_REQUIRED_KEY_MISSING");
-}
 function finiteNumber(value: unknown): void {
   if (typeof value !== "number" || !Number.isFinite(value)) changed("SSE_INVALID_NUMBER");
 }
@@ -88,27 +84,99 @@ const USAGE_NUMBERS = [
   "total_tokens", "total_input_tokens", "total_cached_tokens", "total_output_tokens",
   "total_tool_use_tokens", "total_thought_tokens", "raw_prompt_token", "initial_input_tokens",
 ] as const;
-const USAGE_MODALITY_ARRAYS = ["input_tokens_by_modality", "output_tokens_by_modality"] as const;
+const USAGE_MODALITY_ARRAYS = [
+  "input_tokens_by_modality",
+  "output_tokens_by_modality",
+  "cached_tokens_by_modality",
+  "tool_use_tokens_by_modality",
+] as const;
+const USAGE_GROUNDING_ARRAYS = ["grounding_tool_count"] as const;
 const USAGE_INVOCATION_ARRAYS = ["model_invocation_token_counts", "non_grounding_model_invocation_token_counts"] as const;
 const INVOCATION_MODALITY_ARRAYS = ["prompt_tokens_details", "candidates_tokens_details", "thoughts_tokens_details"] as const;
+
 function modalityCounts(value: unknown): void {
   for (const entry of boundedArray(value)) {
     const count = record(entry);
-    exactKeys(count, ["modality", "tokens"]);
-    if (typeof count.modality !== "string" || count.modality.length === 0) changed("SSE_USAGE_SHAPE_CHANGED");
-    finiteNumber(count.tokens);
+    keys(count, ["modality", "tokens"]);
+
+    if (
+      Object.hasOwn(count, "modality") &&
+      (typeof count.modality !== "string" ||
+        count.modality.length === 0)
+    ) {
+      changed("SSE_USAGE_SHAPE_CHANGED");
+    }
+
+    if (Object.hasOwn(count, "tokens")) {
+      finiteNumber(count.tokens);
+    }
   }
 }
+
+function groundingToolCounts(value: unknown): void {
+  for (const entry of boundedArray(value)) {
+    const count = record(entry);
+    keys(count, ["type", "count"]);
+
+    if (
+      Object.hasOwn(count, "type") &&
+      count.type !== "google_search" &&
+      count.type !== "google_maps"
+    ) {
+      changed("SSE_USAGE_SHAPE_CHANGED");
+    }
+
+    if (Object.hasOwn(count, "count")) {
+      finiteNumber(count.count);
+    }
+  }
+}
+
 function validateStatusUpdateUsage(value: unknown): void {
   const usage = record(value);
-  exactKeys(usage, [...USAGE_NUMBERS, ...USAGE_MODALITY_ARRAYS, ...USAGE_INVOCATION_ARRAYS]);
-  for (const key of USAGE_NUMBERS) finiteNumber(usage[key]);
-  for (const key of USAGE_MODALITY_ARRAYS) modalityCounts(usage[key]);
+
+  keys(
+    usage,
+    [
+      ...USAGE_NUMBERS,
+      ...USAGE_MODALITY_ARRAYS,
+      ...USAGE_GROUNDING_ARRAYS,
+      ...USAGE_INVOCATION_ARRAYS,
+    ],
+  );
+
+  for (const key of USAGE_NUMBERS) {
+    if (Object.hasOwn(usage, key)) {
+      finiteNumber(usage[key]);
+    }
+  }
+
+  for (const key of USAGE_MODALITY_ARRAYS) {
+    if (Object.hasOwn(usage, key)) {
+      modalityCounts(usage[key]);
+    }
+  }
+
+  for (const key of USAGE_GROUNDING_ARRAYS) {
+    if (Object.hasOwn(usage, key)) {
+      groundingToolCounts(usage[key]);
+    }
+  }
+
   for (const key of USAGE_INVOCATION_ARRAYS) {
+    if (!Object.hasOwn(usage, key)) {
+      continue;
+    }
+
     for (const entry of boundedArray(usage[key])) {
       const invocation = record(entry);
-      exactKeys(invocation, INVOCATION_MODALITY_ARRAYS);
-      for (const nested of INVOCATION_MODALITY_ARRAYS) modalityCounts(invocation[nested]);
+      keys(invocation, INVOCATION_MODALITY_ARRAYS);
+
+      for (const nested of INVOCATION_MODALITY_ARRAYS) {
+        if (Object.hasOwn(invocation, nested)) {
+          modalityCounts(invocation[nested]);
+        }
+      }
     }
   }
 }

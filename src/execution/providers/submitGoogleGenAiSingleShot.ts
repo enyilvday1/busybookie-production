@@ -462,6 +462,33 @@ export async function submitGoogleGenAiSingleShotFromReservationIdentity(
 ): Promise<
   GoogleGenAiSingleShotSubmissionResult
 > {
+  const reservationIdentityKeys =
+    Object.keys(
+      input.reservationIdentity,
+    ).sort();
+
+  const expectedReservationIdentityKeys =
+    [
+      "episodeId",
+      "provider",
+      "reservationId",
+      "shotId",
+    ] as const;
+
+  if (
+    reservationIdentityKeys.length !==
+      expectedReservationIdentityKeys.length ||
+    reservationIdentityKeys.some(
+      (key, index) =>
+        key !==
+        expectedReservationIdentityKeys[index],
+    )
+  ) {
+    throw new Error(
+      "Google GenAI reservation identity must contain exactly reservationId, episodeId, shotId and provider.",
+    );
+  }
+
   return submitGoogleGenAiSingleShotCore(
     input,
     () =>

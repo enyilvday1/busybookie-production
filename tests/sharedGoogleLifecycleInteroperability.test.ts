@@ -357,7 +357,12 @@ describe("B5C-R1 shared Google lifecycle inspection", () => {
     await googleCompleted(root);
     const shared = await inspectExecutionLifecycle(root, "EP92", "S01");
     expect(shared).toMatchObject({ reservation: { provider: "GOOGLE_GENAI" }, submission: { provider: "GOOGLE_GENAI" }, completion: { provider: "GOOGLE_GENAI" } });
-    expect(process.env.GEMINI_API_KEY ?? "").toBe("");
+    expect(
+      cliDependencies(root)
+        .loadEnvironment(),
+    ).toEqual({
+      BUSYBOOKIE_MEDIA_ROOT: root,
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(createGoogleGenAiSingleShotProductionInteractionCreator).not.toHaveBeenCalled();
   });

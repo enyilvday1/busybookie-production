@@ -985,7 +985,7 @@ describe("2H-B legacy compatibility and the submitter seam (S-V)", () => {
         ...shared, reservationIdentity: reservationIdentity as unknown as typeof identity, onSubmissionAccepted,
       }, { createInteraction }), JSON.stringify(reservationIdentity)).rejects.toThrow();
     }
-    await expect(submitGoogleGenAiSingleShotFromReservationIdentity({ ...shared, activationPolicy: committedActivationPolicy, reservationIdentity: identity, onSubmissionAccepted }, { createInteraction }))
+    await expect(submitGoogleGenAiSingleShotFromReservationIdentity({ ...shared, activationPolicy: disabledPolicies().activationPolicy, reservationIdentity: identity, onSubmissionAccepted }, { createInteraction }))
       .rejects.toBeInstanceOf(GoogleGenAiNewSubmissionsDisabledError);
     expect(createInteraction).not.toHaveBeenCalled();
     expect(onSubmissionAccepted).not.toHaveBeenCalled();

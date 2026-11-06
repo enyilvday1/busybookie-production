@@ -250,6 +250,9 @@ describe("D1 source boundary, package and portability", () => {
       "./operatorConsoleAssets.js",
       "./operatorRequestSecurity.js",
     ],
+    "src/operatorServer/operatorServerProcess.ts": [
+      "./cli/runOperatorServerCli.js",
+    ],
     "src/operatorServer/cli/runOperatorServerCli.ts": [
       "../createOperatorServer.js",
       "../operatorConsoleAssets.js",
@@ -298,6 +301,23 @@ describe("D1 source boundary, package and portability", () => {
     }
   });
 
+  it("compiled production bootstrap stays thin and package start uses plain Node", async () => {
+    const source = await read("src/operatorServer/operatorServerProcess.ts");
+
+    expect(source.match(/runOperatorServerCli\(\)/g)).toHaveLength(1);
+    expect(source).toContain("process.exitCode = 1;");
+    expect(source).not.toMatch(/process\.exit\s*\(|console\.|JSON\.stringify|\.stack\b/);
+
+    const pkg = JSON.parse(await read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(pkg.scripts.start).toBe("node dist/operatorServer/operatorServerProcess.js");
+    expect(pkg.scripts.build).toBe(
+      "npm run clean && npm --prefix apps/operator-console run build && tsc -p tsconfig.build.json",
+    );
+    expect(pkg.scripts["operator:serve"]).toBe("tsx scripts/operator-server.ts");
+  });
   it("package.json adds exactly operator:serve after dialogue:place with unchanged dependencies", async () => {
     const pkg = JSON.parse(await read("package.json")) as {
       scripts: Record<string, string>;

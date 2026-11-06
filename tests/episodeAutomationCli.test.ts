@@ -540,6 +540,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
     expect(Object.keys(pkg.scripts)).toEqual([
       "test",
       "build",
+      "start",
       "typecheck",
       "test:watch",
       "validate:characters",

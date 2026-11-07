@@ -567,7 +567,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
       "@google/genai": "^2.24.0",
       "@runwayml/sdk": "^4.20.0",
       dotenv: "^18.0.2",
-      zod: "^4.6.5",
+      zod: "^4.6.6",
     });
     expect(pkg.devDependencies).toEqual({
       "@types/node": "^26.6.2",

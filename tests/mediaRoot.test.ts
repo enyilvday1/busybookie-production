@@ -15,6 +15,7 @@ import type {
 import {
   REQUIRED_MEDIA_DIRECTORIES,
   resolveAndValidateMediaRootPath,
+  type MediaRootPathValidationDependencies,
 } from "../src/validation/validateMediaRoot.js";
 
 import {
@@ -64,21 +65,164 @@ describe("Busybookie Media Root", () => {
     const rules =
       await loadProductionRules();
 
+    const platform =
+      process.platform;
+
+    const repositoryRoot =
+      process.cwd();
+
+    const mediaRoot =
+      resolve(
+        repositoryRoot,
+        "media",
+      );
+
     const env: Environment = {
       BUSYBOOKIE_MEDIA_ROOT:
-        resolve(
-          process.cwd(),
-          "media",
-        ),
+        mediaRoot,
+    };
+
+    const dependencies:
+      MediaRootPathValidationDependencies = {
+      platform,
+      cwd: () =>
+        repositoryRoot,
+      statDevice: () =>
+        64769,
     };
 
     expect(() =>
       resolveAndValidateMediaRootPath(
         env,
         rules,
+        dependencies,
       ),
     ).toThrow(
       /external\/non-system drive/,
     );
   });
+  it("accepts a separate POSIX filesystem device when external storage is required", async () => {
+    const rules =
+      await loadProductionRules();
+
+    const env: Environment = {
+      BUSYBOOKIE_MEDIA_ROOT:
+        "/srv/busybookie-media/data",
+    };
+
+    const dependencies:
+      MediaRootPathValidationDependencies = {
+      platform: "linux",
+      cwd: () =>
+        "/opt/busybookie/releases/current",
+      statDevice: path =>
+        path.startsWith("/srv/")
+          ? 2048
+          : 64769,
+    };
+
+    expect(
+      resolveAndValidateMediaRootPath(
+        env,
+        rules,
+        dependencies,
+      ),
+    ).toBe(
+      "/srv/busybookie-media/data",
+    );
+  });
+
+  it("rejects the same POSIX filesystem device when external storage is required", async () => {
+    const rules =
+      await loadProductionRules();
+
+    const env: Environment = {
+      BUSYBOOKIE_MEDIA_ROOT:
+        "/srv/busybookie-media/data",
+    };
+
+    const dependencies:
+      MediaRootPathValidationDependencies = {
+      platform: "linux",
+      cwd: () =>
+        "/opt/busybookie/releases/current",
+      statDevice: () =>
+        64769,
+    };
+
+    expect(() =>
+      resolveAndValidateMediaRootPath(
+        env,
+        rules,
+        dependencies,
+      ),
+    ).toThrow(
+      /external\/non-system drive/,
+    );
+  });
+
+  it("fails closed when POSIX filesystem identity cannot be verified", async () => {
+    const rules =
+      await loadProductionRules();
+
+    const env: Environment = {
+      BUSYBOOKIE_MEDIA_ROOT:
+        "/srv/busybookie-media/data",
+    };
+
+    const dependencies:
+      MediaRootPathValidationDependencies = {
+      platform: "linux",
+      cwd: () =>
+        "/opt/busybookie/releases/current",
+      statDevice: () => {
+        throw new Error(
+          "synthetic stat failure",
+        );
+      },
+    };
+
+    expect(() =>
+      resolveAndValidateMediaRootPath(
+        env,
+        rules,
+        dependencies,
+      ),
+    ).toThrow(
+      /filesystem identity could not be verified/,
+    );
+  });
+
+  it("preserves Windows drive-letter separation without consulting filesystem devices", async () => {
+    const rules =
+      await loadProductionRules();
+
+    const env: Environment = {
+      BUSYBOOKIE_MEDIA_ROOT:
+        "D:\\Busybookie\\Production",
+    };
+
+    const dependencies:
+      MediaRootPathValidationDependencies = {
+      platform: "win32",
+      cwd: () =>
+        "C:\\Projects\\busybookie-production",
+      statDevice: () => {
+        throw new Error(
+          "Windows drive validation must not inspect filesystem devices.",
+        );
+      },
+    };
+
+    expect(
+      resolveAndValidateMediaRootPath(
+        env,
+        rules,
+        dependencies,
+      ),
+    ).toBe(
+      "D:\\Busybookie\\Production",
+    );
+  });
+
 });

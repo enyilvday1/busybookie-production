@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   constants,
+  statSync,
 } from "node:fs";
 import {
   access,
@@ -9,9 +10,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import {
-  isAbsolute,
-  parse,
+  platform as operatingSystemPlatform,
+} from "node:os";
+
+import {
+  posix,
   resolve,
+  win32,
 } from "node:path";
 
 import type {
@@ -37,38 +42,143 @@ export const REQUIRED_MEDIA_DIRECTORIES = [
   "exports",
 ] as const;
 
+export type MediaRootPathValidationDependencies = Readonly<{
+  platform: NodeJS.Platform;
+  cwd: () => string;
+  statDevice: (path: string) => number;
+}>;
+
+const defaultPathValidationDependencies:
+  MediaRootPathValidationDependencies =
+  Object.freeze({
+    platform: operatingSystemPlatform(),
+    cwd: () => process.cwd(),
+    statDevice: (path: string) =>
+      statSync(path).dev,
+  });
+
+function pathFlavor(
+  platform: NodeJS.Platform,
+) {
+  return platform === "win32"
+    ? win32
+    : posix;
+}
+
+function assertExternalMediaRoot(
+  mediaRoot: string,
+  repositoryRoot: string,
+  dependencies:
+    MediaRootPathValidationDependencies,
+): void {
+  const flavor =
+    pathFlavor(
+      dependencies.platform,
+    );
+
+  if (
+    dependencies.platform === "win32"
+  ) {
+    const mediaRootDrive =
+      flavor.parse(
+        mediaRoot,
+      ).root;
+
+    const repositoryDrive =
+      flavor.parse(
+        repositoryRoot,
+      ).root;
+
+    if (
+      mediaRootDrive.toLowerCase() ===
+      repositoryDrive.toLowerCase()
+    ) {
+      throw new Error(
+        `Media root must be on an external/non-system drive. ` +
+        `Repository drive: ${repositoryDrive}; ` +
+        `media drive: ${mediaRootDrive}`,
+      );
+    }
+
+    return;
+  }
+
+  let repositoryDevice: number;
+  let mediaDevice: number;
+
+  try {
+    repositoryDevice =
+      dependencies.statDevice(
+        repositoryRoot,
+      );
+
+    mediaDevice =
+      dependencies.statDevice(
+        mediaRoot,
+      );
+  } catch (error) {
+    throw new Error(
+      "Media root filesystem identity could not be verified for external-storage enforcement.",
+      {
+        cause: error,
+      },
+    );
+  }
+
+  if (
+    repositoryDevice ===
+    mediaDevice
+  ) {
+    throw new Error(
+      `Media root must be on an external/non-system drive. ` +
+      `Repository device: ${repositoryDevice}; ` +
+      `media device: ${mediaDevice}`,
+    );
+  }
+}
+
 export function resolveAndValidateMediaRootPath(
   env: Environment,
   rules: ProductionRules,
+  dependencies:
+    MediaRootPathValidationDependencies =
+      defaultPathValidationDependencies,
 ): string {
+  const flavor =
+    pathFlavor(
+      dependencies.platform,
+    );
+
   const configuredMediaRoot =
     env.BUSYBOOKIE_MEDIA_ROOT.trim();
 
-  if (!isAbsolute(configuredMediaRoot)) {
+  if (
+    !flavor.isAbsolute(
+      configuredMediaRoot,
+    )
+  ) {
     throw new Error(
       "BUSYBOOKIE_MEDIA_ROOT must be an absolute path.",
     );
   }
 
-  const mediaRoot = resolve(
-    configuredMediaRoot,
-  );
-
-  const mediaRootDrive =
-    parse(mediaRoot).root;
-
-  const repositoryDrive =
-    parse(process.cwd()).root;
+  const mediaRoot =
+    flavor.resolve(
+      configuredMediaRoot,
+    );
 
   if (
-    rules.storage.requireExternalMediaRoot &&
-    mediaRootDrive.toLowerCase() ===
-      repositoryDrive.toLowerCase()
+    rules.storage.requireExternalMediaRoot
   ) {
-    throw new Error(
-      `Media root must be on an external/non-system drive. ` +
-      `Repository drive: ${repositoryDrive}; ` +
-      `media drive: ${mediaRootDrive}`,
+    const repositoryRoot =
+      flavor.resolve(
+        dependencies.cwd(),
+      );
+
+    assertExternalMediaRoot(
+      mediaRoot,
+      repositoryRoot,
+      dependencies,
     );
   }
 

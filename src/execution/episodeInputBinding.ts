@@ -1,4 +1,5 @@
 export { canonicalBindingJson, rawSha256, bindingDigest, freezeBoundCopy, requireSameBinding, assertBindingBundleOrder } from "./boundEpisodeProduction.types.js";
+export { BUSYBOOKIE_RELEASE_IDENTITY_FILE } from "./portableReleaseRuntimeIdentity.js";
 import { constants } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -6,6 +7,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { BoundEpisodeError, rawSha256, requireSameBinding, type FileBinding } from "./boundEpisodeProduction.types.js";
 import type { RuntimeIdentity } from "./boundEpisodeProduction.types.js";
+import { isPortableRuntimeIdentity, readPortableReleaseRuntimeIdentity } from "./portableReleaseRuntimeIdentity.js";
 
 export async function requireLinkSafeContainedPath(root: string, candidate: string, allowMissing = false): Promise<string> {
   const canonicalRoot = resolve(root);
@@ -35,6 +37,7 @@ export async function requireLinkSafeContainedPath(root: string, candidate: stri
   }
   return canonicalPath;
 }
+
 export async function readBoundFile(input: Readonly<{
   root: string; canonicalPath: string; role: string; maxBytes: number; optional?: boolean; expected?: FileBinding;
 }>): Promise<Readonly<{ binding: FileBinding; bytes: Buffer | null }>> {
@@ -75,6 +78,7 @@ export async function readBoundFile(input: Readonly<{
     return Object.freeze({ binding: Object.freeze(binding), bytes });
   } finally { await handle.close(); }
 }
+
 export function parseBoundJson<T>(bytes: Buffer, parse: (value: unknown) => T): T {
   const result = parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
   function freeze(value: unknown): void {
@@ -89,12 +93,19 @@ export function parseBoundJson<T>(bytes: Buffer, parse: (value: unknown) => T): 
 
 export async function readEpisodeRuntimeIdentity(repositoryRoot: string, mediaRoot: string,
   ffprobeExecutable?: string): Promise<RuntimeIdentity> {
-  const git = async (args: readonly string[]) => (await promisify(execFile)("git", [...args],
-    { cwd: repositoryRoot, windowsHide: true, maxBuffer: 4 * 1024 * 1024 })).stdout;
-  const reviewedRevision = (await git(["rev-parse", "HEAD"])).trim();
   const root = resolve(repositoryRoot);
   await requireLinkSafeContainedPath(root, root);
   await requireLinkSafeContainedPath(mediaRoot, mediaRoot, true);
+
+  const portable = await readPortableReleaseRuntimeIdentity(
+    { root, mediaRoot, ...(ffprobeExecutable ? { ffprobeExecutable } : {}) },
+    { readBoundFile, requireLinkSafeContainedPath },
+  );
+  if (portable) return portable;
+
+  const git = async (args: readonly string[]) => (await promisify(execFile)("git", [...args],
+    { cwd: root, windowsHide: true, maxBuffer: 4 * 1024 * 1024 })).stdout;
+  const reviewedRevision = (await git(["rev-parse", "HEAD"])).trim();
   const names = (await git(["ls-files", "-z", "--", "src", "scripts", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json"]))
     .split("\0").filter(Boolean).sort();
   // Include untracked executable inputs as well: a clean commit cannot pin
@@ -112,17 +123,17 @@ export async function readEpisodeRuntimeIdentity(repositoryRoot: string, mediaRo
   }
   return { reviewedRevision, repositoryRoot: root, mediaRoot: resolve(mediaRoot), physicalMediaRoot: resolve(mediaRoot), executableInputs, ffprobe };
 }
+
 export async function verifyEpisodeRuntimeIdentity(expected: RuntimeIdentity, requireClean: boolean): Promise<void> {
   if (expected.repositoryRoot !== resolve(process.cwd()) || !process.env.BUSYBOOKIE_MEDIA_ROOT ||
       expected.mediaRoot !== resolve(process.env.BUSYBOOKIE_MEDIA_ROOT)) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   const current = await readEpisodeRuntimeIdentity(expected.repositoryRoot, expected.mediaRoot, expected.ffprobe?.canonicalPath);
   requireSameBinding(current, expected);
-  if (requireClean) {
-    try {
-      const status = await promisify(execFile)("git", ["status", "--porcelain=v1", "--untracked-files=all", "--",
-        "src", "scripts", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json"],
-        { cwd: expected.repositoryRoot, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-      if (status.stdout.trim()) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
-    } catch (cause) { throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED", { cause }); }
-  }
+  if (!requireClean || isPortableRuntimeIdentity(expected)) return;
+  try {
+    const status = await promisify(execFile)("git", ["status", "--porcelain=v1", "--untracked-files=all", "--",
+      "src", "scripts", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json"],
+      { cwd: expected.repositoryRoot, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+    if (status.stdout.trim()) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
+  } catch (cause) { throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED", { cause }); }
 }

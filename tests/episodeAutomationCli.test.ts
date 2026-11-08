@@ -530,16 +530,18 @@ describe("C7 CLI N thin script", () => {
 describe("C7 CLI O-Q package, index and composition boundaries", () => {
   const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-  it("package.json gains exactly the episode:automate script after execution:status", async () => {
+  it("package.json keeps exactly the reviewed release and episode automation script surface", async () => {
     const pkg = JSON.parse(await read("package.json")) as {
       scripts: Record<string, string>;
       dependencies: Record<string, string>;
       devDependencies: Record<string, string>;
     };
+    expect(pkg.scripts["release:identity"]).toBe("tsx scripts/create-portable-release-identity.ts");
     expect(pkg.scripts["episode:automate"]).toBe("tsx scripts/episode-automation.ts");
     expect(Object.keys(pkg.scripts)).toEqual([
       "test",
       "build",
+      "release:identity",
       "start",
       "production:execution:reconcile",
       "production:execution:status",

@@ -22,7 +22,8 @@ or public API.
 ## Application root
 
 The runtime application root must contain package.json, package-lock.json,
-root node_modules, dist, apps/operator-console/dist, config, and episodes.
+busybookie-release-identity.json, root node_modules, dist,
+apps/operator-console/dist, config, and episodes.
 
 BusyBookie resolves runtime inputs relative to process.cwd(), so production
 commands must run from the application root.
@@ -45,6 +46,40 @@ For a clean runtime production-dependency install:
     npm ci --omit=dev
 
 tsx remains development-only and is not required on the production host.
+
+## Portable release identity
+
+Portable production releases must contain
+busybookie-release-identity.json at the application root.
+
+Generate the identity only from the clean approved Git checkout after
+npm run build has completed and after the portable release root contains
+the exact compiled dist, package.json, and package-lock.json that will be
+archived.
+
+From the approved source checkout:
+
+    npm run release:identity -- --release-root /absolute/path/to/release-root
+
+The release-identity command is a packaging-time authority. It must not be
+run on the deployed production host, and tsx must not be installed on the
+production host merely to support this command.
+
+The command fails closed when the reviewed source checkout is dirty, when
+untracked release-authority source files exist, when the portable release
+contains Git metadata, when executable inventory differs, when release
+runtime bytes differ from the reviewed build, or when an identity manifest
+already exists.
+
+The identity binds the approved 40-character Git revision plus every
+dist/**/*.js runtime file, package.json, and package-lock.json. TypeScript
+declarations and source maps are not runtime executable inputs. config,
+episodes, references, durable execution evidence, media, and FFprobe remain
+governed by their existing independent runtime/input-binding contracts.
+
+Generate the identity before locking the release archive and its SHA-256.
+Do not copy .git into a portable release and do not fabricate Git metadata
+on the deployment host.
 
 ## Environment contract
 
@@ -181,7 +216,8 @@ operator API.
 
 Before any paid generation is attempted on the deployed host:
 
-- verify the approved Git revision;
+- verify busybookie-release-identity.json records the approved Git revision;
+- verify the portable application root contains no .git metadata;
 - verify Node.js 24;
 - verify FFmpeg and FFprobe are executable;
 - verify the persistent media volume is mounted;
@@ -192,6 +228,8 @@ Before any paid generation is attempted on the deployed host:
 - install root production dependencies deterministically;
 - run the production dependency audit;
 - verify all compiled production entrypoints exist;
+- verify busybookie-release-identity.json is present and readable;
+- verify portable runtime identity succeeds without requiring a Git worktree;
 - verify apps/operator-console/dist exists;
 - verify config is present;
 - verify required episode manifests are present;

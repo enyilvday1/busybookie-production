@@ -1,0 +1,184 @@
+/*
+ * Semantic design tokens for the public commercial website.
+ *
+ * PROVISIONAL PRESENTATION VALUES. The commercial product name and brand are
+ * not decided. The palette below (deep violet, controlled purple, soft
+ * lavender, warm off-white, deep ink and restrained peach highlights) is a
+ * provisional creative-SaaS direction for this implementation only. None of
+ * these values is a final brand colour. Components reference only the
+ * semantic role names, so a future brand can replace the values here without
+ * touching component CSS.
+ *
+ * Independent of the operator console: nothing here is shared with or copied
+ * from it.
+ *
+ * Responsive breakpoints (custom properties cannot be used inside media
+ * queries, so they are documented here and used literally in site.css):
+ *   large phone    >= 30rem / 40rem
+ *   tablet         >= 48rem  (768px)   full header navigation appears
+ *   desktop        >= 64rem  (1024px)  multi-column layouts
+ *   wide hero      >= 72rem  (1152px)  two-column hero compositions
+ *   large desktop  >= 80rem  (1280px)  horizontal workflow
+ */
+:root {
+  /* Brand roles — provisional values. */
+  --color-brand-primary: #5b2bd9; /* vivid but controlled purple */
+  --color-brand-primary-strong: #3f1a9e; /* deep violet */
+  --color-brand-primary-soft: #efe9ff; /* soft lavender */
+  --color-on-brand-primary: #ffffff;
+  /* Secondary: a deep orange kept text-safe; peach is the decorative tint. */
+  --color-brand-secondary: #b4460f;
+  --color-brand-secondary-soft: #fff0e6;
+  --color-highlight-peach: #ffb38a;
+
+  /* Surfaces. */
+  --color-surface: #fcfbf8; /* warm off-white */
+  --color-surface-elevated: #ffffff;
+  --color-surface-muted: #f5f1fc; /* light lavender section surface */
+  --color-surface-inverse: #160f33;
+
+  /* Text. */
+  --color-text-primary: #141029; /* deep ink */
+  --color-text-secondary: #433f58;
+  --color-text-muted: #5c5870;
+  --color-text-on-inverse: #ffffff;
+  --color-text-on-inverse-muted: #e3dcff;
+
+  /* Borders. */
+  --color-border-subtle: #e7e2f1;
+  --color-border-strong: #cbc3dd;
+
+  /* Focus. */
+  --color-focus: #5b2bd9;
+  --color-focus-on-inverse: #ffd4bd;
+
+  /* Status (always paired with text). */
+  --color-success: #17693f;
+  --color-success-soft: #e2f3e9;
+  --color-warning: #8a5300;
+  --color-warning-soft: #fdf0d8;
+  --color-danger: #b3261e;
+  --color-danger-soft: #fbe7e5;
+
+  /* Closing-banner gradient stops (white text is tested against the lightest). */
+  --color-banner-start: #22105f;
+  --color-banner-end: #6a3be6;
+
+  /* Decorative accent families for icons and illustrations. "ink" is the
+     icon/stroke colour (≥3:1 on its soft tint); "soft" is the tint. */
+  --color-accent-violet: #5b2bd9;
+  --color-accent-violet-soft: #efe9ff;
+  --color-accent-indigo: #2f4fc7;
+  --color-accent-indigo-soft: #e7ecff;
+  --color-accent-teal: #0f766e;
+  --color-accent-teal-soft: #ddf3ef;
+  --color-accent-peach: #c0501b;
+  --color-accent-peach-soft: #ffeee3;
+  --color-accent-rose: #b5306c;
+  --color-accent-rose-soft: #fde9f2;
+  --color-accent-amber: #976010;
+  --color-accent-amber-soft: #fdf2dc;
+
+  /* Restrained decorative gradients (never carry information). */
+  --gradient-hero:
+    radial-gradient(48rem 32rem at 88% 8%, rgb(124 77 255 / 0.16) 0%, transparent 62%),
+    radial-gradient(30rem 22rem at 70% 70%, rgb(255 179 138 / 0.18) 0%, transparent 65%),
+    radial-gradient(36rem 26rem at 0% 0%, rgb(239 233 255 / 0.9) 0%, transparent 70%);
+  /* Home hero studio light: warm daylight from the upper right, a lavender
+     bloom behind the product preview and a faint teal floor accent. */
+  --gradient-hero-studio:
+    radial-gradient(60rem 40rem at 94% -12%, rgb(255 214 179 / 0.5) 0%, transparent 60%),
+    radial-gradient(46rem 34rem at 76% 46%, rgb(124 77 255 / 0.13) 0%, transparent 66%),
+    radial-gradient(28rem 18rem at 100% 96%, rgb(15 118 110 / 0.07) 0%, transparent 70%),
+    radial-gradient(36rem 26rem at 0% 0%, rgb(239 233 255 / 0.9) 0%, transparent 70%),
+    linear-gradient(180deg, #fcfbf8 0%, #fbf6f0 100%);
+  --gradient-banner: linear-gradient(130deg, var(--color-banner-start) 0%, var(--color-brand-primary-strong) 45%, var(--color-banner-end) 100%);
+
+  /* Typography: local/system fonts only, no remote font requirement. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Display", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --text-2xs: 0.75rem;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.25rem;
+  --text-xl: clamp(1.25rem, 1.15rem + 0.4vw, 1.5rem);
+  --text-2xl: clamp(1.625rem, 1.3rem + 1.2vw, 2.25rem);
+  --text-section: clamp(2rem, 1.45rem + 1.9vw, 3.125rem);
+  --text-page: clamp(2.25rem, 1.5rem + 2.6vw, 3.625rem);
+  --text-display: clamp(2.5rem, 1.45rem + 3.4vw, 4.25rem);
+
+  --leading-tight: 1.06;
+  --leading-heading: 1.15;
+  --leading-snug: 1.3;
+  --leading-normal: 1.6;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-heavy: 800;
+
+  --tracking-display: -0.035em;
+  --tracking-tight: -0.022em;
+  --tracking-wide: 0.08em;
+
+  /* Spacing scale (4px base). */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+
+  --page-gutter: clamp(1rem, 0.4rem + 2.6vw, 3rem);
+  /* Per-side section padding: ~48px phone, ~58px tablet, ~72px at 1280px,
+     80px max. Consecutive sections add both sides, so keep this moderate. */
+  --section-space: clamp(3rem, 2.4rem + 2.6vw, 5rem);
+  --section-space-tight: calc(var(--section-space) * 0.7);
+  --section-heading-gap: clamp(2rem, 1.5rem + 1.5vw, 3.25rem);
+
+  /* Content widths. */
+  --width-content: 80rem;
+  --width-narrow: 52rem;
+  --width-text: 44rem;
+
+  /* Radii. */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.125rem;
+  --radius-xl: 1.625rem;
+  --radius-2xl: 2.25rem;
+  --radius-pill: 999px;
+
+  /* Shadows (violet-tinted, restrained). */
+  --shadow-sm: 0 1px 2px rgb(20 16 41 / 0.06);
+  --shadow-md: 0 1px 3px rgb(20 16 41 / 0.05), 0 10px 30px rgb(63 26 158 / 0.07);
+  --shadow-lg: 0 2px 6px rgb(20 16 41 / 0.05), 0 24px 60px rgb(63 26 158 / 0.13);
+  --shadow-xl: 0 4px 10px rgb(20 16 41 / 0.06), 0 40px 90px rgb(63 26 158 / 0.2);
+
+  /* Motion. */
+  --motion-fast: 140ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Interaction. */
+  --target-min: 2.75rem;
+  --focus-ring-width: 3px;
+  --focus-ring-offset: 2px;
+  --header-height: 4.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+}

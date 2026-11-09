@@ -1,0 +1,22 @@
+{
+  "name": "commercial-api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Commercial control-plane API (foundation scaffold). Independently built, tested and deployed.",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build && node dist/main.js",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  }
+}

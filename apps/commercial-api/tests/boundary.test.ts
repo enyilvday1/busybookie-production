@@ -62,6 +62,19 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   // R44B5E: the fictitious-provider registry is a test fixture; production
   // source enables no provider and may not reference the test ones.
   { label: "test provider registry", pattern: /testProviderRegistry|createTestProviderRegistry|TEST_PROVIDER/ },
+  // R44B6F: worker authentication is a vendor-neutral seam. The test adapter
+  // never reaches production; no machine-identity vendor, mTLS peer
+  // inspection, proxy-asserted identity header, worker credential variable or
+  // hard-coded bearer secret exists. (rejectUnauthorized stays allowed: it is
+  // the PostgreSQL TLS setting.)
+  { label: "test worker authentication", pattern: /testWorkerAuthentication|createTestWorkerAuthenticationAdapter/ },
+  { label: "worker identity header", pattern: /x-worker|worker-id|x-forwarded-client-cert|x-client-cert|x-ssl-client/i },
+  {
+    label: "machine identity vendor or mTLS",
+    pattern: /spiffe|spire-agent|@aws-sdk|@google-cloud|@azure\/identity|metadata\.google\.internal|169\.254\.169\.254|getPeerCertificate|requestCert/i,
+  },
+  { label: "worker credential variable", pattern: /COMMERCIAL_API_WORKER|WORKER_(TOKEN|SECRET|SHARED|BEARER|API_KEY)/ },
+  { label: "hard-coded bearer credential", pattern: /["'`]Bearer [A-Za-z0-9\-._~+/]{8,}/ },
 ];
 
 const BUILTINS = new Set(builtinModules);
@@ -138,6 +151,17 @@ describe("boundary scanner", () => {
     ["const key = generateTestKey('k');", "test credential crypto"],
     ["const decipher = createDecipheriv('aes-256-gcm', key, nonce);", "credential decryption primitive"],
     ["decipher.setAuthTag(tag);", "credential decryption primitive"],
+    ['import { createTestWorkerAuthenticationAdapter } from "../tests/support/testWorkerAuthentication.js";', "test worker authentication"],
+    ['const workerId = request.headers["x-worker-id"];', "worker identity header"],
+    ['const cert = request.headers["X-Forwarded-Client-Cert"];', "worker identity header"],
+    ["const peer = socket.getPeerCertificate(true);", "machine identity vendor or mTLS"],
+    ["https.createServer({ requestCert: true }, handler);", "machine identity vendor or mTLS"],
+    ['import { SPIFFEID } from "spiffe";', "machine identity vendor or mTLS"],
+    ['import { STSClient } from "@aws-sdk/client-sts";', "machine identity vendor or mTLS"],
+    ['fetch("http://169.254.169.254/latest/meta-data/");', "machine identity vendor or mTLS"],
+    ["const secret = environment.COMMERCIAL_API_WORKER_TOKEN;", "worker credential variable"],
+    ["const token = env.WORKER_SHARED_SECRET;", "worker credential variable"],
+    ['const header = "Bearer worker-static-secret-123";', "hard-coded bearer credential"],
     ['import { createTestProviderRegistry } from "../tests/support/testProviderRegistry.js";', "test provider registry"],
     ["const registry = createTestProviderRegistry();", "test provider registry"],
     ['registry.resolve("TEST_PROVIDER");', "test provider registry"],
@@ -281,5 +305,37 @@ describe("worker bridge boundary (persistence only)", () => {
     expect('if (pathname === "/worker/leases")').toMatch(WORKER_ROUTE);
     expect("const opener: CredentialOpener = createKmsCredentialOpener(key);").toMatch(OPENER_IMPLEMENTATION);
     expect("export type CredentialOpener = Readonly<{").not.toMatch(OPENER_IMPLEMENTATION);
+  });
+});
+
+// R44B6F: worker authentication is a contract and service only. Nothing in
+// production composition imports it, so no default process can reach it.
+describe("worker authentication boundary (seam only)", () => {
+  const sources = sourceFiles.map((path) => ({ path: label(path), text: read(path) }));
+
+  it("is not composed into any production module", () => {
+    const importers = sources
+      .filter(({ path, text }) => !path.startsWith("src/workerAuthentication/") && /workerAuthentication\//.test(text))
+      .map(({ path }) => path);
+    expect(importers).toEqual([]);
+    expect(read(join(SRC_ROOT, "runCommercialApiProcess.ts"))).not.toMatch(/worker/i);
+    expect(read(join(SRC_ROOT, "main.ts"))).not.toMatch(/worker/i);
+  });
+
+  it("reads no worker identity from a query string, cookie or custom header", () => {
+    const workerAuth = sources.filter(({ path }) => path.startsWith("src/workerAuthentication/"));
+    expect(workerAuth.map(({ path }) => path).sort()).toEqual([
+      "src/workerAuthentication/workerAuthentication.ts",
+      "src/workerAuthentication/workerAuthenticationAdapter.ts",
+      "src/workerAuthentication/workerAuthenticationError.ts",
+    ]);
+    // Code only: comments may name what is deliberately absent.
+    const code = (text: string) => text.replace(/^\s*\/\/.*$/gm, "");
+    for (const { text } of workerAuth) {
+      expect(code(text)).not.toMatch(/searchParams|request\.url|cookie|request\.headers\[|process\.env|remoteAddress|localhost|127\.0\.0\.1/i);
+    }
+    expect(code("// no cookie here\nconst x = 1;")).not.toMatch(/cookie/i);
+    // Guard the guard.
+    expect('const id = url.searchParams.get("worker");').toMatch(/searchParams|request\.url|cookie|request\.headers\[|process\.env|remoteAddress|localhost|127\.0\.0\.1/i);
   });
 });

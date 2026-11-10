@@ -50,6 +50,12 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   },
   { label: "client identity header", pattern: /x-user-id|x-account-id|x-email|x-role|x-plan|x-tier|x-entitlement/i },
   { label: "test identity provider", pattern: /testIdentityProvider|createTestIdentityProvider|tests\/support/ },
+  // R44B5C: credential crypto. Production source holds contracts only; the
+  // decrypt-capable implementation lives in the test tree, and no production
+  // source may contain decryption primitives until a reviewed execution-side
+  // opener is added.
+  { label: "test credential crypto", pattern: /testCredentialCrypto|createTestCredential|generateTestKey/ },
+  { label: "credential decryption primitive", pattern: /createDecipheriv|setAuthTag/ },
 ];
 
 const BUILTINS = new Set(builtinModules);
@@ -115,6 +121,10 @@ describe("boundary scanner", () => {
     ['const userId = request.headers["x-user-id"];', "client identity header"],
     ['const plan = request.headers["X-Plan"];', "client identity header"],
     ['import { createTestIdentityProvider } from "../tests/support/testIdentityProvider.js";', "test identity provider"],
+    ['import { createTestCredentialOpener } from "../tests/support/testCredentialCrypto.js";', "test credential crypto"],
+    ["const key = generateTestKey('k');", "test credential crypto"],
+    ["const decipher = createDecipheriv('aes-256-gcm', key, nonce);", "credential decryption primitive"],
+    ["decipher.setAuthTag(tag);", "credential decryption primitive"],
     ['import "dotenv/config";', ".env loading"],
     ["executeVeoSingleShot()", "Veo provider"],
   ])("detects a planted violation: %s", (text, expectedLabel) => {

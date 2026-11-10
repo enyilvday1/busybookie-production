@@ -975,6 +975,275 @@ describe("immutable attempt provenance", () => {
   });
 });
 
+// Migration 0005: the database derives immutable submission-authority
+// provenance from the lease that crosses LEASED -> SUBMITTING.
+describe("submitting worker provenance (migration 0005)", () => {
+  const SUBMITTING_SET = INTO.SUBMITTING;
+  const provenance = async (client: pg.Client, id: string) =>
+    (
+      await client.query<{ submitting_worker_principal_id: string | null; lease_worker_principal_id: string | null; submitting_at: Date | null }>(
+        "SELECT submitting_worker_principal_id, lease_worker_principal_id, submitting_at FROM execution_attempts WHERE id = $1",
+        [id],
+      )
+    ).rows[0]!;
+  const leasedAttempt = async (client: pg.Client, subject: string) => {
+    const f = await fixture(client, subject);
+    const id = await insertAttempt(client, attemptFor(f));
+    await move(client, id, "LEASED", workerA);
+    return id;
+  };
+
+  it("stamps the lease principal on the first LEASED -> SUBMITTING without the statement naming the column", async () => {
+    expect(SUBMITTING_SET).not.toContain("submitting_worker_principal_id");
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const id = await leasedAttempt(clients.runtime, "wb-prov-stamp");
+      expect((await provenance(clients.runtime, id)).submitting_worker_principal_id).toBeNull();
+      await move(clients.runtime, id, "SUBMITTING");
+      const row = await provenance(clients.runtime, id);
+      expect(row.submitting_worker_principal_id).toBe(workerA);
+      expect(row.lease_worker_principal_id).toBe(workerA);
+      expect(row.submitting_at).not.toBeNull();
+    });
+  });
+
+  // R44B6K5/R44B6L1: lease validity at the provider-call authority barrier is
+  // judged by wall-clock time (clock_timestamp()), never transaction-stable now().
+  describe("wall-clock lease expiry at the SUBMITTING barrier", () => {
+    // The SQLSTATE and constraint name of a refused LEASED -> SUBMITTING, read
+    // inside a savepoint so the surrounding transaction survives.
+    const expiryErrorIdentity = async (client: pg.Client, id: string) => {
+      await client.query("SAVEPOINT expiry_identity");
+      try {
+        await client.query(`UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id]);
+        return null;
+      } catch (error) {
+        return { code: (error as { code?: string }).code, constraint: (error as { constraint?: string }).constraint };
+      } finally {
+        await client.query("ROLLBACK TO SAVEPOINT expiry_identity");
+      }
+    };
+    const clocks = async (client: pg.Client, id: string) =>
+      (
+        await client.query<{ tx_before_expiry: boolean; wall_before_expiry: boolean }>(
+          "SELECT now() < lease_expires_at AS tx_before_expiry, clock_timestamp() < lease_expires_at AS wall_before_expiry FROM execution_attempts WHERE id = $1",
+          [id],
+        )
+      ).rows[0]!;
+
+    it("A: admits a lease that is clearly unexpired by wall-clock time", async () => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await leasedAttempt(clients.runtime, "wb-wall-valid");
+        expect(await clocks(clients.runtime, id)).toEqual({ tx_before_expiry: true, wall_before_expiry: true });
+        await move(clients.runtime, id, "SUBMITTING");
+        expect(await provenance(clients.runtime, id)).toMatchObject({ submitting_worker_principal_id: workerA });
+      });
+    });
+
+    it("B: refuses a lease that is clearly expired by wall-clock time", async () => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await leasedAttempt(clients.runtime, "wb-wall-expired");
+        await clients.runtime.query(
+          "UPDATE execution_attempts SET leased_at = now() - interval '10 minutes', lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [id],
+        );
+        await expectTriggerError(clients.runtime, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], "under an expired lease");
+        expect(await expiryErrorIdentity(clients.runtime, id)).toEqual({ code: CHECK, constraint: "execution_attempts_submitting_lease_unexpired" });
+        expect(await stateOf(clients.runtime, id)).toBe("LEASED");
+      });
+    });
+
+    it("C: refuses a lease at or just past its wall-clock expiry", async () => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await leasedAttempt(clients.runtime, "wb-wall-boundary");
+        // Expiry is the wall-clock instant of this statement; the transition runs at a later instant.
+        await clients.runtime.query(
+          "UPDATE execution_attempts SET leased_at = now() - interval '1 minute', lease_expires_at = clock_timestamp() WHERE id = $1",
+          [id],
+        );
+        expect((await clocks(clients.runtime, id)).wall_before_expiry).toBe(false);
+        await expectTriggerError(clients.runtime, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], "under an expired lease");
+        // Transaction-start expiry is expired too.
+        await clients.runtime.query("UPDATE execution_attempts SET lease_expires_at = now() WHERE id = $1", [id]);
+        await expectTriggerError(clients.runtime, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], "under an expired lease");
+        expect(await stateOf(clients.runtime, id)).toBe("LEASED");
+      });
+    });
+
+    it("D: refuses a long-running transaction that began under a valid lease once the lease has expired in real time", async () => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await leasedAttempt(clients.runtime, "wb-wall-drift");
+        // A short lease that is still valid when this transaction is already running.
+        await clients.runtime.query("UPDATE execution_attempts SET lease_expires_at = clock_timestamp() + interval '750 milliseconds' WHERE id = $1", [id]);
+        expect(await clocks(clients.runtime, id)).toEqual({ tx_before_expiry: true, wall_before_expiry: true });
+
+        // Let real time pass the expiry inside the same transaction (bounded: under one second).
+        await clients.runtime.query(
+          "SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM (lease_expires_at - clock_timestamp()))) + 0.05) FROM execution_attempts WHERE id = $1",
+          [id],
+        );
+
+        // The exact defect: transaction-stable now() still sees a valid lease, wall-clock time does not.
+        expect(await clocks(clients.runtime, id)).toEqual({ tx_before_expiry: true, wall_before_expiry: false });
+        const before = (await clients.runtime.query("SELECT * FROM execution_attempts WHERE id = $1", [id])).rows[0];
+        await expectTriggerError(clients.runtime, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], "under an expired lease");
+        // R44B6L2: the refusal carries a stable, machine-readable identity.
+        expect(await expiryErrorIdentity(clients.runtime, id)).toEqual({ code: CHECK, constraint: "execution_attempts_submitting_lease_unexpired" });
+        expect((await clients.runtime.query("SELECT * FROM execution_attempts WHERE id = $1", [id])).rows[0]).toEqual(before);
+        expect(await provenance(clients.runtime, id)).toMatchObject({ submitting_worker_principal_id: null, submitting_at: null });
+      });
+    });
+  });
+
+  it("refuses to enter SUBMITTING without a lease principal, even if the lease check constraint were absent", async () => {
+    // Defence in depth: execution_attempts_lease_state_ck already forbids a
+    // LEASED row without a principal. The owner drops it inside a rolled-back
+    // transaction to prove the guard refuses on its own.
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await leasedAttempt(clients.migrator, "wb-prov-no-principal");
+      await clients.migrator.query("ALTER TABLE execution_attempts DROP CONSTRAINT execution_attempts_lease_state_ck");
+      await clients.migrator.query(`UPDATE execution_attempts SET ${CLEAR_LEASE} WHERE id = $1`, [id]);
+      await expectTriggerError(clients.migrator, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], "only under a lease");
+    });
+  });
+
+  it("rejects a supplied submitting principal other than the lease principal, and re-derives a matching one", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await leasedAttempt(clients.migrator, "wb-prov-supplied");
+      await expectTriggerError(
+        clients.migrator,
+        `UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_worker_principal_id = $2 WHERE id = $1`,
+        [id, workerB],
+        "submitting worker must be the lease worker",
+      );
+      await clients.migrator.query(`UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_worker_principal_id = $2 WHERE id = $1`, [id, workerA]);
+      expect((await provenance(clients.migrator, id)).submitting_worker_principal_id).toBe(workerA);
+    });
+  });
+
+  it.each([
+    ["the lease principal", "lease_worker_principal_id = $2", true],
+    ["the lease token (with a higher generation)", "lease_token_sha256 = repeat('d', 64), lease_fencing_counter = lease_fencing_counter + 1", false],
+    ["the fencing counter", "lease_fencing_counter = lease_fencing_counter + 1", false],
+    ["the lease start", "leased_at = now() - interval '1 second'", false],
+    ["the lease expiry", "lease_expires_at = now() + interval '10 minutes'", false],
+    ["the heartbeat", "heartbeat_at = now()", false],
+  ] as const)("refuses to change %s while entering SUBMITTING", async (_label, set, needsWorker) => {
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const id = await leasedAttempt(clients.runtime, "wb-prov-lease-change");
+      await expectTriggerError(
+        clients.runtime,
+        `UPDATE execution_attempts SET ${SUBMITTING_SET}, ${set} WHERE id = $1`,
+        needsWorker ? [id, workerB] : [id],
+        "lease cannot change while an execution attempt enters SUBMITTING",
+      );
+      expect(await stateOf(clients.runtime, id)).toBe("LEASED");
+    });
+  });
+
+  it("never changes or clears the provenance once established", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await leasedAttempt(clients.migrator, "wb-prov-immutable");
+      await move(clients.migrator, id, "SUBMITTING");
+      for (const value of [workerB, null]) {
+        await expectTriggerError(
+          clients.migrator,
+          "UPDATE execution_attempts SET submitting_worker_principal_id = $2 WHERE id = $1",
+          [id, value],
+          "submitting worker provenance is immutable",
+        );
+      }
+      // Nor can it be set on an attempt that never crossed the barrier.
+      const other = await leasedAttempt(clients.migrator, "wb-prov-premature");
+      await expectTriggerError(
+        clients.migrator,
+        "UPDATE execution_attempts SET submitting_worker_principal_id = $2 WHERE id = $1",
+        [other, workerA],
+        "submitting worker provenance is immutable",
+      );
+    });
+    // The runtime role cannot even name the column.
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const id = await leasedAttempt(clients.runtime, "wb-prov-runtime");
+      await move(clients.runtime, id, "SUBMITTING");
+      await expectSqlError(clients.runtime, "UPDATE execution_attempts SET submitting_worker_principal_id = NULL WHERE id = $1", [id], { code: DENIED });
+    });
+  });
+
+  it.each(STATES)("keeps provenance exactly when the barrier was crossed, through every path to %s", async (to) => {
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const f = await fixture(clients.runtime, `wb-prov-path-${to}`);
+      const id = await insertAttempt(clients.runtime, attemptFor(f));
+      await walk(clients.runtime, id, PATH_TO[to]);
+      const row = await provenance(clients.runtime, id);
+      const crossed = PATH_TO[to].includes("SUBMITTING");
+      expect(row.submitting_worker_principal_id).toBe(crossed ? workerA : null);
+      expect(row.submitting_at !== null).toBe(crossed);
+      // Terminal and unknown states have no lease; provenance outlives it.
+      if (crossed && !["SUBMITTING", "SUBMITTED"].includes(to)) expect(row.lease_worker_principal_id).toBeNull();
+    });
+  });
+
+  it("survives recovery leases on SUBMITTED, a definitive rejection, and leaves a pre-barrier failure without provenance", async () => {
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const submitted = await leasedAttempt(clients.runtime, "wb-prov-recovery");
+      await walk(clients.runtime, submitted, ["SUBMITTING", "SUBMITTED"]);
+      await clients.runtime.query(`UPDATE execution_attempts SET ${CLEAR_LEASE} WHERE id = $1`, [submitted]);
+      await clients.runtime.query(
+        `UPDATE execution_attempts SET lease_worker_principal_id = $2, lease_token_sha256 = repeat('9', 64),
+                lease_fencing_counter = lease_fencing_counter + 1, leased_at = now(), lease_expires_at = now() + interval '5 minutes' WHERE id = $1`,
+        [submitted, workerB],
+      );
+      expect(await provenance(clients.runtime, submitted)).toMatchObject({ submitting_worker_principal_id: workerA, lease_worker_principal_id: workerB });
+
+      const rejected = await leasedAttempt(clients.runtime, "wb-prov-rejected");
+      await walk(clients.runtime, rejected, ["SUBMITTING", "FAILED_BEFORE_SUBMISSION"]);
+      expect(await provenance(clients.runtime, rejected)).toMatchObject({ submitting_worker_principal_id: workerA, lease_worker_principal_id: null });
+
+      const preBarrier = await leasedAttempt(clients.runtime, "wb-prov-pre-barrier");
+      await move(clients.runtime, preBarrier, "FAILED_BEFORE_SUBMISSION");
+      expect(await provenance(clients.runtime, preBarrier)).toEqual({ submitting_worker_principal_id: null, lease_worker_principal_id: null, submitting_at: null });
+    });
+  });
+
+  it("refuses an insert that carries submitting authority", async () => {
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const f = await fixture(clients.runtime, "wb-prov-insert");
+      await expectTriggerError(
+        clients.runtime,
+        `INSERT INTO execution_attempts
+           (account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider,
+            provider_credential_version_id, submitting_worker_principal_id)
+         VALUES ($1, $2, $3, 1, 'USER_BYO', $4, $5, $6)`,
+        [f.accountId, f.jobId, f.authorizationId, f.provider, f.versionId, workerA],
+        "created without submitting worker provenance",
+      );
+    });
+  });
+
+  it("enforces the barrier equivalence as a check constraint", async () => {
+    // The owner bypasses the guard's stamping only by disabling the trigger,
+    // inside a rolled-back transaction, to prove the constraint stands alone.
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await leasedAttempt(clients.migrator, "wb-prov-check");
+      await clients.migrator.query("ALTER TABLE execution_attempts DISABLE TRIGGER execution_attempts_guard");
+      await expectSqlError(clients.migrator, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], {
+        code: CHECK,
+        constraint: "execution_attempts_submitting_worker_ck",
+      });
+      await expectSqlError(clients.migrator, "UPDATE execution_attempts SET submitting_worker_principal_id = $2 WHERE id = $1", [id, workerA], {
+        code: CHECK,
+        constraint: "execution_attempts_submitting_worker_ck",
+      });
+      await expectSqlError(
+        clients.migrator,
+        `UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_worker_principal_id = '00000000-0000-4000-8000-000000000000' WHERE id = $1`,
+        [id],
+        { code: FOREIGN_KEY, constraint: "execution_attempts_submitting_worker_fk" },
+      );
+    });
+  });
+});
+
 describe("derivable credential obligations", () => {
   // The documented predicates from migration 0004, evaluated per attempt.
   const PREDICATES = `
@@ -1088,6 +1357,8 @@ describe("runtime privileges on worker-bridge tables", () => {
       "provider",
       "provider_credential_version_id",
       "created_at",
+      // Migration 0005: derived by the guard, never written by the application.
+      "submitting_worker_principal_id",
     ]) {
       expect(attemptColumns).not.toContain(immutable);
     }

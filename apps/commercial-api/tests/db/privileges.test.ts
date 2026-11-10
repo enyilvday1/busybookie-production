@@ -115,7 +115,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 4 }]);
+      expect(version.rows).toEqual([{ version: 5 }]);
     });
   });
 
@@ -155,6 +155,22 @@ describe("runtime role authority", () => {
         [],
         denied,
       );
+    });
+  });
+
+  it("has no UPDATE on submission-authority provenance: only the database guard derives it (migration 0005)", async () => {
+    const privileges = await clients.runtime.query(
+      `SELECT has_column_privilege(current_user, 'public.execution_attempts', 'submitting_worker_principal_id', 'UPDATE') AS update,
+              has_column_privilege(current_user, 'public.execution_attempts', 'submitting_worker_principal_id', 'SELECT') AS select,
+              has_column_privilege(current_user, 'public.execution_attempts', 'submitting_worker_principal_id', 'REFERENCES') AS references,
+              has_table_privilege(current_user, 'public.execution_attempts', 'DELETE') AS delete,
+              has_table_privilege(current_user, 'public.execution_attempts', 'TRUNCATE') AS truncate,
+              has_table_privilege(current_user, 'public.execution_attempts', 'TRIGGER') AS trigger`,
+    );
+    expect(privileges.rows).toEqual([{ update: false, select: true, references: false, delete: false, truncate: false, trigger: false }]);
+    expect(RUNTIME_TABLE_PRIVILEGES.execution_attempts!.updateColumns).not.toContain("submitting_worker_principal_id");
+    await inRolledBackTransaction(clients.runtime, async () => {
+      await expectSqlError(clients.runtime, "UPDATE execution_attempts SET submitting_worker_principal_id = NULL", [], { code: INSUFFICIENT_PRIVILEGE });
     });
   });
 

@@ -14,6 +14,7 @@ import { runMigrations } from "../../src/database/runMigrations.js";
 import { applyRuntimeGrants } from "../../src/database/runtimeGrants.js";
 import {
   connectAs,
+  insertAccountWithFreeGrant,
   openGuardedClients,
   prepareSchemaV1,
   resetTestSchema,
@@ -25,7 +26,8 @@ const SCHEMA_V1_FILE = "0001_commercial_schema_v1.sql";
 const PROVIDER_CONNECTIONS_FILE = "0002_provider_connections.sql";
 const GENERATION_AUTHORIZATIONS_FILE = "0003_generation_authorizations.sql";
 const WORKER_BRIDGE_FILE = "0004_worker_bridge_persistence.sql";
-const COMMITTED_FILES = [SCHEMA_V1_FILE, PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE];
+const SUBMISSION_PROVENANCE_FILE = "0005_submission_authority_provenance.sql";
+const COMMITTED_FILES = [SCHEMA_V1_FILE, PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE];
 
 let clients: GuardedClients;
 let scratch: string;
@@ -94,25 +96,28 @@ function commandDependencies(migrationsDirectory: string) {
 }
 
 describe("migration runner against PostgreSQL 16", () => {
-  it("applies the bootstrap and 0001 to 0004 to an empty database and records the exact checksums", async () => {
+  it("applies the bootstrap and 0001 to 0005 to an empty database and records the exact checksums", async () => {
     expect(await publicTables()).toEqual([]);
 
     const migrations = await discoverMigrations();
     const result = await runMigrations(clients.migrator, migrations);
 
-    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 4 });
+    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 5 });
     const v1 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE));
     const v2 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE));
     const v3 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE));
     const v4 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, WORKER_BRIDGE_FILE));
+    const v5 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SUBMISSION_PROVENANCE_FILE));
     expect(sha256Hex(v1)).toBe("6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed");
     expect(sha256Hex(v2)).toBe("599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06");
     expect(sha256Hex(v3)).toBe("639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868");
+    expect(sha256Hex(v4)).toBe("c19113d3e3022f26e17cb4eeba9cee2719a387914549d5c2996fc66fcd8cfe49");
     expect(await appliedRows()).toEqual([
       { version: 1, name: "commercial_schema_v1", sha256: sha256Hex(v1) },
       { version: 2, name: "provider_connections", sha256: sha256Hex(v2) },
       { version: 3, name: "generation_authorizations", sha256: sha256Hex(v3) },
       { version: 4, name: "worker_bridge_persistence", sha256: sha256Hex(v4) },
+      { version: 5, name: "submission_authority_provenance", sha256: sha256Hex(v5) },
     ]);
     expect(await publicTables()).toEqual([
       "accounts",
@@ -130,18 +135,18 @@ describe("migration runner against PostgreSQL 16", () => {
     ]);
   });
 
-  it("applies 0002 to 0004 on top of a database already at version 1", async () => {
+  it("applies 0002 to 0005 on top of a database already at version 1", async () => {
     const [schemaV1] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1]);
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
   });
 
-  it("upgrades a database at version 3 to version 4 only", async () => {
+  it("upgrades a database at version 3 through version 5", async () => {
     const [schemaV1, providerConnections, generationAuthorizations] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!, providerConnections!, generationAuthorizations!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
@@ -151,8 +156,8 @@ describe("migration runner against PostgreSQL 16", () => {
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE], latestVersion: 4 });
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE], latestVersion: 5 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
     for (const table of ["worker_principals", "execution_jobs", "execution_attempts"]) {
       expect(await publicTables()).toContain(table);
     }
@@ -181,9 +186,10 @@ describe("migration runner against PostgreSQL 16", () => {
       `commercial-api migrate: applied ${PROVIDER_CONNECTIONS_FILE}\n`,
       `commercial-api migrate: applied ${GENERATION_AUTHORIZATIONS_FILE}\n`,
       `commercial-api migrate: applied ${WORKER_BRIDGE_FILE}\n`,
-      "commercial-api migrate: schema at version 4\n",
+      `commercial-api migrate: applied ${SUBMISSION_PROVENANCE_FILE}\n`,
+      "commercial-api migrate: schema at version 5\n",
     ]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it.each(COMMITTED_FILES)("rejects checksum drift in an applied %s and changes nothing", async (edited) => {
@@ -201,7 +207,7 @@ describe("migration runner against PostgreSQL 16", () => {
     await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(scratch)), "MIGRATION_CHECKSUM_DRIFT");
     const after = await clients.migrator.query("SELECT version, sha256, applied_at FROM schema_migrations ORDER BY version");
     expect(after.rows).toEqual(before.rows);
-    expect(after.rows).toHaveLength(4);
+    expect(after.rows).toHaveLength(5);
   });
 
   it("rejects an applied version whose committed name differs", async () => {
@@ -357,5 +363,153 @@ describe("migration runner against PostgreSQL 16", () => {
     expect(run.exitCodes).toEqual([1]);
     expect(run.stderr.join("")).toContain(code);
     expect(await publicTables()).toEqual([]);
+  });
+});
+
+// Migration 0005 on databases already at schema version 4. Rows are built by
+// the owner through the 0004 guard's legal transitions, then 0005 is applied.
+describe("migration 0005 on a schema-version-4 database", () => {
+  async function migrateToVersion4(): Promise<void> {
+    await runMigrations(clients.migrator, (await discoverMigrations()).slice(0, 4));
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+  }
+
+  async function legacyAttempt(subject: string): Promise<Readonly<{ id: string; workerId: string }>> {
+    const q = async (sql: string, params: unknown[]) => (await clients.migrator.query<{ id: string }>(sql, params)).rows[0]!.id;
+    const owner = await insertAccountWithFreeGrant(clients.migrator, subject);
+    const workerId = await q("INSERT INTO worker_principals (label) VALUES ($1) RETURNING id", [`${subject}-worker`]);
+    const productionId = await q(
+      "INSERT INTO productions (account_id, title, creation_entitlement_grant_id, created_by_user_id) VALUES ($1, 'Production', $2, $3) RETURNING id",
+      [owner.accountId, owner.grantId, owner.userId],
+    );
+    const connectionId = await q(
+      "INSERT INTO provider_connections (account_id, provider, credential_kind, created_by_user_id) VALUES ($1, 'EXAMPLE_PROVIDER', 'API_KEY', $2) RETURNING id",
+      [owner.accountId, owner.userId],
+    );
+    const versionId = await q(
+      `INSERT INTO provider_credential_versions
+         (account_id, provider_connection_id, credential_version, status, sealed_credential,
+          fingerprint_algorithm, fingerprint_key_ref, fingerprint_value, created_by_user_id)
+       VALUES ($1, $2, 1, 'ACTIVE', '{"format":"fixture-envelope"}'::jsonb, 'HMAC-SHA-256', 'fixture/v1', repeat('B', 43), $3) RETURNING id`,
+      [owner.accountId, connectionId, owner.userId],
+    );
+    const authorizationId = await q(
+      `INSERT INTO generation_authorizations
+         (account_id, production_id, entitlement_grant_id, billing_mode, provider, model, provider_connection_id,
+          provider_credential_version_id, generation_request, generation_request_sha256, expected_cost_cap_unit,
+          expected_cost_cap_amount, expires_at, created_by_user_id)
+       VALUES ($1, $2, $3, 'USER_BYO', 'EXAMPLE_PROVIDER', 'example-model-1', $4, $5, '{"prompt":"fixture"}'::jsonb, repeat('c', 64),
+               'MICRO_USD', 1000000, now() + interval '15 minutes', $6) RETURNING id`,
+      [owner.accountId, productionId, owner.grantId, connectionId, versionId, owner.userId],
+    );
+    const jobId = await q("INSERT INTO execution_jobs (account_id, production_id, generation_authorization_id) VALUES ($1, $2, $3) RETURNING id", [
+      owner.accountId,
+      productionId,
+      authorizationId,
+    ]);
+    const id = await q(
+      `INSERT INTO execution_attempts (account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider, provider_credential_version_id)
+       VALUES ($1, $2, $3, 1, 'USER_BYO', 'EXAMPLE_PROVIDER', $4) RETURNING id`,
+      [owner.accountId, jobId, authorizationId, versionId],
+    );
+    return { id, workerId };
+  }
+
+  const LEASE = `UPDATE execution_attempts
+      SET state = 'LEASED', lease_worker_principal_id = $2, lease_token_sha256 = repeat('a', 64), lease_fencing_counter = 1,
+          leased_at = now(), lease_expires_at = now() + interval '2 minutes'
+    WHERE id = $1`;
+  const SUBMIT = "UPDATE execution_attempts SET state = 'SUBMITTING', credential_granted_at = now(), submitting_at = now() WHERE id = $1";
+  const CLEAR = "lease_worker_principal_id = NULL, lease_token_sha256 = NULL, leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL";
+
+  async function provenanceInstalled() {
+    const column = await clients.migrator.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'execution_attempts' AND column_name = 'submitting_worker_principal_id'",
+    );
+    const constraints = await clients.migrator.query(
+      "SELECT conname FROM pg_constraint WHERE conname IN ('execution_attempts_submitting_worker_fk', 'execution_attempts_submitting_worker_ck')",
+    );
+    const guard = await clients.migrator.query<{ src: string }>("SELECT prosrc AS src FROM pg_proc WHERE proname = 'execution_attempts_guard'");
+    return {
+      column: column.rowCount === 1,
+      constraints: constraints.rowCount,
+      guardStamps: guard.rows.length === 1 && guard.rows[0]!.src.includes("submitting_worker_principal_id"),
+    };
+  }
+
+  it("A: applies to rows that never crossed SUBMITTING and leaves their provenance NULL", async () => {
+    await migrateToVersion4();
+    const queued = await legacyAttempt("legacy-queued");
+    const leased = await legacyAttempt("legacy-leased");
+    await clients.migrator.query(LEASE, [leased.id, leased.workerId]);
+    const failed = await legacyAttempt("legacy-failed");
+    await clients.migrator.query(LEASE, [failed.id, failed.workerId]);
+    await clients.migrator.query(
+      `UPDATE execution_attempts SET state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR}, failure_code = 'CREDENTIAL_UNAVAILABLE', completed_at = now() WHERE id = $1`,
+      [failed.id],
+    );
+
+    const result = await runMigrations(clients.migrator, await discoverMigrations());
+
+    expect(result).toEqual({ applied: [SUBMISSION_PROVENANCE_FILE], latestVersion: 5 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(await provenanceInstalled()).toEqual({ column: true, constraints: 2, guardStamps: true });
+    const rows = await clients.migrator.query<{ state: string; submitting_at: Date | null; submitting_worker_principal_id: string | null }>(
+      "SELECT state, submitting_at, submitting_worker_principal_id FROM execution_attempts WHERE id = ANY($1) ORDER BY state",
+      [[queued.id, leased.id, failed.id]],
+    );
+    expect(rows.rows).toEqual([
+      { state: "FAILED_BEFORE_SUBMISSION", submitting_at: null, submitting_worker_principal_id: null },
+      { state: "LEASED", submitting_at: null, submitting_worker_principal_id: null },
+      { state: "QUEUED", submitting_at: null, submitting_worker_principal_id: null },
+    ]);
+  });
+
+  it("B: backfills a SUBMITTING row from its lease principal, which then survives the lease clearing", async () => {
+    await migrateToVersion4();
+    const legacy = await legacyAttempt("legacy-submitting");
+    await clients.migrator.query(LEASE, [legacy.id, legacy.workerId]);
+    await clients.migrator.query(SUBMIT, [legacy.id]);
+
+    await runMigrations(clients.migrator, await discoverMigrations());
+
+    const after = await clients.migrator.query("SELECT state, submitting_worker_principal_id FROM execution_attempts WHERE id = $1", [legacy.id]);
+    expect(after.rows).toEqual([{ state: "SUBMITTING", submitting_worker_principal_id: legacy.workerId }]);
+    await clients.migrator.query(
+      `UPDATE execution_attempts SET state = 'OUTCOME_UNKNOWN', ${CLEAR}, failure_code = 'WORKER_LEASE_EXPIRED_DURING_SUBMISSION' WHERE id = $1`,
+      [legacy.id],
+    );
+    const unknown = await clients.migrator.query(
+      "SELECT state, lease_worker_principal_id, submitting_worker_principal_id FROM execution_attempts WHERE id = $1",
+      [legacy.id],
+    );
+    expect(unknown.rows).toEqual([{ state: "OUTCOME_UNKNOWN", lease_worker_principal_id: null, submitting_worker_principal_id: legacy.workerId }]);
+  });
+
+  it("C: aborts on a post-SUBMITTING row without recoverable provenance, installing nothing and recording no version 5", async () => {
+    await migrateToVersion4();
+    const legacy = await legacyAttempt("legacy-unknown");
+    await clients.migrator.query(LEASE, [legacy.id, legacy.workerId]);
+    await clients.migrator.query(SUBMIT, [legacy.id]);
+    await clients.migrator.query(
+      `UPDATE execution_attempts SET state = 'OUTCOME_UNKNOWN', ${CLEAR}, failure_code = 'PROVIDER_CREATE_TIMEOUT' WHERE id = $1`,
+      [legacy.id],
+    );
+    const before = await clients.migrator.query("SELECT * FROM execution_attempts WHERE id = $1", [legacy.id]);
+
+    const failure = runMigrations(clients.migrator, await discoverMigrations());
+    await expect(failure).rejects.toMatchObject({ code: "23514" });
+    await expect(failure).rejects.toThrow(/without recoverable submitting worker provenance/);
+
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+    expect(await provenanceInstalled()).toEqual({ column: false, constraints: 0, guardStamps: false });
+    const after = await clients.migrator.query("SELECT * FROM execution_attempts WHERE id = $1", [legacy.id]);
+    expect(after.rows).toEqual(before.rows);
+    // The 0004 guard is still installed and still enforces its transition rules.
+    await expect(clients.migrator.query("UPDATE execution_attempts SET state = 'QUEUED' WHERE id = $1", [legacy.id])).rejects.toMatchObject({
+      code: "23514",
+    });
+    // The migration lock was released: a later run reaches the same refusal.
+    await expect(runMigrations(clients.migrator, await discoverMigrations())).rejects.toMatchObject({ code: "23514" });
   });
 });

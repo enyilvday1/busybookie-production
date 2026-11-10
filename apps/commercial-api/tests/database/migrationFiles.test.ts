@@ -125,7 +125,7 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001 to 0004 in order, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0005 in order, contiguously, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
@@ -133,14 +133,53 @@ describe("committed migrations", () => {
       "0002_provider_connections.sql",
       "0003_generation_authorizations.sql",
       "0004_worker_bridge_persistence.sql",
+      "0005_submission_authority_provenance.sql",
     ]);
+    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
       expect(raw.includes(0x0d)).toBe(false);
     }
-    // Migration 0001 is byte-for-byte unchanged.
+    // Earlier migrations are byte-for-byte unchanged.
     expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
+    expect(migrations.slice(1, 4).map((entry) => entry.sha256)).toEqual([
+      "599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06",
+      "639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868",
+      "c19113d3e3022f26e17cb4eeba9cee2719a387914549d5c2996fc66fcd8cfe49",
+    ]);
+  });
+
+  it("adds submission-authority provenance in 0005 only: one column, no table, role, grant, secret or provider brand", async () => {
+    const migrations = await discoverMigrations();
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const provenance = migrations[4]!;
+    const statements = withoutComments(provenance.sql);
+    expect(migrations.slice(0, 4).some((migration) => /submitting_worker_principal_id/.test(migration.sql))).toBe(false);
+
+    expect(statements).not.toMatch(/^CREATE TABLE/m);
+    expect([...statements.matchAll(/ADD COLUMN (\w+) (\w+)/g)].map((match) => [match[1], match[2]])).toEqual([
+      ["submitting_worker_principal_id", "uuid"],
+    ]);
+    expect(statements).toMatch(/REFERENCES worker_principals \(id\) ON DELETE RESTRICT/);
+    expect(statements).not.toMatch(/\bCASCADE\b|SET NULL|SET DEFAULT/i);
+    expect(provenance.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+    expect(statements).not.toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b|\bREVOKE\b/im);
+    expect(statements).not.toMatch(/\bDELETE\s+FROM\b|\bTRUNCATE\b/i);
+    const SECRET_COLUMN = /\w*(secret|plaintext|password|api_key|sealed|fingerprint|bearer|token)\w*\s+(text|jsonb|bytea|uuid)\b/i;
+    expect(statements).not.toMatch(SECRET_COLUMN);
+    // No provenance from audit metadata: the migration never reads audit events.
+    expect(statements).not.toMatch(/audit_events/);
+    // The 0004 guard is replaced in place, never dropped or duplicated.
+    expect(statements).toMatch(/^CREATE OR REPLACE FUNCTION execution_attempts_guard\(\) RETURNS trigger/m);
+    expect(statements).not.toMatch(/\bDROP\b|CREATE TRIGGER/i);
+
+    // Guard the guards.
+    expect("  ON DELETE CASCADE").toMatch(/\bCASCADE\b|SET NULL|SET DEFAULT/i);
+    expect("ADD COLUMN lease_token text").toMatch(SECRET_COLUMN);
+    expect("ADD COLUMN sealed_credential jsonb").toMatch(SECRET_COLUMN);
+    expect("ADD COLUMN submitting_worker_principal_id uuid").not.toMatch(SECRET_COLUMN);
+    expect("GRANT UPDATE (x) ON t TO r;").toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b|\bREVOKE\b/im);
   });
 
   it("creates exactly the tables the runtime grant manifest covers", async () => {

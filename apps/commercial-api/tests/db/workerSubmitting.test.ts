@@ -318,6 +318,114 @@ describe("first SUBMITTING transition", () => {
     expect(await obligations(item)).toEqual({ hasOpenCredentialRetentionObligation: true, hasOpenProviderRecoveryObligation: true, blocksDestruction: true });
   });
 
+  it("gets the authenticated lease principal stamped as submitting provenance by the database (migration 0005)", async () => {
+    const list = await workers(2);
+    const item = await work();
+    const leasePort = await compose(list);
+    const proof = await granted(leasePort, list[1]!);
+    await server!.close();
+    const recorded = recordingPool();
+    const port = await compose(list, recorded.pool);
+    const response = await call(port, list[1]!, "submitting", item.attemptId, proof);
+    expect(response.status).toBe(200);
+    // The unchanged R44B6J statement never names the column...
+    expect(recorded.statements.some((sql) => /submitting_worker_principal_id/.test(sql))).toBe(false);
+    // ...yet the committed row carries exactly the lease principal that took the barrier.
+    const provenance = async () =>
+      (
+        await clients.migrator.query(
+          "SELECT state, lease_worker_principal_id, submitting_worker_principal_id, submitting_at IS NOT NULL AS barrier FROM execution_attempts WHERE id = $1",
+          [item.attemptId],
+        )
+      ).rows;
+    expect(await provenance()).toEqual([
+      { state: "SUBMITTING", lease_worker_principal_id: list[1]!.id, submitting_worker_principal_id: list[1]!.id, barrier: true },
+    ]);
+    // A replay writes nothing and leaves it unchanged.
+    expect((await call(port, list[1]!, "submitting", item.attemptId, proof)).status).toBe(200);
+    expect(await provenance()).toEqual([
+      { state: "SUBMITTING", lease_worker_principal_id: list[1]!.id, submitting_worker_principal_id: list[1]!.id, barrier: true },
+    ]);
+  });
+
+  it("is refused by the database barrier when the lease expires after the service check but before the transition (R44B6L1)", async () => {
+    const [worker] = await workers(1);
+    const item = await work();
+    const leasePort = await compose([worker!]);
+    const proof = await granted(leasePort, worker!);
+    await server!.close();
+    // A lease that is valid now and expires in under a second.
+    await clients.migrator.query("UPDATE execution_attempts SET lease_expires_at = clock_timestamp() + interval '750 milliseconds' WHERE id = $1", [
+      item.attemptId,
+    ]);
+    // Pause the unchanged R44B6J service after its own preliminary lease check
+    // has passed, immediately before its SUBMITTING update.
+    const gated = gatedPool((sql) => sql.includes("SET state = 'SUBMITTING'"));
+    const port = await compose([worker!], gated.pool);
+    const submitting = call(port, worker!, "submitting", item.attemptId, proof);
+    await gated.paused;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const expired = await clients.migrator.query<{ expired: boolean }>(
+      "SELECT lease_expires_at <= clock_timestamp() AS expired FROM execution_attempts WHERE id = $1",
+      [item.attemptId],
+    );
+    expect(expired.rows).toEqual([{ expired: true }]);
+    gated.release();
+
+    const response = await submitting;
+    // The database guard refuses, and the refusal keeps the ordinary R44B6J
+    // lifecycle contract (R44B6L2): 409 LEASE_REJECTED with exactly one
+    // rejection event, never a 5xx and never provider-call authority.
+    expect(response.status).toBe(409);
+    expect(response.body).toBe(REJECTED);
+    expect(eventSummary()).toEqual([["WORKER_SUBMITTING_REJECTED", "LEASE_EXPIRED"]]);
+    expect(events[0]).toMatchObject({ workerPrincipalId: worker!.id, executionAttemptId: item.attemptId });
+    expect(JSON.stringify(events).includes(proof.leaseToken)).toBe(false);
+    const row = await attempt(item.attemptId);
+    expect(row).toMatchObject({ state: "LEASED", submitting_at: null });
+    expect(
+      (await clients.migrator.query("SELECT submitting_worker_principal_id FROM execution_attempts WHERE id = $1", [item.attemptId])).rows,
+    ).toEqual([{ submitting_worker_principal_id: null }]);
+    expect(await submittingAudits(item.attemptId)).toEqual([]);
+  });
+
+  it.each([
+    ["another check violation", { code: "23514", constraint: "execution_attempts_submitting_at_ck" }],
+    ["a check violation without a constraint name", { code: "23514" }],
+    ["the lease-expiry constraint name under another SQLSTATE", { code: "XX000", constraint: "execution_attempts_submitting_lease_unexpired" }],
+    ["a serialization failure", { code: "40001" }],
+    ["a lost connection", { code: "57P01" }],
+  ] as const)("keeps %s at the SUBMITTING update a 503, never LEASE_REJECTED (R44B6L2)", async (_label, injected) => {
+    const [worker] = await workers(1);
+    const item = await work();
+    const leasePort = await compose([worker!]);
+    const proof = await granted(leasePort, worker!);
+    await server!.close();
+    const before = await attempt(item.attemptId);
+    const failing: TransactionalPool = {
+      query: pool.query,
+      end: async () => {},
+      connect: async () => {
+        const inner = await pool.connect();
+        return {
+          release: (error?: Error) => inner.release(error),
+          query: async <Row extends object>(sql: string, params?: unknown[]) => {
+            if (sql.includes("SET state = 'SUBMITTING'")) throw Object.assign(new Error("injected database failure"), injected);
+            return inner.query<Row>(sql, params);
+          },
+        };
+      },
+    };
+    const port = await compose([worker!], failing);
+    const response = await call(port, worker!, "submitting", item.attemptId, proof);
+    expect(response.status).toBe(503);
+    expect(response.body).toBe('{"status":"error","code":"SERVICE_UNAVAILABLE"}\n');
+    // No lifecycle-refusal event: this is a failure, not a lease refusal.
+    expect(events).toEqual([]);
+    expect(await attempt(item.attemptId)).toEqual(before);
+    expect(await submittingAudits(item.attemptId)).toEqual([]);
+  });
+
   it("never reads the sealed credential or fingerprint", async () => {
     const [worker] = await workers(1);
     const item = await work();

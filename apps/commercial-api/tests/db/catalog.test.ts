@@ -177,10 +177,12 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "execution_attempts_submitted_at_ck",
     "execution_attempts_submitting_after_grant_ck",
     "execution_attempts_submitting_at_ck",
+    "execution_attempts_submitting_worker_ck",
+    "execution_attempts_submitting_worker_fk",
   ],
 };
 
-describe("schema catalog (migrations 0001 to 0004)", () => {
+describe("schema catalog (migrations 0001 to 0005)", () => {
   it("contains exactly the eleven domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -401,6 +403,10 @@ describe("schema catalog (migrations 0001 to 0004)", () => {
       },
       { conname: "execution_attempts_lease_worker_fk", def: "FOREIGN KEY (lease_worker_principal_id) REFERENCES worker_principals(id) ON DELETE RESTRICT" },
       { conname: "execution_attempts_number_uq", def: "UNIQUE (execution_job_id, attempt_number)" },
+      {
+        conname: "execution_attempts_submitting_worker_fk",
+        def: "FOREIGN KEY (submitting_worker_principal_id) REFERENCES worker_principals(id) ON DELETE RESTRICT",
+      },
       { conname: "execution_jobs_account_fk", def: "FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT" },
       { conname: "execution_jobs_attempt_scope_uq", def: "UNIQUE (account_id, id, generation_authorization_id)" },
       {
@@ -411,6 +417,55 @@ describe("schema catalog (migrations 0001 to 0004)", () => {
       { conname: "generation_authorizations_credential_scope_uq", def: "UNIQUE (account_id, id, provider_credential_version_id)" },
       { conname: "generation_authorizations_execution_scope_uq", def: "UNIQUE (account_id, id, billing_mode, provider)" },
     ]);
+  });
+
+  it("records submission-authority provenance (0005): a nullable uuid, a restrictive worker FK, the barrier equivalence and the extended guard", async () => {
+    const column = await rows<{ data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT data_type, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'execution_attempts' AND column_name = 'submitting_worker_principal_id'`,
+    );
+    expect(column).toEqual([{ data_type: "uuid", is_nullable: "YES", column_default: null }]);
+
+    const foreignKey = await rows<{ target: string; columns: string; target_columns: string; on_delete: string; on_update: string }>(
+      `SELECT c.confrelid::regclass::text AS target,
+              (SELECT string_agg(attname, ',') FROM pg_attribute WHERE attrelid = c.conrelid AND attnum = ANY (c.conkey)) AS columns,
+              (SELECT string_agg(attname, ',') FROM pg_attribute WHERE attrelid = c.confrelid AND attnum = ANY (c.confkey)) AS target_columns,
+              c.confdeltype AS on_delete, c.confupdtype AS on_update
+         FROM pg_constraint c WHERE c.conname = 'execution_attempts_submitting_worker_fk' AND c.contype = 'f'`,
+    );
+    // 'r' = RESTRICT (never cascade, set null or set default); 'a' = NO ACTION on update.
+    expect(foreignKey).toEqual([
+      { target: "worker_principals", columns: "submitting_worker_principal_id", target_columns: "id", on_delete: "r", on_update: "a" },
+    ]);
+
+    const check = await rows<{ def: string; validated: boolean }>(
+      "SELECT pg_get_constraintdef(oid) AS def, convalidated AS validated FROM pg_constraint WHERE conname = 'execution_attempts_submitting_worker_ck'",
+    );
+    expect(check).toEqual([{ def: "CHECK (((submitting_at IS NULL) = (submitting_worker_principal_id IS NULL)))", validated: true }]);
+
+    const guard = await rows<{ src: string }>("SELECT prosrc AS src FROM pg_proc WHERE proname = 'execution_attempts_guard'");
+    expect(guard).toHaveLength(1);
+    expect(guard[0]!.src).toContain("NEW.submitting_worker_principal_id := OLD.lease_worker_principal_id;");
+    // R44B6K5/R44B6L1: the provider-call authority barrier uses wall-clock time, never transaction-stable now().
+    expect(guard[0]!.src).toContain("OLD.lease_expires_at <= clock_timestamp()");
+    expect(guard[0]!.src).not.toMatch(/lease_expires_at\s*(<=|>)\s*now\(\)/);
+    // R44B6L2: that refusal has a stable identity the submitting service classifies.
+    expect(guard[0]!.src).toContain("CONSTRAINT = 'execution_attempts_submitting_lease_unexpired'");
+    // The 0004 rules are still present in the replacement.
+    for (const rule of [
+      "execution attempt provenance is immutable",
+      "execution attempt transition % -> % is not allowed",
+      "execution attempt submission and output identity are immutable",
+      "execution attempt credential grant cannot be replaced",
+      "execution attempt failure code changes only with its state",
+      "execution attempt fencing generation must increase for every new lease",
+      "a SUBMITTING attempt cannot be leased again",
+    ]) {
+      expect(guard[0]!.src).toContain(rule);
+    }
+
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
+    expect(version).toEqual([{ version: 5, name: "submission_authority_provenance" }]);
   });
 
   it("stores no secret, sealed credential, fingerprint or plaintext lease token on worker-bridge tables", async () => {
@@ -540,7 +595,8 @@ describe("schema catalog (migrations 0001 to 0004)", () => {
     const actions = await rows<{ conname: string; confdeltype: string }>(
       "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace ORDER BY conname",
     );
-    expect(actions).toHaveLength(24);
+    // 24 through 0004, plus execution_attempts_submitting_worker_fk (0005).
+    expect(actions).toHaveLength(25);
     for (const action of actions) {
       expect(action.confdeltype, action.conname).toBe("r");
     }

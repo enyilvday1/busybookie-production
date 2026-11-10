@@ -63,6 +63,21 @@ const REPLAYABLE_VERSION = (status: string) => ELIGIBLE_VERSION(status) || statu
 
 const reject = (reason: WorkerLeaseRejectionReason) => new WorkerLeaseError("LEASE_REJECTED", reason);
 
+// The final authority on lease validity is the migration 0005 guard, which
+// judges expiry by wall-clock time; the check in lockCurrentLease uses
+// transaction time and is only a fast refusal. A lease that expires between
+// the two is refused by the guard with exactly this identity (SQLSTATE 23514
+// and this constraint name), and is the same lifecycle refusal as
+// LEASE_EXPIRED. Every other database error stays a database failure.
+const SUBMITTING_LEASE_EXPIRED = Object.freeze({ code: "23514", constraint: "execution_attempts_submitting_lease_unexpired" });
+
+const isSubmittingLeaseExpiry = (error: unknown) =>
+  error instanceof Error &&
+  "code" in error &&
+  error.code === SUBMITTING_LEASE_EXPIRED.code &&
+  "constraint" in error &&
+  error.constraint === SUBMITTING_LEASE_EXPIRED.constraint;
+
 export async function acknowledgeWorkerSubmitting(
   pool: TransactionalPool,
   context: WorkerControlContext,
@@ -145,13 +160,19 @@ export async function acknowledgeWorkerSubmitting(
     if (!ELIGIBLE_CONNECTION(connectionRow.status)) throw reject("CONNECTION_INELIGIBLE");
     if (!ELIGIBLE_VERSION(versionRow.status)) throw reject("CREDENTIAL_VERSION_INELIGIBLE");
 
-    const transitioned = await client.query<{ submitting_at: Date }>(
-      `UPDATE execution_attempts SET state = 'SUBMITTING', submitting_at = now(), updated_at = now()
-        WHERE id = $1 AND state = 'LEASED' AND credential_granted_at IS NOT NULL
-        RETURNING submitting_at`,
-      [lease.id],
-    );
-    const submittingAt = transitioned.rows[0]?.submitting_at;
+    let submittingAt: Date | undefined;
+    try {
+      const transitioned = await client.query<{ submitting_at: Date }>(
+        `UPDATE execution_attempts SET state = 'SUBMITTING', submitting_at = now(), updated_at = now()
+          WHERE id = $1 AND state = 'LEASED' AND credential_granted_at IS NOT NULL
+          RETURNING submitting_at`,
+        [lease.id],
+      );
+      submittingAt = transitioned.rows[0]?.submitting_at;
+    } catch (error) {
+      if (isSubmittingLeaseExpiry(error)) throw reject("LEASE_EXPIRED");
+      throw error;
+    }
     if (submittingAt === undefined) throw new WorkerLeaseError("WORKER_CONTROL_DATABASE_FAILURE");
     await audit(client, "execution_attempt.submitting", { id: lease.id, accountId: lease.accountId }, context.correlationId, {
       attemptNumber: lease.attemptNumber,

@@ -24,6 +24,8 @@ import { APPROVED_MIGRATION_ROLE } from "./support/testDatabaseGuard.js";
 const SCHEMA_V1_FILE = "0001_commercial_schema_v1.sql";
 const PROVIDER_CONNECTIONS_FILE = "0002_provider_connections.sql";
 const GENERATION_AUTHORIZATIONS_FILE = "0003_generation_authorizations.sql";
+const WORKER_BRIDGE_FILE = "0004_worker_bridge_persistence.sql";
+const COMMITTED_FILES = [SCHEMA_V1_FILE, PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE];
 
 let clients: GuardedClients;
 let scratch: string;
@@ -92,58 +94,68 @@ function commandDependencies(migrationsDirectory: string) {
 }
 
 describe("migration runner against PostgreSQL 16", () => {
-  it("applies the bootstrap, 0001, 0002 and 0003 to an empty database and records the exact checksums", async () => {
+  it("applies the bootstrap and 0001 to 0004 to an empty database and records the exact checksums", async () => {
     expect(await publicTables()).toEqual([]);
 
     const migrations = await discoverMigrations();
     const result = await runMigrations(clients.migrator, migrations);
 
-    expect(result).toEqual({ applied: [SCHEMA_V1_FILE, PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE], latestVersion: 3 });
+    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 4 });
     const v1 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE));
     const v2 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE));
     const v3 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE));
+    const v4 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, WORKER_BRIDGE_FILE));
     expect(sha256Hex(v1)).toBe("6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed");
     expect(sha256Hex(v2)).toBe("599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06");
+    expect(sha256Hex(v3)).toBe("639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868");
     expect(await appliedRows()).toEqual([
       { version: 1, name: "commercial_schema_v1", sha256: sha256Hex(v1) },
       { version: 2, name: "provider_connections", sha256: sha256Hex(v2) },
       { version: 3, name: "generation_authorizations", sha256: sha256Hex(v3) },
+      { version: 4, name: "worker_bridge_persistence", sha256: sha256Hex(v4) },
     ]);
     expect(await publicTables()).toEqual([
       "accounts",
       "audit_events",
       "entitlement_grants",
+      "execution_attempts",
+      "execution_jobs",
       "generation_authorizations",
       "productions",
       "provider_connections",
       "provider_credential_versions",
       "schema_migrations",
       "users",
+      "worker_principals",
     ]);
   });
 
-  it("applies 0002 and 0003 on top of a database already at version 1", async () => {
+  it("applies 0002 to 0004 on top of a database already at version 1", async () => {
     const [schemaV1] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1]);
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
+    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
   });
 
-  it("upgrades a database at version 2 to version 3 only", async () => {
-    const [schemaV1, providerConnections] = await discoverMigrations();
-    await runMigrations(clients.migrator, [schemaV1!, providerConnections!]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2]);
-    expect(await publicTables()).not.toContain("generation_authorizations");
+  it("upgrades a database at version 3 to version 4 only", async () => {
+    const [schemaV1, providerConnections, generationAuthorizations] = await discoverMigrations();
+    await runMigrations(clients.migrator, [schemaV1!, providerConnections!, generationAuthorizations!]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
+    for (const table of ["worker_principals", "execution_jobs", "execution_attempts"]) {
+      expect(await publicTables()).not.toContain(table);
+    }
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result).toEqual({ applied: [GENERATION_AUTHORIZATIONS_FILE], latestVersion: 3 });
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
-    expect(await publicTables()).toContain("generation_authorizations");
+    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE], latestVersion: 4 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+    for (const table of ["worker_principals", "execution_jobs", "execution_attempts"]) {
+      expect(await publicTables()).toContain(table);
+    }
   });
 
   it("is a no-op on a second run", async () => {
@@ -168,42 +180,28 @@ describe("migration runner against PostgreSQL 16", () => {
       `commercial-api migrate: applied ${SCHEMA_V1_FILE}\n`,
       `commercial-api migrate: applied ${PROVIDER_CONNECTIONS_FILE}\n`,
       `commercial-api migrate: applied ${GENERATION_AUTHORIZATIONS_FILE}\n`,
-      "commercial-api migrate: schema at version 3\n",
+      `commercial-api migrate: applied ${WORKER_BRIDGE_FILE}\n`,
+      "commercial-api migrate: schema at version 4\n",
     ]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4]);
   });
 
-  it("rejects checksum drift in an applied migration and changes nothing", async () => {
-    await runMigrations(clients.migrator, await discoverMigrations());
-    const original = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE), "utf8");
-    const directory = await stageMigrations({ [SCHEMA_V1_FILE]: `${original}-- edited after apply\n` });
-
-    await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(directory)), "MIGRATION_CHECKSUM_DRIFT");
-    expect(await appliedRows()).toHaveLength(3);
-  });
-
-  it("rejects checksum drift in an applied 0002 and changes nothing", async () => {
-    await runMigrations(clients.migrator, await discoverMigrations());
-    await copyFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE), join(scratch, SCHEMA_V1_FILE));
-    await copyFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE), join(scratch, GENERATION_AUTHORIZATIONS_FILE));
-    const original = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE), "utf8");
-    await writeFile(join(scratch, PROVIDER_CONNECTIONS_FILE), `${original}-- edited after apply\n`);
-
-    await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(scratch)), "MIGRATION_CHECKSUM_DRIFT");
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
-  });
-
-  it("rejects checksum drift in an applied 0003 and changes nothing", async () => {
+  it.each(COMMITTED_FILES)("rejects checksum drift in an applied %s and changes nothing", async (edited) => {
     await runMigrations(clients.migrator, await discoverMigrations());
     const before = await clients.migrator.query("SELECT version, sha256, applied_at FROM schema_migrations ORDER BY version");
-    await copyFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE), join(scratch, SCHEMA_V1_FILE));
-    await copyFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE), join(scratch, PROVIDER_CONNECTIONS_FILE));
-    const original = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE), "utf8");
-    await writeFile(join(scratch, GENERATION_AUTHORIZATIONS_FILE), `${original}-- edited after apply\n`);
+    for (const file of COMMITTED_FILES) {
+      if (file === edited) {
+        const original = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, file), "utf8");
+        await writeFile(join(scratch, file), `${original}-- edited after apply\n`);
+      } else {
+        await copyFile(join(DEFAULT_MIGRATIONS_DIRECTORY, file), join(scratch, file));
+      }
+    }
 
     await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(scratch)), "MIGRATION_CHECKSUM_DRIFT");
     const after = await clients.migrator.query("SELECT version, sha256, applied_at FROM schema_migrations ORDER BY version");
     expect(after.rows).toEqual(before.rows);
+    expect(after.rows).toHaveLength(4);
   });
 
   it("rejects an applied version whose committed name differs", async () => {

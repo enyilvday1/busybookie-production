@@ -113,7 +113,9 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "generation_authorizations_created_by_user_fk",
     "generation_authorizations_creation_idempotency_key_ck",
     "generation_authorizations_credential_binding_ck",
+    "generation_authorizations_credential_scope_uq",
     "generation_authorizations_credential_version_same_connection_fk",
+    "generation_authorizations_execution_scope_uq",
     "generation_authorizations_expected_cost_cap_amount_ck",
     "generation_authorizations_expected_cost_cap_unit_ck",
     "generation_authorizations_expired_after_expiry_ck",
@@ -130,10 +132,56 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "generation_authorizations_status_ck",
     "generation_authorizations_v1_issuable_billing_mode_ck",
   ],
+  worker_principals: ["worker_principals_disabled_ck", "worker_principals_label_ck", "worker_principals_pk", "worker_principals_status_ck"],
+  execution_jobs: [
+    "execution_jobs_account_fk",
+    "execution_jobs_attempt_scope_uq",
+    "execution_jobs_authorization_same_production_fk",
+    "execution_jobs_authorization_uq",
+    "execution_jobs_completed_at_ck",
+    "execution_jobs_pk",
+    "execution_jobs_status_ck",
+  ],
+  execution_attempts: [
+    "execution_attempts_account_fk",
+    "execution_attempts_account_scope_uq",
+    "execution_attempts_authorization_credential_fk",
+    "execution_attempts_authorization_provider_fk",
+    "execution_attempts_billing_mode_ck",
+    "execution_attempts_completed_at_ck",
+    "execution_attempts_credential_binding_ck",
+    "execution_attempts_credential_granted_ck",
+    "execution_attempts_failure_code_ck",
+    "execution_attempts_failure_state_ck",
+    "execution_attempts_fencing_counter_ck",
+    "execution_attempts_heartbeat_ck",
+    "execution_attempts_job_same_authorization_fk",
+    "execution_attempts_lease_complete_ck",
+    "execution_attempts_lease_state_ck",
+    "execution_attempts_lease_times_ck",
+    "execution_attempts_lease_token_sha256_ck",
+    "execution_attempts_lease_worker_fk",
+    "execution_attempts_number_ck",
+    "execution_attempts_number_uq",
+    "execution_attempts_output_byte_count_ck",
+    "execution_attempts_output_content_type_ck",
+    "execution_attempts_output_object_key_ck",
+    "execution_attempts_output_sha256_ck",
+    "execution_attempts_output_state_ck",
+    "execution_attempts_pk",
+    "execution_attempts_provider_ck",
+    "execution_attempts_provider_execution_id_ck",
+    "execution_attempts_provider_execution_state_ck",
+    "execution_attempts_recovery_expires_at_ck",
+    "execution_attempts_state_ck",
+    "execution_attempts_submitted_at_ck",
+    "execution_attempts_submitting_after_grant_ck",
+    "execution_attempts_submitting_at_ck",
+  ],
 };
 
-describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
-  it("contains exactly the eight domain tables and schema_migrations", async () => {
+describe("schema catalog (migrations 0001 to 0004)", () => {
+  it("contains exactly the eleven domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v', 'm', 'p', 'f') ORDER BY c.relname`,
@@ -143,12 +191,15 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
         "accounts",
         "audit_events",
         "entitlement_grants",
+        "execution_attempts",
+        "execution_jobs",
         "generation_authorizations",
         "productions",
         "provider_connections",
         "provider_credential_versions",
         "schema_migrations",
         "users",
+        "worker_principals",
       ].map((relname) => ({
         relname,
         relkind: "r",
@@ -205,6 +256,39 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
         indexname: "entitlement_grants_initial_free_byo_uq",
         indexdef:
           "CREATE UNIQUE INDEX entitlement_grants_initial_free_byo_uq ON public.entitlement_grants USING btree (account_id) WHERE ((kind = 'FREE_BYO'::text) AND (source = 'ACCOUNT_PROVISIONING'::text))",
+      },
+      {
+        indexname: "execution_attempts_credential_version_ix",
+        indexdef:
+          "CREATE INDEX execution_attempts_credential_version_ix ON public.execution_attempts USING btree (provider_credential_version_id, state) WHERE (provider_credential_version_id IS NOT NULL)",
+      },
+      {
+        indexname: "execution_attempts_job_ix",
+        indexdef: "CREATE INDEX execution_attempts_job_ix ON public.execution_attempts USING btree (account_id, execution_job_id, attempt_number)",
+      },
+      {
+        indexname: "execution_attempts_lease_expiry_ix",
+        indexdef:
+          "CREATE INDEX execution_attempts_lease_expiry_ix ON public.execution_attempts USING btree (lease_expires_at) WHERE (lease_expires_at IS NOT NULL)",
+      },
+      {
+        // Never two concurrent paid attempts for one authorization.
+        indexname: "execution_attempts_one_open_per_job_uq",
+        indexdef:
+          "CREATE UNIQUE INDEX execution_attempts_one_open_per_job_uq ON public.execution_attempts USING btree (execution_job_id) WHERE (state = ANY (ARRAY['QUEUED'::text, 'LEASED'::text, 'SUBMITTING'::text, 'SUBMITTED'::text, 'OUTCOME_UNKNOWN'::text]))",
+      },
+      {
+        indexname: "execution_attempts_provider_execution_uq",
+        indexdef:
+          "CREATE UNIQUE INDEX execution_attempts_provider_execution_uq ON public.execution_attempts USING btree (account_id, provider, provider_execution_id) WHERE (provider_execution_id IS NOT NULL)",
+      },
+      {
+        indexname: "execution_attempts_queue_ix",
+        indexdef: "CREATE INDEX execution_attempts_queue_ix ON public.execution_attempts USING btree (created_at, id) WHERE (state = 'QUEUED'::text)",
+      },
+      {
+        indexname: "execution_jobs_production_list_ix",
+        indexdef: "CREATE INDEX execution_jobs_production_list_ix ON public.execution_jobs USING btree (account_id, production_id, created_at DESC, id)",
       },
       {
         indexname: "generation_authorizations_creation_idempotency_key_uq",
@@ -284,13 +368,59 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
     ]);
   });
 
-  it("widens the audit resource-type check to provider_connection and generation_authorization under the same name", async () => {
+  it("widens the audit resource-type check through 0004 under the same name", async () => {
     const check = await rows<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'audit_events_resource_type_ck'");
     expect(check).toEqual([
       {
-        def: "CHECK ((resource_type = ANY (ARRAY['user'::text, 'account'::text, 'entitlement_grant'::text, 'production'::text, 'provider_connection'::text, 'generation_authorization'::text])))",
+        def: "CHECK ((resource_type = ANY (ARRAY['user'::text, 'account'::text, 'entitlement_grant'::text, 'production'::text, 'provider_connection'::text, 'generation_authorization'::text, 'execution_job'::text, 'execution_attempt'::text, 'worker_principal'::text])))",
       },
     ]);
+  });
+
+  it("binds jobs and attempts to their authorization through composite foreign keys", async () => {
+    const definitions = await rows<{ conname: string; def: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conrelid IN ('public.execution_jobs'::regclass, 'public.execution_attempts'::regclass) AND contype IN ('f', 'u')
+           OR conname IN ('generation_authorizations_execution_scope_uq', 'generation_authorizations_credential_scope_uq')
+        ORDER BY conname`,
+    );
+    expect(definitions).toEqual([
+      { conname: "execution_attempts_account_fk", def: "FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT" },
+      { conname: "execution_attempts_account_scope_uq", def: "UNIQUE (account_id, id)" },
+      {
+        conname: "execution_attempts_authorization_credential_fk",
+        def: "FOREIGN KEY (account_id, generation_authorization_id, provider_credential_version_id) REFERENCES generation_authorizations(account_id, id, provider_credential_version_id) ON DELETE RESTRICT",
+      },
+      {
+        conname: "execution_attempts_authorization_provider_fk",
+        def: "FOREIGN KEY (account_id, generation_authorization_id, billing_mode, provider) REFERENCES generation_authorizations(account_id, id, billing_mode, provider) ON DELETE RESTRICT",
+      },
+      {
+        conname: "execution_attempts_job_same_authorization_fk",
+        def: "FOREIGN KEY (account_id, execution_job_id, generation_authorization_id) REFERENCES execution_jobs(account_id, id, generation_authorization_id) ON DELETE RESTRICT",
+      },
+      { conname: "execution_attempts_lease_worker_fk", def: "FOREIGN KEY (lease_worker_principal_id) REFERENCES worker_principals(id) ON DELETE RESTRICT" },
+      { conname: "execution_attempts_number_uq", def: "UNIQUE (execution_job_id, attempt_number)" },
+      { conname: "execution_jobs_account_fk", def: "FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT" },
+      { conname: "execution_jobs_attempt_scope_uq", def: "UNIQUE (account_id, id, generation_authorization_id)" },
+      {
+        conname: "execution_jobs_authorization_same_production_fk",
+        def: "FOREIGN KEY (account_id, production_id, generation_authorization_id) REFERENCES generation_authorizations(account_id, production_id, id) ON DELETE RESTRICT",
+      },
+      { conname: "execution_jobs_authorization_uq", def: "UNIQUE (generation_authorization_id)" },
+      { conname: "generation_authorizations_credential_scope_uq", def: "UNIQUE (account_id, id, provider_credential_version_id)" },
+      { conname: "generation_authorizations_execution_scope_uq", def: "UNIQUE (account_id, id, billing_mode, provider)" },
+    ]);
+  });
+
+  it("stores no secret, sealed credential, fingerprint or plaintext lease token on worker-bridge tables", async () => {
+    const columns = await rows<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name IN ('worker_principals', 'execution_jobs', 'execution_attempts')`,
+    );
+    const names = columns.map((column) => column.column_name);
+    expect(names.filter((name) => /secret|plaintext|password|api_key|sealed|fingerprint|bearer|url|path/.test(name))).toEqual([]);
+    expect(names.filter((name) => /token/.test(name))).toEqual(["lease_token_sha256"]);
   });
 
   it("binds generation-authorization provenance through same-account composite foreign keys", async () => {
@@ -308,10 +438,13 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
         def: "FOREIGN KEY (account_id, provider_connection_id, provider) REFERENCES provider_connections(account_id, id, provider) ON DELETE RESTRICT",
       },
       { conname: "generation_authorizations_created_by_user_fk", def: "FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT" },
+      // Added by 0004 as composite-FK targets for execution attempts.
+      { conname: "generation_authorizations_credential_scope_uq", def: "UNIQUE (account_id, id, provider_credential_version_id)" },
       {
         conname: "generation_authorizations_credential_version_same_connection_fk",
         def: "FOREIGN KEY (account_id, provider_connection_id, provider_credential_version_id) REFERENCES provider_credential_versions(account_id, provider_connection_id, id) ON DELETE RESTRICT",
       },
+      { conname: "generation_authorizations_execution_scope_uq", def: "UNIQUE (account_id, id, billing_mode, provider)" },
       {
         conname: "generation_authorizations_grant_same_account_fk",
         def: "FOREIGN KEY (account_id, entitlement_grant_id) REFERENCES entitlement_grants(account_id, id) ON DELETE RESTRICT",
@@ -407,7 +540,7 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
     const actions = await rows<{ conname: string; confdeltype: string }>(
       "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace ORDER BY conname",
     );
-    expect(actions).toHaveLength(17);
+    expect(actions).toHaveLength(24);
     for (const action of actions) {
       expect(action.confdeltype, action.conname).toBe("r");
     }
@@ -450,6 +583,16 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
     );
     expect(otherTriggers).toEqual([
       {
+        relname: "execution_attempts",
+        tgname: "execution_attempts_guard",
+        def: "CREATE TRIGGER execution_attempts_guard BEFORE INSERT OR UPDATE ON public.execution_attempts FOR EACH ROW EXECUTE FUNCTION execution_attempts_guard()",
+      },
+      {
+        relname: "execution_jobs",
+        tgname: "execution_jobs_guard",
+        def: "CREATE TRIGGER execution_jobs_guard BEFORE INSERT OR UPDATE ON public.execution_jobs FOR EACH ROW EXECUTE FUNCTION execution_jobs_guard()",
+      },
+      {
         relname: "generation_authorizations",
         tgname: "generation_authorizations_guard_update",
         def: "CREATE TRIGGER generation_authorizations_guard_update BEFORE UPDATE ON public.generation_authorizations FOR EACH ROW EXECUTE FUNCTION generation_authorizations_guard_update()",
@@ -459,6 +602,11 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
         tgname: "provider_credential_versions_guard_update",
         def: "CREATE TRIGGER provider_credential_versions_guard_update BEFORE UPDATE ON public.provider_credential_versions FOR EACH ROW EXECUTE FUNCTION provider_credential_versions_guard_update()",
       },
+      {
+        relname: "worker_principals",
+        tgname: "worker_principals_guard_update",
+        def: "CREATE TRIGGER worker_principals_guard_update BEFORE UPDATE ON public.worker_principals FOR EACH ROW EXECUTE FUNCTION worker_principals_guard_update()",
+      },
     ]);
 
     const functions = await rows<{ proname: string; public_execute: boolean }>(
@@ -467,8 +615,11 @@ describe("schema catalog (migrations 0001, 0002 and 0003)", () => {
     );
     expect(functions).toEqual([
       { proname: "audit_events_reject_mutation", public_execute: false },
+      { proname: "execution_attempts_guard", public_execute: false },
+      { proname: "execution_jobs_guard", public_execute: false },
       { proname: "generation_authorizations_guard_update", public_execute: false },
       { proname: "provider_credential_versions_guard_update", public_execute: false },
+      { proname: "worker_principals_guard_update", public_execute: false },
     ]);
   });
 

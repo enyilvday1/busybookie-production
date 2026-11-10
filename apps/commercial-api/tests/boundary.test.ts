@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -109,6 +109,7 @@ describe("boundary scanner", () => {
       "migrations/0001_commercial_schema_v1.sql",
       "migrations/0002_provider_connections.sql",
       "migrations/0003_generation_authorizations.sql",
+      "migrations/0004_worker_bridge_persistence.sql",
     ]);
     expect(scannedFiles.map(label).some((path) => path.startsWith("tests/"))).toBe(false);
   });
@@ -257,5 +258,28 @@ describe("private engine release boundary", () => {
 
   it("is not referenced by the engine package scripts", () => {
     expect(read(join(REPO_ROOT, "package.json"))).not.toMatch(/commercial-api/);
+  });
+});
+
+// R44B6D: the worker bridge exists only as persistence. The worker process,
+// its protocol package, worker routes and any credential opener are later,
+// separately authorised steps.
+describe("worker bridge boundary (persistence only)", () => {
+  const sources = sourceFiles.map((path) => ({ path: label(path), text: read(path) }));
+  const WORKER_ROUTE = /["'`]\/worker(s)?(\/|["'`])/;
+  const OPENER_IMPLEMENTATION = /\bopen\s*\(\s*sealed|create\w*CredentialOpener|:\s*CredentialOpener\s*=/;
+
+  it("has no commercial worker application or worker protocol package yet", () => {
+    expect(existsSync(join(REPO_ROOT, "apps", "commercial-worker"))).toBe(false);
+    expect(existsSync(join(REPO_ROOT, "packages", "commercial-worker-protocol"))).toBe(false);
+  });
+
+  it("exposes no worker route and implements no credential opener", () => {
+    expect(sources.filter(({ text }) => WORKER_ROUTE.test(text)).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ text }) => OPENER_IMPLEMENTATION.test(text)).map(({ path }) => path)).toEqual([]);
+    // Guard the guards.
+    expect('if (pathname === "/worker/leases")').toMatch(WORKER_ROUTE);
+    expect("const opener: CredentialOpener = createKmsCredentialOpener(key);").toMatch(OPENER_IMPLEMENTATION);
+    expect("export type CredentialOpener = Readonly<{").not.toMatch(OPENER_IMPLEMENTATION);
   });
 });

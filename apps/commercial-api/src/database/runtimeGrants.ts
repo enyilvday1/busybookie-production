@@ -69,6 +69,41 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
     insert: true,
     updateColumns: ["status", "claimed_at", "expired_at", "cancelled_at", "updated_at"],
   },
+  // Machine principals are provisioned by operators, never by the API: the
+  // runtime role may read them and disable them (revocation), nothing more.
+  worker_principals: { select: true, insert: false, updateColumns: ["status", "disabled_at", "updated_at"] },
+  // Coarse job progress only; ownership and the authorization are immutable.
+  execution_jobs: { select: true, insert: true, updateColumns: ["status", "completed_at", "updated_at"] },
+  // Lifecycle, lease, submission and output fields. Ownership, job,
+  // authorization, attempt number, billing mode, provider and the exact
+  // credential version are immutable to the runtime role; the
+  // execution_attempts guard trigger also enforces transitions and
+  // write-once submission identity for every role.
+  execution_attempts: {
+    select: true,
+    insert: true,
+    updateColumns: [
+      "state",
+      "lease_worker_principal_id",
+      "lease_token_sha256",
+      "lease_fencing_counter",
+      "leased_at",
+      "lease_expires_at",
+      "heartbeat_at",
+      "credential_granted_at",
+      "submitting_at",
+      "provider_execution_id",
+      "submitted_at",
+      "recovery_expires_at",
+      "failure_code",
+      "output_object_key",
+      "output_sha256",
+      "output_byte_count",
+      "output_content_type",
+      "completed_at",
+      "updated_at",
+    ],
+  },
   audit_events: { select: true, insert: true, updateColumns: [] },
   // Read-only: lets the API verify the applied schema version.
   schema_migrations: { select: true, insert: false, updateColumns: [] },

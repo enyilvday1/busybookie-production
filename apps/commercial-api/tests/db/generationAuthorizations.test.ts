@@ -574,7 +574,8 @@ describe("audit events after migration 0003", () => {
       for (const type of ["user", "account", "entitlement_grant", "production", "provider_connection", "generation_authorization"]) {
         await clients.runtime.query(INSERT_AUDIT, ["generation_authorization.issued", type]);
       }
-      for (const type of ["execution_job", "execution_attempt", "worker_principal", "generation_authorizations", "credential"]) {
+      // execution_job, execution_attempt and worker_principal became valid in 0004.
+      for (const type of ["generation_authorizations", "credential", "lease", "secret"]) {
         await expectSqlError(clients.runtime, INSERT_AUDIT, ["generation_authorization.issued", type], {
           code: CHECK,
           constraint: "audit_events_resource_type_ck",

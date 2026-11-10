@@ -125,13 +125,14 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001, 0002 and 0003 in order, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0004 in order, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
       "0001_commercial_schema_v1.sql",
       "0002_provider_connections.sql",
       "0003_generation_authorizations.sql",
+      "0004_worker_bridge_persistence.sql",
     ]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
@@ -150,11 +151,14 @@ describe("committed migrations", () => {
       "accounts",
       "audit_events",
       "entitlement_grants",
+      "execution_attempts",
+      "execution_jobs",
       "generation_authorizations",
       "productions",
       "provider_connections",
       "provider_credential_versions",
       "users",
+      "worker_principals",
     ]);
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...created, "schema_migrations"].sort());
   });
@@ -193,5 +197,49 @@ describe("committed migrations", () => {
     expect(withoutComments("  lease_token text, -- note")).toMatch(/\blease|fencing|recovery_obligation|platform_credential/i);
     expect(withoutComments("-- no lease here\n")).not.toMatch(/\blease/i);
     expect("RUNWAY_CREDITS").toMatch(/runway|gemini|genai|veo|google/i);
+  });
+
+  it("uses no regular-expression repetition bound PostgreSQL rejects at check time", async () => {
+    // PostgreSQL caps {m,n} at 255 and reports a larger bound only when a row
+    // is checked, never when the migration is applied.
+    const bounds = (sql: string) => [...sql.matchAll(/\{(\d+)(?:,(\d*))?\}/g)].flatMap((match) => [Number(match[1]), Number(match[2] || 0)]);
+    for (const migration of await discoverMigrations()) {
+      expect(bounds(migration.sql).filter((bound) => bound > 255), migration.fileName).toEqual([]);
+    }
+    // Guard the guard.
+    expect(bounds("x ~ '^[a-z]{1,256}$'")).toContain(256);
+  });
+
+  it("introduces worker and execution tables only in 0004, with no secret material or worker database role", async () => {
+    const migrations = await discoverMigrations();
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const BRIDGE_TABLE = /CREATE TABLE (execution_|worker_)/;
+    for (const migration of migrations.slice(0, 3)) {
+      expect(withoutComments(migration.sql)).not.toMatch(BRIDGE_TABLE);
+    }
+
+    const statements = withoutComments(migrations[3]?.sql ?? "");
+    expect([...statements.matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1])).toEqual([
+      "worker_principals",
+      "execution_jobs",
+      "execution_attempts",
+    ]);
+    expect(migrations[3]?.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+    // No plaintext token, secret, sealed credential or fingerprint column; the
+    // lease token appears only as its SHA-256 verifier.
+    const SECRET_COLUMN = /^\s+\w*(secret|plaintext|password|api_key|sealed|fingerprint|bearer)\w*\s+(text|jsonb|bytea)/im;
+    const PLAIN_TOKEN_COLUMN = /^\s+\w*token\s+(text|jsonb|bytea)/im;
+    expect(statements).not.toMatch(SECRET_COLUMN);
+    expect(statements).not.toMatch(PLAIN_TOKEN_COLUMN);
+    expect(statements).toMatch(/^\s+lease_token_sha256\s+text/m);
+    // The worker never connects to PostgreSQL: no role is created or granted.
+    expect(statements).not.toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b/im);
+
+    // Guard the guards.
+    expect("CREATE TABLE execution_jobs (").toMatch(BRIDGE_TABLE);
+    expect("  sealed_credential  jsonb NULL,").toMatch(SECRET_COLUMN);
+    expect("  lease_token        text NULL,").toMatch(PLAIN_TOKEN_COLUMN);
+    expect("  lease_token_sha256 text NULL,").not.toMatch(PLAIN_TOKEN_COLUMN);
+    expect("CREATE ROLE commercial_worker;").toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b/im);
   });
 });

@@ -14,12 +14,21 @@ import { describe, expect, it } from "vitest";
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC_ROOT = join(APP_ROOT, "src");
 const REPO_ROOT = resolve(APP_ROOT, "..", "..");
-const APP_CONFIG_FILES = ["package.json", "tsconfig.json", "tsconfig.build.json", "vitest.config.ts"] as const;
+const MIGRATIONS_ROOT = join(APP_ROOT, "migrations");
+const APP_CONFIG_FILES = ["package.json", "tsconfig.json", "tsconfig.build.json", "vitest.config.ts", "vitest.db.config.ts"] as const;
+// The only approved external runtime import (R44B2D). Everything else must be
+// a node: built-in or a module inside src.
+const APPROVED_EXTERNAL_IMPORTS = new Set(["pg"]);
+// The only modules that may read process.env: the HTTP process entry point and
+// the two explicit database command entry points.
+const PROCESS_ENTRY_POINTS = ["src/database/grantRuntimeProcess.ts", "src/database/migrateProcess.ts", "src/main.ts"];
 
 const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   { label: "private operator server", pattern: /operatorServer|operator-server|operatorRequestSecurity/i },
   { label: "operator console", pattern: /operator-console|operatorConsole/i },
-  { label: "operator unlock/session/token", pattern: /launchToken|launch-token|LAUNCH_TOKEN|unlock|OperatorRequestContext/i },
+  // "unlock" is forbidden except as part of PostgreSQL's pg_advisory_unlock(),
+  // which the migration runner's session lock requires (R44B2D2).
+  { label: "operator unlock/session/token", pattern: /launchToken|launch-token|LAUNCH_TOKEN|(?<!pg_advisory_)unlock|OperatorRequestContext/i },
   { label: "private operator port", pattern: /4381/ },
   { label: "commercial web app", pattern: /commercial-web|commercialWeb/i },
   { label: "Runway provider", pattern: /runway/i },
@@ -54,7 +63,8 @@ function listFiles(directory: string): string[] {
 }
 
 const sourceFiles = listFiles(SRC_ROOT);
-const scannedFiles = [...sourceFiles, ...APP_CONFIG_FILES.map((file) => join(APP_ROOT, file))];
+const migrationFiles = listFiles(MIGRATIONS_ROOT);
+const scannedFiles = [...sourceFiles, ...migrationFiles, ...APP_CONFIG_FILES.map((file) => join(APP_ROOT, file))];
 const label = (path: string) => relative(APP_ROOT, path).split(sep).join("/");
 const read = (path: string) => readFileSync(path, "utf8");
 
@@ -69,8 +79,13 @@ describe("boundary scanner", () => {
         "src/main.ts",
         "src/runCommercialApiProcess.ts",
         "src/startCommercialApiServer.ts",
+        "src/database/databaseConfig.ts",
+        "src/database/migrationFiles.ts",
+        "src/database/runMigrations.ts",
+        "src/database/runtimeGrants.ts",
       ]),
     );
+    expect(migrationFiles.map(label)).toEqual(["migrations/0001_commercial_schema_v1.sql"]);
     expect(scannedFiles.map(label).some((path) => path.startsWith("tests/"))).toBe(false);
   });
 
@@ -93,7 +108,15 @@ describe("boundary scanner", () => {
 
   it("does not flag the scaffold's own vocabulary", () => {
     expect(findViolations('const HEALTH_PATH = "/__health"; const DEFAULT_PORT = 4480;')).toEqual([]);
+    expect(findViolations('client.query("SELECT pg_advisory_unlock($1::bigint) AS released")')).toEqual([]);
   });
+
+  it.each(["unlockOperatorConsole()", "const UNLOCK_TOKEN = 1;", "// unlock the console", "pg_unlock_everything()"])(
+    "still flags operator-style unlock usage: %s",
+    (text) => {
+      expect(findViolations(text)).toContain("operator unlock/session/token");
+    },
+  );
 });
 
 describe("commercial-api source boundary", () => {
@@ -102,12 +125,14 @@ describe("commercial-api source boundary", () => {
   });
 
   it.each(sourceFiles.map((path) => [label(path), path] as const))(
-    "%s imports only Node built-ins and modules inside src",
+    "%s imports only Node built-ins, approved packages and modules inside src",
     (_name, path) => {
       for (const specifier of importSpecifiers(read(path))) {
         if (specifier.startsWith(".")) {
           const target = resolve(dirname(path), specifier);
           expect(target.startsWith(SRC_ROOT + sep), `${specifier} escapes src`).toBe(true);
+        } else if (APPROVED_EXTERNAL_IMPORTS.has(specifier)) {
+          continue;
         } else {
           expect(specifier.startsWith("node:") && BUILTINS.has(specifier.slice(5)), `${specifier} is not a node: built-in`).toBe(
             true,
@@ -117,14 +142,17 @@ describe("commercial-api source boundary", () => {
     },
   );
 
-  it("reads process.env only in the entry point", () => {
-    const readers = sourceFiles.filter((path) => /process\.env/.test(read(path))).map(label);
-    expect(readers).toEqual(["src/main.ts"]);
+  it("reads process.env only in the process entry points", () => {
+    const readers = sourceFiles.filter((path) => /process\.env/.test(read(path))).map(label).sort();
+    expect(readers).toEqual(PROCESS_ENTRY_POINTS);
   });
 
-  it("names only COMMERCIAL_API_* configuration keys", () => {
-    const keys = read(join(SRC_ROOT, "config.ts")).match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) ?? [];
-    const environmentKeys = keys.filter((key) => !["DEFAULT_HOST", "DEFAULT_PORT", "CONFIG_KEYS", "HOST_PATTERN", "PORT_PATTERN"].includes(key));
+  it.each([
+    ["src/config.ts", ["DEFAULT_HOST", "DEFAULT_PORT", "CONFIG_KEYS", "HOST_PATTERN", "PORT_PATTERN"]],
+    ["src/database/databaseConfig.ts", ["DATABASE_CONFIG_KEYS", "DATABASE_CONFIG_INVALID"]],
+  ])("%s names only COMMERCIAL_API_* configuration keys", (file, constants) => {
+    const keys = read(join(APP_ROOT, file)).match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) ?? [];
+    const environmentKeys = keys.filter((key) => !constants.includes(key));
 
     expect(environmentKeys.length).toBeGreaterThan(0);
     for (const key of environmentKeys) {
@@ -140,12 +168,18 @@ describe("package boundary", () => {
     scripts: Record<string, string>;
   };
 
-  it("has no runtime dependencies", () => {
-    expect(manifest.dependencies ?? {}).toEqual({});
+  it("has exactly the approved runtime dependency", () => {
+    expect(Object.keys(manifest.dependencies ?? {})).toEqual(["pg"]);
   });
 
   it("has only the approved development dependencies", () => {
-    expect(Object.keys(manifest.devDependencies ?? {}).sort()).toEqual(["@types/node", "typescript", "vitest"]);
+    expect(Object.keys(manifest.devDependencies ?? {}).sort()).toEqual(["@types/node", "@types/pg", "typescript", "vitest"]);
+  });
+
+  it("pins every dependency to an exact version", () => {
+    for (const [name, version] of Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })) {
+      expect(version, name).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+$/);
+    }
   });
 
   it("starts compiled JavaScript, not TypeScript through a loader", () => {

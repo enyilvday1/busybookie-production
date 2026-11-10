@@ -9,14 +9,21 @@
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts",
+    "test:db": "vitest run --config vitest.db.config.ts",
+    "migrate": "node dist/database/migrateProcess.js",
+    "grant-runtime": "node dist/database/grantRuntimeProcess.js"
   },
   "devDependencies": {
     "@types/node": "26.6.2",
+    "@types/pg": "8.23.1",
     "typescript": "7.0.2",
     "vitest": "5.0.4"
   },
   "engines": {
     "node": "^22.13.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
   }
 }

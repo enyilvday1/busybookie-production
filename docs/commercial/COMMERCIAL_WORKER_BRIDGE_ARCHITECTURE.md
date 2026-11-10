@@ -17,7 +17,9 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   0005 contract, the exact `recordSha256` preimage, the provider-create
   retry prohibition and cross-reference corrections: introduction, sections
   12, 13, 16 to 18, 26, 30, 31, 36 and 37); R44B6K5 (wall-clock
-  provider-call authority barrier erratum: sections 12, 26, 36 and 37).
+  provider-call authority barrier erratum: sections 12, 26, 36 and 37);
+  R44B6M2 (`SUBMITTED` heartbeat lease-epoch authority: sections 10, 12, 18,
+  36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -383,7 +385,7 @@ under `/worker-control/v1`, all with exact closed JSON bodies:
 | Route | Body | Status |
 |---|---|---|
 | `leases` | none | Implemented (R44B6G). |
-| `attempts/:attemptId/heartbeat` | `{fencingCounter, leaseToken}` | Implemented for `LEASED`; extended to `SUBMITTING` and leased `SUBMITTED` (section 12). |
+| `attempts/:attemptId/heartbeat` | `{fencingCounter, leaseToken}` | Implemented for `LEASED` and `SUBMITTING` (R44B6M). `SUBMITTED` renewal is future-gated on durable lease-epoch provenance (section 12, R44B6M2). |
 | `attempts/:attemptId/release` | `{fencingCounter, leaseToken}` | Implemented; `LEASED` without a grant only. |
 | `attempts/:attemptId/credential-grant` | `{fencingCounter, leaseToken}` | Implemented (R44B6H). |
 | `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
@@ -470,10 +472,14 @@ provider create call.
   `updated_at`. It never changes the fencing counter, the token verifier, the
   principal or the state. Migration 0004 already forbids a new principal or
   token while `SUBMITTING`.
-- **Heartbeat in `SUBMITTED`: allowed only while that attempt still carries
-  the lease** that entered `SUBMITTED` through the live route (section 18), so
-  the same worker can continue polling under fencing. It is forbidden in
-  `OUTCOME_UNKNOWN` and in every terminal state, which carry no lease.
+- **Heartbeat in `SUBMITTED`: not currently implemented** (revision
+  R44B6M2). The intended rule allows it only for the exact lease that
+  entered `SUBMITTED` through the live route (section 18), so that worker can
+  continue polling under fencing. That rule is future-gated on durable
+  lease-epoch provenance (see "SUBMITTED heartbeat lease-epoch authority"
+  below).
+- **Heartbeat in `OUTCOME_UNKNOWN` and every terminal state: forbidden.**
+  These states carry no lease.
 - **Release from `SUBMITTING`: forbidden.** A voluntary release would hand
   back provider-call authority after it may already have been used. Release
   remains possible only for `LEASED` without a credential grant (R44B6G and
@@ -491,6 +497,85 @@ provider create call.
 SUBMITTING_HEARTBEAT_ALLOWED=YES
 SUBMITTING_HEARTBEAT_CHANGES_FENCING=NO
 SUBMITTING_RELEASE_ALLOWED=NO
+```
+
+### SUBMITTED heartbeat lease-epoch authority (revision R44B6M2)
+
+**Repository fact (R44B6M1).** Migrations 0004 and 0005 forbid a new lease
+principal or token only while `SUBMITTING`. In `SUBMITTED`, a lease is
+optional, and a replacement needs only a strictly higher fencing counter.
+The runtime role's existing column privileges permit such a replacement,
+including one for the **same** worker principal:
+
+```text
+live-route lease:          worker = W, fence = N,   token = T1
+replacement/recovery lease: worker = W, fence = N+1, token = T2
+```
+
+A heartbeat check that proves the current proof (N+1, T2) and requires
+`lease_worker_principal_id = submitting_worker_principal_id` accepts the
+replacement. R44B6M1 demonstrated this against the database and then
+removed `SUBMITTED` from the renewable states.
+
+**Locked decision.** The heartbeat state set currently implemented, before
+the `/submitted` and recovery-lease slices exist, is exactly:
+
+- `LEASED`;
+- `SUBMITTING`.
+
+The current implementation never renews a `SUBMITTED` lease.
+
+**Future SUBMITTED heartbeat.** The product requirement stands: the live
+`submitted` route keeps its lease (section 18), and that lease should
+eventually be renewable. Renewal may be enabled only when the control plane
+can durably prove that the current lease is the **exact lease epoch** that
+crossed into `SUBMITTING` and then `SUBMITTED` through the live route.
+
+- **Same principal is not enough.** A future recovery lease may be issued
+  to the same worker principal; with one worker it usually will be. So
+  `lease_worker_principal_id = submitting_worker_principal_id` alone never
+  authorises `SUBMITTED` heartbeat.
+- **Required durable discriminator:** immutable lease-epoch provenance. The
+  preferred design is an immutable `submitting_fencing_counter`:
+  - the database stamps it from `OLD.lease_fencing_counter` when the
+    attempt first crosses `LEASED -> SUBMITTING`, exactly as migration 0005
+    stamps the submitting principal;
+  - it is never written by application code and never changes;
+  - every replacement lease or token needs a strictly higher fencing
+    counter (migration 0004).
+
+  A `SUBMITTED` heartbeat may then require
+  `lease_fencing_counter = submitting_fencing_counter`, together with the
+  usual exact current proof and an unexpired lease. That equality holds only
+  for the live-route epoch. A stronger mechanism may replace this design
+  only through a deliberate revision.
+- **Not proof of the live-route epoch:**
+  - the same worker principal, or worker identity alone;
+  - `leased_at < submitting_at`, or any other lease timing, because the
+    runtime role can write lease timing fields;
+  - the current token merely being valid;
+  - audit metadata;
+  - any caller assertion.
+- **Recovery leases get no renewal authority from this rule.** A future
+  recovery lease on an expired `SUBMITTED` attempt (section 12, "Re-lease
+  after expiry") is for recovery of the same provider execution ID only. It
+  never inherits live-route `SUBMITTED` heartbeat authority. Any renewal
+  rule for recovery leases belongs to the recovery-lease gate (section 36).
+- **Schema status.** No schema exists for the discriminator yet. Migration
+  0005 is immutable, so any schema it needs is migration 0006 or later,
+  created only in its own authorised slice.
+
+```text
+CURRENT_HEARTBEAT_LEASED=YES
+CURRENT_HEARTBEAT_SUBMITTING=YES
+CURRENT_HEARTBEAT_SUBMITTED=NO
+FUTURE_SUBMITTED_HEARTBEAT_REQUIRES_EXACT_LIVE_ROUTE_LEASE_EPOCH=YES
+SAME_WORKER_PRINCIPAL_SUFFICIENT_FOR_SUBMITTED_HEARTBEAT=NO
+FUTURE_RECOVERY_LEASE_MAY_USE_SAME_WORKER_PRINCIPAL=YES
+SUBMITTED_HEARTBEAT_NEEDS_DURABLE_LEASE_EPOCH_PROVENANCE=YES
+SUBMITTING_FENCING_COUNTER_PREFERRED_DISCRIMINATOR=YES
+RECOVERY_LEASE_AUTOMATICALLY_GETS_SUBMITTED_HEARTBEAT_AUTHORITY=NO
+MIGRATION_FOR_SUBMITTED_HEARTBEAT_CREATED_NOW=NO
 ```
 
 ### Expired SUBMITTING lease
@@ -1311,7 +1396,10 @@ ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
 
   The lease is **kept**: the same worker continues polling under fencing
   (section 12). The job stays `RUNNING`. The route audits
-  `execution_attempt.submitted`.
+  `execution_attempt.submitted`. Renewing that kept lease by heartbeat waits
+  for durable lease-epoch provenance (section 12, R44B6M2). Until then the
+  kept lease runs to its normal expiry and is never renewed. Recovery
+  afterwards follows section 12, "Re-lease after expiry".
 - Timestamps come from server time. There is no client-supplied acceptance
   timestamp. The journal's `providerAcceptedAt` stays local and
   informational. Recovery horizons, once defined, are measured
@@ -2411,11 +2499,14 @@ each slice under its own authorised gate:
    grant change. Its first `LEASED -> SUBMITTING` check is
    `OLD.lease_expires_at > clock_timestamp()` (revision R44B6K5), never
    transaction-stable `now()`.
-2. Heartbeat in `SUBMITTING` and in leased `SUBMITTED`; release still
-   refused (section 12).
+2. Heartbeat in `SUBMITTING`; release still refused (section 12).
+   `SUBMITTED` heartbeat is not part of this step (revision R44B6M2).
 3. Expired `SUBMITTING -> OUTCOME_UNKNOWN` sweep (section 12).
 4. The `submitted`, `acceptance-recovery` and `submission-failed` routes
-   (section 18).
+   (section 18). This step, and any recovery-lease step, must not enable
+   `SUBMITTED` heartbeat until exact lease-epoch provenance exists: the
+   preferred design is the database-stamped `submitting_fencing_counter`
+   (section 12, R44B6M2), in migration 0006 or later.
 5. The worker acceptance journal: state-root validation, write algorithm,
    read validation and corruption handling (section 17).
 6. Worker startup reconciliation and the unresolved-journal new-work block
@@ -2440,7 +2531,9 @@ The following may come after the first fake-provider slice, which stops at
 `SUBMITTED`, because they act only after a durable provider identity exists
 or before any provider authority exists:
 
-- recovery leases and recovery-scoped credential grants for `SUBMITTED`;
+- recovery leases and recovery-scoped credential grants for `SUBMITTED`. A
+  recovery lease never inherits live-route `SUBMITTED` heartbeat authority
+  (section 12, R44B6M2);
 - polling, output persistence and completion (steps 9 and 10);
 - resolution of an expired `LEASED` attempt that holds a credential grant.
   This is a liveness gap with no provider side effect.
@@ -2562,6 +2655,16 @@ SUBMITTING_EXPIRY_USES_WALL_CLOCK_TIME=YES
 SUBMITTING_EXPIRY_CLOCK_SOURCE=CLOCK_TIMESTAMP
 LONG_RUNNING_TRANSACTION_CAN_CROSS_EXPIRED_LEASE_INTO_SUBMITTING=NO
 EXPIRY_SWEEP_REQUIRES_CLOCK_TIMESTAMP=NO
+CURRENT_HEARTBEAT_LEASED=YES
+CURRENT_HEARTBEAT_SUBMITTING=YES
+CURRENT_HEARTBEAT_SUBMITTED=NO
+FUTURE_SUBMITTED_HEARTBEAT_REQUIRES_EXACT_LIVE_ROUTE_LEASE_EPOCH=YES
+SAME_WORKER_PRINCIPAL_SUFFICIENT_FOR_SUBMITTED_HEARTBEAT=NO
+FUTURE_RECOVERY_LEASE_MAY_USE_SAME_WORKER_PRINCIPAL=YES
+SUBMITTED_HEARTBEAT_NEEDS_DURABLE_LEASE_EPOCH_PROVENANCE=YES
+SUBMITTING_FENCING_COUNTER_PREFERRED_DISCRIMINATOR=YES
+RECOVERY_LEASE_AUTOMATICALLY_GETS_SUBMITTED_HEARTBEAT_AUTHORITY=NO
+MIGRATION_FOR_SUBMITTED_HEARTBEAT_CREATED_NOW=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

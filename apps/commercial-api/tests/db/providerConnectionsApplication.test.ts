@@ -10,7 +10,7 @@ import type { AuthenticationAdapter } from "../../src/authentication/authenticat
 import type { VerifiedIdentity } from "../../src/authentication/verifiedIdentity.js";
 import { loadRuntimeDatabaseConfig } from "../../src/database/runtimeDatabaseConfig.js";
 import { createRuntimePool, type TransactionalPool } from "../../src/database/runtimePool.js";
-import { PROVIDER_CREDENTIAL_PURPOSE } from "../../src/providerCredentials/credentialContext.js";
+import { PROVIDER_CREDENTIAL_PURPOSE } from "commercial-worker-protocol";
 import { runCommercialApiProcess, type ShutdownSignal } from "../../src/runCommercialApiProcess.js";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../../src/startCommercialApiServer.js";
 import { send, type TestResponse } from "../httpClient.js";

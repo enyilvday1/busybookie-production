@@ -1,0 +1,26 @@
+{
+  "name": "commercial-worker-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pure contracts shared by commercial-api and commercial-worker: the provider-credential envelope, opening context and opener interface. Never published.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  }
+}

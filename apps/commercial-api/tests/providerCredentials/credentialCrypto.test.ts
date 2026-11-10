@@ -9,10 +9,10 @@ import {
   PROVIDER_CREDENTIAL_PURPOSE,
   validateSealingContext,
   type CredentialSealingContext,
-} from "../../src/providerCredentials/credentialContext.js";
-import { CredentialCryptoError } from "../../src/providerCredentials/credentialCryptoError.js";
-import { credentialBytes, MAX_CREDENTIAL_BYTES } from "../../src/providerCredentials/credentialInput.js";
-import { MAX_KEY_REF_LENGTH, NONCE_BYTES, parseSealedEnvelope, TAG_BYTES, type SealedCredentialEnvelope } from "../../src/providerCredentials/sealedEnvelope.js";
+} from "commercial-worker-protocol";
+import { CredentialCryptoError } from "commercial-worker-protocol";
+import { credentialBytes, MAX_CREDENTIAL_BYTES } from "commercial-worker-protocol";
+import { MAX_KEY_REF_LENGTH, NONCE_BYTES, parseSealedEnvelope, TAG_BYTES, type SealedCredentialEnvelope } from "commercial-worker-protocol";
 import {
   createTestCredentialFingerprinter,
   createTestCredentialOpener,

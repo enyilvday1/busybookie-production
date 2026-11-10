@@ -1,14 +1,14 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 
-import { encodeAssociatedData, ASSOCIATED_DATA_FORMAT_V1, validateSealingContext } from "../../src/providerCredentials/credentialContext.js";
+import { encodeAssociatedData, ASSOCIATED_DATA_FORMAT_V1, validateSealingContext } from "commercial-worker-protocol";
 import {
   FINGERPRINT_ALGORITHM_HMAC_SHA_256,
   type CredentialFingerprinter,
   type CredentialOpener,
   type CredentialSealer,
-} from "../../src/providerCredentials/credentialCrypto.js";
-import { CredentialCryptoError } from "../../src/providerCredentials/credentialCryptoError.js";
-import { credentialBytes } from "../../src/providerCredentials/credentialInput.js";
+} from "commercial-worker-protocol";
+import { CredentialCryptoError } from "commercial-worker-protocol";
+import { credentialBytes } from "commercial-worker-protocol";
 import {
   NONCE_BYTES,
   parseSealedEnvelope,
@@ -16,7 +16,7 @@ import {
   SEALING_ALGORITHM_AES_256_GCM,
   TAG_BYTES,
   type SealedCredentialEnvelope,
-} from "../../src/providerCredentials/sealedEnvelope.js";
+} from "commercial-worker-protocol";
 
 // TEST FIXTURE ONLY. Real authenticated encryption (AES-256-GCM) and a real
 // keyed MAC (HMAC-SHA-256) with keys generated in memory per test. Lives in

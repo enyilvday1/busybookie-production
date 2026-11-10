@@ -1,0 +1,23 @@
+{
+  "name": "commercial-worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Private commercial execution worker (skeleton). Outbound-only client of the commercial-api worker-control routes. Never started by default.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "commercial-worker-protocol": "file:../../packages/commercial-worker-protocol"
+  }
+}

@@ -16,9 +16,11 @@ const SRC_ROOT = join(APP_ROOT, "src");
 const REPO_ROOT = resolve(APP_ROOT, "..", "..");
 const MIGRATIONS_ROOT = join(APP_ROOT, "migrations");
 const APP_CONFIG_FILES = ["package.json", "tsconfig.json", "tsconfig.build.json", "vitest.config.ts", "vitest.db.config.ts"] as const;
-// The only approved external runtime import (R44B2D). Everything else must be
-// a node: built-in or a module inside src.
-const APPROVED_EXTERNAL_IMPORTS = new Set(["pg"]);
+// The only approved external runtime imports: pg (R44B2D) and the shared,
+// pure commercial-worker protocol package (R44B6I1). Everything else must be a
+// node: built-in or a module inside src.
+const APPROVED_EXTERNAL_IMPORTS = new Set(["pg", "commercial-worker-protocol"]);
+const PROTOCOL_REFERENCE = "file:../../packages/commercial-worker-protocol";
 // The only modules that may read process.env: the HTTP process entry point and
 // the two explicit database command entry points.
 const PROCESS_ENTRY_POINTS = ["src/database/grantRuntimeProcess.ts", "src/database/migrateProcess.ts", "src/main.ts"];
@@ -44,7 +46,8 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   { label: "engine execution/CLI modules", pattern: /src\/execution|src\/dialogue|src\/composition|\/providers\/|scripts\/|dist\/execution|executeSingleShot|confirm-paid-generation/i },
   { label: "process spawning", pattern: /child_process|node:worker_threads/ },
   { label: ".env loading", pattern: /dotenv|loadEnvFile/ },
-  { label: "repository escape", pattern: /\.\.\/\.\.\// },
+  // The only path out of the app is the shared protocol package (R44B6I1).
+  { label: "repository escape", pattern: /\.\.\/\.\.\/(?!packages\/commercial-worker-protocol\b)/ },
   // R44B4A: authentication stays vendor-neutral, identity never comes from
   // client headers, and the test identity provider never reaches production.
   {
@@ -237,16 +240,18 @@ describe("package boundary", () => {
     scripts: Record<string, string>;
   };
 
-  it("has exactly the approved runtime dependency", () => {
-    expect(Object.keys(manifest.dependencies ?? {})).toEqual(["pg"]);
+  it("has exactly the approved runtime dependencies", () => {
+    expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual(["commercial-worker-protocol", "pg"]);
+    expect(manifest.dependencies?.["commercial-worker-protocol"]).toBe(PROTOCOL_REFERENCE);
   });
 
   it("has only the approved development dependencies", () => {
     expect(Object.keys(manifest.devDependencies ?? {}).sort()).toEqual(["@types/node", "@types/pg", "typescript", "vitest"]);
   });
 
-  it("pins every dependency to an exact version", () => {
+  it("pins every registry dependency to an exact version (the protocol package is the one local reference)", () => {
     for (const [name, version] of Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })) {
+      if (name === "commercial-worker-protocol") continue;
       expect(version, name).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+$/);
     }
   });
@@ -295,9 +300,12 @@ describe("worker bridge boundary (persistence only)", () => {
   const WORKER_ROUTE = /["'`]\/worker(s)?(\/|["'`])/;
   const OPENER_IMPLEMENTATION = /\bopen\s*\(\s*sealed|create\w*CredentialOpener|:\s*CredentialOpener\s*=/;
 
-  it("has no commercial worker application or worker protocol package yet", () => {
-    expect(existsSync(join(REPO_ROOT, "apps", "commercial-worker"))).toBe(false);
-    expect(existsSync(join(REPO_ROOT, "packages", "commercial-worker-protocol"))).toBe(false);
+  it("never imports the separate commercial worker (R44B6I); shares only the protocol package (R44B6I1)", () => {
+    expect(existsSync(join(REPO_ROOT, "apps", "commercial-worker", "package.json"))).toBe(true);
+    const WORKER_APP = /commercial-worker(?!-protocol)/;
+    expect(sources.filter(({ text }) => WORKER_APP.test(text)).map(({ path }) => path)).toEqual([]);
+    expect(read(join(APP_ROOT, "package.json"))).not.toMatch(WORKER_APP);
+    expect(existsSync(join(REPO_ROOT, "packages", "commercial-worker-protocol", "package.json"))).toBe(true);
   });
 
   it("exposes no worker route and implements no credential opener", () => {
@@ -321,8 +329,10 @@ describe("worker authentication boundary (seam only)", () => {
       .filter(({ path, text }) => !path.startsWith("src/workerAuthentication/") && /workerAuthentication\//.test(text))
       .map(({ path }) => path);
     expect(importers.sort()).toEqual(["src/workerControl/workerControlApplication.ts", "src/workerControl/workerSecurityEvents.ts"]);
-    expect(read(join(SRC_ROOT, "runCommercialApiProcess.ts"))).not.toMatch(/worker/i);
-    expect(read(join(SRC_ROOT, "main.ts"))).not.toMatch(/worker/i);
+    // The shared protocol package's name is the only "worker" text allowed here.
+    const withoutProtocol = (text: string) => text.replaceAll('"commercial-worker-protocol"', '""');
+    expect(withoutProtocol(read(join(SRC_ROOT, "runCommercialApiProcess.ts")))).not.toMatch(/worker/i);
+    expect(withoutProtocol(read(join(SRC_ROOT, "main.ts")))).not.toMatch(/worker/i);
   });
 
   it("reads no worker identity from a query string, cookie or custom header", () => {
@@ -398,5 +408,63 @@ describe("worker-control boundary (lease foundation only)", () => {
     for (const { text } of workerControl) {
       expect(code(text)).not.toMatch(/Access-Control-Allow|cookie|Set-Cookie|session/i);
     }
+  });
+});
+
+// R44B6I1: the provider-credential contract lives in one shared, pure package
+// that both commercial-api and commercial-worker import; neither app imports
+// the other.
+describe("shared commercial-worker protocol package", () => {
+  const PROTOCOL_SRC = join(REPO_ROOT, "packages", "commercial-worker-protocol", "src");
+  const protocolFiles = listFiles(PROTOCOL_SRC);
+  const ESCAPE = FORBIDDEN.find(({ label: name }) => name === "repository escape")!.pattern;
+
+  it("is the only path out of the app, and the escape rule still catches anything else", () => {
+    expect(ESCAPE.test('"file:../../packages/commercial-worker-protocol"')).toBe(false);
+    expect(ESCAPE.test('import "../../commercial-worker/src/workerControlClient.js";')).toBe(true);
+    expect(ESCAPE.test('import "../../packages/other-package/index.js";')).toBe(true);
+  });
+
+  it("contains exactly the pure credential contract, importing only itself", () => {
+    expect(protocolFiles.map((path) => relative(PROTOCOL_SRC, path).split(sep).join("/")).sort()).toEqual([
+      "credentialContext.ts",
+      "credentialCrypto.ts",
+      "credentialCryptoError.ts",
+      "credentialInput.ts",
+      "index.ts",
+      "sealedEnvelope.ts",
+    ]);
+    for (const path of protocolFiles) {
+      const text = read(path);
+      for (const specifier of importSpecifiers(text)) {
+        if (specifier.startsWith("./")) {
+          expect(resolve(dirname(path), specifier).startsWith(PROTOCOL_SRC + sep)).toBe(true);
+        } else {
+          expect(specifier, path).toBe("node:never-imported");
+        }
+      }
+      expect(findViolations(text), path).toEqual([]);
+      expect(/process\.env|node:fs|node:http|node:net|createServer|createDecipheriv|setAuthTag|pg\b|kms/i.test(text.replace(/^\s*\/\/.*$/gm, "")), path).toBe(false);
+    }
+    const manifest = JSON.parse(read(join(REPO_ROOT, "packages", "commercial-worker-protocol", "package.json"))) as Record<string, unknown>;
+    expect(manifest.dependencies).toBeUndefined();
+    expect(manifest.private).toBe(true);
+  });
+
+  it("is the single authority for the envelope and context formats", () => {
+    const literal = /["']sealed-credential-v1["']|["']provider-credential-context-v1["']|function parseSealedEnvelope|function validateSealingContext/;
+    expect(existsSync(join(SRC_ROOT, "providerCredentials"))).toBe(false);
+    expect(sourceFiles.filter((path) => literal.test(read(path))).map(label)).toEqual([]);
+    const workerSrc = join(REPO_ROOT, "apps", "commercial-worker", "src");
+    expect(listFiles(workerSrc).filter((path) => literal.test(read(path))).map((path) => relative(REPO_ROOT, path))).toEqual([]);
+    expect(protocolFiles.filter((path) => literal.test(read(path))).map((path) => relative(PROTOCOL_SRC, path).split(sep).join("/")).sort()).toEqual([
+      "credentialContext.ts",
+      "sealedEnvelope.ts",
+    ]);
+  });
+
+  it("is imported by commercial-api source without any import of commercial-worker", () => {
+    expect(sourceFiles.filter((path) => importSpecifiers(read(path)).includes("commercial-worker-protocol")).length).toBeGreaterThan(0);
+    expect(sourceFiles.filter((path) => importSpecifiers(read(path)).some((specifier) => /commercial-worker(?!-protocol)/.test(specifier))).map(label)).toEqual([]);
   });
 });

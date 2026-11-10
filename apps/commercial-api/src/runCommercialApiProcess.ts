@@ -3,7 +3,7 @@ import { createCustomerApplication } from "./application/customerApplication.js"
 import { createProviderConnectionApplication } from "./application/providerConnectionApplication.js";
 import type { AuthenticationAdapter } from "./authentication/authenticationAdapter.js";
 import type { ProviderCapabilityRegistry } from "./providerConnections/providerCapabilityRegistry.js";
-import type { CredentialFingerprinter, CredentialSealer } from "./providerCredentials/credentialCrypto.js";
+import type { CredentialFingerprinter, CredentialSealer } from "commercial-worker-protocol";
 import { loadServerConfig, ServerConfigError, type ConfigEnvironment } from "./config.js";
 import type { ApplicationRouter } from "./createCommercialApiServer.js";
 import { MigrationError } from "./database/migrationError.js";

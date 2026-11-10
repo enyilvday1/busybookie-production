@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createProviderConnectionApplication } from "../../src/application/providerConnectionApplication.js";
 import type { TransactionalPool } from "../../src/database/runtimePool.js";
 import { MAX_CREDENTIAL_JSON_BODY_BYTES, MAX_JSON_BODY_BYTES } from "../../src/http/requestBody.js";
-import { MAX_CREDENTIAL_BYTES } from "../../src/providerCredentials/credentialInput.js";
+import { MAX_CREDENTIAL_BYTES } from "commercial-worker-protocol";
 import { ProviderConnectionError } from "../../src/providerConnections/providerConnectionError.js";
 import { validateCreateInput, validateRotateInput } from "../../src/providerConnections/providerConnectionService.js";
 import { runCommercialApiProcess, type ShutdownSignal } from "../../src/runCommercialApiProcess.js";

@@ -1,6 +1,6 @@
 import type { TransactionalPool } from "../database/runtimePool.js";
-import { PROVIDER_CREDENTIAL_PURPOSE, validateSealingContext, type CredentialSealingContext } from "../providerCredentials/credentialContext.js";
-import { parseSealedEnvelope, type SealedCredentialEnvelope } from "../providerCredentials/sealedEnvelope.js";
+import { PROVIDER_CREDENTIAL_PURPOSE, validateSealingContext, type CredentialSealingContext } from "commercial-worker-protocol";
+import { parseSealedEnvelope, type SealedCredentialEnvelope } from "commercial-worker-protocol";
 import {
   audit,
   lockCurrentLease,

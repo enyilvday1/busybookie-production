@@ -1,11 +1,11 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { RuntimeClient, TransactionalPool } from "../database/runtimePool.js";
-import { MAX_CREDENTIAL_VERSION, PROVIDER_CREDENTIAL_PURPOSE } from "../providerCredentials/credentialContext.js";
-import type { CredentialFingerprint, CredentialFingerprinter, CredentialSealer } from "../providerCredentials/credentialCrypto.js";
-import { CredentialCryptoError } from "../providerCredentials/credentialCryptoError.js";
-import { credentialBytes } from "../providerCredentials/credentialInput.js";
-import type { SealedCredentialEnvelope } from "../providerCredentials/sealedEnvelope.js";
+import { MAX_CREDENTIAL_VERSION, PROVIDER_CREDENTIAL_PURPOSE } from "commercial-worker-protocol";
+import type { CredentialFingerprint, CredentialFingerprinter, CredentialSealer } from "commercial-worker-protocol";
+import { CredentialCryptoError } from "commercial-worker-protocol";
+import { credentialBytes } from "commercial-worker-protocol";
+import type { SealedCredentialEnvelope } from "commercial-worker-protocol";
 import { readCredentialObligations } from "./credentialObligations.js";
 import type { ProviderCapabilityRegistry } from "./providerCapabilityRegistry.js";
 import { ProviderConnectionError, type ProviderConnectionErrorCode } from "./providerConnectionError.js";

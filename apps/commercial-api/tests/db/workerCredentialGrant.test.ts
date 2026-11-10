@@ -6,7 +6,7 @@ import { loadRuntimeDatabaseConfig } from "../../src/database/runtimeDatabaseCon
 import { createRuntimePool, type RuntimeClient, type TransactionalPool } from "../../src/database/runtimePool.js";
 import { readCredentialObligations } from "../../src/providerConnections/credentialObligations.js";
 import { disconnectProviderConnection } from "../../src/providerConnections/providerConnectionService.js";
-import { PROVIDER_CREDENTIAL_PURPOSE } from "../../src/providerCredentials/credentialContext.js";
+import { PROVIDER_CREDENTIAL_PURPOSE } from "commercial-worker-protocol";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../../src/startCommercialApiServer.js";
 import { createWorkerControlApplication } from "../../src/workerControl/workerControlApplication.js";
 import type { WorkerSecurityEvent } from "../../src/workerControl/workerSecurityEvents.js";

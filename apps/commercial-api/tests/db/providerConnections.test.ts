@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { PROVIDER_CREDENTIAL_PURPOSE } from "../../src/providerCredentials/credentialContext.js";
+import { PROVIDER_CREDENTIAL_PURPOSE } from "commercial-worker-protocol";
 import { createTestCredentialFingerprinter, createTestCredentialSealer, generateTestKey } from "../support/testCredentialCrypto.js";
 import {
   expectSqlError,

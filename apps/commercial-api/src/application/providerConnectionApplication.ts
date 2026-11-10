@@ -9,7 +9,7 @@ import type { ApplicationRoute, ApplicationRouter } from "../createCommercialApi
 import type { TransactionalPool } from "../database/runtimePool.js";
 import { sendError, sendJson, type ErrorCode } from "../http/jsonResponse.js";
 import { MAX_CREDENTIAL_JSON_BODY_BYTES, readEmptyBody, readJsonObjectBody, RequestBodyError } from "../http/requestBody.js";
-import type { CredentialFingerprinter, CredentialSealer } from "../providerCredentials/credentialCrypto.js";
+import type { CredentialFingerprinter, CredentialSealer } from "commercial-worker-protocol";
 import type { ProviderCapabilityRegistry } from "../providerConnections/providerCapabilityRegistry.js";
 import { ProviderConnectionError } from "../providerConnections/providerConnectionError.js";
 import {

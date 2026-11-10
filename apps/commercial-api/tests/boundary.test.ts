@@ -354,20 +354,24 @@ describe("worker authentication boundary (seam only)", () => {
 });
 
 // R44B6G: worker-control leases only. The router lives in src/workerControl,
-// is never composed by the default process, and nothing in it can grant a
-// credential, enter SUBMITTING, read secret material or reach a provider.
+// is never composed by the default process, and nothing in it can decrypt,
+// read fingerprints, enter SUBMITTED or reach a provider. R44B6H confines the
+// credential grant and R44B6J confines entering SUBMITTING to one service each.
 describe("worker-control boundary (lease foundation only)", () => {
   const sources = sourceFiles.map((path) => ({ path: label(path), text: read(path) }));
   const code = (text: string) => text.replace(/^\s*\/\/.*$/gm, "");
   const workerControl = sources.filter(({ path }) => path.startsWith("src/workerControl/"));
-  // Never anywhere in worker-control (R44B6G, kept by R44B6H): SUBMITTING,
+  // Never anywhere in worker-control (R44B6G, narrowed by R44B6J): SUBMITTED,
   // provider execution identity, fingerprints, decryption or an opener.
   const FORBIDDEN_IN_WORKER_CONTROL =
-    /'SUBMITTING'|state\s*=\s*'SUBMITT|fingerprint_|CredentialOpener\s*=|:\s*CredentialOpener|\.open\s*\(|createDecipheriv|provider_execution_id\s*=|submitting_at\s*=|submitted_at\s*=/i;
+    /'SUBMITTED'|state\s*=\s*'SUBMITTED|fingerprint_|CredentialOpener\s*=|:\s*CredentialOpener|\.open\s*\(|createDecipheriv|provider_execution_id\s*=|submitted_at\s*=/i;
   // R44B6H: writing the grant timestamp and reading the sealed envelope are
   // confined to the credential-grant service.
   const GRANT_ONLY = /SET\s[^;`]*credential_granted_at\s*=|sealed_credential/i;
   const GRANT_SERVICE = "src/workerControl/workerCredentialGrantService.ts";
+  // R44B6J: entering SUBMITTING is confined to the fenced acknowledgement service.
+  const SUBMITTING_ONLY = /'SUBMITTING'|submitting_at\s*=/i;
+  const SUBMITTING_SERVICE = "src/workerControl/workerSubmittingService.ts";
 
   it("keeps worker-control routes inside src/workerControl and out of the default process", () => {
     expect(workerControl.map(({ path }) => path).sort()).toEqual([
@@ -376,6 +380,7 @@ describe("worker-control boundary (lease foundation only)", () => {
       "src/workerControl/workerLeasePolicy.ts",
       "src/workerControl/workerLeaseService.ts",
       "src/workerControl/workerSecurityEvents.ts",
+      "src/workerControl/workerSubmittingService.ts",
     ]);
     const routeOwners = sources.filter(({ text }) => /worker-control/.test(code(text))).map(({ path }) => path);
     expect(routeOwners).toEqual(["src/workerControl/workerControlApplication.ts"]);
@@ -383,16 +388,30 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect(importers).toEqual([]);
   });
 
-  it("cannot enter SUBMITTING, decrypt, read fingerprints or record a provider execution", () => {
+  it("cannot enter SUBMITTED, decrypt, read fingerprints or record a provider execution", () => {
     for (const { path, text } of workerControl) {
       expect({ path, violates: FORBIDDEN_IN_WORKER_CONTROL.test(code(text)) }).toEqual({ path, violates: false });
     }
     // Guard the guards.
-    expect("SET state = 'SUBMITTING'").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
-    expect("SET submitting_at = now()").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("SET state = 'SUBMITTED'").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("SET submitted_at = now()").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("SET provider_execution_id = $2").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
     expect("SELECT fingerprint_value FROM provider_credential_versions").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
     expect("const plaintext = await opener.open(envelope, context);").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
     expect("type CredentialSealingContext").not.toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("SET state = 'SUBMITTING', submitting_at = now()").not.toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+  });
+
+  it("confines entering SUBMITTING to the fenced acknowledgement service, which reads no secret material", () => {
+    const offenders = workerControl.filter(({ path, text }) => path !== SUBMITTING_SERVICE && SUBMITTING_ONLY.test(code(text))).map(({ path }) => path);
+    expect(offenders).toEqual([]);
+    const service = code(read(join(APP_ROOT, SUBMITTING_SERVICE)));
+    expect(SUBMITTING_ONLY.test(service)).toBe(true);
+    expect(GRANT_ONLY.test(service)).toBe(false);
+    expect(/sealed|envelope|recovery_expires_at\s*=|credential_granted_at\s*=/i.test(service.replace(/\/\/.*$/gm, ""))).toBe(false);
+    // Guard the guards.
+    expect("SET state = 'SUBMITTING'").toMatch(SUBMITTING_ONLY);
+    expect('acceptedStates = ["LEASED"]').not.toMatch(SUBMITTING_ONLY);
   });
 
   it("confines the grant timestamp write and the sealed-envelope read to the credential-grant service", () => {

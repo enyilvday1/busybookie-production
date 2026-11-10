@@ -19,7 +19,8 @@ export type WorkerSecurityEventType =
   | "WORKER_ORIGIN_REJECTED"
   | "WORKER_LEASE_REJECTED"
   | "WORKER_FENCING_REJECTED"
-  | "WORKER_CREDENTIAL_GRANT_REJECTED";
+  | "WORKER_CREDENTIAL_GRANT_REJECTED"
+  | "WORKER_SUBMITTING_REJECTED";
 
 export type WorkerLeaseRejectionReason =
   // The authenticated principal is not ACTIVE when re-checked in the transaction.
@@ -40,7 +41,11 @@ export type WorkerLeaseRejectionReason =
   | "AUTHORIZATION_INCONSISTENT"
   // Invariant failure: an already-granted exact version is DESTROYED while its
   // LEASED+grant retention obligation is still open.
-  | "GRANTED_VERSION_DESTROYED";
+  | "GRANTED_VERSION_DESTROYED"
+  // SUBMITTING barrier only: no credential was granted under this lease.
+  | "CREDENTIAL_NOT_GRANTED"
+  // Invariant failure: an already-SUBMITTING attempt's exact version is DESTROYED.
+  | "SUBMITTING_VERSION_DESTROYED";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 

@@ -266,13 +266,22 @@ export type LockedLease = Readonly<{
   fencingCounter: number;
   credentialGrantedAt: Date | null;
   credentialGranted: boolean;
+  state: string;
+  submittingAt: Date | null;
 }>;
 
-// Locks the attempt and proves the caller holds its current lease: LEASED,
-// this worker, this exact fencing generation, this token, not expired. Every
-// failure is the same LEASE_REJECTED to the caller; the reason is only for
-// the security log.
-export async function lockCurrentLease(client: RuntimeClient, context: WorkerControlContext, attemptId: string, proof: LeaseProof): Promise<LockedLease> {
+// Locks the attempt and proves the caller holds its current lease: in an
+// accepted state (LEASED unless the caller says otherwise; the SUBMITTING
+// barrier also accepts SUBMITTING to replay its acknowledgement), this worker,
+// this exact fencing generation, this token, not expired. Every failure is the
+// same LEASE_REJECTED to the caller; the reason is only for the security log.
+export async function lockCurrentLease(
+  client: RuntimeClient,
+  context: WorkerControlContext,
+  attemptId: string,
+  proof: LeaseProof,
+  acceptedStates: readonly string[] = ["LEASED"],
+): Promise<LockedLease> {
   const result = await client.query<{
     id: string;
     account_id: string;
@@ -288,17 +297,18 @@ export async function lockCurrentLease(client: RuntimeClient, context: WorkerCon
     lease_fencing_counter: string;
     expired: boolean | null;
     credential_granted_at: Date | null;
+    submitting_at: Date | null;
   }>(
     `SELECT id, account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider,
             provider_credential_version_id, state, lease_worker_principal_id, lease_token_sha256,
-            lease_fencing_counter, lease_expires_at <= now() AS expired, credential_granted_at
+            lease_fencing_counter, lease_expires_at <= now() AS expired, credential_granted_at, submitting_at
        FROM execution_attempts WHERE id = $1 FOR UPDATE`,
     [attemptId],
   );
   const row = result.rows[0];
   const reject = (reason: WorkerLeaseRejectionReason) => new WorkerLeaseError("LEASE_REJECTED", reason);
   if (row === undefined) throw reject("UNKNOWN_ATTEMPT");
-  if (row.state !== "LEASED") throw reject("NOT_LEASED");
+  if (!acceptedStates.includes(row.state)) throw reject("NOT_LEASED");
   if (row.lease_worker_principal_id !== context.workerPrincipalId) throw reject("OTHER_WORKER");
   if (Number(row.lease_fencing_counter) !== proof.fencingCounter) throw reject("FENCING_MISMATCH");
   if (!tokenMatches(proof.leaseToken, row.lease_token_sha256)) throw reject("TOKEN_MISMATCH");
@@ -315,6 +325,8 @@ export async function lockCurrentLease(client: RuntimeClient, context: WorkerCon
     fencingCounter: Number(row.lease_fencing_counter),
     credentialGrantedAt: row.credential_granted_at,
     credentialGranted: row.credential_granted_at !== null,
+    state: row.state,
+    submittingAt: row.submitting_at,
   };
 }
 

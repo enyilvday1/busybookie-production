@@ -20,6 +20,7 @@ import {
   type WorkerLease,
 } from "./workerLeaseService.js";
 import { grantWorkerCredential } from "./workerCredentialGrantService.js";
+import { acknowledgeWorkerSubmitting } from "./workerSubmittingService.js";
 import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecurityEvents.js";
 
 // Private worker-control routes, machine-to-machine only:
@@ -28,6 +29,7 @@ import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecur
 //   POST /worker-control/v1/attempts/:attemptId/heartbeat         renew the current lease
 //   POST /worker-control/v1/attempts/:attemptId/release           return a pre-grant lease
 //   POST /worker-control/v1/attempts/:attemptId/credential-grant  the exact sealed credential (R44B6H)
+//   POST /worker-control/v1/attempts/:attemptId/submitting        fenced SUBMITTING acknowledgement (R44B6J)
 //
 // The router exists only when a WorkerAuthenticationAdapter, a
 // WorkerSecurityEventSink and the runtime pool are injected in code; the
@@ -40,8 +42,9 @@ import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecur
 // unavailable -> 503. Every lease or fencing failure is the same 409.
 //
 // The credential grant returns only the sealed envelope and its opening
-// context; nothing here decrypts, enters SUBMITTING or calls a provider: the
-// highest attempt state these routes can reach is LEASED.
+// context; nothing here decrypts or calls a provider. The SUBMITTING
+// acknowledgement is the control-plane point of no return before a provider
+// call: the highest attempt state these routes can reach is SUBMITTING.
 
 export type WorkerControlApplicationOptions = Readonly<{
   authentication: WorkerAuthenticationAdapter;
@@ -52,7 +55,7 @@ export type WorkerControlApplicationOptions = Readonly<{
 
 export const WORKER_CONTROL_PREFIX = "/worker-control/v1";
 const LEASES_PATH = `${WORKER_CONTROL_PREFIX}/leases`;
-const ATTEMPT_ACTION = /^\/worker-control\/v1\/attempts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(heartbeat|release|credential-grant)$/;
+const ATTEMPT_ACTION = /^\/worker-control\/v1\/attempts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(heartbeat|release|credential-grant|submitting)$/;
 const PROOF_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken"]);
 
 class HttpFailure extends Error {
@@ -109,9 +112,10 @@ export function createWorkerControlApplication(options: WorkerControlApplication
     (
       handler: (request: IncomingMessage, response: ServerResponse, context: WorkerControlContext, attemptId: string | null) => Promise<void>,
       attemptId: string | null,
-      // Credential-grant refusals are logged as their own event type; the
-      // response stays the same uniform 409 (or 401) as every other route.
-      credentialGrant = false,
+      // Credential-grant and SUBMITTING refusals are logged as their own event
+      // type; the response stays the same uniform 409 (or 401) as every other
+      // route.
+      rejectionEvent: "WORKER_CREDENTIAL_GRANT_REJECTED" | "WORKER_SUBMITTING_REJECTED" | null = null,
     ) =>
     async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
       const correlationId = randomUUID();
@@ -145,14 +149,14 @@ export function createWorkerControlApplication(options: WorkerControlApplication
         } catch (error) {
           if (!(error instanceof WorkerLeaseError)) throw error;
           if (error.code === "WORKER_NOT_ACTIVE") {
-            const type = credentialGrant ? "WORKER_CREDENTIAL_GRANT_REJECTED" : "WORKER_LEASE_REJECTED";
+            const type = rejectionEvent ?? "WORKER_LEASE_REJECTED";
             await record({ type, reason: "WORKER_NOT_ACTIVE", correlationId, workerPrincipalId, ...attempt });
             throw new HttpFailure(401, "AUTHENTICATION_REQUIRED");
           }
           if (error.code === "LEASE_REJECTED") {
             const reason = error.reason ?? "NOT_LEASED";
-            const type = credentialGrant
-              ? "WORKER_CREDENTIAL_GRANT_REJECTED"
+            const type = rejectionEvent !== null
+              ? rejectionEvent
               : reason === "FENCING_MISMATCH" || reason === "TOKEN_MISMATCH"
                 ? "WORKER_FENCING_REJECTED"
                 : "WORKER_LEASE_REJECTED";
@@ -214,7 +218,24 @@ export function createWorkerControlApplication(options: WorkerControlApplication
         });
       },
       attemptId,
-      true,
+      "WORKER_CREDENTIAL_GRANT_REJECTED",
+    );
+
+  // The fenced acknowledgement a worker must receive before any provider call.
+  const submitting = (attemptId: string) =>
+    route(
+      async (request, response, context) => {
+        const proof = parseProof(await readJsonObjectBody(request, PROOF_MEMBERS));
+        const acknowledgement = await acknowledgeWorkerSubmitting(pool, context, attemptId, proof);
+        sendJson(response, 200, {
+          executionAttemptId: acknowledgement.executionAttemptId,
+          fencingCounter: acknowledgement.fencingCounter,
+          state: acknowledgement.state,
+          submittingAt: acknowledgement.submittingAt.toISOString(),
+        });
+      },
+      attemptId,
+      "WORKER_SUBMITTING_REJECTED",
     );
 
   const leasesRoute: ApplicationRoute = Object.freeze({ methods: ["POST"], handle: lease });
@@ -224,8 +245,15 @@ export function createWorkerControlApplication(options: WorkerControlApplication
       if (pathname === LEASES_PATH) return leasesRoute;
       const match = ATTEMPT_ACTION.exec(pathname);
       if (match === null) return null;
-      const [, attemptId, action] = match as unknown as [string, string, "heartbeat" | "release" | "credential-grant"];
-      const handle = action === "heartbeat" ? heartbeat(attemptId) : action === "release" ? release(attemptId) : credentialGrant(attemptId);
+      const [, attemptId, action] = match as unknown as [string, string, "heartbeat" | "release" | "credential-grant" | "submitting"];
+      const handle =
+        action === "heartbeat"
+          ? heartbeat(attemptId)
+          : action === "release"
+            ? release(attemptId)
+            : action === "credential-grant"
+              ? credentialGrant(attemptId)
+              : submitting(attemptId);
       return Object.freeze({ methods: ["POST"], handle });
     },
   });

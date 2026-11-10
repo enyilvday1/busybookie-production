@@ -9,6 +9,14 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   `docs/commercial/COMMERCIAL_DOMAIN_PERSISTENCE_ARCHITECTURE.md` and
   `docs/commercial/COMMERCIAL_PROVIDER_CONNECTION_ARCHITECTURE.md`
 - **Source:** R44B6A commercial-to-private-engine bridge discovery.
+- **Revisions:** R44B6D1 (definitive provider rejection and provider
+  execution ID scope); R44B6K (submission lifecycle and durable
+  provider-acceptance journal, revised at `e18b59b521881b9c78fffe5bc28e32196a3db375`:
+  sections 10, 12, 15 to 18, 23, 24, 26, 27, 29 to 31, 36 and 37);
+  R44B6K1 (token-less recovery only from `OUTCOME_UNKNOWN`, the migration
+  0005 contract, the exact `recordSha256` preimage, the provider-create
+  retry prohibition and cross-reference corrections: introduction, sections
+  12, 13, 16 to 18, 26, 30, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -20,7 +28,7 @@ PUBLIC_INBOUND_ENGINE_PORT_REQUIRED=NO
 decisions only. It does not authorise migrations, tables, routes, packages,
 worker code, key-management integration, object storage, provider calls,
 credential validation calls or generation. Each implementation step in
-section 31 requires its own explicitly authorised gate.
+section 36 requires its own explicitly authorised gate.
 
 ### How to read this document
 
@@ -365,7 +373,25 @@ Conceptual operations:
 6. report completion;
 7. report closed failure.
 
-Exact URL spelling is an implementation detail.
+Exact URL spelling is an implementation detail, except where a later
+revision locks it.
+
+**Locked decision (revision R44B6K).** The submission routes, all `POST`
+under `/worker-control/v1`, all with exact closed JSON bodies:
+
+| Route | Body | Status |
+|---|---|---|
+| `leases` | none | Implemented (R44B6G). |
+| `attempts/:attemptId/heartbeat` | `{fencingCounter, leaseToken}` | Implemented for `LEASED`; extended to `SUBMITTING` and leased `SUBMITTED` (section 12). |
+| `attempts/:attemptId/release` | `{fencingCounter, leaseToken}` | Implemented; `LEASED` without a grant only. |
+| `attempts/:attemptId/credential-grant` | `{fencingCounter, leaseToken}` | Implemented (R44B6H). |
+| `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
+| `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Future (section 18). |
+| `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Future (section 18). |
+| `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18). |
+
+No route accepts a client-supplied timestamp, Account, connection,
+credential version, provider or job identifier; the server derives them.
 
 - Customer authentication never authorises worker routes.
 - Worker authentication never authorises customer routes.
@@ -428,6 +454,115 @@ The mechanism guarantees:
   same provider execution ID with the original credential version. It never
   permits a new submission for that attempt.
 
+### Lease during SUBMITTING and SUBMITTED
+
+**Locked decision (revision R44B6K).** The lease that obtained provider-call
+authority stays active through `SUBMITTING`. The worker that received the
+`SUBMITTING` acknowledgement keeps owning the attempt while it performs the
+provider create call.
+
+- **Heartbeat in `SUBMITTING`: allowed.** It requires the same current proof
+  as every lease-scoped mutation: the authenticated worker principal, the
+  attempt ID, the matching lease token and the exact current fencing counter,
+  with an unexpired lease.
+- A heartbeat writes only `heartbeat_at`, `lease_expires_at` and
+  `updated_at`. It never changes the fencing counter, the token verifier, the
+  principal or the state. Migration 0004 already forbids a new principal or
+  token while `SUBMITTING`.
+- **Heartbeat in `SUBMITTED`: allowed only while that attempt still carries
+  the lease** that entered `SUBMITTED` through the live route (section 18), so
+  the same worker can continue polling under fencing. It is forbidden in
+  `OUTCOME_UNKNOWN` and in every terminal state, which carry no lease.
+- **Release from `SUBMITTING`: forbidden.** A voluntary release would hand
+  back provider-call authority after it may already have been used. Release
+  remains possible only for `LEASED` without a credential grant (R44B6G and
+  R44B6H). Release of a `SUBMITTED` lease is also forbidden in v1. Handing
+  recovery to another worker belongs to the recovery-lease gate (section 36).
+- A heartbeat failure never authorises the worker to abandon a provider call
+  that is already in flight. The worker finishes the call, journals any
+  acceptance (section 17) and reports through the route that its remaining
+  authority permits (section 18).
+- The worker heartbeats at most every third of the server lease duration
+  (currently 40 seconds of a 120-second lease). The worker never chooses the
+  duration.
+
+```text
+SUBMITTING_HEARTBEAT_ALLOWED=YES
+SUBMITTING_HEARTBEAT_CHANGES_FENCING=NO
+SUBMITTING_RELEASE_ALLOWED=NO
+```
+
+### Expired SUBMITTING lease
+
+**Locked decision (revision R44B6K).** The published semantic is kept:
+
+```text
+SUBMITTING + lease expiry -> OUTCOME_UNKNOWN
+```
+
+An expired `SUBMITTING` attempt never becomes `QUEUED`, is never leased by
+another worker for another submission, and never becomes
+`FAILED_BEFORE_SUBMISSION` automatically. Only separate authoritative
+evidence that no provider side effect exists could justify
+`FAILED_BEFORE_SUBMISSION` (section 14), and lease expiry is never such
+evidence.
+
+- **Owner.** Only the control plane performs this transition. A worker
+  cannot be trusted to be alive to report its own expiry.
+- **Mechanism (revised R44B6K1).** One sweep function, invoked in three
+  places with identical semantics:
+  - opportunistically inside the lease-acquisition transaction, beside the
+    existing pre-grant reclaim and with the same bounded batch;
+  - scoped to the single named attempt, as its own committed transaction at
+    the start of every `acceptance-recovery` request (section 18). A worker
+    that is blocked by an unresolved journal requests no leases, so this
+    invocation prevents a deadlock;
+  - by a future explicit reconciliation operation.
+
+  Every invocation applies the same server-clock rule,
+  `lease_expires_at <= now()`. None shortens, ends early or otherwise
+  bypasses a live lease, whatever the caller reports about a restart.
+- **Transaction.** READ COMMITTED. Candidate rows are selected with
+  `state = 'SUBMITTING' AND lease_expires_at <= now()`,
+  `FOR UPDATE SKIP LOCKED`, in a bounded batch. Each row is updated with:
+  - `state = 'OUTCOME_UNKNOWN'`;
+  - `failure_code = 'WORKER_LEASE_EXPIRED_DURING_SUBMISSION'`;
+  - every current-lease field cleared, as migration 0004 requires for
+    `OUTCOME_UNKNOWN`;
+  - `updated_at = now()`.
+
+  `lease_fencing_counter`, `credential_granted_at`, `submitting_at` and
+  `submitting_worker_principal_id` (migration 0005, section 26) are kept.
+  The parent job moves `RUNNING -> NEEDS_ATTENTION`.
+- **Fencing.** Clearing the lease invalidates the old token. Every later
+  token-proven mutation by that worker is refused as `LEASE_REJECTED`.
+  Recovery of durable acceptance evidence then uses the acceptance-recovery
+  route (section 18), which is bound to the submitting principal and the
+  retained fencing counter, never to the cleared token.
+- **Duplicate sweepers.** `SKIP LOCKED` plus the state predicate in the
+  `UPDATE` means exactly one transaction converts a given attempt. A
+  concurrent or later sweeper finds the row locked, or no longer
+  `SUBMITTING`, and does nothing. A live-lease `submitted` transaction that
+  holds the row lock first wins, and the sweep then finds a `SUBMITTED` row
+  and does nothing. `acceptance-recovery` never transitions a `SUBMITTING`
+  row, so it cannot race the sweep for one.
+- **Audit.** One `execution_attempt.outcome_unknown` event per converted
+  attempt, with metadata `attemptNumber`, `fencingCounter`,
+  `workerPrincipalId` (the expired lease holder) and `failureCode`.
+- **No provider conclusion.** The failure code names only the control-plane
+  fact (the lease expired after the barrier). It asserts nothing about
+  provider acceptance.
+- The credential-retention and provider-recovery obligations stay open
+  (`OUTCOME_UNKNOWN`), so the exact credential version is retained.
+
+```text
+EXPIRED_SUBMITTING_OUTCOME=OUTCOME_UNKNOWN
+EXPIRED_SUBMITTING_AUTO_REQUEUED=NO
+EXPIRED_SUBMITTING_CAN_AUTO_RESUBMIT=NO
+EXPIRED_SUBMITTING_TRANSITION_OWNER=CONTROL_PLANE
+EXPIRED_SUBMITTING_FAILURE_CODE=WORKER_LEASE_EXPIRED_DURING_SUBMISSION
+```
+
 ---
 
 ## 13. Fencing
@@ -447,7 +582,15 @@ attempt.
 STALE_WORKER_MUTATION=DENIED
 ```
 
-Stale-worker rejections are recorded in the security log (section 25).
+Stale-worker rejections are recorded in the security log (section 30).
+
+The token-less `acceptance-recovery` route (section 18, revision R44B6K1) is
+not an exception to this rule:
+
+- it newly transitions only an `OUTCOME_UNKNOWN` attempt, which has no
+  lease left to be stale against;
+- it never acts on a `SUBMITTING` attempt, whose lease is still the
+  authority.
 
 ---
 
@@ -555,6 +698,53 @@ SUBMITTING_BARRIER_REQUIRED=YES
 PROVIDER_AUTOMATIC_RESUBMISSION_AFTER_SUBMITTING=NO
 ```
 
+### Core safety property
+
+**Locked decision (revision R44B6K).**
+
+> Once an attempt has entered `SUBMITTING`, BusyBookie never automatically
+> starts another provider submission for that same attempt unless it has
+> authoritative evidence that no accepted or outstanding provider-side effect
+> exists.
+
+An ambiguous crash, lease expiry or transport failure after `SUBMITTING`
+therefore never results in automatic resubmission. Nothing returns an attempt
+to a submission-capable state after `SUBMITTING` (migration 0004 enforces
+this). A further provider submission for the same job needs a new attempt,
+which the one-open-attempt-per-job index refuses while this attempt is
+`SUBMITTING`, `SUBMITTED` or `OUTCOME_UNKNOWN`. It also needs a new policy
+decision, never an automatic retry.
+
+### Provider-call ordering
+
+**Locked decision (revision R44B6K).** The exact worker ordering for one
+attempt:
+
+```text
+lease
+-> credential grant
+-> credential open (worker memory only)
+-> journal-root preflight (section 17)
+-> SUBMITTING acknowledgement
+-> heartbeat, as needed, throughout
+-> provider create call (exactly one)
+-> definitive provider acceptance
+-> acceptance journal record durably committed (section 17)
+-> acceptance handler resolves (section 18)
+-> report SUBMITTED (section 18)
+```
+
+- No provider call moves earlier than the committed `SUBMITTING`
+  acknowledgement.
+- No `SUBMITTED` report moves earlier than durable journal acceptance.
+- The journal-root preflight comes before `SUBMITTING`. A worker that cannot
+  currently journal must not create provider authority it could not record.
+
+```text
+PROVIDER_CALL_REQUIRES_COMMITTED_SUBMITTING=YES
+SUBMITTED_REPORT_REQUIRES_DURABLE_JOURNAL=YES
+```
+
 **Rationale.** Without a durable pre-call mark, a crash during the paid call
 is indistinguishable from a crash before it, and a retry could buy the same
 generation twice.
@@ -584,7 +774,74 @@ PROVIDER_SUBMISSION_PER_ATTEMPT_AUTOMATIC_RETRY=NO
 
 Provider effects are at most once per attempt, enforced by the `SUBMITTING`
 barrier. Any future use of provider idempotency requires separate research
-and a separate lock (section 28).
+and a separate lock (section 33).
+
+### Terminology
+
+**Locked decision (revision R44B6K).** BusyBookie never claims provider
+exactly-once execution. The precise guarantees are:
+
+- control-plane delivery to workers is at least once (section 11);
+- provider create is invoked **at most once per attempt by BusyBookie's
+  automatic behaviour**, after the `SUBMITTING` barrier;
+- ambiguous outcomes are never automatically resubmitted;
+- duplicate provider-side execution cannot be universally ruled out. A
+  provider may itself violate its own semantics, or a network path outside
+  BusyBookie's control may duplicate a request. BusyBookie neither detects
+  nor prevents that in v1.
+
+```text
+PROVIDER_EXACTLY_ONCE_CLAIMED=NO
+BUSYBOOKIE_AUTOMATIC_PROVIDER_CREATE_AT_MOST_ONCE_PER_ATTEMPT=YES
+```
+
+### Provider-create retry prohibition (revision R44B6K1)
+
+**Locked decision.** After a committed `SUBMITTING` acknowledgement,
+BusyBookie invokes provider create **at most once** for that attempt.
+"At most once per attempt" holds only because every layer beneath the
+adapter is also prevented from repeating the create.
+
+- **No adapter retry.** A provider-create adapter never retries the create
+  after any of the following:
+  - a timeout;
+  - a connection reset;
+  - an ambiguous HTTP failure (including an ambiguous 5xx);
+  - a malformed or uncertain response;
+  - any other condition in which acceptance cannot be ruled out.
+- **No SDK or HTTP retry.** Automatic retry is disabled for every
+  provider-create call. Each create client is constructed with its retry
+  setting at the "no retry" value, in code, never from configuration. The
+  repository already does this (section 16 repository fact):
+  - Runway `maxRetries: 0`;
+  - Veo `retryOptions.attempts: 1`;
+  - Google GenAI `maxRetries: 0`.
+
+  The commercial adapter asserts this setting. A boundary test pins it,
+  because changing it would void this invariant.
+- **Ambiguous result.** An ambiguous result after the create invocation
+  begins maps to `OUTCOME_UNKNOWN` (section 18). It never causes another
+  automatic create for the same attempt.
+- **Lifting the rule.** Only a later provider-specific architecture lock may
+  lift this rule. That lock must prove a provider-supported idempotency
+  mechanism that makes a retried create provably safe (section 33). Until
+  then, no idempotency key is relied on, even where an SDK offers one.
+
+This rule covers provider **create** only. The following are separate
+operations with their own idempotent or recoverable contracts, and are
+never a retried create:
+
+- retrying a control-plane acknowledgement (`submitting`, `submitted`,
+  `acceptance-recovery`, `submission-failed` replays);
+- polling or retrieving an already-known provider execution;
+- recovering or downloading output.
+
+```text
+PROVIDER_CREATE_AUTOMATIC_TRANSPORT_RETRY=NO
+PROVIDER_CREATE_SDK_RETRY_DISABLED=YES
+AMBIGUOUS_PROVIDER_CREATE_RESULT=OUTCOME_UNKNOWN
+AMBIGUOUS_PROVIDER_CREATE_AUTO_RESUBMIT=NO
+```
 
 ---
 
@@ -599,29 +856,359 @@ WORKER_LOCAL_ACCEPTANCE_JOURNAL_REQUIRED=YES
 The worker keeps a small local durable journal for the ambiguity window
 around provider acceptance. It does not rely on volatile memory.
 
-Before the submission-accepted handler resolves, the journal records at
-minimum:
+### Purpose
 
-- job ID;
-- attempt ID;
-- provider;
-- exact credential version ID;
-- provider execution ID;
-- accepted timestamp;
-- fencing generation;
-- correlation identity where needed.
+The journal closes this crash window:
 
-The entry is durably flushed before the worker treats acceptance as
-captured.
+```text
+provider accepted
+-> provider returned execution ID
+-> worker crashes or loses its lease before the control plane records SUBMITTED
+```
 
-The journal lives in worker-local durable storage under the worker's own
-private root. It is never in a customer media path, never at a
-browser-supplied path, and never contains credential plaintext, sealed
-credentials or fingerprints.
+Without durable local evidence, BusyBookie cannot distinguish "the provider
+accepted and the response or report was lost" from "the provider did not
+accept". The journal records the accepted provider identity before the
+acceptance handler is considered complete (section 18). A journal record
+only ever lets the worker report the **same** provider execution ID. It never
+authorises a provider create call.
 
-**Deferred.** Journal technology. Candidates are an append-only file journal
-with fsync, or SQLite if separately approved. No dependency is added by this
-document.
+```text
+PROVIDER_ACCEPTANCE_REQUIRES_DURABLE_JOURNAL=YES
+VALID_JOURNAL_CAN_AUTHORIZE_SECOND_PROVIDER_CREATE=NO
+```
+
+### Technology
+
+**Locked decision (revision R44B6K).** The journal is **one immutable JSON
+record per attempt**, published by an exclusive hard link from a fully
+written, fsynced temporary file in the same directory. It adds no
+dependency.
+
+| Option | Assessment |
+|---|---|
+| One immutable JSON record per attempt | **Chosen.** Atomic creation by exclusive link; no in-place mutation, so no torn update of earlier evidence; deterministic lookup by filename; idempotent replay by byte comparison; matches the engine's proven immutable-record publication (`persistGoogleGenAiSingleShotCompletion`, `editorialGovernanceStore`). |
+| Append-only JSON Lines | Rejected. Concurrent records share one file, so a torn tail can hide or corrupt the previous entry; lookup needs a scan; deletion needs compaction, which is a rewrite. |
+| SQLite | Rejected for v1. New native dependency and a second storage engine for a few records per day at concurrency 1. Its durability depends on journal-mode and sync pragmas that would themselves need locking. |
+| Engine `createExecutionSubmission` record writer | Rejected for reuse. It writes with `wx` and publishes with `copyFile(COPYFILE_EXCL)` **without any fsync**, so it does not meet this durability requirement. It also stores prompts and absolute paths. |
+
+The implementation reuses the pattern of the engine's existing fsync-and-link
+publication. It does not import engine modules, because the worker stays
+behind the boundary of section 2. The exFAT direct-write fallback in
+`persistGoogleGenAiSingleShotCompletion` is **not** adopted: a directly
+written final file can be observed torn after a crash.
+
+```text
+ACCEPTANCE_JOURNAL_TECHNOLOGY=IMMUTABLE_JSON_RECORD_PER_ATTEMPT
+ACCEPTANCE_JOURNAL_NEW_DEPENDENCY=NO
+JOURNAL_RECORD_IMMUTABLE=YES
+```
+
+### Location and layout
+
+**Locked decision (revision R44B6K).** The journal lives under a private,
+worker-owned **state root**. The worker composition receives it as an
+explicit configuration value. Deployment may supply it, for example as
+`COMMERCIAL_WORKER_STATE_ROOT`. No machine path is fixed by this document.
+
+The state root must be:
+
+- an absolute path on a local fixed volume that supports hard links;
+- not a network filesystem;
+- not exFAT or FAT. The worker probes link support at startup and refuses
+  to start on an unsuitable volume;
+- outside every Git working tree;
+- outside the BusyBookie media root and its episode evidence;
+- outside `apps/commercial-worker/src`;
+- never served over HTTP;
+- owner-only: POSIX `0700` directories and `0600` files, or the equivalent
+  owner-only ACL on Windows.
+
+Logical layout:
+
+```text
+<worker-state-root>/
+  acceptance-journal/
+    v1/
+      <executionAttemptId>.json                  published, immutable record
+      <executionAttemptId>.<32 hex>.tmp          in-flight temporary (same directory)
+    quarantine/
+      <name>                                     operator-moved evidence (section 17, corruption)
+```
+
+`<executionAttemptId>` is the canonical lowercase UUID. The directory holds
+nothing else. Any other entry fails the startup scan closed.
+
+### Record schema
+
+**Locked decision (revision R44B6K).** Format `v1`: a closed JSON object
+with exactly these members, serialised canonically. Members appear in the
+order below, with no insignificant whitespace, UTF-8 encoding and one
+trailing LF.
+
+| Member | Value |
+|---|---|
+| `format` | The literal `"busybookie.commercial-worker.acceptance/v1"`. |
+| `executionAttemptId` | Canonical lowercase UUID; equals the filename stem. |
+| `executionJobId` | Canonical lowercase UUID, from the lease. |
+| `accountId` | Canonical lowercase UUID, from the credential grant's opening context. |
+| `attemptNumber` | Integer 1 to 2^53-1, from the lease. |
+| `fencingCounter` | Integer 1 to 2^53-1; the generation that received the `SUBMITTING` acknowledgement. |
+| `provider` | `^[A-Z][A-Z0-9_]{0,31}$`; equals the lease provider and the acceptance provider. |
+| `generationRequestSha256` | 64 lowercase hex, from the lease. |
+| `submittingAt` | ISO-8601 UTC with milliseconds, as acknowledged by the control plane. |
+| `providerExecutionId` | Opaque, 1 to 256 visible ASCII characters (`0x21`-`0x7e`), never containing `://`: the migration 0004 constraint. |
+| `providerAcceptedAt` | ISO-8601 UTC with milliseconds; the worker clock when acceptance was observed. Informational only. |
+| `recordedAt` | ISO-8601 UTC with milliseconds; the worker clock when the record was serialised. Informational only. |
+| `recordSha256` | 64 lowercase hex SHA-256 of the digest preimage defined below. It is never part of its own preimage. |
+
+### Canonical bytes and `recordSha256` (revision R44B6K1)
+
+**Locked decision.** Every string value is ASCII; the schema admits nothing
+else. Canonical serialisation of a member list is exactly:
+
+- `{`;
+- then, for each member in the order of the table above, separated by a
+  single `,`: the ECMAScript `JSON.stringify` of the member name, then `:`,
+  then the value;
+- then `}`.
+
+Values are serialised as follows:
+
+- a string is the ECMAScript `JSON.stringify` of the string, which escapes
+  `"` and `\`;
+- an integer is the ECMAScript `JSON.stringify` of the safe integer: plain
+  decimal, with no sign, exponent, fraction or leading zero.
+
+There is no whitespace anywhere.
+
+1. **Preimage.** The canonical serialisation of the first twelve members,
+   `format` through `recordedAt`, in table order. `recordSha256` is
+   excluded. There is no trailing LF.
+2. **Digest.** SHA-256 over exactly those UTF-8 bytes, hence ASCII bytes,
+   encoded as 64 lowercase hexadecimal characters.
+3. **Stored file.** The canonical serialisation of all thirteen members, with
+   `recordSha256` last and set to that digest, followed by exactly one LF.
+   Equivalently, the preimage with its closing `}` replaced by
+   `,"recordSha256":"<digest>"}`, followed by LF.
+4. **Read.** The file must:
+   - be ASCII and end in exactly one LF;
+   - parse as one JSON object that passes the closed schema;
+   - re-serialise canonically, all thirteen members plus LF, to bytes
+     identical to the file;
+   - have its digest, recomputed from the same twelve-member preimage, equal
+     to the stored `recordSha256`.
+
+   Any difference makes the record corrupt (`ACCEPTANCE_JOURNAL_CORRUPT`).
+   No normalisation, alternate key order, alternate escaping or alternate
+   number form is accepted.
+
+**Repository fact.** The engine's own canonical JSON
+(`canonicalCharacterIdentityJson`, byte-compatible with the editorial
+canonicaliser) sorts keys. It is not adopted here, for two reasons:
+
+- a closed record with a fixed, documented member order is equally
+  deterministic;
+- the worker may not import engine modules (section 2).
+
+The fixed order is the contract. A parity of algorithms is not.
+
+```text
+JOURNAL_RECORD_SHA256_PREIMAGE_EXCLUDES_RECORD_SHA256=YES
+JOURNAL_RECORD_SHA256_CANONICAL_UTF8=YES
+```
+
+Identity binding:
+
+- Every identity member comes from the immutable lease, grant and
+  `SUBMITTING` acknowledgement of the attempt that made the call. None is
+  derived from mutable current state.
+- The record never grants authority. The control plane re-derives Account,
+  provider, credential version and job from its own immutable rows, and
+  checks the reported values against them (section 18).
+
+**Credential version.** The exact credential version is **omitted**. It is
+immutable provenance of the attempt row (migration 0004 trigger), the control
+plane derives it for every recovery grant, and the worker never chooses it.
+Repeating it locally adds no recovery capability. It would only add a second
+copy that could disagree. This revises the earlier minimum list of this
+section, which named the credential version ID.
+
+```text
+JOURNAL_CONTAINS_CREDENTIAL_VERSION=NO
+```
+
+### Secret exclusions
+
+A journal record never contains:
+
+- plaintext provider credential;
+- sealed credential envelope or its opening context;
+- credential fingerprint;
+- lease token or lease-token hash;
+- the worker machine credential or any bearer token;
+- KMS or key material;
+- provider request authorisation headers;
+- provider request or response bodies;
+- prompts, reference media, URLs or local paths.
+
+The closed schema makes any such member a validation failure.
+
+```text
+JOURNAL_CONTAINS_PLAINTEXT_CREDENTIAL=NO
+JOURNAL_CONTAINS_SEALED_CREDENTIAL=NO
+JOURNAL_CONTAINS_LEASE_TOKEN=NO
+```
+
+### Provider execution ID
+
+The provider execution ID is opaque:
+
+- no URL, format or global-uniqueness assumption;
+- control-plane uniqueness stays Account plus provider plus ID (section 26);
+- no normalisation: an ID that does not already satisfy the schema is not
+  trimmed or rewritten, and the acceptance is handled as invalid (section
+  18);
+- once published, a record's ID is never changed, replaced or re-derived.
+
+### Write algorithm
+
+**Locked decision (revision R44B6K).**
+
+1. Validate the acceptance and build the record. Compute `recordSha256`
+   from the twelve-member preimage, then serialise the stored file bytes
+   (section 17, canonical bytes).
+2. Create `<attemptId>.<32 random hex>.tmp` in `acceptance-journal/v1/`.
+   Use exclusive creation (`wx`: `O_CREAT|O_EXCL`), owner-only mode.
+3. Write all bytes, call `FileHandle.sync()` (fsync / `FlushFileBuffers`),
+   then close the handle.
+4. `link(temporary, final)`. This is atomic, and it fails with `EEXIST`
+   rather than overwrite. **No rename** is used, because a POSIX rename and
+   Node's Windows rename both replace an existing target. There is no copy
+   fallback and no direct-write fallback.
+5. On `EEXIST`, read the final record and validate it fully:
+   - byte-identical -> idempotent success;
+   - anything else -> `ACCEPTANCE_JOURNAL_CONFLICT`, fail closed. The
+     existing record is never overwritten.
+6. Make the directory entry durable (see the platform rules below).
+7. Unlink the temporary file. Failure here is logged but harmless, because
+   the startup scan handles leftovers.
+
+Only after step 6 succeeds has the journal record been durably committed.
+
+```text
+CONFLICTING_JOURNAL_RECORD_OVERWRITTEN=NO
+ACCEPTANCE_JOURNAL_PUBLICATION=EXCLUSIVE_HARD_LINK_AFTER_FSYNC
+```
+
+### Platform durability
+
+- **Linux (deployment target).** After the link, open the containing
+  directory read-only and `fsync` it. A failure there is a journal-write
+  failure. The production composition probes directory fsync at startup and
+  refuses to start without it.
+- **Windows (development).** Node cannot open a directory handle for
+  `FlushFileBuffers`. The engine's own store tolerates that failure. File
+  data is flushed in step 3. NTFS journals the link metadata, but its
+  durability across power loss is not guaranteed until the NTFS log flushes.
+  A Windows worker is therefore **development-only** for durability claims.
+  Directory-sync failure is tolerated only in the development composition.
+- **Safety under a lost link.** If a platform loses a published link after
+  power loss, the record is simply absent. That is restart case A (section
+  31): `OUTCOME_UNKNOWN`, never resubmission. A durability gap can lose
+  evidence. It can never cause a second provider create, because no
+  `SUBMITTED` report precedes step 6.
+
+### Validation on every read
+
+Every read validates the record against the closed schema and rejects:
+
+- missing or extra members;
+- wrong member order or non-canonical bytes;
+- a malformed UUID, timestamp or hash;
+- an unknown `format`;
+- an empty or non-conforming provider execution ID;
+- a filename stem that differs from `executionAttemptId`;
+- a `recordSha256` mismatch;
+- a fencing counter or attempt number outside range;
+- a provider or request hash that differs from the identity the caller
+  expects.
+
+No best-effort parsing is permitted.
+
+### Corruption and I/O failure
+
+| Condition | Behaviour |
+|---|---|
+| Published record malformed, truncated, unknown format, digest mismatch or unreadable | `ACCEPTANCE_JOURNAL_CORRUPT`. Fail closed. The worker takes no new submission work until an operator investigates and moves the record to `quarantine/`. |
+| Published record conflicts with the acceptance being written, or with the control plane's provider execution ID | `ACCEPTANCE_JOURNAL_CONFLICT`. Fail closed, as above. |
+| Temporary file valid and complete, final absent (crash between steps 3 and 4) | Complete publication from step 4, then reconcile. The provider ID is the one the provider returned. |
+| Temporary file invalid or partial (crash during step 3) | Move it to `quarantine/` (exclusive link, then unlink). Log `ACCEPTANCE_JOURNAL_CORRUPT`. It never authorises anything, and nothing is stranded, because the handler never resolved; the attempt reaches `OUTCOME_UNKNOWN` by the section 12 sweep. |
+| Filesystem I/O error while writing | Journal-write failure (section 18). |
+| Filesystem I/O error while scanning | Fail closed. No new work. Retry the scan. |
+
+A corrupt, conflicting or unreadable journal never authorises a provider
+create call. The control-plane outcome for such an attempt is
+`OUTCOME_UNKNOWN`, which needs operator attention.
+
+### Retention
+
+**Locked decision (revision R44B6K).**
+
+- **Minimum.** A record may be deleted only after the worker has received a
+  successful control-plane response that shows the attempt durably committed
+  with the **same** provider execution ID. That response comes from
+  `submitted`, from `acceptance-recovery`, or from their idempotent replays.
+  A transport success, a timeout or an unconfirmed send never permits
+  deletion.
+- **v1 policy.** Retain the record until the control plane reports the
+  attempt terminal (`SUCCEEDED`, `SUBMITTED_FAILED` or `ABANDONED` with the
+  same ID). Then unlink it and fsync the directory. The record contains no
+  secret, which makes this forensic retention acceptable. A confirmed,
+  retained record never blocks new work.
+- Quarantined files are deleted only by an operator.
+
+### Startup reconciliation
+
+**Locked decision (revision R44B6K).** On startup, before requesting any
+lease, the worker:
+
+1. validates the state root (absolute, local, link-capable, owner-only, and
+   directory-fsync-capable in production);
+2. scans `acceptance-journal/v1/` and applies the corruption table above;
+3. for each valid published record, calls `acceptance-recovery` (section 18)
+   with the record's fencing counter and provider execution ID, and then:
+   - a response showing the same provider execution ID in `SUBMITTED` or a
+     later state -> reconciled; delete it if terminal, keep it otherwise;
+   - `ATTEMPT_STILL_SUBMITTING` (revision R44B6K1) means the attempt's lease
+     is still live by server time. The restarted worker cannot prove that
+     lease's token. It therefore stays blocked and makes no provider create.
+     It retries `acceptance-recovery` with bounded backoff, never longer than
+     the server lease duration, until the authoritative expiry has moved the
+     attempt to `OUTCOME_UNKNOWN` and the same ID is recovered. Nothing in
+     this path shortens the lease;
+   - a refusal (state conflict, ID conflict, principal or fencing mismatch,
+     or an incompatible terminal state) -> `ACCEPTANCE_RECONCILIATION_FAILED`;
+     fail closed and wait for an operator;
+   - a transport failure or 503 -> retry with bounded backoff and stay
+     blocked;
+4. only when every record is reconciled or quarantined, starts leasing.
+
+No step in reconciliation calls a provider create.
+
+### Unresolved journal blocks new work
+
+**Locked decision (revision R44B6K).** With `INITIAL_WORKER_CONCURRENCY=1`, a
+worker that holds any unresolved acceptance record does not request a new
+lease until that record is reconciled or escalated. The same applies to a
+record that is unconfirmed, corrupt or conflicting. This keeps provider
+evidence from being stranded while new paid side effects begin. The rule
+also applies at runtime, after a failed `submitted` report (section 18).
+Raising concurrency requires revisiting this rule.
+
+```text
+UNRESOLVED_ACCEPTANCE_JOURNAL_BLOCKS_NEW_SUBMISSION_WORK=YES
+```
 
 ---
 
@@ -642,16 +1229,236 @@ the worker's engine adapter. The commercial worker extends its behaviour:
 
 No second, independent acceptance path is created.
 
+### Acceptance checkpoint (revision R44B6K)
+
+**Locked decision.** The precise sequence inside the commercial worker's
+acceptance handler:
+
+1. The provider returns a definitive accepted execution ID.
+2. The handler validates it, with no normalisation:
+   - the provider equals the lease provider;
+   - the ID satisfies the record schema;
+   - the handler was not already called once.
+3. The handler builds the journal record (section 17).
+4. The handler durably commits the record: write algorithm steps 2 to 6 of
+   section 17.
+5. Only after step 4 succeeds does the handler resolve.
+6. The worker then reports `SUBMITTED` (below).
+7. The control plane commits `provider_execution_id` and `submitted_at`.
+
+The Runway, Veo and Google adapters already stop and refuse to resubmit when
+the handler throws. That behaviour is relied on unchanged.
+
+```text
+ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
+```
+
+**Journal persistence failure.** If step 2 rejects the ID, or step 4 fails:
+
+- the handler throws and never claims durable acceptance;
+- the provider may already have accepted, so the outcome is ambiguous. The
+  worker reports `submission-failed` with outcome `OUTCOME_UNKNOWN` and
+  failure code `ACCEPTANCE_JOURNAL_WRITE_FAILED` or
+  `PROVIDER_EXECUTION_ID_INVALID`. If it cannot report, the section 12 sweep
+  reaches the same state;
+- the worker does **not** report `SUBMITTED`, because `SUBMITTED` requires
+  durable local evidence. The in-memory ID is not sent upstream in v1;
+- the worker treats a journal-write failure as a host fault. It halts new
+  submission work until its state root passes the startup checks again;
+- the attempt is never retried automatically.
+
+### Definitive rejection and ambiguous outcomes
+
+- **Definitive rejection.** An unambiguous provider refusal proving the
+  generation was not accepted is reported as `submission-failed` with outcome
+  `DEFINITIVELY_REJECTED` and a closed failure code. The result is
+  `SUBMITTING -> FAILED_BEFORE_SUBMISSION`. `submitting_at` is kept, no
+  journal record is created and the lease is cleared. A timeout, a
+  connection reset, an ambiguous 5xx or an uncertain response is never
+  definitive (section 14).
+- **Ambiguous outcome.** A timeout, reset, ambiguous 5xx, malformed response
+  that cannot rule out acceptance, or journal failure is reported as
+  `submission-failed` with outcome `OUTCOME_UNKNOWN`. The result is
+  `SUBMITTING -> OUTCOME_UNKNOWN`, with the lease cleared and the parent job
+  set to `NEEDS_ATTENTION`. A worker crash during the call reaches the same
+  state through the section 12 sweep. There is never automatic resubmission.
+- **Provider accepted.** After step 4, `SUBMITTING -> SUBMITTED` with exactly
+  the journalled ID.
+
+### Future `submitted` route (live lease)
+
+**Locked decision (design only).**
+`POST /worker-control/v1/attempts/:attemptId/submitted` with exactly
+`{fencingCounter, leaseToken, providerExecutionId}`.
+
+- Authority is the same proof as `submitting`: an ACTIVE principal re-checked
+  `FOR SHARE`, the attempt locked `FOR UPDATE`, the same worker, exact
+  fencing, a matching token and an unexpired lease. The state must be
+  `SUBMITTING`, or `SUBMITTED` for replay.
+- Connection eligibility is **not** checked. Submission was already
+  authorised (section 24). The exact version must not be `DESTROYED`; if it
+  is, the request fails closed as an invariant failure.
+- The first transition writes:
+  - `state = 'SUBMITTED'`;
+  - `provider_execution_id`;
+  - `submitted_at = now()`;
+  - `updated_at = now()`.
+
+  The lease is **kept**: the same worker continues polling under fencing
+  (section 12). The job stays `RUNNING`. The route audits
+  `execution_attempt.submitted`.
+- Timestamps come from server time. There is no client-supplied acceptance
+  timestamp. The journal's `providerAcceptedAt` stays local and
+  informational. Recovery horizons, once defined, are measured
+  conservatively from `submitting_at` (section 23).
+- The response is
+  `{executionAttemptId, fencingCounter, state: "SUBMITTED", providerExecutionId, submittedAt}`.
+- **Idempotency.** For the same attempt, proof and provider execution ID on
+  an already `SUBMITTED` attempt, the route returns the committed result. It
+  writes no new audit and does not change `submitted_at`.
+- **Conflicts.** The following are refused with the uniform
+  `409 LEASE_REJECTED` and logged as security events (section 30):
+  - a different provider execution ID on a `SUBMITTED` attempt is an
+    invariant violation;
+  - an ID already adopted by another attempt of the same Account and
+    provider is also refused, through the unique index.
+- **Lost response.** The journal is durable, the control plane commits, the
+  response is lost and the worker retries. The retry hits the idempotent
+  replay. If the lease has expired meanwhile, the attempt is already
+  `SUBMITTED`, because the commit happened. The worker then uses
+  `acceptance-recovery`, which replays it. Neither path creates a second
+  audit row or changes the provider ID.
+
+```text
+SUBMITTED_REPORT_IDEMPOTENT=YES
+SUBMITTED_DIFFERENT_PROVIDER_EXECUTION_ID=INVARIANT_VIOLATION
+SUBMITTED_TIMESTAMP_AUTHORITY=SERVER
+LEASE_KEPT_ON_LIVE_SUBMITTED=YES
+```
+
+### Future `acceptance-recovery` route (journal evidence without a lease token)
+
+**Locked decision (design only; revised R44B6K1).** A restarted worker no
+longer holds its lease token: the token lives only in memory, and the
+journal never stores it. A swept attempt has no lease at all. Journal
+evidence is therefore reported through
+`POST /worker-control/v1/attempts/:attemptId/acceptance-recovery` with
+exactly `{fencingCounter, providerExecutionId}`.
+
+A token-less request **never bypasses a live `SUBMITTING` lease**:
+
+```text
+SUBMITTING + valid current lease token
+  -> the live submitted route may commit SUBMITTED
+SUBMITTING + process restart (token lost)
+  -> no provider create
+  -> no token-less SUBMITTED transition
+  -> wait for the authoritative control-plane expiry
+expired SUBMITTING (server clock)
+  -> OUTCOME_UNKNOWN (section 12 sweep)
+  -> lease fields cleared
+  -> submitting_worker_principal_id and fencing counter retained
+OUTCOME_UNKNOWN + valid durable acceptance journal
+  -> acceptance-recovery may commit SUBMITTED
+```
+
+- **Step 1: expiry, in its own transaction.** The section 12 sweep runs,
+  scoped to the named attempt, and commits. If the attempt is `SUBMITTING`
+  and `lease_expires_at <= now()` by the server clock, it becomes
+  `OUTCOME_UNKNOWN` with its normal audit. A live lease is untouched; the
+  caller's claim of a restart changes nothing.
+- **Step 2: recovery, in a fresh READ COMMITTED transaction.** The principal
+  is re-checked `FOR SHARE` and the attempt locked `FOR UPDATE`. Then:
+  - **Authority.** The caller must be an ACTIVE authenticated principal
+    equal to the attempt's immutable `submitting_worker_principal_id`
+    (section 26). `fencingCounter` must equal the attempt's retained
+    `lease_fencing_counter`. The counter cannot advance after `SUBMITTING`:
+    migration 0004 forbids re-leasing a `SUBMITTING` attempt, and
+    `OUTCOME_UNKNOWN` has no lease. These checks run before any state is
+    disclosed.
+  - **`OUTCOME_UNKNOWN`** is the only state this route newly transitions.
+    It becomes `SUBMITTED` with the reported ID and `submitted_at = now()`.
+    No lease is created; recovery polling needs a future recovery lease
+    (section 36). The job moves from `NEEDS_ATTENTION` to `RUNNING`. The
+    route audits `execution_attempt.submitted` with
+    `recoveredFromJournal: true`. `OUTCOME_UNKNOWN -> SUBMITTED` is already
+    a permitted migration 0004 transition ("provider identity later
+    proven").
+  - **`SUBMITTING`**, whose lease is still live after step 1: no write, no
+    audit and no security event. The route answers `409` with code
+    `ATTEMPT_STILL_SUBMITTING`, and only to the authenticated submitting
+    principal. The worker stays blocked and retries later (section 17). The
+    live-lease holder, if one is still running, reports through
+    `submitted`.
+- **Replay and reconciliation.** If the attempt is already `SUBMITTED`,
+  `SUCCEEDED`, `SUBMITTED_FAILED` or `ABANDONED` with the **same** ID, the
+  route returns `{executionAttemptId, fencingCounter, state,
+  providerExecutionId}` with no write.
+- **Refusals.** These are refused with the uniform `409 LEASE_REJECTED` and
+  a security event:
+  - a different ID;
+  - a terminal state without that ID (`FAILED_BEFORE_SUBMISSION`,
+    `CANCELLED`, or `ABANDONED` with no ID);
+  - a principal or fencing mismatch;
+  - an ID adopted by another attempt;
+  - any state before `SUBMITTING`.
+- The route never calls a provider. Adopting results still requires recovery
+  to verify the ID with the provider, using the exact original credential
+  (section 32).
+
+```text
+SUBMITTING_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
+OUTCOME_UNKNOWN_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
+ACCEPTANCE_RECOVERY_AUTHORITY=SUBMITTING_PRINCIPAL_AND_RETAINED_FENCING_COUNTER
+TOKENLESS_ACCEPTANCE_RECOVERY_FROM_LIVE_SUBMITTING=NO
+TOKENLESS_ACCEPTANCE_RECOVERY_FROM_OUTCOME_UNKNOWN=YES
+SUBMITTING_RESTART_WITH_JOURNAL_CAN_RESUBMIT_PROVIDER=NO
+SUBMITTING_RESTART_WITH_JOURNAL_WAITS_FOR_AUTHORITATIVE_EXPIRY=YES
+```
+
+A `SUBMITTING` attempt with a valid journal reports the same provider
+execution ID in one of two ways only:
+
+- through the live `submitted` route, while its token-proven lease lasts;
+- after the authoritative expiry, through `OUTCOME_UNKNOWN` and
+  `acceptance-recovery`.
+
+### Future `submission-failed` route
+
+**Locked decision (design only).**
+`POST /worker-control/v1/attempts/:attemptId/submission-failed` with exactly
+`{fencingCounter, leaseToken, outcome, failureCode}`.
+
+- `outcome` is `DEFINITIVELY_REJECTED` or `OUTCOME_UNKNOWN`.
+- `failureCode` comes from the closed taxonomy of section 27, and each code
+  is valid for only one outcome.
+- The route requires the live-lease proof and state `SUBMITTING`.
+- It writes the target state, `failure_code`, the cleared lease and
+  `updated_at`. `DEFINITIVELY_REJECTED` also writes `completed_at`.
+- It audits `execution_attempt.failed_before_submission` or
+  `execution_attempt.outcome_unknown`.
+- A replay with the same outcome and code returns the committed result. Any
+  other report on a no-longer-`SUBMITTING` attempt is refused.
+- The parent job becomes `NEEDS_ATTENTION` for `OUTCOME_UNKNOWN`. For
+  `DEFINITIVELY_REJECTED` it becomes `FAILED`, unless a separately locked
+  retry policy creates a new attempt. That policy is deferred and is never
+  automatic in v1.
+
 ### Upstream reporting after the journal
 
 If the journal holds a provider execution ID but the upstream report fails:
 
 - do not resubmit;
-- retry the upstream report;
+- retry `submitted` while the lease is live, otherwise use
+  `acceptance-recovery`;
 - do not lease or start another job until the accepted record is reconciled
-  with the control plane.
+  with the control plane (section 17).
 
 This is an initial concurrency-1 safety rule.
+
+```text
+SUBMITTED_CAN_CALL_PROVIDER_CREATE_AGAIN=NO
+```
 
 ---
 
@@ -826,7 +1633,26 @@ automated recovery ends at `submittedAt` plus 24 hours, an operator-only
 historical authority allows 6 days, and output files must have at least one
 hour of remaining provider lifetime. No Runway or Veo horizon is encoded.
 Commercial horizons per provider are deferred to the gate that enables each
-provider (section 28).
+provider (section 33).
+
+**Locked decision (revision R44B6K).** `recovery_expires_at` stays `NULL`
+until a provider-specific capability policy locks a horizon. This revision
+invents no Runway, Veo or Google value. The state machine is safe without a
+horizon:
+
+- `SUBMITTING`, `SUBMITTED` and `OUTCOME_UNKNOWN` keep both obligations open
+  indefinitely;
+- abandonment is only ever an explicit decision (migration 0004);
+- nothing expires automatically.
+
+When horizons are defined, they are measured from `submitting_at`. It is the
+earliest server-proven bound on provider acceptance, so the measurement is
+conservative. They are never measured from a worker-supplied time.
+
+```text
+RECOVERY_EXPIRES_AT_PROVIDER_VALUE_INVENTED=NO
+RECOVERY_EXPIRES_AT_UNTIL_PROVIDER_POLICY=NULL
+```
 
 ---
 
@@ -854,6 +1680,31 @@ OPEN_RETENTION_OR_RECOVERY_OBLIGATION_BLOCKS_DESTRUCTION=YES
 
 **This is a launch-blocking invariant.** Migration 0002 already provides the
 `RETAINED_FOR_RECOVERY` version status and `retained_for_recovery_at`.
+
+**Locked decision (revision R44B6K).** Disconnect after `SUBMITTING` or
+`SUBMITTED`:
+
+- **No revocation of committed work.** Disconnect does not revoke recovery
+  of a provider call that was authorised before it. The exact version is
+  `RETAINED_FOR_RECOVERY` while `SUBMITTING`, `SUBMITTED` or
+  `OUTCOME_UNKNOWN` holds the obligation open (implemented in R44B6E).
+- **Routes that skip connection eligibility.** These routes act only on
+  already-authorised work: heartbeat, `submitted`, `acceptance-recovery`,
+  `submission-failed` and the `submitting` replay. They therefore never
+  check connection eligibility. Each one fails closed if the exact version
+  is `DESTROYED`, which is an invariant failure.
+- **No new create.** Disconnect never authorises a new provider create. A
+  first `SUBMITTING` after disconnect is refused (R44B6J).
+- **Recovery use only.** A retained credential may be used only to recover
+  the same provider execution ID: polling, retrieval and output download. Its
+  use requires a future recovery-scoped credential grant under a recovery
+  lease (section 36). It is never used for create, and never for a different
+  attempt.
+
+```text
+DISCONNECT_REVOKES_AUTHORISED_SUBMISSION_RECOVERY=NO
+RETAINED_CREDENTIAL_USE=RECOVERY_OF_SAME_PROVIDER_EXECUTION_ONLY
+```
 
 ---
 
@@ -956,6 +1807,134 @@ PROVIDER_EXECUTION_ID_UNIQUENESS_SCOPE=ACCOUNT_PROVIDER
 **Repository fact.** The engine already enforces a comparable rule for
 Google interactions through its global provider-execution-ID claim.
 
+### Migration assessment for the submission lifecycle (revision R44B6K)
+
+**Repository fact.** Migration 0004 already supports, unchanged:
+
+- heartbeat in `SUBMITTING`, which changes only `heartbeat_at` and
+  `lease_expires_at`;
+- `SUBMITTING -> OUTCOME_UNKNOWN` with every lease field cleared, the
+  fencing counter retained and a closed failure code;
+- `SUBMITTING -> SUBMITTED` with the lease kept or cleared;
+- `SUBMITTING -> FAILED_BEFORE_SUBMISSION` with `submitting_at` kept;
+- `OUTCOME_UNKNOWN -> SUBMITTED`;
+- the immutability of provider identity and `submitted_at`;
+- Account-plus-provider uniqueness of provider execution IDs;
+- the lease-expiry index.
+
+**Gap.** `acceptance-recovery` must prove that its caller is the principal
+that received provider-call authority. In `OUTCOME_UNKNOWN`, migration 0004
+requires `lease_worker_principal_id` to be `NULL`, so the expiry sweep erases
+that identity. The only durable copy left is in audit metadata. Audit is
+evidence, not authority, so it is not used for authorisation.
+
+**Rejected alternatives:**
+
+- keeping the lease on `OUTCOME_UNKNOWN` (contradicts migration 0004);
+- accepting any ACTIVE principal with a matching fencing counter (any worker
+  principal could then attach a provider ID to another Account's unknown
+  attempt);
+- storing the lease token in the journal (forbidden by section 17).
+
+**Locked decision.** Implementation requires a small additive migration
+0005, created only in its own authorised slice. Migrations 0001 to 0004 are
+never edited.
+
+### Migration 0005 contract (revision R44B6K1)
+
+**Column.** `execution_attempts.submitting_worker_principal_id uuid NULL`,
+with
+`CONSTRAINT execution_attempts_submitting_worker_fk FOREIGN KEY (submitting_worker_principal_id) REFERENCES worker_principals (id) ON DELETE RESTRICT`.
+This is the same restrictive semantics as `execution_attempts_lease_worker_fk`.
+Worker principals are disabled, never deleted.
+
+**Meaning.** The column is historical provider-call-authority provenance:
+
+- `NULL` until the attempt first enters `SUBMITTING`;
+- non-`NULL` exactly when `submitting_at IS NOT NULL`, enforced by
+  `CONSTRAINT execution_attempts_submitting_worker_ck CHECK ((submitting_at IS NULL) = (submitting_worker_principal_id IS NULL))`;
+- immutable once set;
+- survives the clearing of the live lease, `SUBMITTING -> OUTCOME_UNKNOWN`,
+  `SUBMITTING -> FAILED_BEFORE_SUBMISSION`, `SUBMITTED` and every terminal
+  descendant.
+
+**Database-derived stamping.** The value comes from the database, never from
+application code. Migration 0005 replaces `execution_attempts_guard()`
+(`CREATE OR REPLACE FUNCTION`; the trigger binding stays) with the 0004
+rules plus:
+
+1. **On INSERT,** `NEW.submitting_worker_principal_id` must be `NULL`.
+2. **On the first `LEASED -> SUBMITTING` transition,** the guard requires:
+   - `OLD.lease_worker_principal_id IS NOT NULL`;
+   - `OLD.lease_expires_at > now()`, the same transaction clock that the
+     lease service checks;
+   - `NEW.lease_worker_principal_id IS NOT DISTINCT FROM OLD.lease_worker_principal_id`,
+     so the lease cannot change in the same statement;
+   - `NEW.submitting_worker_principal_id` either `NULL` or equal to
+     `OLD.lease_worker_principal_id`. Any other supplied value is rejected.
+
+   It then **stamps**
+   `NEW.submitting_worker_principal_id := OLD.lease_worker_principal_id`.
+3. **On every other update,** any
+   `NEW.submitting_worker_principal_id IS DISTINCT FROM OLD.submitting_worker_principal_id`
+   is rejected. That covers setting it outside the transition, changing it
+   and clearing it.
+
+The R44B6J service is unchanged. It never names the column, and the guard
+fills it in.
+
+**Migration order** (one transaction, under the existing migration lock):
+
+1. `ADD COLUMN submitting_worker_principal_id uuid NULL` with the foreign key.
+   No default is needed, because every existing value starts `NULL`.
+2. **Backfill.** For rows where `state = 'SUBMITTING'` only, set the column
+   from `lease_worker_principal_id`. Rows are not otherwise mutated. The
+   0004 guard, still installed at this point, does not inspect the new
+   column, and the transition and immutability rules are untouched. For a
+   `SUBMITTING` row the value is provably the submitting principal, because
+   0004 forbids changing the lease principal or token while `SUBMITTING`.
+3. **Fail closed.** If any row still has `submitting_at IS NOT NULL` and a
+   `NULL` submitting principal, `RAISE EXCEPTION` and abort the whole
+   migration. Such a row would be a post-`SUBMITTING` row whose lease has
+   already been cleared or replaced. No value is inferred from audit
+   metadata or from a later lease. An operator decides. At this revision no
+   commercial generation exists and the test schema is reset, so no such
+   row is expected.
+4. Add `execution_attempts_submitting_worker_ck`, validated.
+5. Replace `execution_attempts_guard()` with the extended rules.
+6. Record schema version 5.
+
+**Runtime grant.** Migration 0005 is expected to need no runtime grant
+change:
+
+- PostgreSQL checks column `UPDATE` privilege only for columns named in the
+  statement's `SET` list. A `BEFORE ROW` trigger that assigns
+  `NEW.submitting_worker_principal_id` needs no privilege on that column.
+- The runtime role therefore gets **no** `UPDATE` on the new column. It
+  cannot nominate or change the submitting principal, even by accident.
+- The manifest's table-level `SELECT` and `INSERT` already cover new columns.
+  The guard and the `CHECK` force `NULL` on insert.
+- `runtimeGrants.ts` stays unchanged. Grant-runtime is re-run as normal
+  after migrating.
+- The 0005 slice adds a privilege test asserting
+  `has_column_privilege(runtime, 'execution_attempts', 'submitting_worker_principal_id', 'UPDATE') = false`.
+
+No other schema change is needed for the decisions of this revision.
+
+```text
+SUBMITTING_WORKER_PRINCIPAL_DATABASE_DERIVED=YES
+SUBMITTING_WORKER_PRINCIPAL_IMMUTABLE=YES
+SUBMITTING_WORKER_PRINCIPAL_SURVIVES_LEASE_CLEAR=YES
+SUBMITTING_WORKER_PRINCIPAL_SURVIVES_OUTCOME_UNKNOWN=YES
+RUNTIME_GRANT_CHANGE_EXPECTED_FOR_0005=NO
+```
+
+```text
+MIGRATION_0005_REQUIRED_FOR_IMPLEMENTATION=YES
+MIGRATION_0005_SCOPE=IMMUTABLE_SUBMITTING_WORKER_PRINCIPAL
+MIGRATION_0005_CREATED=NO
+```
+
 ---
 
 ## 27. Failure taxonomy and public progress
@@ -985,6 +1964,21 @@ Classification guidance:
   stays `SUBMITTED` and recovery continues.
 
 Internal codes are closed enums. Customer-facing errors are coarser.
+
+**Locked decision (revision R44B6K).** The initial closed `failure_code`
+values for the submission lifecycle:
+
+| State | `failure_code` | Set by |
+|---|---|---|
+| `OUTCOME_UNKNOWN` | `WORKER_LEASE_EXPIRED_DURING_SUBMISSION` | the control-plane sweep (section 12) |
+| `OUTCOME_UNKNOWN` | `PROVIDER_SUBMISSION_AMBIGUOUS` | `submission-failed`: timeout, reset, ambiguous 5xx or uncertain response |
+| `OUTCOME_UNKNOWN` | `ACCEPTANCE_JOURNAL_WRITE_FAILED` | `submission-failed` (section 18) |
+| `OUTCOME_UNKNOWN` | `PROVIDER_EXECUTION_ID_INVALID` | `submission-failed`: the provider accepted, but its ID is unusable |
+| `FAILED_BEFORE_SUBMISSION` | `PROVIDER_REJECTED_DEFINITIVELY` | `submission-failed`; each provider adapter decides definitiveness by its own closed classification |
+
+Provider adapters may later refine `PROVIDER_REJECTED_DEFINITIVELY` into
+narrower closed codes through a reviewed change. No provider-specific
+definitiveness rule is inferred here.
 
 ### Public progress
 
@@ -1094,6 +2088,28 @@ provider authentication headers, signed object-storage URLs, and full
 provider SDK request bodies where secrets may appear. Correlation IDs, job
 IDs, attempt IDs and closed codes are permitted, subject to retention policy.
 
+**Locked decision (revision R44B6K).**
+
+- **Permitted.** Worker log lines may carry: attempt ID, job ID, provider,
+  fencing counter, lifecycle stage (closed vocabulary) and closed error or
+  failure codes.
+- **Never logged.** Worker log lines never carry:
+  - credential plaintext;
+  - the sealed envelope or opening context;
+  - the lease token or its hash;
+  - the machine bearer credential;
+  - provider authorisation headers;
+  - the journal state-root path.
+- **Provider execution ID.** It is not written to routine worker logs. Its
+  durable homes are the journal record and the control-plane attempt row. An
+  operator diagnostic that needs it reads the journal or the control plane.
+- **Journal mechanics.** Temporary names, link and fsync steps are worker
+  debug detail, not domain audit.
+
+```text
+PROVIDER_EXECUTION_ID_IN_ROUTINE_WORKER_LOGS=NO
+```
+
 ---
 
 ## 30. Audit and security logs
@@ -1128,6 +2144,47 @@ A separate security log covers:
 KMS operation logging comes from the eventual key-management system where
 possible.
 
+**Locked decision (revision R44B6K).** Event names for the submission
+lifecycle.
+
+Domain AuditEvent (`execution_attempt` resource). Metadata is limited to:
+`attemptNumber`, `fencingCounter`, `workerPrincipalId`, `provider`,
+`credentialVersion` (the number), `failureCode` and `recoveredFromJournal`.
+
+| Event | When |
+|---|---|
+| `execution_attempt.submitting` | First `LEASED -> SUBMITTING` (implemented, R44B6J). |
+| `execution_attempt.submitted` | First commit of the provider execution ID, by `submitted` or `acceptance-recovery` (with `recoveredFromJournal`). Never on replay. |
+| `execution_attempt.outcome_unknown` | `SUBMITTING -> OUTCOME_UNKNOWN`, by the sweep or by `submission-failed`. |
+| `execution_attempt.failed_before_submission` | `SUBMITTING -> FAILED_BEFORE_SUBMISSION` on a definitive rejection. |
+
+The provider execution ID is not placed in audit metadata, because the
+attempt row holds it. Journal filesystem mechanics are never audited.
+
+Control-plane security events (the worker security sink):
+
+| Type | Reasons |
+|---|---|
+| `WORKER_SUBMITTED_REJECTED` | The existing lease reasons, plus `PROVIDER_EXECUTION_CONFLICT` (a different ID on `SUBMITTED`), `PROVIDER_EXECUTION_ID_IN_USE` (adopted by another attempt) and `INCOMPATIBLE_ATTEMPT_STATE`. |
+| `WORKER_ACCEPTANCE_RECOVERY_REJECTED` | `SUBMITTING_PRINCIPAL_MISMATCH`, `FENCING_MISMATCH`, `UNKNOWN_ATTEMPT`, `INCOMPATIBLE_ATTEMPT_STATE`, `PROVIDER_EXECUTION_CONFLICT`, `PROVIDER_EXECUTION_ID_IN_USE`, `SUBMITTING_VERSION_DESTROYED`. `ATTEMPT_STILL_SUBMITTING` (a live lease, for the proven submitting principal) is an expected wait signal, not a security event (R44B6K1). |
+| `WORKER_SUBMISSION_FAILURE_REJECTED` | The existing lease reasons, plus `INCOMPATIBLE_ATTEMPT_STATE` and `FAILURE_CODE_OUTCOME_MISMATCH`. |
+| `WORKER_LEASE_REJECTED` | Existing. A stale worker's heartbeat after its `SUBMITTING` lease was swept (`NOT_LEASED` or `LEASE_EXPIRED`). |
+
+A `SUBMITTING` expiry is a lifecycle fact. It is audited as
+`execution_attempt.outcome_unknown`, not logged as a security event.
+
+Worker-local security events are written to the worker log in the closed
+vocabulary of section 29:
+
+- `ACCEPTANCE_JOURNAL_CORRUPT`;
+- `ACCEPTANCE_JOURNAL_CONFLICT`;
+- `ACCEPTANCE_JOURNAL_WRITE_FAILED`;
+- `ACCEPTANCE_RECONCILIATION_FAILED`;
+- `STATE_ROOT_UNSUITABLE`.
+
+No security event, local or central, carries a secret value, a provider
+execution ID or a filesystem path.
+
 ---
 
 ## 31. Crash matrix
@@ -1145,6 +2202,30 @@ possible.
 | Provider success before output persistence | `SUBMITTED` | Remains recoverable until output is securely persisted. |
 | Output local, upstream completion missing | local output and hash | Re-upload or report idempotently. |
 | Server already terminal, worker missed the acknowledgement | terminal state | A worker replay receives the recorded terminal result. |
+
+### Restart matrix (revision R44B6K)
+
+**Locked decision.** The worker's local evidence is compared with the
+control-plane state during startup reconciliation (section 17).
+
+| Case | Control plane | Local journal | Rule |
+|---|---|---|---|
+| A | `SUBMITTING`, or `OUTCOME_UNKNOWN` after the sweep | none | Acceptance cannot be proven. No resubmission. The attempt becomes or stays `OUTCOME_UNKNOWN` (section 12 sweep) for operator resolution. |
+| B | `SUBMITTING`, lease still live by server time | valid record | (Revised R44B6K1.) Block new work. No provider create and no token-less transition: `acceptance-recovery` answers `ATTEMPT_STILL_SUBMITTING`. Retry with bounded backoff until the authoritative expiry moves the attempt to `OUTCOME_UNKNOWN`, then apply B'. The lease is never shortened. |
+| B' | `OUTCOME_UNKNOWN` (expired and swept, including by step 1 of `acceptance-recovery`) | valid record | `acceptance-recovery`: `OUTCOME_UNKNOWN -> SUBMITTED` with the same ID, authorised by the immutable submitting principal and the retained fencing counter. No provider create. |
+| C | `SUBMITTED`, same ID | valid record | Reconciled. Recovery of that ID resumes under a recovery lease. |
+| D | `SUBMITTED` | none | The control-plane ID is authoritative. Recovery uses it. |
+| E | Terminal without that ID, or any state with a different ID | valid record | `ACCEPTANCE_RECONCILIATION_FAILED`. Fail closed. No new work until an operator investigates. |
+| F | any | corrupt published record | `ACCEPTANCE_JOURNAL_CORRUPT`. Fail closed. Operator quarantine. |
+| G | any | valid temporary file only | Complete publication, then apply B, B', C or E. |
+| H | any | invalid temporary file only | Quarantine automatically. Then apply A or D. |
+
+In every case: no provider create, no requeue of a post-`SUBMITTING` attempt
+and no new submission work while any case is unresolved.
+
+```text
+SUBMITTING_WITHOUT_JOURNAL_CAN_AUTO_RESUBMIT_AFTER_RESTART=NO
+```
 
 ---
 
@@ -1257,6 +2338,58 @@ the core engine must first demonstrate reliable execution and recovery.
 If implementation evidence requires reordering, this document is updated by
 a deliberate architecture revision rather than silently diverged from.
 
+### Status and fake-provider gate (revision R44B6K)
+
+**Repository fact.** Steps 1 to 7 are implemented, together with the worker
+skeleton and test opener of step 8 and the fenced `SUBMITTING` barrier
+(R44B6J).
+
+**Locked decision.** The submission lifecycle is implemented in this order,
+each slice under its own authorised gate:
+
+1. Migration 0005: the immutable submitting principal (section 26). The
+   guard stamps it, so there is no R44B6J service change and no runtime
+   grant change.
+2. Heartbeat in `SUBMITTING` and in leased `SUBMITTED`; release still
+   refused (section 12).
+3. Expired `SUBMITTING -> OUTCOME_UNKNOWN` sweep (section 12).
+4. The `submitted`, `acceptance-recovery` and `submission-failed` routes
+   (section 18).
+5. The worker acceptance journal: state-root validation, write algorithm,
+   read validation and corruption handling (section 17).
+6. Worker startup reconciliation and the unresolved-journal new-work block
+   (section 17).
+7. Crash-point tests covering every row of the section 31 matrices.
+   Faults are injected:
+   - before and after each journal step;
+   - before and after each control-plane commit;
+   - on a lost response;
+   - on lease expiry racing each route;
+   - on a restart with a valid journal while the `SUBMITTING` lease is still
+     live, which must wait for the authoritative expiry (R44B6K1);
+   - with an SDK client whose create retry is not disabled, which must be
+     refused (R44B6K1).
+
+**A fake provider adapter may execute only after slices 1 to 7 exist.**
+Every one of them protects the window between `SUBMITTING` and a durable
+`SUBMITTED`, which is the first thing a fake provider exercises. None can be
+safely deferred.
+
+The following may come after the first fake-provider slice, which stops at
+`SUBMITTED`, because they act only after a durable provider identity exists
+or before any provider authority exists:
+
+- recovery leases and recovery-scoped credential grants for `SUBMITTED`;
+- polling, output persistence and completion (steps 9 and 10);
+- resolution of an expired `LEASED` attempt that holds a credential grant.
+  This is a liveness gap with no provider side effect.
+
+```text
+FAKE_PROVIDER_EXECUTION_GATE=SECTION_36_SLICES_1_TO_7
+FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
+REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
+```
+
 ---
 
 ## 37. Lock flags
@@ -1303,6 +2436,66 @@ SUBMITTING_TO_FAILED_BEFORE_SUBMISSION=ALLOWED
 SUBMITTING_AT_PRESERVED_ON_DEFINITIVE_REJECTION=YES
 PROVIDER_EXECUTION_ID_GLOBAL_UNIQUENESS_ASSUMED=NO
 PROVIDER_EXECUTION_ID_UNIQUENESS_SCOPE=ACCOUNT_PROVIDER
+SUBMITTING_HEARTBEAT_ALLOWED=YES
+SUBMITTING_HEARTBEAT_CHANGES_FENCING=NO
+SUBMITTING_RELEASE_ALLOWED=NO
+EXPIRED_SUBMITTING_OUTCOME=OUTCOME_UNKNOWN
+EXPIRED_SUBMITTING_AUTO_REQUEUED=NO
+EXPIRED_SUBMITTING_CAN_AUTO_RESUBMIT=NO
+EXPIRED_SUBMITTING_TRANSITION_OWNER=CONTROL_PLANE
+EXPIRED_SUBMITTING_FAILURE_CODE=WORKER_LEASE_EXPIRED_DURING_SUBMISSION
+PROVIDER_CALL_REQUIRES_COMMITTED_SUBMITTING=YES
+SUBMITTED_REPORT_REQUIRES_DURABLE_JOURNAL=YES
+PROVIDER_ACCEPTANCE_REQUIRES_DURABLE_JOURNAL=YES
+ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
+ACCEPTANCE_JOURNAL_TECHNOLOGY=IMMUTABLE_JSON_RECORD_PER_ATTEMPT
+ACCEPTANCE_JOURNAL_PUBLICATION=EXCLUSIVE_HARD_LINK_AFTER_FSYNC
+ACCEPTANCE_JOURNAL_NEW_DEPENDENCY=NO
+JOURNAL_RECORD_IMMUTABLE=YES
+JOURNAL_CONTAINS_PLAINTEXT_CREDENTIAL=NO
+JOURNAL_CONTAINS_SEALED_CREDENTIAL=NO
+JOURNAL_CONTAINS_LEASE_TOKEN=NO
+JOURNAL_CONTAINS_CREDENTIAL_VERSION=NO
+CONFLICTING_JOURNAL_RECORD_OVERWRITTEN=NO
+VALID_JOURNAL_CAN_AUTHORIZE_SECOND_PROVIDER_CREATE=NO
+SUBMITTING_WITHOUT_JOURNAL_CAN_AUTO_RESUBMIT_AFTER_RESTART=NO
+SUBMITTING_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
+OUTCOME_UNKNOWN_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
+ACCEPTANCE_RECOVERY_AUTHORITY=SUBMITTING_PRINCIPAL_AND_RETAINED_FENCING_COUNTER
+SUBMITTED_REPORT_IDEMPOTENT=YES
+SUBMITTED_DIFFERENT_PROVIDER_EXECUTION_ID=INVARIANT_VIOLATION
+SUBMITTED_TIMESTAMP_AUTHORITY=SERVER
+LEASE_KEPT_ON_LIVE_SUBMITTED=YES
+SUBMITTED_CAN_CALL_PROVIDER_CREATE_AGAIN=NO
+UNRESOLVED_ACCEPTANCE_JOURNAL_BLOCKS_NEW_SUBMISSION_WORK=YES
+DISCONNECT_REVOKES_AUTHORISED_SUBMISSION_RECOVERY=NO
+RETAINED_CREDENTIAL_USE=RECOVERY_OF_SAME_PROVIDER_EXECUTION_ONLY
+RECOVERY_EXPIRES_AT_PROVIDER_VALUE_INVENTED=NO
+RECOVERY_EXPIRES_AT_UNTIL_PROVIDER_POLICY=NULL
+PROVIDER_EXECUTION_ID_IN_ROUTINE_WORKER_LOGS=NO
+PROVIDER_EXACTLY_ONCE_CLAIMED=NO
+BUSYBOOKIE_AUTOMATIC_PROVIDER_CREATE_AT_MOST_ONCE_PER_ATTEMPT=YES
+FAKE_PROVIDER_EXECUTION_GATE=SECTION_36_SLICES_1_TO_7
+FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
+REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
+MIGRATION_0005_REQUIRED_FOR_IMPLEMENTATION=YES
+MIGRATION_0005_SCOPE=IMMUTABLE_SUBMITTING_WORKER_PRINCIPAL
+MIGRATION_0005_CREATED=NO
+TOKENLESS_ACCEPTANCE_RECOVERY_FROM_LIVE_SUBMITTING=NO
+TOKENLESS_ACCEPTANCE_RECOVERY_FROM_OUTCOME_UNKNOWN=YES
+SUBMITTING_RESTART_WITH_JOURNAL_CAN_RESUBMIT_PROVIDER=NO
+SUBMITTING_RESTART_WITH_JOURNAL_WAITS_FOR_AUTHORITATIVE_EXPIRY=YES
+SUBMITTING_WORKER_PRINCIPAL_DATABASE_DERIVED=YES
+SUBMITTING_WORKER_PRINCIPAL_IMMUTABLE=YES
+SUBMITTING_WORKER_PRINCIPAL_SURVIVES_LEASE_CLEAR=YES
+SUBMITTING_WORKER_PRINCIPAL_SURVIVES_OUTCOME_UNKNOWN=YES
+RUNTIME_GRANT_CHANGE_EXPECTED_FOR_0005=NO
+JOURNAL_RECORD_SHA256_PREIMAGE_EXCLUDES_RECORD_SHA256=YES
+JOURNAL_RECORD_SHA256_CANONICAL_UTF8=YES
+PROVIDER_CREATE_AUTOMATIC_TRANSPORT_RETRY=NO
+PROVIDER_CREATE_SDK_RETRY_DISABLED=YES
+AMBIGUOUS_PROVIDER_CREATE_RESULT=OUTCOME_UNKNOWN
+AMBIGUOUS_PROVIDER_CREATE_AUTO_RESUBMIT=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

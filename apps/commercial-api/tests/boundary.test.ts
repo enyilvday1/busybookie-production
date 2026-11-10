@@ -75,6 +75,8 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   },
   { label: "worker credential variable", pattern: /COMMERCIAL_API_WORKER|WORKER_(TOKEN|SECRET|SHARED|BEARER|API_KEY)/ },
   { label: "hard-coded bearer credential", pattern: /["'`]Bearer [A-Za-z0-9\-._~+/]{8,}/ },
+  // R44B6G: the recording security sink is a test fixture.
+  { label: "test worker security sink", pattern: /testWorkerSecurityEvents|createRecordingWorkerSecurityEventSink/ },
 ];
 
 const BUILTINS = new Set(builtinModules);
@@ -313,11 +315,12 @@ describe("worker bridge boundary (persistence only)", () => {
 describe("worker authentication boundary (seam only)", () => {
   const sources = sourceFiles.map((path) => ({ path: label(path), text: read(path) }));
 
-  it("is not composed into any production module", () => {
+  it("is composed only into the private worker-control router, never the default process", () => {
+    // R44B6G: the worker-control router is the only consumer.
     const importers = sources
       .filter(({ path, text }) => !path.startsWith("src/workerAuthentication/") && /workerAuthentication\//.test(text))
       .map(({ path }) => path);
-    expect(importers).toEqual([]);
+    expect(importers.sort()).toEqual(["src/workerControl/workerControlApplication.ts", "src/workerControl/workerSecurityEvents.ts"]);
     expect(read(join(SRC_ROOT, "runCommercialApiProcess.ts"))).not.toMatch(/worker/i);
     expect(read(join(SRC_ROOT, "main.ts"))).not.toMatch(/worker/i);
   });
@@ -337,5 +340,46 @@ describe("worker authentication boundary (seam only)", () => {
     expect(code("// no cookie here\nconst x = 1;")).not.toMatch(/cookie/i);
     // Guard the guard.
     expect('const id = url.searchParams.get("worker");').toMatch(/searchParams|request\.url|cookie|request\.headers\[|process\.env|remoteAddress|localhost|127\.0\.0\.1/i);
+  });
+});
+
+// R44B6G: worker-control leases only. The router lives in src/workerControl,
+// is never composed by the default process, and nothing in it can grant a
+// credential, enter SUBMITTING, read secret material or reach a provider.
+describe("worker-control boundary (lease foundation only)", () => {
+  const sources = sourceFiles.map((path) => ({ path: label(path), text: read(path) }));
+  const code = (text: string) => text.replace(/^\s*\/\/.*$/gm, "");
+  const workerControl = sources.filter(({ path }) => path.startsWith("src/workerControl/"));
+  const FORBIDDEN_IN_WORKER_CONTROL =
+    /SET\s[^;`]*credential_granted_at\s*=|'SUBMITTING'|state\s*=\s*'SUBMITT|sealed_credential|fingerprint_|CredentialOpener|provider_execution_id\s*=|submitting_at\s*=/i;
+
+  it("keeps worker-control routes inside src/workerControl and out of the default process", () => {
+    expect(workerControl.map(({ path }) => path).sort()).toEqual([
+      "src/workerControl/workerControlApplication.ts",
+      "src/workerControl/workerLeasePolicy.ts",
+      "src/workerControl/workerLeaseService.ts",
+      "src/workerControl/workerSecurityEvents.ts",
+    ]);
+    const routeOwners = sources.filter(({ text }) => /worker-control/.test(code(text))).map(({ path }) => path);
+    expect(routeOwners).toEqual(["src/workerControl/workerControlApplication.ts"]);
+    const importers = sources.filter(({ path, text }) => !path.startsWith("src/workerControl/") && /workerControl\//.test(text)).map(({ path }) => path);
+    expect(importers).toEqual([]);
+  });
+
+  it("cannot grant a credential, enter SUBMITTING, read secret material or record a provider execution", () => {
+    for (const { path, text } of workerControl) {
+      expect({ path, violates: FORBIDDEN_IN_WORKER_CONTROL.test(code(text)) }).toEqual({ path, violates: false });
+    }
+    // Guard the guards.
+    expect("SET state = 'LEASED', credential_granted_at = now()").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("SET state = 'SUBMITTING'").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("SELECT sealed_credential FROM provider_credential_versions").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+    expect("credential_granted_at IS NULL").not.toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+  });
+
+  it("enables no CORS and reads no cookie or session", () => {
+    for (const { text } of workerControl) {
+      expect(code(text)).not.toMatch(/Access-Control-Allow|cookie|Set-Cookie|session/i);
+    }
   });
 });

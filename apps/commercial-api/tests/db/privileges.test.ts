@@ -115,7 +115,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 1 }]);
+      expect(version.rows).toEqual([{ version: 2 }]);
     });
   });
 

@@ -36,7 +36,10 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   { label: "Google GenAI provider", pattern: /genai|gemini/i },
   { label: "provider SDK package", pattern: /@runwayml|@google\// },
   { label: "media root", pattern: /BUSYBOOKIE_MEDIA_ROOT|MEDIA_ROOT|mediaRoot/i },
-  { label: "provider secret variable", pattern: /RUNWAYML_API_SECRET|GEMINI_API_KEY|API_SECRET|API_KEY/ },
+  // R44B5D: the bare token API_KEY is allowed as credential-kind vocabulary
+  // (provider_connections.credential_kind). Environment-variable-style names
+  // (any prefix_API_KEY / prefix_API_SECRET) and API_SECRET stay forbidden.
+  { label: "provider secret variable", pattern: /RUNWAYML_API_SECRET|GEMINI_API_KEY|API_SECRET|[A-Z0-9]_API_KEY/ },
   { label: "engine environment namespace", pattern: /BUSYBOOKIE_/ },
   { label: "engine execution/CLI modules", pattern: /src\/execution|src\/dialogue|src\/composition|\/providers\/|scripts\/|dist\/execution|executeSingleShot|confirm-paid-generation/i },
   { label: "process spawning", pattern: /child_process|node:worker_threads/ },
@@ -99,7 +102,7 @@ describe("boundary scanner", () => {
         "src/database/runtimeGrants.ts",
       ]),
     );
-    expect(migrationFiles.map(label)).toEqual(["migrations/0001_commercial_schema_v1.sql"]);
+    expect(migrationFiles.map(label)).toEqual(["migrations/0001_commercial_schema_v1.sql", "migrations/0002_provider_connections.sql"]);
     expect(scannedFiles.map(label).some((path) => path.startsWith("tests/"))).toBe(false);
   });
 
@@ -107,6 +110,8 @@ describe("boundary scanner", () => {
     ['import { startOperatorServer } from "../../../src/operatorServer/startOperatorServer.js";', "private operator server"],
     ['fetch("http://127.0.0.1:4381/api/v1/operator/health")', "private operator port"],
     ["const key = process.env.GEMINI_API_KEY;", "provider secret variable"],
+    ["const key = process.env.OTHER_PROVIDER_API_KEY;", "provider secret variable"],
+    ["const secret = env.API_SECRET;", "provider secret variable"],
     ["const secret = process.env.RUNWAYML_API_SECRET;", "provider secret variable"],
     ["const root = process.env.BUSYBOOKIE_MEDIA_ROOT;", "media root"],
     ['import RunwayML from "@runwayml/sdk";', "provider SDK package"],
@@ -134,6 +139,7 @@ describe("boundary scanner", () => {
   it("does not flag the scaffold's own vocabulary", () => {
     expect(findViolations('const HEALTH_PATH = "/__health"; const DEFAULT_PORT = 4480;')).toEqual([]);
     expect(findViolations('client.query("SELECT pg_advisory_unlock($1::bigint) AS released")')).toEqual([]);
+    expect(findViolations("CHECK (credential_kind IN ('API_KEY'))")).toEqual([]);
   });
 
   it.each(["unlockOperatorConsole()", "const UNLOCK_TOKEN = 1;", "// unlock the console", "pg_unlock_everything()"])(

@@ -65,16 +65,61 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "audit_events_sequence_uq",
   ],
   schema_migrations: ["schema_migrations_name_ck", "schema_migrations_pk", "schema_migrations_sha256_ck", "schema_migrations_version_ck"],
+  provider_connections: [
+    "provider_connections_account_fk",
+    "provider_connections_account_scope_uq",
+    "provider_connections_created_by_user_fk",
+    "provider_connections_creation_idempotency_key_ck",
+    "provider_connections_credential_kind_ck",
+    "provider_connections_disabled_at_ck",
+    "provider_connections_disconnected_at_ck",
+    "provider_connections_label_ck",
+    "provider_connections_pk",
+    "provider_connections_provider_ck",
+    "provider_connections_status_ck",
+    "provider_connections_verification_attempt_ck",
+    "provider_connections_verification_status_ck",
+    "provider_connections_verified_at_ck",
+  ],
+  provider_credential_versions: [
+    "provider_credential_versions_active_clean_ck",
+    "provider_credential_versions_connection_same_account_fk",
+    "provider_credential_versions_created_by_user_fk",
+    "provider_credential_versions_destroyed_at_ck",
+    "provider_credential_versions_fingerprint_algorithm_ck",
+    "provider_credential_versions_fingerprint_key_ref_ck",
+    "provider_credential_versions_fingerprint_presence_ck",
+    "provider_credential_versions_fingerprint_value_ck",
+    "provider_credential_versions_pk",
+    "provider_credential_versions_retained_at_ck",
+    "provider_credential_versions_rotation_idempotency_key_ck",
+    "provider_credential_versions_scope_uq",
+    "provider_credential_versions_sealed_credential_ck",
+    "provider_credential_versions_secret_presence_ck",
+    "provider_credential_versions_status_ck",
+    "provider_credential_versions_superseded_at_ck",
+    "provider_credential_versions_version_ck",
+    "provider_credential_versions_version_uq",
+  ],
 };
 
-describe("schema v1 catalog", () => {
-  it("contains exactly the five domain tables and schema_migrations", async () => {
+describe("schema catalog (migrations 0001 and 0002)", () => {
+  it("contains exactly the seven domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v', 'm', 'p', 'f') ORDER BY c.relname`,
     );
     expect(tables).toEqual(
-      ["accounts", "audit_events", "entitlement_grants", "productions", "schema_migrations", "users"].map((relname) => ({
+      [
+        "accounts",
+        "audit_events",
+        "entitlement_grants",
+        "productions",
+        "provider_connections",
+        "provider_credential_versions",
+        "schema_migrations",
+        "users",
+      ].map((relname) => ({
         relname,
         relkind: "r",
       })),
@@ -144,7 +189,71 @@ describe("schema v1 catalog", () => {
         indexdef:
           "CREATE UNIQUE INDEX productions_creation_idempotency_key_uq ON public.productions USING btree (account_id, creation_idempotency_key) WHERE (creation_idempotency_key IS NOT NULL)",
       },
+      {
+        indexname: "provider_connections_account_list_ix",
+        indexdef: "CREATE INDEX provider_connections_account_list_ix ON public.provider_connections USING btree (account_id, created_at DESC, id)",
+      },
+      {
+        indexname: "provider_connections_creation_idempotency_key_uq",
+        indexdef:
+          "CREATE UNIQUE INDEX provider_connections_creation_idempotency_key_uq ON public.provider_connections USING btree (account_id, creation_idempotency_key) WHERE (creation_idempotency_key IS NOT NULL)",
+      },
+      {
+        // Deliberately not unique: duplicate policy is Account-scoped application logic.
+        indexname: "provider_credential_versions_fingerprint_ix",
+        indexdef:
+          "CREATE INDEX provider_credential_versions_fingerprint_ix ON public.provider_credential_versions USING btree (account_id, fingerprint_key_ref, fingerprint_value) WHERE (fingerprint_value IS NOT NULL)",
+      },
+      {
+        indexname: "provider_credential_versions_one_active_uq",
+        indexdef:
+          "CREATE UNIQUE INDEX provider_credential_versions_one_active_uq ON public.provider_credential_versions USING btree (provider_connection_id) WHERE (status = 'ACTIVE'::text)",
+      },
+      {
+        indexname: "provider_credential_versions_rotation_idempotency_key_uq",
+        indexdef:
+          "CREATE UNIQUE INDEX provider_credential_versions_rotation_idempotency_key_uq ON public.provider_credential_versions USING btree (provider_connection_id, rotation_idempotency_key) WHERE (rotation_idempotency_key IS NOT NULL)",
+      },
     ]);
+  });
+
+  it("enforces credential-version provenance through a same-account composite foreign key", async () => {
+    const definitions = await rows<{ conname: string; def: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conname IN ('provider_credential_versions_connection_same_account_fk', 'provider_connections_account_scope_uq',
+                          'provider_credential_versions_scope_uq', 'provider_credential_versions_version_uq')
+        ORDER BY conname`,
+    );
+    expect(definitions).toEqual([
+      { conname: "provider_connections_account_scope_uq", def: "UNIQUE (account_id, id)" },
+      {
+        conname: "provider_credential_versions_connection_same_account_fk",
+        def: "FOREIGN KEY (account_id, provider_connection_id) REFERENCES provider_connections(account_id, id) ON DELETE RESTRICT",
+      },
+      { conname: "provider_credential_versions_scope_uq", def: "UNIQUE (account_id, provider_connection_id, id)" },
+      { conname: "provider_credential_versions_version_uq", def: "UNIQUE (provider_connection_id, credential_version)" },
+    ]);
+  });
+
+  it("widens the audit resource-type check to provider_connection under the same name", async () => {
+    const check = await rows<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'audit_events_resource_type_ck'");
+    expect(check).toEqual([
+      {
+        def: "CHECK ((resource_type = ANY (ARRAY['user'::text, 'account'::text, 'entitlement_grant'::text, 'production'::text, 'provider_connection'::text])))",
+      },
+    ]);
+  });
+
+  it("has no plaintext credential column and no provider-brand vocabulary", async () => {
+    const columns = await rows<{ table_name: string; column_name: string; data_type: string }>(
+      `SELECT table_name, column_name, data_type FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name IN ('provider_connections', 'provider_credential_versions')
+        ORDER BY table_name, ordinal_position`,
+    );
+    const names = columns.map((column) => column.column_name);
+    expect(names).not.toContain("api_key");
+    expect(names.filter((name) => /secret|plaintext|password|token|api_key/.test(name))).toEqual([]);
+    expect(columns.find((column) => column.column_name === "sealed_credential")?.data_type).toBe("jsonb");
   });
 
   it("enforces production grant provenance through a same-account composite foreign key", async () => {
@@ -167,7 +276,7 @@ describe("schema v1 catalog", () => {
     const actions = await rows<{ conname: string; confdeltype: string }>(
       "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace ORDER BY conname",
     );
-    expect(actions).toHaveLength(7);
+    expect(actions).toHaveLength(11);
     for (const action of actions) {
       expect(action.confdeltype, action.conname).toBe("r");
     }
@@ -203,17 +312,26 @@ describe("schema v1 catalog", () => {
       },
     ]);
 
-    const otherTriggers = await rows<{ count: string }>(
-      `SELECT count(*) AS count FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+    const otherTriggers = await rows<{ relname: string; tgname: string; def: string }>(
+      `SELECT c.relname, t.tgname, pg_get_triggerdef(t.oid) AS def FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
         WHERE c.relnamespace = 'public'::regnamespace AND NOT t.tgisinternal AND c.relname <> 'audit_events'`,
     );
-    expect(otherTriggers).toEqual([{ count: "0" }]);
+    expect(otherTriggers).toEqual([
+      {
+        relname: "provider_credential_versions",
+        tgname: "provider_credential_versions_guard_update",
+        def: "CREATE TRIGGER provider_credential_versions_guard_update BEFORE UPDATE ON public.provider_credential_versions FOR EACH ROW EXECUTE FUNCTION provider_credential_versions_guard_update()",
+      },
+    ]);
 
     const functions = await rows<{ proname: string; public_execute: boolean }>(
       `SELECT proname, has_function_privilege('public', oid, 'EXECUTE') AS public_execute
-         FROM pg_proc WHERE pronamespace = 'public'::regnamespace`,
+         FROM pg_proc WHERE pronamespace = 'public'::regnamespace ORDER BY proname`,
     );
-    expect(functions).toEqual([{ proname: "audit_events_reject_mutation", public_execute: false }]);
+    expect(functions).toEqual([
+      { proname: "audit_events_reject_mutation", public_execute: false },
+      { proname: "provider_credential_versions_guard_update", public_execute: false },
+    ]);
   });
 
   it("stores no engine, filesystem or provider identity on productions", async () => {

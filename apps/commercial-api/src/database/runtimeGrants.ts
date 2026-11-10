@@ -26,6 +26,40 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
     updateColumns: ["state", "reserved_at", "consumed_at", "revoked_at", "expired_at", "expires_at", "updated_at"],
   },
   productions: { select: true, insert: true, updateColumns: ["title", "archived_at", "updated_at"] },
+  // Lifecycle and verification only; ownership, provider, credential kind,
+  // creator and idempotency key are immutable to the runtime role.
+  provider_connections: {
+    select: true,
+    insert: true,
+    updateColumns: [
+      "label",
+      "status",
+      "verification_status",
+      "last_verification_attempt_at",
+      "verified_at",
+      "disconnected_at",
+      "disabled_at",
+      "updated_at",
+    ],
+  },
+  // Lifecycle fields, plus the secret and fingerprint columns solely so that
+  // destruction can set them to NULL. The provider_credential_versions guard
+  // trigger rejects any replacement of secret material with another value.
+  provider_credential_versions: {
+    select: true,
+    insert: true,
+    updateColumns: [
+      "status",
+      "superseded_at",
+      "retained_for_recovery_at",
+      "destroyed_at",
+      "sealed_credential",
+      "fingerprint_algorithm",
+      "fingerprint_key_ref",
+      "fingerprint_value",
+      "updated_at",
+    ],
+  },
   audit_events: { select: true, insert: true, updateColumns: [] },
   // Read-only: lets the API verify the applied schema version.
   schema_migrations: { select: true, insert: false, updateColumns: [] },

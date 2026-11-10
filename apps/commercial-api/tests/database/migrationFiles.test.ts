@@ -123,27 +123,43 @@ describe("discoverMigrations", () => {
 });
 
 describe("committed migrations", () => {
-  it("discovers exactly 0001 with LF bytes and a stable checksum", async () => {
-    const migrations = await discoverMigrations();
-    const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, "0001_commercial_schema_v1.sql"));
+  const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-    expect(migrations.map((entry) => entry.fileName)).toEqual(["0001_commercial_schema_v1.sql"]);
-    expect(migrations[0]?.sha256).toBe(sha256Hex(raw));
-    expect(raw.includes(0x0d)).toBe(false);
+  it("discovers 0001 and 0002 in order, with LF bytes and stable checksums", async () => {
+    const migrations = await discoverMigrations();
+
+    expect(migrations.map((entry) => entry.fileName)).toEqual(["0001_commercial_schema_v1.sql", "0002_provider_connections.sql"]);
+    for (const migration of migrations) {
+      const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
+      expect(migration.sha256).toBe(sha256Hex(raw));
+      expect(raw.includes(0x0d)).toBe(false);
+    }
+    // Migration 0001 is byte-for-byte unchanged.
+    expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
   });
 
   it("creates exactly the tables the runtime grant manifest covers", async () => {
-    const [schemaV1] = await discoverMigrations();
-    const created = [...(schemaV1?.sql ?? "").matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1]).sort();
+    const migrations = await discoverMigrations();
+    const created = migrations.flatMap((migration) => [...migration.sql.matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1])).sort();
 
-    expect(created).toEqual(["accounts", "audit_events", "entitlement_grants", "productions", "users"]);
+    expect(created).toEqual(["accounts", "audit_events", "entitlement_grants", "productions", "provider_connections", "provider_credential_versions", "users"]);
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...created, "schema_migrations"].sort());
   });
 
-  it("names no environment-specific role", async () => {
-    const [schemaV1] = await discoverMigrations();
-    expect(schemaV1?.sql).not.toMatch(/busybookie_commercial_test/i);
-    // No GRANT statements: runtime privileges are applied by the runtime-grant command.
-    expect(schemaV1?.sql).not.toMatch(/^\s*GRANT\b/im);
+  it("names no environment-specific role and grants nothing", async () => {
+    for (const migration of await discoverMigrations()) {
+      expect(migration.sql).not.toMatch(/busybookie_commercial_test/i);
+      // No GRANT statements: runtime privileges are applied by the runtime-grant command.
+      expect(migration.sql).not.toMatch(/^\s*GRANT\b/im);
+    }
+  });
+
+  it("adds no plaintext credential column and names no provider brand", async () => {
+    const [, providerConnections] = await discoverMigrations();
+    expect(providerConnections?.sql).not.toMatch(/\bapi_key\b|plaintext\s+text|secret\s+text|credential\s+text/);
+    // Guard the guards: these patterns must still detect what they forbid.
+    expect("GRANT SELECT ON users TO someone;").toMatch(/^\s*GRANT\b/im);
+    expect("  api_key text NOT NULL,").toMatch(/\bapi_key\b|plaintext\s+text|secret\s+text|credential\s+text/);
+    expect(providerConnections?.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
   });
 });

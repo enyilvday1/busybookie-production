@@ -12,6 +12,20 @@ export type RuntimePool = Readonly<{
   end: () => Promise<void>;
 }>;
 
+// One checked-out session. Every statement of a transaction must run on the
+// same client; Pool.query() may use a different connection per call.
+export type RuntimeClient = Readonly<{
+  query: <Row extends object>(sql: string, params?: unknown[]) => Promise<{ rows: Row[] }>;
+  // Passing an error destroys the connection instead of returning it to the
+  // pool (used when a rollback could not be confirmed).
+  release: (destroyWithError?: Error) => void;
+}>;
+
+export type TransactionalPool = RuntimePool &
+  Readonly<{
+    connect: () => Promise<RuntimeClient>;
+  }>;
+
 const PEM_CERTIFICATE = "-----BEGIN CERTIFICATE-----";
 
 // Explicit TLS mapping. "require" encrypts without verifying the server;
@@ -62,7 +76,7 @@ export type PoolErrorReporter = (text: string) => void;
 // the server closing a connection) are reported with their class only; the
 // pool discards the broken client and the live readiness probe reflects any
 // lasting outage.
-export async function createRuntimePool(config: RuntimeDatabaseConfig, reportError: PoolErrorReporter): Promise<RuntimePool> {
+export async function createRuntimePool(config: RuntimeDatabaseConfig, reportError: PoolErrorReporter): Promise<TransactionalPool> {
   const caPem = config.caFile === null ? null : await readCaCertificate(config.caFile);
   const pool = new pg.Pool(toPgPoolConfig(config, caPem));
 
@@ -77,5 +91,15 @@ export async function createRuntimePool(config: RuntimeDatabaseConfig, reportErr
       return { rows: result.rows as Row[] };
     },
     end: () => pool.end(),
+    connect: async () => {
+      const client = await pool.connect();
+      return Object.freeze({
+        query: async <Row extends object>(sql: string, params?: unknown[]) => {
+          const result = await client.query(sql, params);
+          return { rows: result.rows as Row[] };
+        },
+        release: (destroyWithError?: Error) => client.release(destroyWithError),
+      });
+    },
   });
 }

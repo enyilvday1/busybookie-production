@@ -16,7 +16,8 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   R44B6K1 (token-less recovery only from `OUTCOME_UNKNOWN`, the migration
   0005 contract, the exact `recordSha256` preimage, the provider-create
   retry prohibition and cross-reference corrections: introduction, sections
-  12, 13, 16 to 18, 26, 30, 31, 36 and 37).
+  12, 13, 16 to 18, 26, 30, 31, 36 and 37); R44B6K5 (wall-clock
+  provider-call authority barrier erratum: sections 12, 26, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -522,6 +523,10 @@ evidence.
   Every invocation applies the same server-clock rule,
   `lease_expires_at <= now()`. None shortens, ends early or otherwise
   bypasses a live lease, whatever the caller reports about a restart.
+  Transaction-stable `now()` is correct here (revision R44B6K5). A sweep can
+  at worst recognise an expiry one transaction later; it never grants
+  authority. Only the `LEASED -> SUBMITTING` grant of provider-call
+  authority uses `clock_timestamp()` (section 26).
 - **Transaction.** READ COMMITTED. Candidate rows are selected with
   `state = 'SUBMITTING' AND lease_expires_at <= now()`,
   `FOR UPDATE SKIP LOCKED`, in a bounded batch. Each row is updated with:
@@ -1866,8 +1871,9 @@ rules plus:
 1. **On INSERT,** `NEW.submitting_worker_principal_id` must be `NULL`.
 2. **On the first `LEASED -> SUBMITTING` transition,** the guard requires:
    - `OLD.lease_worker_principal_id IS NOT NULL`;
-   - `OLD.lease_expires_at > now()`, the same transaction clock that the
-     lease service checks;
+   - `OLD.lease_expires_at > clock_timestamp()`: the lease is still valid
+     by actual wall-clock time at the guarded transition (revision R44B6K5;
+     see "Wall-clock provider-call authority barrier" below);
    - `NEW.lease_worker_principal_id IS NOT DISTINCT FROM OLD.lease_worker_principal_id`,
      so the lease cannot change in the same statement;
    - `NEW.submitting_worker_principal_id` either `NULL` or equal to
@@ -1882,6 +1888,59 @@ rules plus:
 
 The R44B6J service is unchanged. It never names the column, and the guard
 fills it in.
+
+### Wall-clock provider-call authority barrier (revision R44B6K5)
+
+**Erratum.** Revision R44B6K1 required `OLD.lease_expires_at > now()` and
+described it as the same transaction clock that the lease service checks.
+That was too weak. PostgreSQL `now()` is transaction-stable: it returns the
+start time of the enclosing transaction. A transaction that began while the
+lease was valid could therefore move `LEASED -> SUBMITTING` after the lease
+had already expired in real time. That would grant provider-call authority
+to a lease that no longer exists.
+
+**Locked decision.** The database guard is the final, fail-closed authority
+for provider-call permission. For the first `LEASED -> SUBMITTING`
+transition it evaluates `OLD.lease_expires_at > clock_timestamp()`.
+`clock_timestamp()` returns the actual wall-clock time when the guard runs.
+A lease that has expired in real time can never cross into `SUBMITTING`,
+however early the enclosing transaction began.
+
+**The preliminary service check is separate.** The lease service's
+preliminary lease check (for example `lease_expires_at <= now()` in the
+R44B6J path) may keep transaction time. It is a fast first refusal, not the
+authority. Consider this sequence:
+
+1. the service observes the lease as valid;
+2. time passes;
+3. the lease expires before the database transition.
+
+The guard rejects the transition. The service then reports a database
+failure, and no acknowledgement is returned, so no provider call is
+authorised. The database is deliberately stricter than the service.
+
+**Expiry recognition keeps `now()`.** The section 12 sweep (including step 1
+of `acceptance-recovery`) and every other expiry *recognition* rule keep
+`lease_expires_at <= now()` inside short control-plane transactions. A
+transaction-stable clock there can at worst recognise an expiry one
+transaction later. That delays the move to `OUTCOME_UNKNOWN` slightly, while
+the live lease keeps its authority. It can never grant provider-call
+authority after real expiry. The asymmetry is intentional:
+
+- granting authority uses wall-clock time;
+- recognising lost authority may use transaction time.
+
+Future implementations must not mechanically replace every `now()` in this
+design with `clock_timestamp()`. `submitted_at = now()`,
+`updated_at = now()` and similar timestamps also stay transaction time.
+
+```text
+SUBMITTING_EXPIRY_USES_TRANSACTION_STABLE_NOW=NO
+SUBMITTING_EXPIRY_USES_WALL_CLOCK_TIME=YES
+SUBMITTING_EXPIRY_CLOCK_SOURCE=CLOCK_TIMESTAMP
+LONG_RUNNING_TRANSACTION_CAN_CROSS_EXPIRED_LEASE_INTO_SUBMITTING=NO
+EXPIRY_SWEEP_REQUIRES_CLOCK_TIMESTAMP=NO
+```
 
 **Migration order** (one transaction, under the existing migration lock):
 
@@ -2349,7 +2408,9 @@ each slice under its own authorised gate:
 
 1. Migration 0005: the immutable submitting principal (section 26). The
    guard stamps it, so there is no R44B6J service change and no runtime
-   grant change.
+   grant change. Its first `LEASED -> SUBMITTING` check is
+   `OLD.lease_expires_at > clock_timestamp()` (revision R44B6K5), never
+   transaction-stable `now()`.
 2. Heartbeat in `SUBMITTING` and in leased `SUBMITTED`; release still
    refused (section 12).
 3. Expired `SUBMITTING -> OUTCOME_UNKNOWN` sweep (section 12).
@@ -2496,6 +2557,11 @@ PROVIDER_CREATE_AUTOMATIC_TRANSPORT_RETRY=NO
 PROVIDER_CREATE_SDK_RETRY_DISABLED=YES
 AMBIGUOUS_PROVIDER_CREATE_RESULT=OUTCOME_UNKNOWN
 AMBIGUOUS_PROVIDER_CREATE_AUTO_RESUBMIT=NO
+SUBMITTING_EXPIRY_USES_TRANSACTION_STABLE_NOW=NO
+SUBMITTING_EXPIRY_USES_WALL_CLOCK_TIME=YES
+SUBMITTING_EXPIRY_CLOCK_SOURCE=CLOCK_TIMESTAMP
+LONG_RUNNING_TRANSACTION_CAN_CROSS_EXPIRED_LEASE_INTO_SUBMITTING=NO
+EXPIRY_SWEEP_REQUIRES_CLOCK_TIMESTAMP=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

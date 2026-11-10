@@ -44,10 +44,11 @@ async function withPool<T>(config: RuntimeDatabaseConfig, fn: (pool: RuntimePool
 }
 
 describe("runtime pool against PostgreSQL 16", () => {
-  it("connects as the runtime role and verifies the latest committed schema (version 2) with its exact checksum", async () => {
+  it("connects as the runtime role and verifies the latest committed schema (version 3) with its exact checksum", async () => {
     expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
+    expect(migrations).toHaveLength(3);
     await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
-      await expect(verifyRuntimeDatabase(pool, migrations)).resolves.toEqual({ latestVersion: 2, latestSha256: migrations[1]!.sha256 });
+      await expect(verifyRuntimeDatabase(pool, migrations)).resolves.toEqual({ latestVersion: 3, latestSha256: migrations[2]!.sha256 });
 
       const identity = await pool.query<{ user: string; version_num: string }>(
         "SELECT current_user AS user, current_setting('server_version_num') AS version_num",
@@ -99,31 +100,35 @@ describe("runtime pool against PostgreSQL 16", () => {
   });
 
   it("detects drift, a schema behind and a schema ahead of the committed migrations", async () => {
-    const [schemaV1, providerConnections] = migrations;
+    const [schemaV1, providerConnections, generationAuthorizations] = migrations;
     const drifted = parseMigrationFile(schemaV1!.fileName, new TextEncoder().encode(`${schemaV1!.sql}-- drift\n`));
-    const next = parseMigrationFile("0003_next.sql", new TextEncoder().encode("SELECT 3;\n"));
+    const next = parseMigrationFile("0004_next.sql", new TextEncoder().encode("SELECT 4;\n"));
 
     await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
-      await expect(verifyRuntimeDatabase(pool, [drifted, providerConnections!])).rejects.toMatchObject({ code: "SCHEMA_DRIFT" });
-      await expect(verifyRuntimeDatabase(pool, [schemaV1!, providerConnections!, next])).rejects.toMatchObject({ code: "SCHEMA_BEHIND" });
+      await expect(verifyRuntimeDatabase(pool, [drifted, providerConnections!, generationAuthorizations!])).rejects.toMatchObject({
+        code: "SCHEMA_DRIFT",
+      });
+      await expect(verifyRuntimeDatabase(pool, [schemaV1!, providerConnections!, generationAuthorizations!, next])).rejects.toMatchObject({
+        code: "SCHEMA_BEHIND",
+      });
     });
 
     // Ahead: a migration applied to the database that the code does not know.
-    await clients.migrator.query("INSERT INTO schema_migrations (version, name, sha256) VALUES (3, 'next', $1)", [next.sha256]);
+    await clients.migrator.query("INSERT INTO schema_migrations (version, name, sha256) VALUES (4, 'next', $1)", [next.sha256]);
     try {
       await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
         await expect(verifyRuntimeDatabase(pool, migrations)).rejects.toMatchObject({ code: "SCHEMA_AHEAD" });
-        // Readiness verified against version 2 now sees a newer applied migration.
-        const check = createReadinessCheck(pool, { latestVersion: 2, latestSha256: providerConnections!.sha256 }, 2000);
+        // Readiness verified against version 3 now sees a newer applied migration.
+        const check = createReadinessCheck(pool, { latestVersion: 3, latestSha256: generationAuthorizations!.sha256 }, 2000);
         await expect(check()).resolves.toBe(false);
       });
     } finally {
-      await clients.migrator.query("DELETE FROM schema_migrations WHERE version = 3");
+      await clients.migrator.query("DELETE FROM schema_migrations WHERE version = 4");
     }
   });
 
-  it("is not ready while the database is still at version 1, and is ready at version 2", async () => {
-    const [schemaV1, providerConnections] = migrations;
+  it("is not ready while the database is still at version 1", async () => {
+    const [schemaV1, , generationAuthorizations] = migrations;
     await resetTestSchema(clients.migrator);
     await runMigrations(clients.migrator, [schemaV1!]);
     // As a version-1 deployment's grants did, let the runtime role read the schema version.
@@ -131,8 +136,25 @@ describe("runtime pool against PostgreSQL 16", () => {
     try {
       await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
         await expect(verifyRuntimeDatabase(pool, migrations)).rejects.toMatchObject({ code: "SCHEMA_BEHIND" });
-        // A process verified at version 2 would also report not ready here.
-        const check = createReadinessCheck(pool, { latestVersion: 2, latestSha256: providerConnections!.sha256 }, 2000);
+        const check = createReadinessCheck(pool, { latestVersion: 3, latestSha256: generationAuthorizations!.sha256 }, 2000);
+        await expect(check()).resolves.toBe(false);
+      });
+    } finally {
+      await prepareSchemaV1(clients);
+    }
+  });
+
+  it("is not ready while the database is at version 2, and is ready at version 3", async () => {
+    const [schemaV1, providerConnections, generationAuthorizations] = migrations;
+    await resetTestSchema(clients.migrator);
+    await runMigrations(clients.migrator, [schemaV1!, providerConnections!]);
+    // As a version-2 deployment's grants did, let the runtime role read the schema version.
+    await clients.migrator.query("GRANT SELECT ON schema_migrations TO busybookie_commercial_test_runtime");
+    try {
+      await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
+        await expect(verifyRuntimeDatabase(pool, migrations)).rejects.toMatchObject({ code: "SCHEMA_BEHIND" });
+        // A process verified at version 3 also reports not ready here.
+        const check = createReadinessCheck(pool, { latestVersion: 3, latestSha256: generationAuthorizations!.sha256 }, 2000);
         await expect(check()).resolves.toBe(false);
       });
     } finally {
@@ -141,7 +163,7 @@ describe("runtime pool against PostgreSQL 16", () => {
 
     await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
       const verified = await verifyRuntimeDatabase(pool, migrations);
-      expect(verified).toEqual({ latestVersion: 2, latestSha256: providerConnections!.sha256 });
+      expect(verified).toEqual({ latestVersion: 3, latestSha256: generationAuthorizations!.sha256 });
       await expect(createReadinessCheck(pool, verified, 2000)()).resolves.toBe(true);
     });
   });

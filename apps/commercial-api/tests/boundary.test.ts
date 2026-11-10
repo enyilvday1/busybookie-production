@@ -105,7 +105,11 @@ describe("boundary scanner", () => {
         "src/database/runtimeGrants.ts",
       ]),
     );
-    expect(migrationFiles.map(label)).toEqual(["migrations/0001_commercial_schema_v1.sql", "migrations/0002_provider_connections.sql"]);
+    expect(migrationFiles.map(label)).toEqual([
+      "migrations/0001_commercial_schema_v1.sql",
+      "migrations/0002_provider_connections.sql",
+      "migrations/0003_generation_authorizations.sql",
+    ]);
     expect(scannedFiles.map(label).some((path) => path.startsWith("tests/"))).toBe(false);
   });
 

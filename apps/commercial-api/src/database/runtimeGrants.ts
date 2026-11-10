@@ -60,6 +60,15 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
       "updated_at",
     ],
   },
+  // Lifecycle only. Ownership, billing mode, provider, model, the exact
+  // credential version, the frozen request and its hash, the cost cap, expiry
+  // and creation provenance are immutable to the runtime role; the
+  // generation_authorizations guard trigger also rejects them for the owner.
+  generation_authorizations: {
+    select: true,
+    insert: true,
+    updateColumns: ["status", "claimed_at", "expired_at", "cancelled_at", "updated_at"],
+  },
   audit_events: { select: true, insert: true, updateColumns: [] },
   // Read-only: lets the API verify the applied schema version.
   schema_migrations: { select: true, insert: false, updateColumns: [] },

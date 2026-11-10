@@ -125,10 +125,14 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001 and 0002 in order, with LF bytes and stable checksums", async () => {
+  it("discovers 0001, 0002 and 0003 in order, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
-    expect(migrations.map((entry) => entry.fileName)).toEqual(["0001_commercial_schema_v1.sql", "0002_provider_connections.sql"]);
+    expect(migrations.map((entry) => entry.fileName)).toEqual([
+      "0001_commercial_schema_v1.sql",
+      "0002_provider_connections.sql",
+      "0003_generation_authorizations.sql",
+    ]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
@@ -142,7 +146,16 @@ describe("committed migrations", () => {
     const migrations = await discoverMigrations();
     const created = migrations.flatMap((migration) => [...migration.sql.matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1])).sort();
 
-    expect(created).toEqual(["accounts", "audit_events", "entitlement_grants", "productions", "provider_connections", "provider_credential_versions", "users"]);
+    expect(created).toEqual([
+      "accounts",
+      "audit_events",
+      "entitlement_grants",
+      "generation_authorizations",
+      "productions",
+      "provider_connections",
+      "provider_credential_versions",
+      "users",
+    ]);
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...created, "schema_migrations"].sort());
   });
 
@@ -161,5 +174,24 @@ describe("committed migrations", () => {
     expect("GRANT SELECT ON users TO someone;").toMatch(/^\s*GRANT\b/im);
     expect("  api_key text NOT NULL,").toMatch(/\bapi_key\b|plaintext\s+text|secret\s+text|credential\s+text/);
     expect(providerConnections?.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+  });
+
+  it("adds generation authorizations with no plaintext credential, platform secret or provider brand", async () => {
+    const [, , generationAuthorizations] = await discoverMigrations();
+    expect(generationAuthorizations?.sql).toMatch(/^CREATE TABLE generation_authorizations \(/m);
+    expect(generationAuthorizations?.sql).not.toMatch(/\bapi_key\b|plaintext\s+text|secret\s+text|credential\s+text/);
+    expect(generationAuthorizations?.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+    // No execution, worker, lease or platform-secret structures in this slice
+    // (checked on the SQL with comments removed; the header comment names them).
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const statements = withoutComments(generationAuthorizations?.sql ?? "");
+    expect(statements).toMatch(/generation_authorizations/);
+    expect(statements).not.toMatch(/CREATE TABLE (execution_|worker_|platform_)/);
+    expect(statements).not.toMatch(/\blease|fencing|recovery_obligation|platform_credential/i);
+    // Guard the guards.
+    expect("CREATE TABLE execution_jobs (").toMatch(/CREATE TABLE (execution_|worker_|platform_)/);
+    expect(withoutComments("  lease_token text, -- note")).toMatch(/\blease|fencing|recovery_obligation|platform_credential/i);
+    expect(withoutComments("-- no lease here\n")).not.toMatch(/\blease/i);
+    expect("RUNWAY_CREDITS").toMatch(/runway|gemini|genai|veo|google/i);
   });
 });

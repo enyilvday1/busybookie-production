@@ -1,10 +1,25 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 
-// Foundation HTTP adapter. Two routes: GET /__health (liveness, never touches
-// the database) and GET /__ready (readiness); everything else is a
-// deterministic JSON error. Responses never echo the request target, query,
-// headers or error details.
+import { sendError, sendJson, serializeJson } from "./http/jsonResponse.js";
+
+// An application route reads its own request body; the server enforces the
+// method list (405 with Allow) before calling handle.
+export type ApplicationRoute = Readonly<{
+  methods: readonly string[];
+  handle: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+}>;
+
+export type ApplicationRouter = Readonly<{
+  // Returns null when the path is not an application route.
+  route: (pathname: string) => ApplicationRoute | null;
+}>;
+
+// HTTP adapter. Built-in routes: GET /__health (liveness, never touches the
+// database) and GET /__ready (readiness). Customer application routes exist
+// only when an ApplicationRouter is injected; without one, as in the default
+// process composition, every other path is a JSON 404. Responses never echo
+// the request target, query, headers or error details.
 
 export const HEALTH_PATH = "/__health";
 export const READY_PATH = "/__ready";
@@ -19,14 +34,14 @@ export const READY_BODY = Object.freeze({
   service: "commercial-api",
 });
 
-export type ErrorCode = "BAD_REQUEST" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "NOT_READY" | "INTERNAL_ERROR";
-
 export type CommercialApiServerDependencies = Readonly<{
   // Test seam: produces the health body. Production uses HEALTH_BODY.
   readHealth?: () => unknown;
   // Resolves true only when the service can take traffic. Must be bounded;
   // a rejection is treated as not ready. Defaults to never ready.
   checkReadiness?: () => Promise<boolean>;
+  // Customer routes. Absent by default, so they are not exposed.
+  application?: ApplicationRouter;
   // Server-side only; never reaches the client.
   reportError?: (error: unknown) => void;
 }>;
@@ -34,43 +49,6 @@ export type CommercialApiServerDependencies = Readonly<{
 function defaultReportError(error: unknown): void {
   const detail = error instanceof Error ? (error.stack ?? error.name) : "non-error value thrown";
   process.stderr.write(`commercial-api: request handler failed\n${detail}\n`);
-}
-
-function serializeJson(status: number, body: unknown, extraHeaders: Readonly<Record<string, string>> = {}) {
-  const payload = `${JSON.stringify(body)}\n`;
-
-  return {
-    payload,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Content-Length": String(Buffer.byteLength(payload)),
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      ...extraHeaders,
-    },
-    status,
-  };
-}
-
-function sendJson(
-  response: ServerResponse,
-  status: number,
-  body: unknown,
-  extraHeaders?: Readonly<Record<string, string>>,
-): void {
-  // Serialize before writing so a failure cannot leave a partial response.
-  const serialized = serializeJson(status, body, extraHeaders);
-  response.writeHead(serialized.status, serialized.headers);
-  response.end(serialized.payload);
-}
-
-function sendError(
-  response: ServerResponse,
-  status: number,
-  code: ErrorCode,
-  extraHeaders?: Readonly<Record<string, string>>,
-): void {
-  sendJson(response, status, { status: "error", code }, extraHeaders);
 }
 
 function requestPathname(target: string): string | null {
@@ -102,14 +80,23 @@ async function respondReadiness(response: ServerResponse, checkReadiness: () => 
 function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
+  pathname: string | null,
+  applicationRoute: ApplicationRoute | null,
   readHealth: () => unknown,
   checkReadiness: () => Promise<boolean>,
 ): void | Promise<void> {
-  const pathname = requestPathname(request.url ?? "");
-
   if (pathname === null) {
     sendError(response, 400, "BAD_REQUEST");
     return;
+  }
+
+  if (applicationRoute !== null) {
+    if (!applicationRoute.methods.includes(request.method ?? "")) {
+      request.resume();
+      sendError(response, 405, "METHOD_NOT_ALLOWED", { Allow: applicationRoute.methods.join(", ") });
+      return;
+    }
+    return applicationRoute.handle(request, response);
   }
 
   if (pathname !== HEALTH_PATH && pathname !== READY_PATH) {
@@ -133,6 +120,7 @@ export function createCommercialApiServer(dependencies: CommercialApiServerDepen
   const readHealth = dependencies.readHealth ?? (() => HEALTH_BODY);
   const checkReadiness = dependencies.checkReadiness ?? (async () => false);
   const reportError = dependencies.reportError ?? defaultReportError;
+  const application = dependencies.application;
 
   const fail = (response: ServerResponse, error: unknown) => {
     reportError(error);
@@ -146,11 +134,16 @@ export function createCommercialApiServer(dependencies: CommercialApiServerDepen
   };
 
   const server = createServer((request, response) => {
-    // No route reads a request body; discard any that arrives.
-    request.resume();
-
     try {
-      const pending = handleRequest(request, response, readHealth, checkReadiness);
+      const pathname = requestPathname(request.url ?? "");
+      const applicationRoute = pathname !== null && application !== undefined ? application.route(pathname) : null;
+
+      // Only application routes read a request body; discard any other.
+      if (applicationRoute === null) {
+        request.resume();
+      }
+
+      const pending = handleRequest(request, response, pathname, applicationRoute, readHealth, checkReadiness);
       pending?.catch((error: unknown) => fail(response, error));
     } catch (error) {
       fail(response, error);

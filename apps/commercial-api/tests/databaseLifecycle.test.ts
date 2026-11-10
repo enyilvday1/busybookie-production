@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { runCommercialApiProcess, type CommercialApiProcessDependencies, type ShutdownSignal } from "../src/runCommercialApiProcess.js";
-import type { RuntimePool } from "../src/database/runtimePool.js";
+import type { TransactionalPool } from "../src/database/runtimePool.js";
 import { RuntimeDatabaseError, type VerifiedSchema } from "../src/database/verifyRuntimeDatabase.js";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../src/startCommercialApiServer.js";
 import { send } from "./httpClient.js";
@@ -38,11 +38,14 @@ function harness(overrides: Partial<CommercialApiProcessDependencies> & { readin
   let poolEnds = 0;
   let readyRows: () => object[] = overrides.readinessRows ?? (() => [{ version: 1, sha256: VERIFIED.latestSha256 }]);
 
-  const pool: RuntimePool = {
+  const pool: TransactionalPool = {
     query: async <Row extends object>() => ({ rows: readyRows() as Row[] }),
     end: async () => {
       poolEnds += 1;
       events.push("pool-ended");
+    },
+    connect: async () => {
+      throw new Error("lifecycle tests never check out a client");
     },
   };
 
@@ -226,6 +229,9 @@ describe("database shutdown", () => {
       createPool: async () => ({
         query: async <Row extends object>() => ({ rows: [{ version: 1, sha256: VERIFIED.latestSha256 }] as Row[] }),
         end: () => new Promise<void>(() => {}),
+        connect: async () => {
+          throw new Error("lifecycle tests never check out a client");
+        },
       }),
     });
 

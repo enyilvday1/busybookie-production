@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../src/startCommercialApiServer.js";
 import { send } from "./httpClient.js";
 
-// Production creation, provisioning and authentication are service-layer
-// only until protected endpoints are added deliberately (R44B4B). No HTTP
-// path may reach them, with or without credentials or identity headers.
+// The default server composition installs no customer application router
+// (no production identity-provider adapter exists), so no HTTP path reaches
+// provisioning, production or authentication logic, with or without
+// credentials or identity headers. The authenticated routes exist only when a
+// router is injected (tests/application, tests/db/customerApplication).
 
 let running: RunningCommercialApiServer | undefined;
 

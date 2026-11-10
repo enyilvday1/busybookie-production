@@ -1,8 +1,11 @@
+import { createCustomerApplication } from "./application/customerApplication.js";
+import type { AuthenticationAdapter } from "./authentication/authenticationAdapter.js";
 import { loadServerConfig, ServerConfigError, type ConfigEnvironment } from "./config.js";
+import type { ApplicationRouter } from "./createCommercialApiServer.js";
 import { MigrationError } from "./database/migrationError.js";
 import { discoverMigrations, type MigrationFile } from "./database/migrationFiles.js";
 import { loadRuntimeDatabaseConfig, type RuntimeDatabaseConfig } from "./database/runtimeDatabaseConfig.js";
-import { createRuntimePool, type RuntimePool } from "./database/runtimePool.js";
+import { createRuntimePool, type TransactionalPool } from "./database/runtimePool.js";
 import {
   createReadinessCheck,
   RuntimeDatabaseError,
@@ -27,9 +30,14 @@ export type CommercialApiProcessDependencies = Readonly<{
   writeStderr: (text: string) => void;
   setExitCode: (code: number) => void;
   startServer?: typeof startCommercialApiServer;
-  createPool?: (config: RuntimeDatabaseConfig, reportError: (text: string) => void) => Promise<RuntimePool>;
+  createPool?: (config: RuntimeDatabaseConfig, reportError: (text: string) => void) => Promise<TransactionalPool>;
   loadMigrations?: () => Promise<readonly MigrationFile[]>;
-  verifyDatabase?: (pool: RuntimePool, migrations: readonly MigrationFile[]) => Promise<VerifiedSchema>;
+  verifyDatabase?: (pool: TransactionalPool, migrations: readonly MigrationFile[]) => Promise<VerifiedSchema>;
+  // Code-level composition only (never read from the environment). When
+  // supplied, the authenticated customer routes are installed on the single
+  // runtime pool. The default entry point supplies none: no production
+  // identity-provider adapter exists yet, so those routes are not exposed.
+  authentication?: AuthenticationAdapter;
   readinessTimeoutMs?: number;
   poolCloseTimeoutMs?: number;
 }>;
@@ -78,7 +86,8 @@ export async function runCommercialApiProcess(
     dependencies.setExitCode(1);
   };
 
-  let pool: RuntimePool | null = null;
+  let pool: TransactionalPool | null = null;
+  let application: ApplicationRouter | undefined;
   let poolClosing: Promise<boolean> | undefined;
 
   // Idempotent and bounded; resolves false if the pool did not close cleanly in time.
@@ -114,11 +123,18 @@ export async function runCommercialApiProcess(
     port = config.port;
     databaseConfigured = databaseConfig !== null;
 
+    if (dependencies.authentication !== undefined && databaseConfig === null) {
+      throw new ServerConfigError("The authenticated application requires a configured database.");
+    }
+
     if (databaseConfig !== null) {
       const migrations = await loadMigrations();
       pool = await createPool(databaseConfig, dependencies.writeStderr);
       const verified = await verifyDatabase(pool, migrations);
       liveReadiness = createReadinessCheck(pool, verified, dependencies.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
+      if (dependencies.authentication !== undefined) {
+        application = createCustomerApplication({ authentication: dependencies.authentication, pool, reportFailure: dependencies.writeStderr });
+      }
       dependencies.writeStdout("commercial-api: database verified\n");
     }
   } catch (error) {
@@ -132,7 +148,10 @@ export async function runCommercialApiProcess(
     running = await startServer({
       host,
       port,
-      dependencies: { checkReadiness: () => (draining ? Promise.resolve(false) : liveReadiness()) },
+      dependencies: {
+        checkReadiness: () => (draining ? Promise.resolve(false) : liveReadiness()),
+        ...(application === undefined ? {} : { application }),
+      },
     });
   } catch (error) {
     await closePool();

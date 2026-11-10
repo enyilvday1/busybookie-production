@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { VerifiedIdentity } from "../authentication/verifiedIdentity.js";
 import type { RuntimeClient, TransactionalPool } from "../database/runtimePool.js";
 import { ProvisioningError } from "./provisioningError.js";
 
@@ -16,14 +17,10 @@ import { ProvisioningError } from "./provisioningError.js";
 export const FREE_BYO_POLICY_VERSION = "free-byo-v1";
 export const FREE_BYO_ISSUANCE_KEY = "account-provisioning";
 
-// Trusted identity claims, by contract supplied only by a future
-// authentication boundary that has verified them. Never accept these from an
-// unauthenticated client.
-export type VerifiedIdentity = Readonly<{
-  issuer: string;
-  subject: string;
-  email?: Readonly<{ address: string; verified: boolean }>;
-}>;
+// Trusted identity claims, by contract supplied only by the authentication
+// boundary that has verified them. Never accept these from an
+// unauthenticated client. The type is owned by the authentication module.
+export type { VerifiedIdentity };
 
 export type ProvisionOptions = Readonly<{
   // Links this operation's audit events to an upstream request; generated when absent.

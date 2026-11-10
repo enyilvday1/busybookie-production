@@ -8,9 +8,15 @@ export type TestResponse = Readonly<{
 }>;
 
 // Loopback-only client for the server under test.
-export function send(port: number, method: string, path: string, body?: string): Promise<TestResponse> {
+export function send(
+  port: number,
+  method: string,
+  path: string,
+  body?: string,
+  headers: Readonly<Record<string, string>> = {},
+): Promise<TestResponse> {
   return new Promise((resolve, reject) => {
-    const outgoing = request({ host: "127.0.0.1", port, method, path, agent: false }, (response) => {
+    const outgoing = request({ host: "127.0.0.1", port, method, path, agent: false, headers }, (response) => {
       let text = "";
       response.setEncoding("utf8");
       response.on("data", (chunk: string) => {

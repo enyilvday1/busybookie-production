@@ -42,6 +42,14 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   { label: "process spawning", pattern: /child_process|node:worker_threads/ },
   { label: ".env loading", pattern: /dotenv|loadEnvFile/ },
   { label: "repository escape", pattern: /\.\.\/\.\.\// },
+  // R44B4A: authentication stays vendor-neutral, identity never comes from
+  // client headers, and the test identity provider never reaches production.
+  {
+    label: "identity-provider vendor SDK",
+    pattern: /firebase|auth0|@clerk|clerk\/|supabase|cognito|next-auth|@auth\/|passport|jsonwebtoken|\bjose\b|openid-client|oidc-client/i,
+  },
+  { label: "client identity header", pattern: /x-user-id|x-account-id|x-email|x-role|x-plan|x-tier|x-entitlement/i },
+  { label: "test identity provider", pattern: /testIdentityProvider|createTestIdentityProvider|tests\/support/ },
 ];
 
 const BUILTINS = new Set(builtinModules);
@@ -100,6 +108,13 @@ describe("boundary scanner", () => {
     ['import "../../commercial-web/src/routes";', "commercial web app"],
     ['import "../../operator-console/src/api/operatorClient";', "operator console"],
     ['import { execFile } from "node:child_process";', "process spawning"],
+    ['import { initializeApp } from "firebase/app";', "identity-provider vendor SDK"],
+    ['import jwt from "jsonwebtoken";', "identity-provider vendor SDK"],
+    ['import { jwtVerify } from "jose";', "identity-provider vendor SDK"],
+    ['import passport from "passport";', "identity-provider vendor SDK"],
+    ['const userId = request.headers["x-user-id"];', "client identity header"],
+    ['const plan = request.headers["X-Plan"];', "client identity header"],
+    ['import { createTestIdentityProvider } from "../tests/support/testIdentityProvider.js";', "test identity provider"],
     ['import "dotenv/config";', ".env loading"],
     ["executeVeoSingleShot()", "Veo provider"],
   ])("detects a planted violation: %s", (text, expectedLabel) => {

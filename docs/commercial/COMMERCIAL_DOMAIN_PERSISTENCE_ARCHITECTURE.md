@@ -351,8 +351,24 @@ concurrent foreign-key inserts that reference it).
 The current one-production policy is not encoded as a permanent uniqueness
 constraint.
 
-Whether Production creation itself consumes the `FREE_BYO` grant remains
-unresolved.
+### Production creation does not consume the grant (locked)
+
+- A new Production requires a qualifying `FREE_BYO` grant in `AVAILABLE`.
+- Creating the Production does not mutate the grant. Its state stays
+  `AVAILABLE`, and `reserved_at`, `consumed_at`, `revoked_at`, `expired_at`,
+  `expires_at` and `updated_at` are not modified because a Production was
+  created. Production creation is never a reservation, consumption,
+  revocation or expiry.
+- `free-byo-v1` permits one Production per qualifying grant. The limit is
+  enforced by counting Productions bound to the grant through
+  `creation_entitlement_grant_id`.
+- Archived Productions remain included in that count, so archiving does not
+  restore `FREE_BYO` capacity.
+- Actual reservation and consumption semantics belong to the later
+  generation/value-delivery authority and must be defined there.
+- The `FOR UPDATE` grant-row serialisation above, the Production provenance
+  rules (section 9) and the idempotency rule (section 12, including the
+  different-title conflict) are unchanged.
 
 ---
 

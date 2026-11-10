@@ -67,7 +67,7 @@ function tokenMatches(presented: string, storedVerifier: string | null): boolean
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-async function withTransaction<T>(pool: TransactionalPool, work: (client: RuntimeClient) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(pool: TransactionalPool, work: (client: RuntimeClient) => Promise<T>): Promise<T> {
   let client: RuntimeClient;
   try {
     client = await pool.connect();
@@ -96,7 +96,7 @@ async function withTransaction<T>(pool: TransactionalPool, work: (client: Runtim
 // FOR SHARE for lease-scoped operations; FOR UPDATE for acquisition, which
 // also serialises one worker's concurrent acquisitions so the capacity check
 // cannot be raced.
-async function requireActiveWorker(client: RuntimeClient, workerPrincipalId: string, lock: "FOR SHARE" | "FOR UPDATE" = "FOR SHARE"): Promise<void> {
+export async function requireActiveWorker(client: RuntimeClient, workerPrincipalId: string, lock: "FOR SHARE" | "FOR UPDATE" = "FOR SHARE"): Promise<void> {
   const result = await client.query<{ status: string }>(`SELECT status FROM worker_principals WHERE id = $1 ${lock}`, [workerPrincipalId]);
   if (result.rows[0]?.status !== "ACTIVE") throw new WorkerLeaseError("WORKER_NOT_ACTIVE", "WORKER_NOT_ACTIVE");
 }
@@ -106,12 +106,12 @@ INSERT INTO audit_events (account_id, actor_type, event_type, resource_type, res
 VALUES ($1, 'SYSTEM', $2, 'execution_attempt', $3, $4, $5::jsonb)`;
 
 // Domain lifecycle evidence. Metadata never includes a lease token or verifier.
-async function audit(
+export async function audit(
   client: RuntimeClient,
   eventType: string,
   attempt: Readonly<{ id: string; accountId: string }>,
   correlationId: string,
-  metadata: Readonly<{ attemptNumber: number; fencingCounter: number; workerPrincipalId: string }>,
+  metadata: Readonly<{ attemptNumber: number; fencingCounter: number; workerPrincipalId: string; provider?: string; credentialVersion?: number }>,
 ): Promise<void> {
   await client.query(INSERT_AUDIT, [attempt.accountId, eventType, attempt.id, correlationId, JSON.stringify(metadata)]);
 }
@@ -253,12 +253,18 @@ export async function acquireWorkerLease(pool: TransactionalPool, context: Worke
   });
 }
 
-type LockedLease = Readonly<{
+export type LockedLease = Readonly<{
   id: string;
   accountId: string;
   executionJobId: string;
+  generationAuthorizationId: string;
   attemptNumber: number;
+  billingMode: string;
+  provider: string;
+  // The attempt's immutable copy of the authorization's exact version.
+  providerCredentialVersionId: string | null;
   fencingCounter: number;
+  credentialGrantedAt: Date | null;
   credentialGranted: boolean;
 }>;
 
@@ -266,21 +272,26 @@ type LockedLease = Readonly<{
 // this worker, this exact fencing generation, this token, not expired. Every
 // failure is the same LEASE_REJECTED to the caller; the reason is only for
 // the security log.
-async function lockCurrentLease(client: RuntimeClient, context: WorkerControlContext, attemptId: string, proof: LeaseProof): Promise<LockedLease> {
+export async function lockCurrentLease(client: RuntimeClient, context: WorkerControlContext, attemptId: string, proof: LeaseProof): Promise<LockedLease> {
   const result = await client.query<{
     id: string;
     account_id: string;
     execution_job_id: string;
+    generation_authorization_id: string;
     attempt_number: number;
+    billing_mode: string;
+    provider: string;
+    provider_credential_version_id: string | null;
     state: string;
     lease_worker_principal_id: string | null;
     lease_token_sha256: string | null;
     lease_fencing_counter: string;
     expired: boolean | null;
-    credential_granted: boolean;
+    credential_granted_at: Date | null;
   }>(
-    `SELECT id, account_id, execution_job_id, attempt_number, state, lease_worker_principal_id, lease_token_sha256,
-            lease_fencing_counter, lease_expires_at <= now() AS expired, credential_granted_at IS NOT NULL AS credential_granted
+    `SELECT id, account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider,
+            provider_credential_version_id, state, lease_worker_principal_id, lease_token_sha256,
+            lease_fencing_counter, lease_expires_at <= now() AS expired, credential_granted_at
        FROM execution_attempts WHERE id = $1 FOR UPDATE`,
     [attemptId],
   );
@@ -296,9 +307,14 @@ async function lockCurrentLease(client: RuntimeClient, context: WorkerControlCon
     id: row.id,
     accountId: row.account_id,
     executionJobId: row.execution_job_id,
+    generationAuthorizationId: row.generation_authorization_id,
     attemptNumber: row.attempt_number,
+    billingMode: row.billing_mode,
+    provider: row.provider,
+    providerCredentialVersionId: row.provider_credential_version_id,
     fencingCounter: Number(row.lease_fencing_counter),
-    credentialGranted: row.credential_granted,
+    credentialGrantedAt: row.credential_granted_at,
+    credentialGranted: row.credential_granted_at !== null,
   };
 }
 

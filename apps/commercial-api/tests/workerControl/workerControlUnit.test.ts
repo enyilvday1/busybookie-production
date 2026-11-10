@@ -102,9 +102,14 @@ describe("worker-control request security", () => {
     expect(response.status).toBe(503);
   });
 
-  it("answers only POST on the three worker paths, and 404 elsewhere", async () => {
+  it("answers only POST on the four worker paths, and 404 elsewhere", async () => {
     const { port } = await start();
-    for (const path of ["/worker-control/v1/leases", `/worker-control/v1/attempts/${attempt}/heartbeat`, `/worker-control/v1/attempts/${attempt}/release`]) {
+    for (const path of [
+      "/worker-control/v1/leases",
+      `/worker-control/v1/attempts/${attempt}/heartbeat`,
+      `/worker-control/v1/attempts/${attempt}/release`,
+      `/worker-control/v1/attempts/${attempt}/credential-grant`,
+    ]) {
       const response = await send(port, "GET", path);
       expect(response.status).toBe(405);
       expect(response.headers.allow).toBe("POST");
@@ -114,7 +119,8 @@ describe("worker-control request security", () => {
       "/worker-control/v1/leases/x",
       "/worker-control/v1/attempts/not-a-uuid/heartbeat",
       `/worker-control/v1/attempts/${attempt.toUpperCase()}/heartbeat`,
-      `/worker-control/v1/attempts/${attempt}/credential-grant`,
+      `/worker-control/v1/attempts/${attempt}/credential-grants`,
+      `/worker-control/v1/attempts/${attempt}/open`,
       `/worker-control/v1/attempts/${attempt}/submitting`,
       "/worker/leases",
     ]) {

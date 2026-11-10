@@ -18,7 +18,8 @@ export type WorkerSecurityEventType =
   | "WORKER_AUTH_UNAVAILABLE"
   | "WORKER_ORIGIN_REJECTED"
   | "WORKER_LEASE_REJECTED"
-  | "WORKER_FENCING_REJECTED";
+  | "WORKER_FENCING_REJECTED"
+  | "WORKER_CREDENTIAL_GRANT_REJECTED";
 
 export type WorkerLeaseRejectionReason =
   // The authenticated principal is not ACTIVE when re-checked in the transaction.
@@ -31,7 +32,15 @@ export type WorkerLeaseRejectionReason =
   | "FENCING_MISMATCH"
   | "TOKEN_MISMATCH"
   | "LEASE_EXPIRED"
-  | "CREDENTIAL_GRANTED";
+  | "CREDENTIAL_GRANTED"
+  // Credential grant only: the bound connection or exact version is no longer
+  // eligible for new pre-submission work, or the immutable bindings disagree.
+  | "CONNECTION_INELIGIBLE"
+  | "CREDENTIAL_VERSION_INELIGIBLE"
+  | "AUTHORIZATION_INCONSISTENT"
+  // Invariant failure: an already-granted exact version is DESTROYED while its
+  // LEASED+grant retention obligation is still open.
+  | "GRANTED_VERSION_DESTROYED";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 

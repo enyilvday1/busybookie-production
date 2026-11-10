@@ -491,6 +491,42 @@ system can no longer assert that the provider did not charge, so
 cancellation cannot turn the attempt into a clean, retryable pre-submission
 state.
 
+### FAILED_BEFORE_SUBMISSION semantics
+
+**Locked decision (revision R44B6D1).** `FAILED_BEFORE_SUBMISSION` means:
+the system has authoritative evidence that no accepted or outstanding
+provider-side generation side effect exists.
+
+It covers exactly two cases:
+
+1. the attempt failed before any provider submission call; or
+2. a provider submission call was made after entering `SUBMITTING`, and the
+   provider returned an unambiguous, definitive rejection proving that the
+   generation was not accepted.
+
+It never covers a timeout, a connection reset, an ambiguous transport
+failure, an ambiguous provider 5xx, a malformed or uncertain response, a
+worker crash while the submission is in flight, or any other situation in
+which acceptance cannot be ruled out. Those become `OUTCOME_UNKNOWN`.
+
+Case 2 is the transition `SUBMITTING -> FAILED_BEFORE_SUBMISSION`. Its
+history is preserved: `submitting_at` remains recorded because the
+provider-call barrier was crossed. The record never pretends that no
+submission was attempted.
+
+The database cannot inspect a provider response. The service chooses the
+transition from its closed classification of the outcome; the persistence
+model permits only the semantically valid transitions.
+
+```text
+DEFINITIVE_PROVIDER_REJECTION_CAN_BE_FAILED_BEFORE_SUBMISSION=YES
+FAILED_BEFORE_SUBMISSION_REQUIRES_NO_PROVIDER_CALL=NO
+FAILED_BEFORE_SUBMISSION_REQUIRES_NO_OUTSTANDING_PROVIDER_SIDE_EFFECT=YES
+AMBIGUOUS_PROVIDER_OUTCOME=OUTCOME_UNKNOWN
+SUBMITTING_TO_FAILED_BEFORE_SUBMISSION=ALLOWED
+SUBMITTING_AT_PRESERVED_ON_DEFINITIVE_REJECTION=YES
+```
+
 ---
 
 ## 15. SUBMITTING barrier
@@ -499,6 +535,13 @@ state.
 plane durably records `SUBMITTING` under the active lease and fencing
 generation. The worker does not call the provider until that write is
 acknowledged.
+
+A provider call may occur only after the worker receives a successful
+control-plane acknowledgement that its current fenced attempt entered
+`SUBMITTING`. A lease that ends before that acknowledgement (including
+`LEASED -> QUEUED`, which also clears the lease-scoped
+`credential_granted_at`) leaves that worker with no authority to call the
+provider, even if it still holds plaintext.
 
 After `SUBMITTING`:
 
@@ -726,6 +769,7 @@ may still need or use it.
 - Before `SUBMITTING`, it may close when the worker's authority is
   definitively revoked or expired, or the attempt is safely `CANCELLED` or
   `FAILED_BEFORE_SUBMISSION`, and no provider call occurred.
+- After `SUBMITTING`, it closes with the provider-recovery obligation.
 
 ### Provider-recovery obligation
 
@@ -739,6 +783,11 @@ required to recover it.
 
 It does not wait for submission acceptance, because a request may be
 accepted before the worker receives or records the provider ID.
+
+It closes only on authoritative proof that no outstanding provider side
+effect remains (revision R44B6D1), not merely on proof that no provider call
+occurred. A definitive provider rejection is such proof; an ambiguous
+provider outcome never is.
 
 ```text
 CREDENTIAL_RETENTION_OBLIGATION_OPENS_AT_GRANT=YES
@@ -757,7 +806,10 @@ refreshing that URL requires task retrieval.
 Retention may end only when the attempt can no longer require the
 credential, for example:
 
-- `FAILED_BEFORE_SUBMISSION`, with proof that no provider call occurred;
+- `FAILED_BEFORE_SUBMISSION`, with authoritative evidence that no accepted
+  or outstanding provider side effect exists: either no provider call
+  occurred, or the provider definitively rejected the submission (section
+  14);
 - `SUBMITTED_FAILED`, where the provider's terminal failure is
   authoritative;
 - `SUCCEEDED`, after output is securely persisted and its integrity
@@ -889,10 +941,17 @@ No provider credential plaintext is persisted anywhere.
 
 ### Provider execution ID uniqueness
 
-Provider execution IDs are protected from double adoption with
-provider-scoped uniqueness where provider semantics permit. They are not
-exposed to customers unless a future product requirement explicitly needs
-it.
+Provider execution IDs are protected from double adoption with uniqueness
+scoped to the Account and the provider (revision R44B6D1). Global uniqueness
+across independent customer provider accounts or projects is not assumed:
+R44B6A did not establish that namespace, and it is adopted only if provider
+documentation later proves it. They are not exposed to customers unless a
+future product requirement explicitly needs it.
+
+```text
+PROVIDER_EXECUTION_ID_GLOBAL_UNIQUENESS_ASSUMED=NO
+PROVIDER_EXECUTION_ID_UNIQUENESS_SCOPE=ACCOUNT_PROVIDER
+```
 
 **Repository fact.** The engine already enforces a comparable rule for
 Google interactions through its global provider-execution-ID claim.
@@ -907,7 +966,7 @@ Google interactions through its global provider-execution-ID claim.
 
 | Code | Meaning | Retry |
 |---|---|---|
-| `FAILED_BEFORE_SUBMISSION` | No provider side effect occurred or could have occurred. | Policy may permit a new attempt. |
+| `FAILED_BEFORE_SUBMISSION` | Authoritative evidence that no accepted or outstanding provider side effect exists: no provider call occurred, or the provider definitively rejected the submission (section 14). | Policy may permit a new attempt. |
 | `OUTCOME_UNKNOWN` | A provider call was attempted and the system cannot prove rejection or acceptance. | Never automatic. |
 | `SUBMITTED_FAILED` | The provider identified the execution and later returned a terminal failure. | Policy decision on a new attempt. |
 | `ABANDONED` | The recovery horizon or policy ended, or an authorised operator resolved an unknown or recoverable attempt. | No. |
@@ -915,8 +974,13 @@ Google interactions through its global provider-execution-ID claim.
 Classification guidance:
 
 - validation failure before the provider call, credential unavailable, and
-  a definitive provider rejection of the create: `FAILED_BEFORE_SUBMISSION`;
-- timeout, network error or ambiguous response on create: `OUTCOME_UNKNOWN`;
+  an unambiguous, definitive provider rejection of the create proving the
+  generation was not accepted: `FAILED_BEFORE_SUBMISSION` (a rejection keeps
+  its recorded `submitting_at`);
+- timeout, connection reset, ambiguous transport failure, ambiguous provider
+  5xx, malformed or uncertain response, a worker crash while the submission
+  is in flight, or anything else that cannot rule out acceptance:
+  `OUTCOME_UNKNOWN`;
 - output recovery or persistence failure within the horizon: the attempt
   stays `SUBMITTED` and recovery continues.
 
@@ -1231,6 +1295,14 @@ HOSTING_VENDOR=UNDECIDED
 KMS_VENDOR=UNDECIDED
 OBJECT_STORAGE_VENDOR=UNDECIDED
 WORKER_AUTH_MECHANISM=UNDECIDED
+DEFINITIVE_PROVIDER_REJECTION_CAN_BE_FAILED_BEFORE_SUBMISSION=YES
+FAILED_BEFORE_SUBMISSION_REQUIRES_NO_PROVIDER_CALL=NO
+FAILED_BEFORE_SUBMISSION_REQUIRES_NO_OUTSTANDING_PROVIDER_SIDE_EFFECT=YES
+AMBIGUOUS_PROVIDER_OUTCOME=OUTCOME_UNKNOWN
+SUBMITTING_TO_FAILED_BEFORE_SUBMISSION=ALLOWED
+SUBMITTING_AT_PRESERVED_ON_DEFINITIVE_REJECTION=YES
+PROVIDER_EXECUTION_ID_GLOBAL_UNIQUENESS_ASSUMED=NO
+PROVIDER_EXECUTION_ID_UNIQUENESS_SCOPE=ACCOUNT_PROVIDER
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

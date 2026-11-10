@@ -394,7 +394,7 @@ describe("rotation", () => {
 });
 
 describe("disconnect", () => {
-  it("disconnects logically, destroys every version's secret and fingerprint, and is idempotent", async () => {
+  it("disconnects logically, destroys every version with no open obligation, and is idempotent", async () => {
     const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
     expect((await rotate("alice", connection.id, { credential: newCredential() })).status).toBe(201);
 

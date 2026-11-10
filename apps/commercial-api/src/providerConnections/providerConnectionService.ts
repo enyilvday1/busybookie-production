@@ -6,6 +6,7 @@ import type { CredentialFingerprint, CredentialFingerprinter, CredentialSealer }
 import { CredentialCryptoError } from "../providerCredentials/credentialCryptoError.js";
 import { credentialBytes } from "../providerCredentials/credentialInput.js";
 import type { SealedCredentialEnvelope } from "../providerCredentials/sealedEnvelope.js";
+import { readCredentialObligations } from "./credentialObligations.js";
 import type { ProviderCapabilityRegistry } from "./providerCapabilityRegistry.js";
 import { ProviderConnectionError, type ProviderConnectionErrorCode } from "./providerConnectionError.js";
 import { getProviderConnectionForAccount, type ProviderConnectionView } from "./providerConnectionReadModel.js";
@@ -495,15 +496,38 @@ export async function rotateProviderCredential(
   throw fail("CONCURRENT_MODIFICATION");
 }
 
-// Logical disconnect. The connection is kept as a DISCONNECTED historical
-// record and, in this slice, every remaining credential version is destroyed
-// immediately: no commercial generation, job or recovery obligation exists
-// yet, so nothing can depend on the secret.
+// Logical disconnect with the retention/recovery destruction gate
+// (worker bridge architecture sections 23-24).
 //
-// BEFORE COMMERCIAL GENERATION IS ENABLED (R44B6/R44B7), this unconditional
-// destruction must be replaced by the published rule: versions bound to open
-// recovery obligations are retained (RETAINED_FOR_RECOVERY) and destroyed
-// only when those obligations end.
+// The connection becomes DISCONNECTED and is never eligible for new work
+// again. Each non-destroyed credential version is then decided on its own:
+// a version with an open credential-retention or provider-recovery
+// obligation (see credentialObligations.ts) is kept sealed as
+// RETAINED_FOR_RECOVERY, solely for that already-open work; every other
+// version is destroyed (sealed credential and fingerprint set to NULL),
+// irreversibly. Repeating the disconnect re-evaluates retained versions and
+// destroys those whose obligations have since closed, so it is also the
+// cleanup path; it never revives anything.
+//
+// Lock order (inside one READ COMMITTED transaction): the account row FOR NO
+// KEY UPDATE, then the connection row FOR UPDATE, then the connection's
+// non-destroyed credential version rows FOR UPDATE in credential_version
+// order, and only then the obligation read, as a new statement, so it sees
+// every grant committed before the version locks were obtained.
+//
+// Contract for the future worker-control service (not implemented here):
+// the only event that opens an obligation is a credential grant (setting
+// credential_granted_at, directly or on entering SUBMITTING). That
+// transaction must lock the exact provider_credential_versions row (FOR SHARE
+// or stronger) before recording the grant, and must verify in the same
+// transaction that the version is not DESTROYED and, for a new pre-submission
+// grant, that the connection is still eligible (not DISCONNECTED or
+// DISABLED) and the version is not RETAINED_FOR_RECOVERY; a recovery grant
+// for an already-submitted attempt may use a retained version. Because both
+// transactions take conflicting locks on the same version row, a grant either
+// commits first (and this disconnect then sees it and retains the version) or
+// waits and then finds the version destroyed or the connection disconnected
+// (and must refuse). A plain SELECT without that lock would not be safe.
 export async function disconnectProviderConnection(
   dependencies: Pick<ProviderConnectionServiceDependencies, "pool">,
   principal: TrustedPrincipal,
@@ -521,32 +545,76 @@ export async function disconnectProviderConnection(
     );
     const connection = locked.rows[0];
     if (connection === undefined) throw fail("PROVIDER_CONNECTION_NOT_FOUND");
+    const alreadyDisconnected = connection.status === "DISCONNECTED";
 
-    if (connection.status === "DISCONNECTED") {
-      return Object.freeze({ providerConnection: await readView(client, principal, connectionId), created: false, credentialVersion: null });
+    if (!alreadyDisconnected) {
+      await client.query(
+        "UPDATE provider_connections SET status = 'DISCONNECTED', disconnected_at = now(), updated_at = now() WHERE id = $1 AND account_id = $2",
+        [connectionId, principal.accountId],
+      );
     }
 
-    await client.query(
-      "UPDATE provider_connections SET status = 'DISCONNECTED', disconnected_at = now(), updated_at = now() WHERE id = $1 AND account_id = $2",
-      [connectionId, principal.accountId],
-    );
-    const destroyed = await client.query<{ credential_version: number }>(
-      `UPDATE provider_credential_versions
-          SET status = 'DESTROYED', destroyed_at = now(), sealed_credential = NULL,
-              fingerprint_algorithm = NULL, fingerprint_key_ref = NULL, fingerprint_value = NULL, updated_at = now()
+    const versions = await client.query<{ id: string; credential_version: number; status: string }>(
+      `SELECT id, credential_version, status FROM provider_credential_versions
         WHERE account_id = $1 AND provider_connection_id = $2 AND status <> 'DESTROYED'
-        RETURNING credential_version`,
+        ORDER BY credential_version
+          FOR UPDATE`,
       [principal.accountId, connectionId],
     );
+    const obligations = await readCredentialObligations(
+      client,
+      principal.accountId,
+      versions.rows.map((row) => row.id),
+    );
 
-    await audit(client, principal, "provider_connection.disconnected", connectionId, correlationId, { provider: connection.provider });
-    for (const row of [...destroyed.rows].sort((a, b) => a.credential_version - b.credential_version)) {
+    const retained: number[] = [];
+    const destroyed: number[] = [];
+    for (const version of versions.rows) {
+      const state = obligations.get(version.id);
+      if (state === undefined) throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
+      if (state.blocksDestruction) {
+        // Sealed material, fingerprint and identity stay exactly as they are.
+        if (version.status !== "RETAINED_FOR_RECOVERY") {
+          await client.query(
+            `UPDATE provider_credential_versions
+                SET status = 'RETAINED_FOR_RECOVERY', retained_for_recovery_at = now(), updated_at = now()
+              WHERE id = $1 AND account_id = $2`,
+            [version.id, principal.accountId],
+          );
+          retained.push(version.credential_version);
+        }
+      } else {
+        await client.query(
+          `UPDATE provider_credential_versions
+              SET status = 'DESTROYED', destroyed_at = now(), sealed_credential = NULL,
+                  fingerprint_algorithm = NULL, fingerprint_key_ref = NULL, fingerprint_value = NULL, updated_at = now()
+            WHERE id = $1 AND account_id = $2`,
+          [version.id, principal.accountId],
+        );
+        destroyed.push(version.credential_version);
+      }
+    }
+
+    if (!alreadyDisconnected) {
+      await audit(client, principal, "provider_connection.disconnected", connectionId, correlationId, { provider: connection.provider });
+    }
+    for (const credentialVersion of retained) {
+      await audit(client, principal, "provider_connection.secret_retained_for_recovery", connectionId, correlationId, {
+        provider: connection.provider,
+        credentialVersion,
+      });
+    }
+    for (const credentialVersion of destroyed) {
       await audit(client, principal, "provider_connection.secret_destroyed", connectionId, correlationId, {
         provider: connection.provider,
-        credentialVersion: row.credential_version,
+        credentialVersion,
       });
     }
 
-    return Object.freeze({ providerConnection: await readView(client, principal, connectionId), created: true, credentialVersion: null });
+    return Object.freeze({
+      providerConnection: await readView(client, principal, connectionId),
+      created: !alreadyDisconnected,
+      credentialVersion: null,
+    });
   });
 }

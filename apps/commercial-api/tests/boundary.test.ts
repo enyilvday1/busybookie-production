@@ -371,8 +371,13 @@ describe("worker-control boundary (lease foundation only)", () => {
   const GRANT_ONLY = /SET\s[^;`]*credential_granted_at\s*=|sealed_credential/i;
   const GRANT_SERVICE = "src/workerControl/workerCredentialGrantService.ts";
   // R44B6J: entering SUBMITTING is confined to the fenced acknowledgement service.
-  const SUBMITTING_ONLY = /'SUBMITTING'|submitting_at\s*=/i;
+  // R44B6M narrows this to writes: the expired-SUBMITTING sweep may select
+  // SUBMITTING rows, but never sets the state or the barrier timestamp.
+  const SUBMITTING_ONLY = /(\bSET|,)\s*state\s*=\s*'SUBMITTING'|submitting_at\s*=/i;
   const SUBMITTING_SERVICE = "src/workerControl/workerSubmittingService.ts";
+  // R44B6M: OUTCOME_UNKNOWN is entered only by the control-plane sweep in the lease service.
+  const OUTCOME_UNKNOWN_ONLY = /state\s*=\s*'OUTCOME_UNKNOWN'/i;
+  const SWEEP_SERVICE = "src/workerControl/workerLeaseService.ts";
 
   it("keeps worker-control routes inside src/workerControl and out of the default process", () => {
     expect(workerControl.map(({ path }) => path).sort()).toEqual([
@@ -412,7 +417,18 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect(/sealed|envelope|recovery_expires_at\s*=|credential_granted_at\s*=/i.test(service.replace(/\/\/.*$/gm, ""))).toBe(false);
     // Guard the guards.
     expect("SET state = 'SUBMITTING'").toMatch(SUBMITTING_ONLY);
+    expect("UPDATE execution_attempts SET heartbeat_at = now(), state = 'SUBMITTING'").toMatch(SUBMITTING_ONLY);
     expect('acceptedStates = ["LEASED"]').not.toMatch(SUBMITTING_ONLY);
+    expect("SELECT id FROM execution_attempts WHERE state = 'SUBMITTING' AND lease_expires_at <= now()").not.toMatch(SUBMITTING_ONLY);
+    expect("SET state = 'OUTCOME_UNKNOWN', failure_code = 'X' FROM expired WHERE a.id = expired.id AND a.state = 'SUBMITTING'").not.toMatch(SUBMITTING_ONLY);
+  });
+
+  it("confines entering OUTCOME_UNKNOWN to the control-plane sweep in the lease service", () => {
+    const offenders = workerControl.filter(({ path, text }) => path !== SWEEP_SERVICE && OUTCOME_UNKNOWN_ONLY.test(code(text))).map(({ path }) => path);
+    expect(offenders).toEqual([]);
+    expect(OUTCOME_UNKNOWN_ONLY.test(code(read(join(APP_ROOT, SWEEP_SERVICE))))).toBe(true);
+    // Guard the guard.
+    expect("SET state = 'OUTCOME_UNKNOWN', failure_code = 'X'").toMatch(OUTCOME_UNKNOWN_ONLY);
   });
 
   it("confines the grant timestamp write and the sealed-envelope read to the credential-grant service", () => {

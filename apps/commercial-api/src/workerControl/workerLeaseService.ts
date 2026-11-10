@@ -21,7 +21,8 @@ import type { WorkerLeaseRejectionReason } from "./workerSecurityEvents.js";
 // (FOR UPDATE), then their job rows. Nothing here locks provider connections
 // or credential versions: no credential is granted in this slice.
 //
-// The highest state reachable here is LEASED. Nothing here sets
+// The highest state entered here by a worker is LEASED; the control-plane
+// expired-SUBMITTING sweep (R44B6M) enters OUTCOME_UNKNOWN. Nothing here sets
 // credential_granted_at, enters SUBMITTING, or reads secret material.
 
 export type WorkerLeaseErrorCode = "WORKER_NOT_ACTIVE" | "LEASE_REJECTED" | "WORKER_CONTROL_DATABASE_FAILURE";
@@ -111,13 +112,24 @@ export async function audit(
   eventType: string,
   attempt: Readonly<{ id: string; accountId: string }>,
   correlationId: string,
-  metadata: Readonly<{ attemptNumber: number; fencingCounter: number; workerPrincipalId: string; provider?: string; credentialVersion?: number }>,
+  metadata: Readonly<{
+    attemptNumber: number;
+    fencingCounter: number;
+    workerPrincipalId: string;
+    provider?: string;
+    credentialVersion?: number;
+    failureCode?: string;
+  }>,
 ): Promise<void> {
   await client.query(INSERT_AUDIT, [attempt.accountId, eventType, attempt.id, correlationId, JSON.stringify(metadata)]);
 }
 
 const CLEAR_LEASE = `lease_worker_principal_id = NULL, lease_token_sha256 = NULL, leased_at = NULL,
                      lease_expires_at = NULL, heartbeat_at = NULL`;
+
+// Closed failure code (architecture sections 12 and 27): the control-plane
+// fact that the lease expired after the barrier, nothing about the provider.
+export const SUBMITTING_LEASE_EXPIRED_FAILURE_CODE = "WORKER_LEASE_EXPIRED_DURING_SUBMISSION";
 
 // Returns expired pre-grant leases to the queue. A lease that ever received a
 // credential grant is left alone: it carries an open retention obligation and
@@ -154,6 +166,52 @@ async function reclaimExpiredLeases(client: RuntimeClient, correlationId: string
   }
 }
 
+// The authoritative expired-SUBMITTING sweep (architecture section 12,
+// R44B6M). A SUBMITTING attempt whose lease has expired may already have
+// reached the provider, so it is never requeued, re-leased or treated as a
+// failure before submission: it becomes OUTCOME_UNKNOWN with every live lease
+// field cleared. The fencing counter, credential grant, submitting_at and the
+// immutable submitting principal are kept; the parent job needs attention.
+// Recognising lost authority uses transaction-stable now() (R44B6K5): at
+// worst an expiry is recognised one transaction later, never earlier.
+// SKIP LOCKED leaves a row that a heartbeat or another sweep holds; the outer
+// state predicate makes a concurrent conversion a no-op. Runs inside the
+// caller's READ COMMITTED transaction; no network work happens here.
+export async function sweepExpiredSubmittingAttempts(client: RuntimeClient, correlationId: string): Promise<void> {
+  const swept = await client.query<{
+    id: string;
+    account_id: string;
+    execution_job_id: string;
+    attempt_number: number;
+    lease_fencing_counter: string;
+    lease_worker_principal_id: string;
+  }>(
+    `WITH expired AS (
+       SELECT id, lease_worker_principal_id FROM execution_attempts
+        WHERE state = 'SUBMITTING' AND lease_expires_at <= now()
+        ORDER BY lease_expires_at, id
+        LIMIT ${WORKER_EXPIRED_LEASE_RECLAIM_LIMIT}
+          FOR UPDATE SKIP LOCKED
+     )
+     UPDATE execution_attempts a
+        SET state = 'OUTCOME_UNKNOWN', failure_code = '${SUBMITTING_LEASE_EXPIRED_FAILURE_CODE}', ${CLEAR_LEASE}, updated_at = now()
+       FROM expired
+      WHERE a.id = expired.id AND a.state = 'SUBMITTING'
+     RETURNING a.id, a.account_id, a.execution_job_id, a.attempt_number, a.lease_fencing_counter, expired.lease_worker_principal_id`,
+  );
+  for (const row of swept.rows) {
+    await client.query("UPDATE execution_jobs SET status = 'NEEDS_ATTENTION', updated_at = now() WHERE id = $1 AND status = 'RUNNING'", [
+      row.execution_job_id,
+    ]);
+    await audit(client, "execution_attempt.outcome_unknown", { id: row.id, accountId: row.account_id }, correlationId, {
+      attemptNumber: row.attempt_number,
+      fencingCounter: Number(row.lease_fencing_counter),
+      workerPrincipalId: row.lease_worker_principal_id,
+      failureCode: SUBMITTING_LEASE_EXPIRED_FAILURE_CODE,
+    });
+  }
+}
+
 // Eligible work: a QUEUED attempt of a non-terminal job whose authorization
 // has been claimed and, for USER_BYO, whose exact bound credential version is
 // still usable for new work on a connection that is neither DISCONNECTED nor
@@ -183,6 +241,9 @@ export async function acquireWorkerLease(pool: TransactionalPool, context: Worke
   return withTransaction(pool, async (client) => {
     await requireActiveWorker(client, context.workerPrincipalId, "FOR UPDATE");
     await reclaimExpiredLeases(client, context.correlationId);
+    // Before the capacity check: a swept attempt no longer holds a lease, and
+    // it is never a candidate (only QUEUED attempts are).
+    await sweepExpiredSubmittingAttempts(client, context.correlationId);
 
     const held = await client.query<{ current: number }>(
       "SELECT count(*)::int AS current FROM execution_attempts WHERE lease_worker_principal_id = $1",
@@ -330,8 +391,23 @@ export async function lockCurrentLease(
   };
 }
 
+// States whose current lease may be renewed (architecture section 12,
+// R44B6M): LEASED; and SUBMITTING, so the worker that holds provider-call
+// authority keeps owning the attempt during the create call. Never
+// OUTCOME_UNKNOWN or a terminal state, which carry no lease.
+//
+// SUBMITTED is deliberately excluded (R44B6M1). The architecture permits
+// renewal there only for the lease that entered SUBMITTED through the live
+// route, but migrations 0004/0005 let a SUBMITTED attempt carry a replacement
+// lease (a new token at a higher fencing generation), including for the same
+// worker principal, so neither the principal nor the current proof can show
+// that the lease is that live-route epoch. SUBMITTED renewal waits for a
+// durable discriminator of that epoch.
+const HEARTBEAT_STATES = ["LEASED", "SUBMITTING"] as const;
+
 // Renews the caller's current lease: heartbeat_at and lease_expires_at move
-// forward; state, fencing generation and everything else stay unchanged.
+// forward; state, fencing generation, provenance and everything else stay
+// unchanged. Renewal never re-enters SUBMITTING or creates new authority.
 export async function heartbeatWorkerLease(
   pool: TransactionalPool,
   context: WorkerControlContext,
@@ -340,15 +416,17 @@ export async function heartbeatWorkerLease(
 ): Promise<Readonly<{ fencingCounter: number; leaseExpiresAt: Date }>> {
   return withTransaction(pool, async (client) => {
     await requireActiveWorker(client, context.workerPrincipalId);
-    const lease = await lockCurrentLease(client, context, attemptId, proof);
+    const lease = await lockCurrentLease(client, context, attemptId, proof, HEARTBEAT_STATES);
     const renewed = await client.query<{ lease_expires_at: Date }>(
       `UPDATE execution_attempts
           SET heartbeat_at = now(), lease_expires_at = now() + make_interval(secs => $2), updated_at = now()
-        WHERE id = $1 AND state = 'LEASED'
+        WHERE id = $1 AND state = $3 AND lease_worker_principal_id = $4 AND lease_fencing_counter = $5
         RETURNING lease_expires_at`,
-      [lease.id, WORKER_LEASE_DURATION_SECONDS],
+      [lease.id, WORKER_LEASE_DURATION_SECONDS, lease.state, context.workerPrincipalId, lease.fencingCounter],
     );
-    return Object.freeze({ fencingCounter: lease.fencingCounter, leaseExpiresAt: renewed.rows[0]!.lease_expires_at });
+    const row = renewed.rows[0];
+    if (row === undefined) throw new WorkerLeaseError("WORKER_CONTROL_DATABASE_FAILURE");
+    return Object.freeze({ fencingCounter: lease.fencingCounter, leaseExpiresAt: row.lease_expires_at });
   });
 }
 

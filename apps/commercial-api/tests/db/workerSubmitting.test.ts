@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -699,13 +699,13 @@ describe("replay", () => {
     expect(await submittingAudits(item.attemptId)).toHaveLength(1);
   });
 
-  it("leaves a SUBMITTING attempt out of release, heartbeat, grant and reclaim", async () => {
+  it("leaves a SUBMITTING attempt out of release, grant and requeue; an expired one becomes OUTCOME_UNKNOWN (R44B6M)", async () => {
     const list = await workers(2);
     const item = await work();
     const port = await compose(list);
     const proof = await granted(port, list[0]!);
     expect((await call(port, list[0]!, "submitting", item.attemptId, proof)).status).toBe(200);
-    for (const action of ["release", "heartbeat", "credential-grant"] as const) {
+    for (const action of ["release", "credential-grant"] as const) {
       const response = await call(port, list[0]!, action, item.attemptId, proof);
       expect(response.status).toBe(409);
       expect(response.body).toBe(REJECTED);
@@ -714,10 +714,394 @@ describe("replay", () => {
       "UPDATE execution_attempts SET leased_at = now() - interval '10 minutes', heartbeat_at = now() - interval '10 minutes', lease_expires_at = now() - interval '1 second' WHERE id = $1",
       [item.attemptId],
     );
+    // Another worker's lease request sweeps it: never requeued, never re-leased.
     expect(json(await send(port, "POST", "/worker-control/v1/leases", undefined, auth(list[1]!)))).toEqual({ lease: null });
     const row = await attempt(item.attemptId);
-    expect(row).toMatchObject({ state: "SUBMITTING", lease_worker_principal_id: list[0]!.id, lease_fencing_counter: "1", submitted_at: null, provider_execution_id: null });
-    expect(await jobStatus(item.jobId)).toBe("RUNNING");
+    expect(row).toMatchObject({ state: "OUTCOME_UNKNOWN", lease_worker_principal_id: null, lease_fencing_counter: "1", submitted_at: null, provider_execution_id: null });
+    expect(await jobStatus(item.jobId)).toBe("NEEDS_ATTENTION");
+  });
+});
+
+// R44B6M: SUBMITTING lease liveness and the authoritative expired-SUBMITTING sweep.
+describe("SUBMITTING lease liveness and expiry sweep (R44B6M)", () => {
+  type FullRow = Record<string, unknown>;
+  const fullRow = async (id: string) =>
+    (await clients.migrator.query<FullRow>("SELECT * FROM execution_attempts WHERE id = $1", [id])).rows[0]!;
+  const outcomeAudits = async (attemptId: string) =>
+    (await clients.migrator.query<{ metadata: Record<string, unknown> }>(
+      "SELECT metadata FROM audit_events WHERE resource_id = $1 AND event_type = 'execution_attempt.outcome_unknown' ORDER BY sequence",
+      [attemptId],
+    )).rows.map((row) => row.metadata);
+  const expire = (attemptId: string) =>
+    clients.migrator.query(
+      "UPDATE execution_attempts SET leased_at = now() - interval '10 minutes', heartbeat_at = now() - interval '10 minutes', lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [attemptId],
+    );
+  const age = (attemptId: string) =>
+    clients.migrator.query(
+      "UPDATE execution_attempts SET leased_at = now() - interval '90 seconds', heartbeat_at = now() - interval '90 seconds', lease_expires_at = now() + interval '30 seconds' WHERE id = $1",
+      [attemptId],
+    );
+  const leaseRequest = (port: number, worker: Worker) => send(port, "POST", "/worker-control/v1/leases", undefined, auth(worker));
+  // Enters SUBMITTING through the unchanged R44B6J route.
+  async function submittingAttempt(port: number, worker: Worker, item: Work) {
+    const proof = await granted(port, worker);
+    expect(proof.attemptId).toBe(item.attemptId);
+    expect((await call(port, worker, "submitting", item.attemptId, proof)).status).toBe(200);
+    return proof;
+  }
+
+  describe("heartbeat", () => {
+    it("renews a SUBMITTING lease, writing only heartbeat_at, lease_expires_at and updated_at", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      await age(item.attemptId);
+      const before = await fullRow(item.attemptId);
+
+      const response = await call(port, worker!, "heartbeat", item.attemptId, proof);
+      expect(response.status).toBe(200);
+      const body = json(response);
+      expect(body.fencingCounter).toBe(1);
+      const after = await fullRow(item.attemptId);
+      expect(new Date(body.leaseExpiresAt).getTime()).toBe((after.lease_expires_at as Date).getTime());
+      expect((after.lease_expires_at as Date).getTime()).toBeGreaterThan((before.lease_expires_at as Date).getTime());
+      expect((after.heartbeat_at as Date).getTime()).toBeGreaterThan((before.heartbeat_at as Date).getTime());
+      // Nothing else moved: no new authority, no new barrier, no new fencing epoch.
+      const unchanged = (row: FullRow) => ({ ...row, lease_expires_at: null, heartbeat_at: null, updated_at: null });
+      expect(unchanged(after)).toEqual(unchanged(before));
+      expect(after).toMatchObject({ state: "SUBMITTING", submitting_worker_principal_id: worker!.id, lease_fencing_counter: "1" });
+      expect(await submittingAudits(item.attemptId)).toHaveLength(1);
+      expect(events).toEqual([]);
+    });
+
+    it("R44B6M1: does not renew any SUBMITTED lease until the live-route epoch is durably provable", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      // No /submitted route exists yet: the owner commits SUBMITTED, keeping the lease (as the live route will).
+      await clients.migrator.query(
+        "UPDATE execution_attempts SET state = 'SUBMITTED', provider_execution_id = 'fixture-execution-1', submitted_at = now() WHERE id = $1",
+        [item.attemptId],
+      );
+      await age(item.attemptId);
+      const before = await fullRow(item.attemptId);
+      // Even the genuine live-route lease is refused: nothing durable distinguishes it from a replacement epoch.
+      const live = await call(port, list[0]!, "heartbeat", item.attemptId, proof);
+      expect(live.status).toBe(409);
+      expect(live.body).toBe(REJECTED);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
+      expect(await fullRow(item.attemptId)).toEqual(before);
+
+      // A different lease on SUBMITTED (the future recovery-lease shape) is not renewable either,
+      // even with a fully valid proof for that lease.
+      const recoveryToken = randomBytes(32).toString("base64url");
+      await clients.migrator.query(
+        `UPDATE execution_attempts SET lease_worker_principal_id = $2, lease_token_sha256 = $3, lease_fencing_counter = lease_fencing_counter + 1,
+                leased_at = now(), lease_expires_at = now() + interval '2 minutes', heartbeat_at = NULL WHERE id = $1`,
+        [item.attemptId, list[1]!.id, createHash("sha256").update(recoveryToken, "utf8").digest("hex")],
+      );
+      const other = await call(port, list[1]!, "heartbeat", item.attemptId, { fencingCounter: 2, leaseToken: recoveryToken });
+      expect(other.status).toBe(409);
+      expect(other.body).toBe(REJECTED);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
+    });
+
+    it("R44B6M1: a same-principal replacement lease on SUBMITTED is reachable under current authority and must not be renewable", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      await submittingAttempt(port, worker!, item);
+      // No /submitted route exists yet: the owner commits SUBMITTED, keeping the live lease (W, N=1, T1).
+      await clients.migrator.query(
+        "UPDATE execution_attempts SET state = 'SUBMITTED', provider_execution_id = 'fixture-execution-3', submitted_at = now() WHERE id = $1",
+        [item.attemptId],
+      );
+
+      // Reachability under current authority: the restricted runtime role itself may replace the lease on
+      // SUBMITTED with a new epoch for the SAME principal (W, N+1, T2). Migration 0004/0005 forbid re-leasing
+      // only while SUBMITTING; on SUBMITTED a lease is optional and a new one only needs a higher generation.
+      const replacementToken = randomBytes(32).toString("base64url");
+      await clients.runtime.query(
+        `UPDATE execution_attempts SET lease_worker_principal_id = $2, lease_token_sha256 = $3, lease_fencing_counter = lease_fencing_counter + 1,
+                leased_at = now(), lease_expires_at = now() + interval '2 minutes', heartbeat_at = NULL WHERE id = $1`,
+        [item.attemptId, worker!.id, createHash("sha256").update(replacementToken, "utf8").digest("hex")],
+      );
+      const replaced = await fullRow(item.attemptId);
+      expect(replaced).toMatchObject({
+        state: "SUBMITTED",
+        lease_worker_principal_id: worker!.id,
+        submitting_worker_principal_id: worker!.id,
+        lease_fencing_counter: "2",
+      });
+
+      // Principal equality cannot tell this epoch from the live-route lease (R44B6M accepted it with 200), so
+      // SUBMITTED renewal is refused outright.
+      const response = await call(port, worker!, "heartbeat", item.attemptId, { fencingCounter: 2, leaseToken: replacementToken });
+      expect(response.status).toBe(409);
+      expect(response.body).toBe(REJECTED);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
+      expect(await fullRow(item.attemptId)).toEqual(replaced);
+    });
+
+    it("rejects wrong worker, wrong token, stale fence and an expired lease in SUBMITTING, without extending it", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      await age(item.attemptId);
+      const before = await fullRow(item.attemptId);
+      for (const [worker, candidate, type, reason] of [
+        [list[1]!, proof, "WORKER_LEASE_REJECTED", "OTHER_WORKER"],
+        [list[0]!, { ...proof, leaseToken: randomBytes(32).toString("base64url") }, "WORKER_FENCING_REJECTED", "TOKEN_MISMATCH"],
+        [list[0]!, { ...proof, fencingCounter: 2 }, "WORKER_FENCING_REJECTED", "FENCING_MISMATCH"],
+      ] as const) {
+        const response = await call(port, worker, "heartbeat", item.attemptId, candidate);
+        expect(response.status).toBe(409);
+        expect(response.body).toBe(REJECTED);
+        expect(events.at(-1)).toMatchObject({ type, reason });
+      }
+      expect(await fullRow(item.attemptId)).toEqual(before);
+
+      await expire(item.attemptId);
+      const expired = await fullRow(item.attemptId);
+      const response = await call(port, list[0]!, "heartbeat", item.attemptId, proof);
+      expect(response.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "LEASE_EXPIRED" });
+      expect(await fullRow(item.attemptId)).toEqual(expired);
+      expect(JSON.stringify(events).includes(proof.leaseToken)).toBe(false);
+    });
+
+    it("rejects OUTCOME_UNKNOWN and a terminal state (ABANDONED), which carry no lease", async () => {
+      const [worker] = await workers(1);
+      const port = await compose([worker!]);
+      const item = await work();
+      const proof = await submittingAttempt(port, worker!, item);
+      await expire(item.attemptId);
+      expect((await leaseRequest(port, worker!)).status).toBe(200);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      const unknown = await call(port, worker!, "heartbeat", item.attemptId, proof);
+      expect(unknown.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
+
+      // Terminal states carry no lease (migration 0004) and are outside the heartbeat states: walk the swept attempt to ABANDONED.
+      await clients.migrator.query("UPDATE execution_attempts SET state = 'ABANDONED', failure_code = 'RECOVERY_ABANDONED', completed_at = now() WHERE id = $1", [
+        item.attemptId,
+      ]);
+      expect((await call(port, worker!, "heartbeat", item.attemptId, proof)).status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ reason: "NOT_LEASED" });
+    });
+  });
+
+  describe("release", () => {
+    it("never releases SUBMITTING, a live SUBMITTED lease or OUTCOME_UNKNOWN to the queue", async () => {
+      const list = await workers(3);
+      const first = await work();
+      const second = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, first);
+      const release = (worker: Worker, item: Work, candidate: Proof) => call(port, worker, "release", item.attemptId, candidate);
+      expect((await release(list[0]!, first, proof)).status).toBe(409);
+      expect((await attempt(first.attemptId)).state).toBe("SUBMITTING");
+
+      // No /submitted route exists yet: the owner commits SUBMITTED, keeping the lease.
+      await clients.migrator.query(
+        "UPDATE execution_attempts SET state = 'SUBMITTED', provider_execution_id = 'fixture-execution-2', submitted_at = now() WHERE id = $1",
+        [first.attemptId],
+      );
+      expect((await release(list[0]!, first, proof)).status).toBe(409);
+      expect((await attempt(first.attemptId)).state).toBe("SUBMITTED");
+
+      const secondProof = await submittingAttempt(port, list[1]!, second);
+      await expire(second.attemptId);
+      expect((await leaseRequest(port, list[2]!)).status).toBe(200);
+      expect((await attempt(second.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect((await release(list[1]!, second, secondProof)).status).toBe(409);
+      expect((await attempt(second.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await jobStatus(second.jobId)).toBe("NEEDS_ATTENTION");
+      for (const event of events.filter((candidate) => candidate.type === "WORKER_LEASE_REJECTED")) expect(event.reason).toBe("NOT_LEASED");
+    });
+  });
+
+  describe("expired-SUBMITTING sweep", () => {
+    it("moves an expired SUBMITTING attempt to OUTCOME_UNKNOWN, keeping provenance and inventing nothing", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      await expire(item.attemptId);
+      const before = await fullRow(item.attemptId);
+
+      const response = await leaseRequest(port, list[1]!);
+      expect(response.status).toBe(200);
+      expect(json(response)).toEqual({ lease: null });
+
+      const after = await fullRow(item.attemptId);
+      expect(after).toMatchObject({
+        state: "OUTCOME_UNKNOWN",
+        failure_code: "WORKER_LEASE_EXPIRED_DURING_SUBMISSION",
+        // Live lease proof cleared, exactly as migration 0004 requires for OUTCOME_UNKNOWN.
+        lease_worker_principal_id: null,
+        lease_token_sha256: null,
+        leased_at: null,
+        lease_expires_at: null,
+        heartbeat_at: null,
+        // Kept: fencing counter, grant, barrier and the immutable submitting principal.
+        lease_fencing_counter: before.lease_fencing_counter,
+        credential_granted_at: before.credential_granted_at,
+        submitting_at: before.submitting_at,
+        submitting_worker_principal_id: list[0]!.id,
+        // Never invented.
+        provider_execution_id: null,
+        submitted_at: null,
+        recovery_expires_at: null,
+        completed_at: null,
+        output_object_key: null,
+      });
+      expect(await jobStatus(item.jobId)).toBe("NEEDS_ATTENTION");
+      expect(await outcomeAudits(item.attemptId)).toEqual([
+        { attemptNumber: 1, fencingCounter: 1, workerPrincipalId: list[0]!.id, failureCode: "WORKER_LEASE_EXPIRED_DURING_SUBMISSION" },
+      ]);
+      // A lifecycle fact, not a security event (architecture section 30).
+      expect(events).toEqual([]);
+      const visible = (await allAuditText()) + JSON.stringify(events);
+      expect(visible.includes(proof.leaseToken) || visible.includes(item.plaintext) || visible.includes(item.fingerprintValue)).toBe(false);
+      // Both credential obligations stay open.
+      expect(await obligations(item)).toEqual({ hasOpenCredentialRetentionObligation: true, hasOpenProviderRecoveryObligation: true, blocksDestruction: true });
+      // A later sweep is a no-op: no second transition, no second audit.
+      expect((await leaseRequest(port, list[1]!)).status).toBe(200);
+      expect(await fullRow(item.attemptId)).toEqual(after);
+      expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+    });
+
+    it("leaves a live SUBMITTING lease alone, and sweeps only from the server's recognition of expiry", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      await submittingAttempt(port, list[0]!, item);
+      expect((await leaseRequest(port, list[1]!)).status).toBe(200);
+      expect((await attempt(item.attemptId)).state).toBe("SUBMITTING");
+      expect(await outcomeAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("does not lease the expired attempt, but leases unrelated queued work in the same request", async () => {
+      const list = await workers(2);
+      const stale = await work();
+      const fresh = await work();
+      const port = await compose(list);
+      await submittingAttempt(port, list[0]!, stale);
+      await expire(stale.attemptId);
+
+      const lease = json(await leaseRequest(port, list[1]!)).lease;
+      expect(lease.executionAttemptId).toBe(fresh.attemptId);
+      expect((await attempt(stale.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect((await attempt(fresh.attemptId)).state).toBe("LEASED");
+      expect(await jobStatus(stale.jobId)).toBe("NEEDS_ATTENTION");
+      expect(await jobStatus(fresh.jobId)).toBe("RUNNING");
+      // The attempt count per job is unchanged: no replacement attempt was created.
+      const attempts = await clients.migrator.query("SELECT count(*)::int AS count FROM execution_attempts WHERE execution_job_id = $1", [stale.jobId]);
+      expect(attempts.rows).toEqual([{ count: 1 }]);
+    });
+
+    it("keeps one current lease per worker: a live SUBMITTING lease holds the slot until the sweep clears it", async () => {
+      const [worker] = await workers(1);
+      const stale = await work();
+      const fresh = await work();
+      const port = await compose([worker!]);
+      await submittingAttempt(port, worker!, stale);
+      // While SUBMITTING is live, the worker is at capacity.
+      const refused = await leaseRequest(port, worker!);
+      expect(refused.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "WORKER_AT_CAPACITY" });
+      // Once expired, the same request sweeps it first; the worker then gets unrelated work, never the swept attempt.
+      await expire(stale.attemptId);
+      const lease = json(await leaseRequest(port, worker!)).lease;
+      expect(lease.executionAttemptId).toBe(fresh.attemptId);
+      expect((await attempt(stale.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+    });
+
+    it("keeps the exact credential version retained when the customer disconnects after the sweep", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      await submittingAttempt(port, list[0]!, item);
+      await expire(item.attemptId);
+      expect((await leaseRequest(port, list[1]!)).status).toBe(200);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+
+      await disconnect(item);
+      const row = await version(item.versionId);
+      expect(row.status).toBe("RETAINED_FOR_RECOVERY");
+      expect(row.sealed_credential).not.toBeNull();
+      expect(await obligations(item)).toMatchObject({ hasOpenProviderRecoveryObligation: true, blocksDestruction: true });
+    });
+  });
+
+  describe("races", () => {
+    it("heartbeat first: a sweep that runs while the heartbeat holds the row skips it, and the renewed lease is not swept", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const leasePort = await compose(list);
+      const proof = await submittingAttempt(leasePort, list[0]!, item);
+      await server!.close();
+      // Nearly expired: the heartbeat must win.
+      await clients.migrator.query("UPDATE execution_attempts SET lease_expires_at = now() + interval '1 second' WHERE id = $1", [item.attemptId]);
+
+      // Pause the heartbeat after it has locked and proven the lease, just before it renews.
+      // The gated pool pauses only that one statement; the sweep below passes through it.
+      const gated = gatedPool((sql) => sql.includes("SET heartbeat_at = now()"));
+      const port = await compose(list, gated.pool);
+      const heartbeat = call(port, list[0]!, "heartbeat", item.attemptId, proof);
+      await gated.paused;
+      // Let the old lease expire by every clock while the heartbeat holds the row lock.
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      expect(
+        (await clients.migrator.query("SELECT lease_expires_at <= now() AS expired FROM execution_attempts WHERE id = $1", [item.attemptId])).rows,
+      ).toEqual([{ expired: true }]);
+      // A concurrent sweep (another worker's lease request) skips the locked row.
+      expect((await leaseRequest(port, list[1]!)).status).toBe(200);
+      expect((await attempt(item.attemptId)).state).toBe("SUBMITTING");
+      gated.release();
+      expect((await heartbeat).status).toBe(200);
+      // After the renewal commits, the lease is live again and a later sweep leaves it.
+      expect((await leaseRequest(port, list[1]!)).status).toBe(200);
+      expect(await attempt(item.attemptId)).toMatchObject({ state: "SUBMITTING", lease_worker_principal_id: list[0]!.id });
+      expect(await outcomeAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("sweep first: the cleared lease cannot be revived by the old token and fence", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      await expire(item.attemptId);
+      expect((await leaseRequest(port, list[1]!)).status).toBe(200);
+      const swept = await fullRow(item.attemptId);
+      expect(swept.state).toBe("OUTCOME_UNKNOWN");
+      for (const action of ["heartbeat", "submitting", "release", "credential-grant"] as const) {
+        expect((await call(port, list[0]!, action, item.attemptId, proof)).status).toBe(409);
+      }
+      expect(await fullRow(item.attemptId)).toEqual(swept);
+      expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+    });
+
+    it("concurrent sweepers convert each expired attempt exactly once, with one audit each", async () => {
+      const list = await workers(6);
+      const items = [await work(), await work(), await work()];
+      const port = await compose(list);
+      for (const [index, item] of items.entries()) await submittingAttempt(port, list[index]!, item);
+      for (const item of items) await expire(item.attemptId);
+
+      const responses = await Promise.all(list.slice(3).map((worker) => leaseRequest(port, worker)));
+      expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+      for (const item of items) {
+        expect(await attempt(item.attemptId)).toMatchObject({ state: "OUTCOME_UNKNOWN" });
+        expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+        expect(await jobStatus(item.jobId)).toBe("NEEDS_ATTENTION");
+      }
+    });
   });
 });
 

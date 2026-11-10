@@ -1,22 +1,32 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 
-// Foundation HTTP adapter. One route, GET /__health; everything else is a
+// Foundation HTTP adapter. Two routes: GET /__health (liveness, never touches
+// the database) and GET /__ready (readiness); everything else is a
 // deterministic JSON error. Responses never echo the request target, query,
 // headers or error details.
 
 export const HEALTH_PATH = "/__health";
+export const READY_PATH = "/__ready";
 
 export const HEALTH_BODY = Object.freeze({
   status: "ok",
   service: "commercial-api",
 });
 
-export type ErrorCode = "BAD_REQUEST" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "INTERNAL_ERROR";
+export const READY_BODY = Object.freeze({
+  status: "ready",
+  service: "commercial-api",
+});
+
+export type ErrorCode = "BAD_REQUEST" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "NOT_READY" | "INTERNAL_ERROR";
 
 export type CommercialApiServerDependencies = Readonly<{
   // Test seam: produces the health body. Production uses HEALTH_BODY.
   readHealth?: () => unknown;
+  // Resolves true only when the service can take traffic. Must be bounded;
+  // a rejection is treated as not ready. Defaults to never ready.
+  checkReadiness?: () => Promise<boolean>;
   // Server-side only; never reaches the client.
   reportError?: (error: unknown) => void;
 }>;
@@ -74,11 +84,27 @@ function requestPathname(target: string): string | null {
   return queryIndex === -1 ? target : target.slice(0, queryIndex);
 }
 
+async function respondReadiness(response: ServerResponse, checkReadiness: () => Promise<boolean>): Promise<void> {
+  let ready = false;
+  try {
+    ready = await checkReadiness();
+  } catch {
+    ready = false;
+  }
+
+  if (ready) {
+    sendJson(response, 200, READY_BODY);
+  } else {
+    sendError(response, 503, "NOT_READY");
+  }
+}
+
 function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   readHealth: () => unknown,
-): void {
+  checkReadiness: () => Promise<boolean>,
+): void | Promise<void> {
   const pathname = requestPathname(request.url ?? "");
 
   if (pathname === null) {
@@ -86,7 +112,7 @@ function handleRequest(
     return;
   }
 
-  if (pathname !== HEALTH_PATH) {
+  if (pathname !== HEALTH_PATH && pathname !== READY_PATH) {
     sendError(response, 404, "NOT_FOUND");
     return;
   }
@@ -96,28 +122,38 @@ function handleRequest(
     return;
   }
 
+  if (pathname === READY_PATH) {
+    return respondReadiness(response, checkReadiness);
+  }
+
   sendJson(response, 200, readHealth());
 }
 
 export function createCommercialApiServer(dependencies: CommercialApiServerDependencies = {}): Server {
   const readHealth = dependencies.readHealth ?? (() => HEALTH_BODY);
+  const checkReadiness = dependencies.checkReadiness ?? (async () => false);
   const reportError = dependencies.reportError ?? defaultReportError;
+
+  const fail = (response: ServerResponse, error: unknown) => {
+    reportError(error);
+
+    if (response.headersSent) {
+      response.destroy();
+      return;
+    }
+
+    sendError(response, 500, "INTERNAL_ERROR");
+  };
 
   const server = createServer((request, response) => {
     // No route reads a request body; discard any that arrives.
     request.resume();
 
     try {
-      handleRequest(request, response, readHealth);
+      const pending = handleRequest(request, response, readHealth, checkReadiness);
+      pending?.catch((error: unknown) => fail(response, error));
     } catch (error) {
-      reportError(error);
-
-      if (response.headersSent) {
-        response.destroy();
-        return;
-      }
-
-      sendError(response, 500, "INTERNAL_ERROR");
+      fail(response, error);
     }
   });
 

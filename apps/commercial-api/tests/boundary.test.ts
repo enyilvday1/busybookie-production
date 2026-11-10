@@ -150,6 +150,7 @@ describe("commercial-api source boundary", () => {
   it.each([
     ["src/config.ts", ["DEFAULT_HOST", "DEFAULT_PORT", "CONFIG_KEYS", "HOST_PATTERN", "PORT_PATTERN"]],
     ["src/database/databaseConfig.ts", ["DATABASE_CONFIG_KEYS", "DATABASE_CONFIG_INVALID"]],
+    ["src/database/runtimeDatabaseConfig.ts", ["RUNTIME_DATABASE_KEYS", "BOUNDED_SETTINGS", "LOOPBACK_HOSTS", "INTEGER_PATTERN"]],
   ])("%s names only COMMERCIAL_API_* configuration keys", (file, constants) => {
     const keys = read(join(APP_ROOT, file)).match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) ?? [];
     const environmentKeys = keys.filter((key) => !constants.includes(key));

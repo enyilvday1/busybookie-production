@@ -59,6 +59,9 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   // opener is added.
   { label: "test credential crypto", pattern: /testCredentialCrypto|createTestCredential|generateTestKey/ },
   { label: "credential decryption primitive", pattern: /createDecipheriv|setAuthTag/ },
+  // R44B5E: the fictitious-provider registry is a test fixture; production
+  // source enables no provider and may not reference the test ones.
+  { label: "test provider registry", pattern: /testProviderRegistry|createTestProviderRegistry|TEST_PROVIDER/ },
 ];
 
 const BUILTINS = new Set(builtinModules);
@@ -130,6 +133,9 @@ describe("boundary scanner", () => {
     ["const key = generateTestKey('k');", "test credential crypto"],
     ["const decipher = createDecipheriv('aes-256-gcm', key, nonce);", "credential decryption primitive"],
     ["decipher.setAuthTag(tag);", "credential decryption primitive"],
+    ['import { createTestProviderRegistry } from "../tests/support/testProviderRegistry.js";', "test provider registry"],
+    ["const registry = createTestProviderRegistry();", "test provider registry"],
+    ['registry.resolve("TEST_PROVIDER");', "test provider registry"],
     ['import "dotenv/config";', ".env loading"],
     ["executeVeoSingleShot()", "Veo provider"],
   ])("detects a planted violation: %s", (text, expectedLabel) => {

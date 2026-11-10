@@ -1,5 +1,9 @@
+import { combineApplicationRouters } from "./application/combineApplicationRouters.js";
 import { createCustomerApplication } from "./application/customerApplication.js";
+import { createProviderConnectionApplication } from "./application/providerConnectionApplication.js";
 import type { AuthenticationAdapter } from "./authentication/authenticationAdapter.js";
+import type { ProviderCapabilityRegistry } from "./providerConnections/providerCapabilityRegistry.js";
+import type { CredentialFingerprinter, CredentialSealer } from "./providerCredentials/credentialCrypto.js";
 import { loadServerConfig, ServerConfigError, type ConfigEnvironment } from "./config.js";
 import type { ApplicationRouter } from "./createCommercialApiServer.js";
 import { MigrationError } from "./database/migrationError.js";
@@ -38,6 +42,15 @@ export type CommercialApiProcessDependencies = Readonly<{
   // runtime pool. The default entry point supplies none: no production
   // identity-provider adapter exists yet, so those routes are not exposed.
   authentication?: AuthenticationAdapter;
+  // Code-level composition only. When supplied (with authentication), the
+  // ProviderConnection routes are installed. No production registry, sealer
+  // or fingerprinter exists yet, so the default entry point supplies none and
+  // those routes are not exposed. There is deliberately no opener here.
+  providerConnections?: Readonly<{
+    registry: ProviderCapabilityRegistry;
+    sealer: CredentialSealer;
+    fingerprinter: CredentialFingerprinter;
+  }>;
   readinessTimeoutMs?: number;
   poolCloseTimeoutMs?: number;
 }>;
@@ -123,6 +136,9 @@ export async function runCommercialApiProcess(
     port = config.port;
     databaseConfigured = databaseConfig !== null;
 
+    if (dependencies.providerConnections !== undefined && dependencies.authentication === undefined) {
+      throw new ServerConfigError("Provider connections require the authenticated application.");
+    }
     if (dependencies.authentication !== undefined && databaseConfig === null) {
       throw new ServerConfigError("The authenticated application requires a configured database.");
     }
@@ -133,7 +149,19 @@ export async function runCommercialApiProcess(
       const verified = await verifyDatabase(pool, migrations);
       liveReadiness = createReadinessCheck(pool, verified, dependencies.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
       if (dependencies.authentication !== undefined) {
-        application = createCustomerApplication({ authentication: dependencies.authentication, pool, reportFailure: dependencies.writeStderr });
+        const customer = createCustomerApplication({ authentication: dependencies.authentication, pool, reportFailure: dependencies.writeStderr });
+        application =
+          dependencies.providerConnections === undefined
+            ? customer
+            : combineApplicationRouters(
+                customer,
+                createProviderConnectionApplication({
+                  authentication: dependencies.authentication,
+                  pool,
+                  ...dependencies.providerConnections,
+                  reportFailure: dependencies.writeStderr,
+                }),
+              );
       }
       dependencies.writeStdout("commercial-api: database verified\n");
     }

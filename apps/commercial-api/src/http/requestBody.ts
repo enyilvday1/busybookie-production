@@ -68,18 +68,25 @@ function topLevelMemberNames(text: string): string[] {
   return names;
 }
 
+// Credential-bearing routes carry a provider credential of up to 8192 UTF-8
+// bytes, which JSON escaping can expand several times over. Those routes opt
+// in to this larger, still bounded, limit; every other route keeps
+// MAX_JSON_BODY_BYTES.
+export const MAX_CREDENTIAL_JSON_BODY_BYTES = 65_536;
+
 // Reads a JSON object body: exact JSON media type, bounded size, valid UTF-8,
 // a single object (not an array, null or primitive), no duplicate members,
 // and only the allowed member names.
 export async function readJsonObjectBody(
   request: IncomingMessage,
   allowedMembers: ReadonlySet<string>,
+  maxBytes: number = MAX_JSON_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   if (!JSON_MEDIA_TYPE.test(request.headers["content-type"] ?? "")) {
     throw new RequestBodyError("UNSUPPORTED_MEDIA_TYPE");
   }
 
-  const bytes = await readBoundedBody(request, MAX_JSON_BODY_BYTES);
+  const bytes = await readBoundedBody(request, maxBytes);
 
   let text: string;
   let parsed: unknown;

@@ -31,7 +31,10 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   sections 17, 18, 31, 36 and 37); R44B6R1 (R44B6R control-plane
   acceptance-recovery route implemented, preserving the original submission
   epoch and two-transaction expiry handoff; worker recovery wiring still
-  deferred: introduction, sections 10, 17, 18, 30, 31, 36 and 37).
+  deferred: introduction, sections 10, 17, 18, 30, 31, 36 and 37);
+  R44B6S0 (worker startup acceptance-recovery retry policy locked for future
+  R44B6S implementation; no runtime change: introduction, sections 17, 31
+  and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -1491,25 +1494,116 @@ as follows, still before requesting any lease:
 2. scans `acceptance-journal/v1/` and applies the corruption table above;
 3. for each valid published record, calls `acceptance-recovery` (section 18)
    with the record's fencing counter and provider execution ID, and then:
-   - a response showing the same provider execution ID in `SUBMITTED` or a
-     later state -> reconciled; delete it if terminal, keep it otherwise;
+   - an exact acknowledgement matching the record's attempt, fencing counter
+     and provider execution ID in `SUBMITTED`, `SUCCEEDED`,
+     `SUBMITTED_FAILED` or `ABANDONED` -> reconciled for this startup pass;
+     delete it if terminal, keep it otherwise. Never regress terminal state;
    - `ATTEMPT_STILL_SUBMITTING` (revisions R44B6K1 and R44B6R1) means the
      attempt is still `SUBMITTING` after the scoped sweep transaction. This
      includes expiry between that transaction and the recovery transaction.
      The restarted worker cannot prove the lost lease token. It therefore
      stays blocked and makes no provider create.
-     It retries `acceptance-recovery` with bounded backoff, never longer than
-     the server lease duration, until the authoritative expiry has moved the
-     attempt to `OUTCOME_UNKNOWN` and the same ID is recovered. Nothing in
-     this path shortens the lease;
+     It retries `acceptance-recovery` only within the per-record policy below,
+     waiting for authoritative expiry to move the attempt to `OUTCOME_UNKNOWN`
+     so the same ID can be recovered. Nothing in this path shortens the lease
+     or permits the worker clock to declare expiry;
    - a refusal (state conflict, ID conflict, principal or fencing mismatch,
      or an incompatible terminal state) -> `ACCEPTANCE_RECONCILIATION_FAILED`;
      fail closed and wait for an operator;
-   - a transport failure or 503 -> retry with bounded backoff and stay
-     blocked;
-4. only when every record is reconciled or quarantined, starts leasing.
+   - transport/network failure or HTTP 5xx -> retry within the same bounded
+     policy using the existing `CONTROL_API_UNAVAILABLE` classification and
+     stay blocked;
+4. only when all unresolved valid records have exact successful
+   acknowledgements and no other blocking condition remains, becomes `CLEAR`
+   and starts leasing. Quarantine of invalid temporary bytes follows the
+   local corruption table; it cannot resolve valid acceptance evidence.
 
 No step in reconciliation calls a provider create.
+
+### Startup acceptance-recovery retry policy (revision R44B6S0)
+
+**Architecture decision only.** This locks the policy required by R44B6S;
+the worker acceptance-recovery client and startup calls remain unimplemented.
+Section 37 records the authoritative numeric and classification flags.
+
+**Eligibility authority.** Only the control-plane database determines
+recovery eligibility and authoritative lease expiry. The worker retry clock
+only bounds how long startup retries; it cannot declare a lease expired.
+This policy replaces the previous ambiguous "never longer than the server
+lease duration" wording with a fixed local retry budget, independent of the
+server's lease-expiry decision.
+
+**Per-record budget and schedule.** Process unresolved valid records in
+deterministic lexical order. Each record gets its own budget, beginning
+immediately before its first request. Attempt 1 is immediate (0 ms initial
+request delay) and counts toward the maximum of 18 attempts. No nineteenth
+request may start within that budget. The maximum elapsed duration is
+150000 ms (150 seconds), including network/request duration and waits.
+Measure elapsed duration using an injected monotonic worker clock; do not
+use wall-clock timestamps where a monotonic clock is available.
+
+After a retryable result, delays use exponential backoff: initial 1000 ms,
+multiplier 2, capped at 10000 ms. The delay sequence is therefore
+`1000, 2000, 4000, 8000, 10000, 10000, ...` ms. No delay exceeds 10 seconds.
+Before scheduling any retry, check whether 18 attempts have already been
+made, check monotonic elapsed time, then compute the next capped backoff.
+Check elapsed time again after waiting and before starting the next request:
+no request may start when elapsed time is at least 150000 ms. There is no
+requirement to start a request exactly at the boundary.
+
+With negligible request latency, the 18 request start times are approximately
+`0, 1, 3, 7, 15, 25, 35, 45, 55, 65, 75, 85, 95, 105, 115, 125, 135, 145`
+seconds. This schedule is deliberate. A record acknowledged immediately
+consumes no retry delay.
+
+**No jitter.** Jitter is `NONE`; R44B6S must not add random jitter. Recovery
+is a private startup reconciliation path, deterministic crash/restart
+behavior is preferred, retry frequency is already bounded and low, and
+jitter is unnecessary for the current single-concurrency recovery model.
+A future architecture revision may reconsider this if deployment topology
+changes materially.
+
+**Retryable outcomes.** `ATTEMPT_STILL_SUBMITTING` is retryable but is not
+recovery success. Durable journal evidence remains authoritative, new work
+stays blocked, and no provider operation may occur. Retry the exact same
+identity without inferring expiry locally. Transport/network failure and
+HTTP 5xx are retryable within this same budget through the existing worker
+`CONTROL_API_UNAVAILABLE` classification; do not add an overlapping
+availability error taxonomy.
+
+**Definitive outcomes.** Do not retry authentication or authorization
+rejection, definitive acceptance-recovery rejection, incompatible identity
+or epoch, conflicting provider execution identity, malformed success
+responses, unexpected response shapes, or other non-special 4xx responses.
+`ATTEMPT_STILL_SUBMITTING` is the explicit lifecycle exception. These
+failures block startup; no response body or unsafe detail is surfaced.
+
+**Exact identity and durable evidence.** Every retry reuses exactly the
+same `executionAttemptId`, `fencingCounter` and `providerExecutionId` from
+the same durable journal record. Retries must not mutate the fence, obtain
+a lease, send a live lease token, generate another provider execution ID,
+reconstruct a replacement record, or regenerate `recordedAt` or
+`recordSha256`. Until exact successful acknowledgement, the journal record
+remains present and new work remains prohibited.
+
+**Exhaustion.** If attempts reach 18 or monotonic elapsed time reaches
+150000 ms before exact successful acknowledgement, reconciliation fails
+closed and startup surfaces a safe recovery-exhausted failure. Preserve
+the valid published record intact: do not delete, quarantine or otherwise
+discard it. Fresh lease acquisition, credential grants, credential opening
+and provider execution remain prohibited. Stop at that record; do not
+continue to fresh work or run an infinite retry loop. A later process
+restart may begin a new bounded per-record budget against the same durable
+evidence. Successful exact acknowledgement of every unresolved valid
+record is required before startup can become `CLEAR`.
+
+**Testing contract for R44B6S.** Inject the monotonic clock and waiting/sleep
+function; tests must not sleep for production retry durations. Pin immediate
+attempt 1, the delay sequence, the 10-second cap, the maximum 18 attempts,
+the 150-second elapsed bound including request time, no jitter, retryable
+and definitive non-retryable classifications, exact-identity reuse, and
+fail-closed exhaustion with evidence retained. This architecture revision
+does not modify or implement those tests.
 
 ### Unresolved journal blocks new work
 
@@ -2801,7 +2895,7 @@ automatically or create a recovery lease.
 | Case | Control plane | Local journal | Rule |
 |---|---|---|---|
 | A | `SUBMITTING`, or `OUTCOME_UNKNOWN` after the sweep | none | Acceptance cannot be proven. No resubmission. The attempt becomes or stays `OUTCOME_UNKNOWN` (section 12 sweep) for operator resolution. |
-| B | Still `SUBMITTING` after TX1, including expiry between TX1 and TX2 | valid record | (Revised R44B6R1.) Block new work. No provider create and no token-less transition: `acceptance-recovery` answers `ATTEMPT_STILL_SUBMITTING` after original-epoch proof. Retry with bounded backoff until a later authoritative sweep moves the attempt to `OUTCOME_UNKNOWN`, then apply B'. The lease is never shortened and TX2 never manufactures expiry. |
+| B | Still `SUBMITTING` after TX1, including expiry between TX1 and TX2 | valid record | (Revised R44B6S0.) Block new work. No provider create and no token-less transition: `acceptance-recovery` answers `ATTEMPT_STILL_SUBMITTING` after original-epoch proof. Retry only within section 17's bounded per-record policy; if a later authoritative sweep moves the attempt to `OUTCOME_UNKNOWN`, apply B'. Exhaustion retains the journal and blocks startup. The lease is never shortened and neither TX2 nor the worker retry clock manufactures expiry. |
 | B' | `OUTCOME_UNKNOWN` (expired and swept, including by step 1 of `acceptance-recovery`) | valid record | `acceptance-recovery`: `OUTCOME_UNKNOWN -> SUBMITTED` with the same ID, authorised by the immutable submitting principal and the retained fencing counter. No provider create. |
 | C | `SUBMITTED`, same ID | valid record | Reconciled. Recovery of that ID resumes under a recovery lease. |
 | D | `SUBMITTED` | none | The control-plane ID is authoritative. Recovery uses it. |
@@ -3020,7 +3114,36 @@ REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
 
 ## 37. Lock flags
 
+`JOURNAL_RECORD_REMAINS_PRESENT` and `NEW_WORK_ALLOWED` below describe the
+period before exact acknowledgement of unresolved acceptance evidence.
+
 ```text
+RECOVERY_ELIGIBILITY_AUTHORITY=CONTROL_PLANE_DATABASE
+WORKER_RETRY_CLOCK_CAN_DECLARE_LEASE_EXPIRED=NO
+ACCEPTANCE_RECOVERY_INITIAL_REQUEST_DELAY_MS=0
+ACCEPTANCE_RECOVERY_RETRY_MAX_ATTEMPTS=18
+ACCEPTANCE_RECOVERY_RETRY_MAX_ELAPSED_MS=150000
+ACCEPTANCE_RECOVERY_RETRY_INITIAL_BACKOFF_MS=1000
+ACCEPTANCE_RECOVERY_RETRY_MULTIPLIER=2
+ACCEPTANCE_RECOVERY_RETRY_MAX_BACKOFF_MS=10000
+ACCEPTANCE_RECOVERY_RETRY_JITTER=NONE
+ACCEPTANCE_RECOVERY_RETRY_USES_MONOTONIC_ELAPSED_CLOCK=YES
+ATTEMPT_STILL_SUBMITTING_RETRYABLE=YES
+ATTEMPT_STILL_SUBMITTING_COUNTS_AS_RECOVERY_SUCCESS=NO
+ACCEPTANCE_RECOVERY_TRANSPORT_UNAVAILABLE_RETRYABLE=YES
+ACCEPTANCE_RECOVERY_HTTP_5XX_RETRYABLE=YES
+ACCEPTANCE_RECOVERY_AUTH_REJECTION_RETRYABLE=NO
+ACCEPTANCE_RECOVERY_DEFINITIVE_REJECTION_RETRYABLE=NO
+ACCEPTANCE_RECOVERY_MALFORMED_RESPONSE_RETRYABLE=NO
+ACCEPTANCE_RECOVERY_RETRY_REUSES_EXACT_JOURNAL_IDENTITY=YES
+JOURNAL_RECORD_REMAINS_PRESENT=YES
+NEW_WORK_ALLOWED=NO
+ACCEPTANCE_RECOVERY_RETRY_EXHAUSTION_BLOCKS_NEW_WORK=YES
+ACCEPTANCE_RECOVERY_RETRY_EXHAUSTION_DISCARDS_JOURNAL=NO
+ACCEPTANCE_RECOVERY_RETRY_BUDGET_SCOPE=PER_RECORD
+ALL_UNRESOLVED_RECORDS_MUST_RECOVER_BEFORE_NEW_WORK=YES
+ACCEPTANCE_RECOVERY_SENDS_LIVE_LEASE_TOKEN=NO
+ACCEPTANCE_RECOVERY_CREATES_RECOVERY_LEASE=NO
 ARCHITECTURE_STATUS=LOCKED
 BRIDGE_DIRECTION=PRIVATE_WORKER_OUTBOUND_TO_COMMERCIAL_CONTROL_PLANE
 WORKER_PROCESS=apps/commercial-worker

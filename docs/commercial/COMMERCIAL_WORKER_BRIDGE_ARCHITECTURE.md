@@ -276,7 +276,27 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   unchanged, and the application and deployment bindings now agree
   exactly; `WORKER_STATE_ROOT_BINDING_IMPLEMENTED=YES`; the final
   pre-fake-provider gate item is satisfied and the gate is complete;
-  provider flags remain NO: introduction, sections 17, 36 and 37).
+  provider flags remain NO: introduction, sections 17, 36 and 37); R44B9A
+  (first fake-provider execution contract locked; a new post-gate phase:
+  the first lock attempt was blocked because the proposed lowercase,
+  hyphenated identifier broke the existing provider-identifier grammar
+  `^[A-Z][A-Z0-9_]{0,31}$`, so the identifier is `BUSYBOOKIE_FAKE`, needing
+  no migration, protocol or API change; the fake provider is production
+  worker code, never the R44B7 test thunk; development only; a
+  `BUSYBOOKIE_FAKE`-only lease barrier, with any other provider refused
+  before the credential grant; the fake receives no credential; a
+  provider-neutral create-phase contract whose acceptance callback must be
+  awaited and is the only authority for the provider execution ID; the
+  fake execution ID is `BUSYBOOKIE_FAKE-${executionAttemptId}`; acceptance
+  is immediate by default; definitive and ambiguous outcomes; zero create
+  retries, and the real-adapter retry assertion stays deferred; a
+  one-attempt library composer and no daemon; credential-opening
+  continuation without retaining plaintext; the permit precedes provider
+  construction; the keeper wraps create plus callback; the endpoint is
+  `SUBMITTED`; definitive and ambiguous failure composition is required,
+  through one shared submission-failure policy; tier-3 success and failure
+  tests; no real network; provider flags remain NO: introduction, sections
+  36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -5615,7 +5635,9 @@ contract, including where applicable:
 - failure and outcome composition;
 - no real provider network in fake-provider mode.
 
-R44B8B designs and implements none of it.
+R44B8B designs and implements none of it. (R44B9A.) That contract is now
+locked in "First fake-provider execution slice" below, as a new post-gate
+phase. The gate stays complete.
 
 **Separate items, still open.** These are separate readiness domains that
 neither block nor reopen this gate:
@@ -6062,6 +6084,373 @@ WHOLE_CHAIN_CRASH_TESTS_TERMINAL_FIXTURE_ALLOWED=YES
 WHOLE_CHAIN_CRASH_TESTS_STATE_ROOT_BINDING_INCLUDED=NO
 ```
 
+### First fake-provider execution slice (revision R44B9A)
+
+**Locked decision (R44B9A; not implemented).** This is a new post-gate
+execution phase; `PRE_FAKE_PROVIDER_GATE` stays **COMPLETE** and is not
+reopened. The first lock attempt was blocked because the proposed identifier
+`busybookie-fake` broke the authoritative provider-identifier grammar
+`^[A-Z][A-Z0-9_]{0,31}$`. That grammar is enforced by:
+
+- database constraints (`provider_connections`,
+  `generation_authorizations` and `execution_attempts`);
+- the commercial-api connection service;
+- the protocol credential context;
+- the worker-control client lease parser;
+- the acceptance-journal record schema.
+
+The corrected identifier, `BUSYBOOKIE_FAKE`, passes all of them, so no
+migration, protocol change or API validation change is needed, and
+provider-identifier validation is not widened. This lock changes no source,
+test, runbook, API, protocol, migration or engine code.
+
+**Evidence (R44B9 discovery, revalidated).**
+
+- `runCredentialOpeningOnce` stops after opening. Its summary discards the
+  lease token and proof and the plaintext credential, so execution cannot
+  continue from it.
+- `obtainPreProviderPermit`, `runWithInFlightHeartbeat` and
+  `createAcceptanceAdapter` have no production caller.
+- There is no provider-neutral worker execution interface, no production
+  fake provider and no production failure composer.
+- The real engine executors fuse create, acceptance, polling and output,
+  and are unsuitable for this slice.
+- R44B7's `controlledProvider()` remains test-only.
+
+**Definition.** A fake provider counts as implemented only when production
+`apps/commercial-worker` source contains a deterministic local fake
+create-phase provider that is wired through the production worker execution
+composition. That composition exercises:
+
+- the real state-root binding and startup reconciliation;
+- the real lease, grant and open;
+- the real pre-provider permit and in-flight keeper;
+- the real durable acceptance adapter;
+- real submission-failure reporting;
+- real worker-control HTTP, commercial-api and database in tier-3 tests.
+
+A test-only thunk never qualifies. The fake uses no provider SDK, provider
+HTTP endpoint, Runway, Veo or Google execution, or engine polling and
+output code.
+
+**Endpoint.** Success ends at **`SUBMITTED`**: the acceptance is durably
+recorded and the control plane is `SUBMITTED`. Polling, output, download,
+media persistence, completion, terminal status, recovery leases and the
+post-`SUBMITTED` lifecycle are excluded. The live-route `SUBMITTED`
+capacity condition stays separately deferred.
+
+**Identity and barrier.**
+
+- The dedicated fake **provider identifier** is `BUSYBOOKIE_FAKE`. It is
+  not a provider execution ID.
+- Fake execution runs only when `COMMERCIAL_WORKER_ENV=development`.
+  Production mode is refused before any lease.
+- The barrier is the fake-only composer, plus development mode, plus
+  `lease.provider === "BUSYBOOKIE_FAKE"`. There is no
+  `COMMERCIAL_WORKER_PROVIDER_MODE` or other provider-mode variable and no
+  generic real/fake selector; a later real-provider slice owns selection.
+- **No real network, structurally:** no Runway, Veo or Google import, no
+  engine `src/execution` import, no provider SDK dependency, no provider
+  credential passed to the fake, and no HTTP client in the fake. Boundary
+  tests enforce this.
+- **Lease-provider guard:** checked immediately after the lease and before
+  any credential grant, opening, pre-provider orchestration or fake
+  construction. A provider other than `BUSYBOOKIE_FAKE` gets:
+  - no grant, opening, `SUBMITTING`, construction or dispatch;
+  - no `submission-failed` report;
+  - a host-fault trip, because a fake-only worker acquired an incompatible
+    attempt;
+  - the lease left for normal authoritative expiry and reclaim.
+
+  This is never reported as a provider rejection.
+
+**Credential continuation.**
+
+- `runCredentialOpeningOnce` keeps its public summary and behaviour.
+  Implementation may refactor `credentialOpeningRun.ts` only enough to
+  share one internal lease → expiry checks → grant → open primitive. The
+  existing function returns its summary from that primitive; the fake
+  composer receives the non-secret continuation context. No API or protocol
+  change.
+- **Execution context:** immutable, read-only, in memory only, never
+  logged and never persisted as a whole. It holds the existing source
+  values of `executionJobId`, `executionAttemptId`, `attemptNumber`,
+  `provider` and `generationRequestSha256` (lease); `accountId` (grant
+  opening context); `fencingCounter`; and the `LeaseProof` (fencing counter
+  and lease token) that worker-control calls need. All are already exposed
+  by `WorkerLease`, the grant and `LeaseProof`, so no API or protocol change
+  is needed. It never contains a plaintext credential or provider API key.
+- **Fake mode still runs grant, then open**, so the production ordering is
+  exercised. The plaintext is verified under the existing opening contract
+  and discarded at once. The fake receives no plaintext, API key or
+  credential object. This resolves nothing for real-provider credential
+  lifetime (section 24).
+
+**Create-phase contract.** A worker-local, provider-neutral contract
+covering only provider create/submit plus the awaited acceptance callback;
+never polling, download, output or completion. Typed outcomes are
+**ACCEPTED**, **DEFINITIVE_FAILURE** and **AMBIGUOUS_FAILURE**, with
+TypeScript names per worker convention.
+
+- **Callback.** The operation receives
+  `(acceptance: WorkerProviderAcceptance) => Promise<void>` (the outer
+  acceptance adapter) and **must await it**. The callback is the sole
+  authority for `providerExecutionId`; the return value carries no
+  competing ID.
+- **ACCEPTED** is valid only when the create was dispatched, an accepted ID
+  was produced, and the callback was invoked and awaited successfully, in
+  that order.
+  - ACCEPTED without a completed callback is treated as ambiguous plus a
+    contract violation: host-fault trip, the ambiguous report if authority
+    permits, otherwise the sweep owns it. No fabricated ID, no retry.
+- **Callback rejection:** the composer never reports `submission-failed`
+  again on that account. The adapter already owns pre-durable reporting,
+  durability failure and the latch. The composer fails closed: no duplicate
+  report, no resubmission.
+- **A failure after completed acceptance:** if a DEFINITIVE_FAILURE or
+  AMBIGUOUS_FAILURE follows a completed callback, that is an adapter
+  contract violation. Host-fault trip, no `submission-failed`, no
+  overwrite of the accepted authority, journal and recovery preserved, no
+  resubmission.
+- **Untyped throw:** an adapter or host contract fault. Host-fault trip, no
+  fabricated acceptance, no definitive claim, no new route, no
+  resubmission; the existing expiry and sweep own the unresolved state.
+
+**Construction and dispatch.**
+
+- **Permit before construction:** a factory boundary. The fake operation
+  is constructed only after `obtainPreProviderPermit` succeeds, so no
+  submission-capable object exists earlier. Tests count construction and
+  dispatch: if `SUBMITTING`, the mandatory heartbeat or the permit fails,
+  both are 0.
+- **Fake module:** production `apps/commercial-worker/src/fakeProvider.ts`
+  (or an equivalent name). It is create-phase only, `BUSYBOOKIE_FAKE` only,
+  with no network, no SDK and no credential. Its default is deterministic
+  ACCEPTED, with typed definitive and ambiguous behaviour selectable only
+  through an explicit dependency or test seam, never an environment mode.
+  No engine imports.
+- **Fake execution ID:** `BUSYBOOKIE_FAKE-${executionAttemptId}`. It is a
+  different grammar from the provider identifier. At 52 characters it
+  satisfies `isProviderExecutionId`: 1 to 256 visible ASCII characters and
+  no `://`. It is deterministic, bound to the attempt, collision-free
+  across attempts, obviously fake and contains no secret. No randomness.
+- **Timing:** production fake acceptance is immediate. There is no delay
+  setting; tests may inject a pending operation through the production
+  seam.
+- **Cardinality:** at most one create dispatch per leased attempt, with one
+  construction after the permit and one invocation. No create or dispatch
+  retry, no second construction, and no resubmission after a restart.
+- **Retry:** the fake has zero create retries and no transport, and no
+  generic retry wrapper surrounds it.
+- **Real-adapter obligation:** a real adapter must refuse construction or
+  use unless create retry is deterministically disabled. The fake is exempt
+  because it has no SDK. Discovery evidence shows this is feasible later
+  (Runway `maxRetries: 0`, Google per-request `maxRetries: 0`, Veo
+  `attempts: 1`), but the obligation is **not** satisfied, and no
+  Runway/Veo/Google assertion is added to the fake.
+
+**Composer.** One library-only composer, conceptually
+`runConfiguredFakeProviderAttemptOnce`: one startup, at most one leased
+attempt and at most one dispatch. No loop, daemon, CLI, signals, scheduler
+or start script. It reuses R44B8: `WorkerConfig` → require development →
+bind the state root → startup reconciliation → lease. No temporary root in
+production; tests may inject explicit fixtures. Order on success:
+
+```text
+configuration/state-root validation -> journal prepare -> startup reconciliation
+-> lease -> verify provider == BUSYBOOKIE_FAKE -> credential grant
+-> credential open/verify -> discard plaintext -> per-attempt journal prepare
+-> SUBMITTING acknowledgement -> mandatory heartbeat -> pre-provider permit
+-> construct fake operation -> construct/use acceptance adapter
+-> runWithInFlightHeartbeat(fake create -> await durable acceptance)
+-> durable journal -> submitted report or acceptance recovery -> SUBMITTED
+```
+
+It stops there.
+
+- `obtainPreProviderPermit` is reused and not weakened.
+- `runWithInFlightHeartbeat` wraps the create plus the awaited acceptance,
+  never polling. Heartbeat authority never cancels the operation: a 409
+  stops scheduling only, and a late acceptance stays recoverable. R44B7
+  already proved lease-loss semantics, so only a composer wiring proof is
+  needed.
+- `createDurableAcceptanceHandler` and `createAcceptanceAdapter` are
+  reused. The fake awaits the adapter callback. The existing single-use
+  claim governs duplicates; no second mechanism is added.
+
+**Failure composition (required).** `FAKE_PROVIDER_EXECUTION_IMPLEMENTED`
+never becomes YES with success-only composition. Before durable acceptance:
+
+| Outcome | Report | Expected result | Host fault |
+|---|---|---|---|
+| DEFINITIVE_FAILURE | `DEFINITIVELY_REJECTED` / `PROVIDER_REJECTED_DEFINITIVELY` | attempt `FAILED_BEFORE_SUBMISSION`, job `FAILED`, no acceptance record, dispatch 1 | not for an ordinary rejection |
+| AMBIGUOUS_FAILURE | `OUTCOME_UNKNOWN` / `PROVIDER_SUBMISSION_AMBIGUOUS` | attempt `OUTCOME_UNKNOWN`, job `NEEDS_ATTENTION`, no fabricated acceptance, dispatch 1, no resubmission | not for typed ambiguity alone |
+
+- **After lease loss:** if the report is refused because authority is
+  gone, no new transition is invented, no create is retried and no
+  acceptance is fabricated. The existing expiry, sweep and unknown-outcome
+  authority owns the state, and `OUTCOME_UNKNOWN` is never claimed before
+  the sweep has actually run.
+- **Shared policy:** the R44B6Y failure-report policy, currently private in
+  the acceptance adapter, is extracted into **one** production helper with
+  identical semantics: at most two attempts, retrying only
+  `CONTROL_API_UNAVAILABLE`, 10 s per attempt, no provider retry, and the
+  existing 409, authentication, malformed and invariant handling and latch
+  behaviour. The acceptance adapter and the fake composer both use it. The
+  adapter's behaviour does not change. No second latch policy exists.
+- **Host fault:** not tripped for a successfully reported definitive or
+  typed ambiguous outcome. Acceptance durability or integrity failures keep
+  the existing latch behaviour. A provider contract violation trips it.
+  A failure-report control-plane failure follows the shared policy.
+
+**Secrets and process.**
+
+- The fake receives no plaintext credential, API key, lease token or
+  worker credential. The lease proof stays composer and control-plane data.
+- No CLI, daemon, executable, loop or start script, and no provider-mode
+  variable. `COMMERCIAL_WORKER_ENV=development` is the only environmental
+  gate. Library composition is enough for the flag once every tier-3
+  criterion passes.
+
+**Tests (mandatory for the flag).**
+
+- **Tier-3 success:** the production composer with the production
+  `BUSYBOOKIE_FAKE` provider, imported from `src/` and not the R44B7 thunk,
+  over real HTTP, commercial-api, database and journal. It asserts:
+  - startup reconciliation, one lease, and the guard passing;
+  - one grant and open, and the permit before construction;
+  - construction 1, dispatch 1 and durable acceptance 1;
+  - provider ID `BUSYBOOKIE_FAKE-${executionAttemptId}`, persisted exactly;
+  - `SUBMITTED`, the journal retained, the `submitted` audit;
+  - no resubmission and no provider network.
+- **Tier-3 definitive failure:** construction 1, dispatch 1, no journal,
+  the definitive classification, `FAILED_BEFORE_SUBMISSION` (when
+  authority permits), job `FAILED`, the `failed_before_submission` audit,
+  no resubmission and no host fault.
+- **Tier-3 ambiguous failure:** construction 1, dispatch 1, no fabricated
+  acceptance, the ambiguous report, `OUTCOME_UNKNOWN` (when the report
+  succeeds), job `NEEDS_ATTENTION`, the `outcome_unknown` audit, no
+  resubmission and no host fault.
+- **Keeper wiring:** an injected pending operation through the production
+  seam under fake time, with at least one real heartbeat renewal while
+  pending, then normal completion. No 30-second waits.
+- **Barrier tests:**
+  - A. production mode refuses before any lease;
+  - B. a non-`BUSYBOOKIE_FAKE` lease refuses before the grant;
+  - C. an incompatible provider leaves construction at 0;
+  - D and E. a permit failure leaves construction and dispatch at 0;
+  - F. no real-provider imports in the composer;
+  - G. the fake receives no credential.
+- **Acceptance tests:**
+  - A. the callback is awaited;
+  - B. ACCEPTED without a completed callback is ambiguous plus a host
+    fault;
+  - C. a callback rejection produces no duplicate report;
+  - D. a failure after acceptance overwrites nothing and trips the latch;
+  - E. duplicates stay with the durable single-use claim.
+- **Failure-policy tests:** the shared helper keeps the adapter's
+  behaviour; the definitive and ambiguous mappings; unavailable-only retry;
+  at most two attempts; a 409 never authorises a provider retry;
+  authentication, malformed and invariant failures fail closed; no dispatch
+  retry.
+- **No real network:** no engine or provider-brand imports and no SDK
+  dependency, no HTTP client in the fake, no provider credential
+  environment, and runtime outbound URLs only in the worker-control family.
+- **Secrets:** fake input, journal, audit text, errors and latch messages
+  never contain the plaintext credential, worker credential, lease token or
+  an API key. The fake ID contains only the attempt ID.
+- **Audits:** the expected transition families are `submitted`,
+  `failed_before_submission` and `outcome_unknown`, alongside the existing
+  `submitting`. No heartbeat or fake-provider-specific audit is invented.
+
+**Unchanged.**
+
+- The engine executors (`executeRunwaySingleShot`, `executeVeoSingleShot`,
+  `submitGoogleGenAiSingleShot`) and the SDK constructors are not
+  modified. The create/polling fusion and the ID-normalisation conflict
+  belong to the real-adapter slice.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED` and
+  `REAL_PROVIDER_EXECUTION_IMPLEMENTED` stay NO.
+- Section 24 stays launch-blocking; the fake uses no credential.
+- The live-route `SUBMITTED` capacity condition stays deferred.
+- R44B8 stays authoritative for the state root.
+
+**Fake flag criteria.** `FAKE_PROVIDER_EXECUTION_IMPLEMENTED` stays **NO**
+until a published implementation proves all of:
+
+1. the production fake provider;
+2. the fake-only composer;
+3. the development-only barrier;
+4. the `BUSYBOOKIE_FAKE` barrier;
+5. the create-phase contract;
+6. permit before construction;
+7. keeper wiring;
+8. durable acceptance;
+9. definitive composition;
+10. ambiguous composition;
+11. the shared failure policy;
+12. the tier-3 success test;
+13. the tier-3 definitive-failure test;
+14. the tier-3 ambiguous-failure test;
+15. the keeper wiring test;
+16. the no-real-network proof;
+17. the secret-safety proof;
+18. no test-thunk substitution.
+
+A module merely existing never qualifies.
+
+**Expected scope.** Worker only:
+
+- `src/providerExecution.ts`;
+- `src/fakeProvider.ts`;
+- `src/attemptExecution.ts`;
+- `src/credentialOpeningRun.ts`, only for the continuation refactor;
+- `src/acceptanceAdapter.ts`, only for extracting the policy;
+- optionally `src/submissionFailurePolicy.ts`;
+- tests for the contract, the fake, the composer, the continuation, the
+  policy, the boundary, and tier-3 fake execution.
+
+Repository naming may differ. There is no change to commercial-api, the
+protocol, migrations, database constraints, the journal format, the
+state-root contract, the runbook, the engine executors, SDKs or lockfiles,
+and no new dependency.
+
+**Stop conditions.** Implementation stops if it would require:
+
+- widening the provider-identifier pattern, a migration, or a protocol or
+  API change;
+- a provider SDK, a real-provider import or real-provider network;
+- a daemon or entry point, or a `process.env` read;
+- a credential passed to the fake;
+- a create retry or automatic resubmission;
+- weakening permit-before-construction;
+- polling, output or completion;
+- a state-root or deployment change;
+- treating `controlledProvider` as the implementation.
+
+```text
+FAKE_PROVIDER_ID=BUSYBOOKIE_FAKE
+FAKE_PROVIDER_ALLOWED_WORKER_ENV=development
+FAKE_PROVIDER_REAL_NETWORK_ALLOWED=NO
+FAKE_PROVIDER_REAL_PROVIDER_IMPORTS_ALLOWED=NO
+FAKE_PROVIDER_PROVIDER_CREDENTIAL_REQUIRED=NO
+FAKE_PROVIDER_PROCESS_ENTRYPOINT_REQUIRED=NO
+FAKE_PROVIDER_ENDPOINT=SUBMITTED
+FAKE_PROVIDER_CREATE_RETRY_ALLOWED=NO
+FAKE_PROVIDER_TEST_THUNK_COUNTS_AS_IMPLEMENTATION=NO
+FAKE_PROVIDER_FAILURE_COMPOSITION_REQUIRED=YES
+FAKE_PROVIDER_TIER3_SUCCESS_REQUIRED=YES
+FAKE_PROVIDER_TIER3_DEFINITIVE_FAILURE_REQUIRED=YES
+FAKE_PROVIDER_TIER3_AMBIGUOUS_FAILURE_REQUIRED=YES
+FAKE_PROVIDER_KEEPER_WIRING_REQUIRED=YES
+PROVIDER_CREATE_PHASE_CONTRACT_LOCKED=YES
+PROVIDER_CREATE_PHASE_ACCEPTANCE_CALLBACK_MUST_BE_AWAITED=YES
+PROVIDER_CREATE_PHASE_PROVIDER_ID_RETURN_AUTHORITY=CALLBACK_ONLY
+PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=NO
+PROVIDER_REAL_ADAPTER_CREATE_RETRY_ASSERTION_REQUIRED=YES
+FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
+```
+
 ---
 
 ## 37. Lock flags
@@ -6422,6 +6811,25 @@ WORKER_STATE_ROOT_LOCAL_FAKE_PROVIDER_STABLE_ROOT_REQUIRED=YES
 WORKER_STATE_ROOT_PATH_LOGGED=NO
 WORKER_STATE_ROOT_ACCEPTANCE_JOURNAL_INCLUDED=YES
 WORKER_STATE_ROOT_PROVIDER_OUTPUT_INCLUDED=NO
+FAKE_PROVIDER_ID=BUSYBOOKIE_FAKE
+FAKE_PROVIDER_ALLOWED_WORKER_ENV=development
+FAKE_PROVIDER_REAL_NETWORK_ALLOWED=NO
+FAKE_PROVIDER_REAL_PROVIDER_IMPORTS_ALLOWED=NO
+FAKE_PROVIDER_PROVIDER_CREDENTIAL_REQUIRED=NO
+FAKE_PROVIDER_PROCESS_ENTRYPOINT_REQUIRED=NO
+FAKE_PROVIDER_ENDPOINT=SUBMITTED
+FAKE_PROVIDER_CREATE_RETRY_ALLOWED=NO
+FAKE_PROVIDER_TEST_THUNK_COUNTS_AS_IMPLEMENTATION=NO
+FAKE_PROVIDER_FAILURE_COMPOSITION_REQUIRED=YES
+FAKE_PROVIDER_TIER3_SUCCESS_REQUIRED=YES
+FAKE_PROVIDER_TIER3_DEFINITIVE_FAILURE_REQUIRED=YES
+FAKE_PROVIDER_TIER3_AMBIGUOUS_FAILURE_REQUIRED=YES
+FAKE_PROVIDER_KEEPER_WIRING_REQUIRED=YES
+PROVIDER_CREATE_PHASE_CONTRACT_LOCKED=YES
+PROVIDER_CREATE_PHASE_ACCEPTANCE_CALLBACK_MUST_BE_AWAITED=YES
+PROVIDER_CREATE_PHASE_PROVIDER_ID_RETURN_AUTHORITY=CALLBACK_ONLY
+PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=NO
+PROVIDER_REAL_ADAPTER_CREATE_RETRY_ASSERTION_REQUIRED=YES
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

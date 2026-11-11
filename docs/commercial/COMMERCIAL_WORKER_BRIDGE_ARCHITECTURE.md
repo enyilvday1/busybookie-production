@@ -207,7 +207,25 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   knowledge or wiring; component tests cover shutdown, race and
   promise-lifetime semantics; the in-flight heartbeat gate item is
   satisfied and two fake-provider gate items remain; provider execution
-  remains disabled: introduction, sections 15, 18, 36 and 37).
+  remains disabled: introduction, sections 15, 18, 36 and 37); R44B7A
+  (whole-chain crash-point test contract locked after R44B7 discovery was
+  blocked by slice 7's overbroad wording: the rows for polling, output,
+  completion and recovery-lease resumption, deferred past the first
+  fake-provider slice, are removed from slice 7; the negative test for a
+  create client whose retry is not disabled moves to the future
+  provider-create adapter slice; test-only composition of published
+  components is accepted, and no production orchestrator is required; tier
+  3 (real worker components, real HTTP client, real commercial-api, real
+  guarded test database, real filesystem journal) is mandatory; a simulated
+  restart recreates process-local objects and keeps the database and
+  journal; the provider operation is a test-only thunk, run at most once in
+  the first process and never after a restart; eleven mandatory crash cases
+  are locked; pre-durable residuals deliberately end `OUTCOME_UNKNOWN`,
+  durable acceptance must end `SUBMITTED`, and `SUBMITTED` retention and
+  terminal cleanup through a labelled fixture are included; provider-failure
+  composition stays separate, the provider flags stay NO and the state-root
+  binding stays independent; no tests implemented: introduction, sections
+  16, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -2056,7 +2074,12 @@ adapter is also prevented from repeating the create.
   - Google GenAI `maxRetries: 0`.
 
   The commercial adapter asserts this setting. A boundary test pins it,
-  because changing it would void this invariant.
+  because changing it would void this invariant. (R44B7A.) No commercial
+  provider-create adapter exists yet. The invariant is unchanged: commercial
+  provider create never silently retries. Its assertion, and the negative
+  test that a create client whose retry is not disabled is refused, fail
+  closed, are obligations of the future provider-create adapter slice, not
+  of slice 7 (section 36).
 - **Ambiguous result.** An ambiguous result after the create invocation
   begins maps to `OUTCOME_UNKNOWN` (section 18). It never causes another
   automatic create for the same attempt.
@@ -4725,6 +4748,14 @@ execution ID or a filesystem path.
 
 **Locked decision.**
 
+(R44B7A.) Slice 7 tests only the rows from `SUBMITTING` through durable
+`SUBMITTED`, plus terminal journal cleanup through a labelled fixture
+(section 36, "Whole-chain crash-point test contract"). The rows for
+`SUBMITTED` polling or recovery, provider success before output
+persistence, missing upstream completion and an already-terminal server
+stay locked here. Their tests belong to the slices that implement those
+phases.
+
 | Crash point | Durable state | Rule |
 |---|---|---|
 | Before lease | job `QUEUED` | No side effect. |
@@ -4927,16 +4958,22 @@ each slice under its own authorised gate:
    through the control-plane route (R44B6R) by the worker
    acceptance-recovery client and startup wiring (R44B6S), and keeps
    blocking unless exactly acknowledged.
-7. Crash-point tests covering every row of the section 31 matrices.
-   Faults are injected:
-   - before and after each journal step;
-   - before and after each control-plane commit;
-   - on a lost response;
-   - on lease expiry racing each route;
+7. Whole-chain crash-point tests, narrowed by R44B7A ("Whole-chain
+   crash-point test contract" below). They cover the section 31 rows from
+   `SUBMITTING` through durable `SUBMITTED` and restart cases A to H, plus
+   terminal journal cleanup through a labelled fixture. Faults are injected:
+   - at the journal steps;
+   - before and after control-plane commits;
+   - on lost responses;
+   - on authoritative lease expiry;
    - on a restart with a valid journal while the `SUBMITTING` lease is still
-     live, which must wait for the authoritative expiry (R44B6K1);
-   - with an SDK client whose create retry is not disabled, which must be
-     refused (R44B6K1).
+     live, which must wait for the authoritative expiry (R44B6K1).
+
+   The polling, output, completion and recovery-lease rows are deferred to
+   their own slices. The negative test for a create client whose retry is
+   not disabled (R44B6K1) moves to the future provider-create adapter slice
+   (section 16). R44B7A is a contract lock only; the tests are not
+   implemented.
 
 R44B6Q adds focused local startup crash/restart tests, including exact
 temporary publication and interrupted quarantine. R44B6R adds control-plane
@@ -4977,7 +5014,9 @@ R44B6X did not implement. Its classification is unchanged: section 24's
 this fake-provider gate.
 
 - whole-chain crash-point tests (slice 7), exercising the composed
-  execution chain and its crash boundaries across components;
+  execution chain and its crash boundaries across components. Their
+  narrowed contract is locked by R44B7A and not implemented. Once they are
+  implemented and documented, only the state-root binding remains;
 - the production/deployment state-root binding.
 
 The gate is therefore not met.
@@ -5000,6 +5039,301 @@ or before any provider authority exists:
 FAKE_PROVIDER_EXECUTION_GATE=SECTION_36_SLICES_1_TO_7
 FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
 REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
+```
+
+### Whole-chain crash-point test contract (revision R44B7A)
+
+**Locked decision (R44B7A; not implemented).** R44B7 discovery was blocked
+by slice 7's wording, which conflicted with the architecture in two places:
+
+- "every row of the section 31 matrices" included the polling, output,
+  completion and recovery-lease rows, which this section defers past the
+  first fake-provider slice;
+- it required refusing a create client whose retry is not disabled, but no
+  commercial provider-create adapter exists to enforce that.
+
+This lock narrows slice 7. It changes no source, route, protocol or
+migration, adds no fake or real provider, adapter or production
+orchestrator, and implements no test.
+
+**Whole chain.** The chain under test is:
+
+```text
+real worker production components
+-> real WorkerControlClient HTTP requests
+-> real commercial-api router and services
+-> real guarded PostgreSQL test database
+-> real filesystem acceptance journal
+```
+
+A **test-only** controlled provider-operation thunk stands in for provider
+execution. The participating components, where relevant, are:
+
+- worker: `WorkerControlClient`, `obtainPreProviderPermit`,
+  `runWithInFlightHeartbeat`, `createDurableAcceptanceHandler`,
+  `createAcceptanceAdapter`, the acceptance journal, `reportSubmitted`,
+  acceptance recovery, and startup reconciliation through the real startup
+  entry point;
+- control plane: the worker-control routes, the lease and state services,
+  the `SUBMITTING` expiry sweep, and database transactions and locks.
+
+The chain needs no provider SDK, adapter, port, factory, selector, provider
+credential or provider network request.
+
+**Test-only composition.** Test code may compose the published components,
+conceptually:
+
+```text
+obtainPreProviderPermit
+-> runWithInFlightHeartbeat(operation = controlled thunk -> createAcceptanceAdapter when acceptance is injected)
+```
+
+- That is not a production execution orchestrator, and it sets neither
+  `FAKE_PROVIDER_EXECUTION_IMPLEMENTED` nor
+  `REAL_PROVIDER_EXECUTION_IMPLEMENTED` to YES.
+- The absence of a production orchestrator does **not** block slice 7.
+  Slice 7 comes before fake-provider execution precisely to prove that the
+  built durability and control-plane components compose safely before any
+  provider is connected; none is manufactured for the gate.
+- The later production composer must keep the order proven here.
+
+**Tier 3 is mandatory.** Every mandatory case uses:
+
+- the worker's production components;
+- the real `WorkerControlClient` over HTTP;
+- the real in-process commercial-api application;
+- the real guarded test PostgreSQL database;
+- a real temporary-directory journal.
+
+Pure worker mocks would mock away the authoritative state, lease expiry,
+the sweep, recovery TX1/TX2, replay idempotence, real commit-then-lost
+responses and row-lock serialisation. Component tests with fake clients
+stay useful but never satisfy slice 7.
+
+**Controlled operation.** The thunk is test-only. It may expose test events
+such as dispatched, pending, accepted, definitively rejected and ambiguously
+failed. It is not a fake provider adapter or subsystem, a real provider or
+an SDK client. No provider URL is contacted, no provider environment
+variable is needed and no paid call occurs.
+
+**Scope.** Slice 7 tests only the crash and restart boundaries from:
+
+```text
+pre-provider and SUBMITTING
+-> provider-submission uncertainty
+-> durable acceptance
+-> live submitted reporting
+-> acceptance recovery
+-> authoritative SUBMITTED
+```
+
+It also tests terminal journal cleanup through a labelled fixture. Rows
+whose substance needs any of the following stay deferred to the slices that
+implement them; the section 31 matrices themselves are unchanged:
+
+- polling;
+- output retrieval or persistence;
+- completion processing or publication;
+- resumption under a recovery lease;
+- any later provider-result lifecycle.
+
+**Retry-guard obligation.** The negative test for a create client whose
+retry is not disabled is removed from slice 7 and **kept** as an obligation
+of the future provider-create adapter or provider-wiring slice. That slice
+must test that create retry is disabled and must fail closed when the
+no-retry configuration cannot be guaranteed. The invariant itself is not
+weakened (section 16), and no adapter is invented to test it now.
+
+**Boundaries.**
+
+- **Start.** After a real lease acquisition and credential grant, which
+  fixture setup may create, at `obtainPreProviderPermit` with the real
+  client. The queue scheduler and work-acquisition loop are outside the
+  chain.
+- **End.** Either:
+  - success: attempt `SUBMITTED` with the durable record retained (v1
+    rule);
+  - conservative residual: attempt `OUTCOME_UNKNOWN` with the job
+    `NEEDS_ATTENTION`, where the provider outcome cannot be reconstructed.
+
+  Polling and provider terminal success are not endpoints.
+
+**Restart model.** A crash discards the process-local object graph.
+
+| On restart | Items |
+|---|---|
+| Recreated | the `WorkerControlClient`, orchestration and acceptance components, any keeper, the timing objects, and a new clear host-fault latch |
+| Preserved | PostgreSQL state, the journal state root and its durable files |
+
+- No timer, retry counter, keeper or latch state survives, and no real OS
+  kill is needed. The durability boundary under test is persistent database
+  and filesystem state, not heap continuity.
+- Restart cases go through the real startup entry point,
+  `runCredentialOpeningOnce` (startup journal inspection, reconciliation,
+  then the existing recovery policy), never an internal helper merely for
+  convenience.
+- The latch is never written to the journal, database or audit metadata;
+  tests may assert the journal holds none. Keeper heartbeats, requests and
+  stop state never resume, and none is restored.
+
+**Mechanisms.**
+
+- **Journal.** The real temporary-directory journal. Crashes are simulated
+  through the existing `JournalFileSystem` seam: before durable publication,
+  after temporary persistence, before and after final publication, and at
+  corruption and quarantine boundaries. Never an in-memory journal.
+- **Expiry.** The established guarded test-database mechanism (migrator SQL
+  setting `lease_expires_at` before database `now()`). No real 120-second
+  waits, and worker time is never lease authority.
+- **Lost response.** The real request reaches the real API and its
+  transaction commits; only then is the client-visible response suppressed.
+  An artificial client error before the server receives the request is
+  never a substitute.
+- **Provider operation count.** The thunk runs at most once in the first
+  simulated process, and exactly once where dispatch occurs. Restarted
+  processes invoke it **zero** times for that attempt. Startup recovery
+  never resubmits.
+
+**Mandatory crash set.** Each case asserts its own outcome; parameterised
+variants are allowed where assertions and failure location stay distinct.
+The count is not inflated to mirror component tests.
+
+| Case | Scenario | Expected result |
+|---|---|---|
+| 1 | Pre-durable dispatch residual: thunk invoked once, no durable record, crash, then deterministic expiry and sweep | `OUTCOME_UNKNOWN` / `NEEDS_ATTENTION`; restart invokes the thunk zero times. A crash after `SUBMITTING` but before dispatch, and an acceptance held only in memory, converge the same way and may be combined here. |
+| 2 | Valid temporary journal file only (final publication not done), crash, restart | startup completes the publication of the exact record; ordinary reconciliation; no resubmission; exact journal state asserted |
+| 3 | Invalid temporary artifact, crash, restart | handled or quarantined exactly per the existing journal policy; never turned into acceptance; no resubmission; the attempt stays under conservative recovery and the sweep |
+| 4A | Durable journal, live `SUBMITTING` lease, crash before the report, restart | `ATTEMPT_STILL_SUBMITTING` under a fresh budget; fails closed while the lease stays live; record kept; no resubmission. It also covers case 7: a crash during the wait restarts with a fresh budget, the same record drives recovery, and no counter persists. |
+| 4B | Durable journal, crash, deterministic expiry, restart | recovery TX1 (named sweep) then TX2 to `SUBMITTED`; record kept; no resubmission |
+| 5 | Live `reportSubmitted` commits, response lost, crash, restart | recovery and replay against the real live-epoch `SUBMITTED` state converge idempotently to `SUBMITTED`; record kept; no second operation |
+| 6 | Live report unavailable (twice) or refused (409), durable record kept, crash before recovery completes, restart | startup recovery reaches `SUBMITTED`; a 409 is never read as provider failure |
+| 8 | Acceptance recovery commits `SUBMITTED`, response lost, crash, restart | idempotent replay to `SUBMITTED`; record kept |
+| 9 | Real keeper, real heartbeat authority loss (a 409 after database expiry, or a partition followed by expiry), pending thunk, late acceptance | the keeper never cancels or abandons the operation; durable journal; live report then recovery handover; real TX1/TX2 to `SUBMITTED`; record kept; operation count 1 |
+| 10 | `SUBMITTED` with the record kept, restart | harmless replay; same record kept; no operation |
+| 11 | Legal terminal state set by a **TEST TERMINAL FIXTURE — NOT PROVIDER POLLING** (preferably `ABANDONED`), restart | the exact record is removed under the existing rule. This proves journal cleanup only. |
+
+A crash before the `SUBMITTING` acknowledgement is not mandatory. The
+attempt is still granted `LEASED`, recovered by the DB-tested
+granted-expired policy, with dispatch count 0.
+
+**Optional cases.** These never replace a mandatory case:
+
+- separate 409 and partition variants for case 9;
+- late definitive failure after lease loss, where the harness calls the
+  existing `reportSubmissionFailed` directly and gets the route's 409, with
+  `OUTCOME_UNKNOWN` unchanged. It must be labelled **HARNESS-LEVEL
+  CONTROL-PLANE ASSERTION — NOT PRODUCTION PROVIDER-FAILURE COMPOSITION**;
+- duplicate acceptance across a restart.
+
+**Failure composition.** Production composition for definitive or
+ambiguous provider failure stays missing and separately tracked, outside
+this gate. The conservative result (no durable acceptance, then expiry,
+then `OUTCOME_UNKNOWN` and `NEEDS_ATTENTION`) does not block slice 7. No
+outcome route and no provider idempotency are added, and no test claims
+production failure composition exists.
+
+**Existing races.** The DB suites already cover heartbeat vs sweep, recovery
+vs expiry, `submission-failed` concurrency, `submitted` replay and expiry,
+and granted-expired recovery. Whole-chain tests add cross-component
+durability and restart properties rather than repeating those permutations,
+though a mandatory case may exercise a handoff naturally.
+
+**Audit and secrets.**
+
+- Where a real transition audits, tests assert the audit's cardinality and
+  identity, in particular no duplicate transition or audit after a lost
+  response and replay. No audit is required where the route intentionally
+  emits none.
+- Tests use the existing test authentication with fixture credentials and
+  tokens only, with no bypass. They keep checking that secrets do not
+  appear in the journal, failure messages, audit metadata or diagnostics.
+
+**No provider calls.** Tests assert:
+
+- the operation is test-local;
+- no provider SDK import and no provider environment variable;
+- outbound URLs only in the worker-control family;
+- no Runway, Veo or Google client construction.
+
+**Accepted residual windows.** These are documented outcomes, not failed
+invariants:
+
+- (A) death after dispatch before any durable acceptance;
+- (B) acceptance held only in memory when the process dies;
+- (C) an ambiguous create response before durable acceptance.
+
+None is resubmitted. Each ends `OUTCOME_UNKNOWN` / `NEEDS_ATTENTION` under
+operator resolution. Provider idempotency, still locked off, could later
+narrow them. Slice 7 demonstrates these windows; it does not eliminate them.
+
+**Placement and scope.**
+
+- The tests go in
+  `apps/commercial-worker/tests/integration/wholeChainCrashRecovery.test.ts`,
+  with optional test-only support under
+  `apps/commercial-worker/tests/integration/support/`.
+- Extracting helpers from existing integration tests must keep their
+  semantics exactly.
+- Only tests and test support change, with no production `src/` file, API,
+  protocol, migration or provider-adapter change. If a production contract
+  must change, implementation stops.
+
+**Gate pass criteria.** Section 36 may remove the whole-chain item only when
+every mandatory case passes in the tier-3 harness, with evidence of:
+
+1. real worker components composed in test code;
+2. real `WorkerControlClient` HTTP;
+3. real commercial-api router and services;
+4. the real guarded test database;
+5. the real filesystem journal;
+6. exercised restart durability boundaries;
+7. lost-response cases committing server state before the client loses
+   the response;
+8. deterministic database expiry with no real lease waits;
+9. the first-process thunk never invoked more than once;
+10. restarted processes invoking it zero times;
+11. residual uncertainty converging to `OUTCOME_UNKNOWN` /
+    `NEEDS_ATTENTION`;
+12. durable acceptance converging to `SUBMITTED`;
+13. proven `SUBMITTED` record retention;
+14. terminal cleanup proven with a labelled non-polling fixture;
+15. no fake or real provider execution enabled;
+16. no provider SDK or URL;
+17. correct audit cardinality;
+18. no secret leakage;
+19. deterministic tests with no unhandled promises;
+20. all existing worker and API integration regressions passing.
+
+Component tests alone never satisfy the gate.
+
+**Independent items.**
+
+- The provider flags stay NO; whole-chain tests enable nothing.
+- The production/deployment state-root binding stays the last gate item
+  after slice 7; slice 7 neither satisfies it nor changes deployment
+  configuration.
+- Section 24 is unchanged and separately launch-blocking.
+
+```text
+WHOLE_CHAIN_CRASH_TESTS_IMPLEMENTED=NO
+WHOLE_CHAIN_CRASH_TESTS_TEST_ONLY_COMPOSITION=YES
+WHOLE_CHAIN_CRASH_TESTS_PRODUCTION_ORCHESTRATOR_REQUIRED=NO
+WHOLE_CHAIN_CRASH_TESTS_REAL_CONTROL_API_REQUIRED=YES
+WHOLE_CHAIN_CRASH_TESTS_REAL_TEST_DATABASE_REQUIRED=YES
+WHOLE_CHAIN_CRASH_TESTS_REAL_FILESYSTEM_JOURNAL_REQUIRED=YES
+WHOLE_CHAIN_CRASH_TESTS_REAL_PROVIDER_REQUIRED=NO
+WHOLE_CHAIN_CRASH_TESTS_FAKE_PROVIDER_REQUIRED=NO
+WHOLE_CHAIN_CRASH_TESTS_PROVIDER_OPERATION_THUNK_TEST_ONLY=YES
+WHOLE_CHAIN_CRASH_TESTS_POLLING_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_OUTPUT_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_COMPLETION_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_PROVIDER_RETRY_GUARD_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_PROVIDER_RESUBMISSION_ALLOWED=NO
+WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_DATABASE=YES
+WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_JOURNAL=YES
+WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_PROCESS_STATE=NO
+WHOLE_CHAIN_CRASH_TESTS_TERMINAL_FIXTURE_ALLOWED=YES
+WHOLE_CHAIN_CRASH_TESTS_STATE_ROOT_BINDING_INCLUDED=NO
 ```
 
 ---
@@ -5314,6 +5648,25 @@ IN_FLIGHT_HEARTBEAT_KEEPER_STOP_ABORT_IS_FAILURE=NO
 IN_FLIGHT_HEARTBEAT_FAILURE_OVERRIDES_OPERATION_OUTCOME=NO
 IN_FLIGHT_HEARTBEAT_ACCEPTANCE_RECONCILIATION_INCLUDED=YES
 IN_FLIGHT_HEARTBEAT_POLLING_PHASE_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_IMPLEMENTED=NO
+WHOLE_CHAIN_CRASH_TESTS_TEST_ONLY_COMPOSITION=YES
+WHOLE_CHAIN_CRASH_TESTS_PRODUCTION_ORCHESTRATOR_REQUIRED=NO
+WHOLE_CHAIN_CRASH_TESTS_REAL_CONTROL_API_REQUIRED=YES
+WHOLE_CHAIN_CRASH_TESTS_REAL_TEST_DATABASE_REQUIRED=YES
+WHOLE_CHAIN_CRASH_TESTS_REAL_FILESYSTEM_JOURNAL_REQUIRED=YES
+WHOLE_CHAIN_CRASH_TESTS_REAL_PROVIDER_REQUIRED=NO
+WHOLE_CHAIN_CRASH_TESTS_FAKE_PROVIDER_REQUIRED=NO
+WHOLE_CHAIN_CRASH_TESTS_PROVIDER_OPERATION_THUNK_TEST_ONLY=YES
+WHOLE_CHAIN_CRASH_TESTS_POLLING_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_OUTPUT_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_COMPLETION_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_PROVIDER_RETRY_GUARD_INCLUDED=NO
+WHOLE_CHAIN_CRASH_TESTS_PROVIDER_RESUBMISSION_ALLOWED=NO
+WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_DATABASE=YES
+WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_JOURNAL=YES
+WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_PROCESS_STATE=NO
+WHOLE_CHAIN_CRASH_TESTS_TERMINAL_FIXTURE_ALLOWED=YES
+WHOLE_CHAIN_CRASH_TESTS_STATE_ROOT_BINDING_INCLUDED=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

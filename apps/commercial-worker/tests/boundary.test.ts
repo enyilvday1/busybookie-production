@@ -76,6 +76,7 @@ describe("commercial-worker source boundary", () => {
       "src/credentialOpeningRun.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
+      "src/startupJournalReconciliation.ts",
       "src/workerControlClient.ts",
       "src/workerError.ts",
     ]);
@@ -184,11 +185,14 @@ describe("acceptance journal boundary", () => {
     expect(FALLBACK.test("await rename(temporary, target);")).toBe(true);
   });
 
-  it("is used by no execution path yet, and the submitted report is called by nothing in worker source", () => {
+  it("is used only for startup checks, and the submitted report is called by nothing in worker source", () => {
     const importers = sources.filter(({ path, text }) => path !== JOURNAL && /acceptanceJournal/.test(text)).map(({ path }) => path);
-    expect(importers).toEqual([]);
+    expect(importers.sort()).toEqual(["src/credentialOpeningRun.ts", "src/startupJournalReconciliation.ts"]);
     const callers = sources.filter(({ text }) => /\.reportSubmitted\s*\(/.test(code(text))).map(({ path }) => path);
     expect(callers).toEqual([]);
+    const startup = code(read(join(SRC_ROOT, "startupJournalReconciliation.ts")));
+    expect(startup).not.toMatch(/\.write\s*\(|\.reportSubmitted\s*\(|\bfetch\s*\(|workerControlClient|providerExecutionId|recordedAt\s*:/);
+    expect(startup).toMatch(/await journal\.publish\(record\)/);
   });
 });
 

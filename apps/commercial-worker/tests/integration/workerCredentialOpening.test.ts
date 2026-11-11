@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,7 +13,7 @@ import { createWorkerControlApplication } from "../../../commercial-api/src/work
 import { insertAccountWithFreeGrant, openGuardedClients, prepareSchemaV1, type GuardedClients } from "../../../commercial-api/tests/db/support/testDatabase.js";
 import { createTestWorkerAuthenticationAdapter } from "../../../commercial-api/tests/support/testWorkerAuthentication.js";
 import { createRecordingWorkerSecurityEventSink } from "../../../commercial-api/tests/support/testWorkerSecurityEvents.js";
-import { createAcceptanceJournal } from "../../src/acceptanceJournal.js";
+import { buildAcceptanceRecord, createAcceptanceJournal, serializeAcceptanceRecord, type AcceptanceJournal } from "../../src/acceptanceJournal.js";
 import type { CredentialOpener } from "../../src/credentialContracts.js";
 import { runCredentialOpeningOnce, type CredentialOpeningClient, type WorkerLogEvent } from "../../src/credentialOpeningRun.js";
 import { createHttpWorkerControlClient } from "../../src/workerControlClient.js";
@@ -29,6 +29,8 @@ import { createTestCredentialFingerprinter, createTestCredentialOpener, createTe
 let clients: GuardedClients;
 let pool: TransactionalPool;
 let server: RunningCommercialApiServer | undefined;
+let startupStateRoot: string;
+let journal: AcceptanceJournal;
 
 const encryptionKey = generateTestKey("worker-e2e-encryption/v1");
 const sealer = createTestCredentialSealer(encryptionKey);
@@ -42,10 +44,13 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   await prepareSchemaV1(clients);
+  startupStateRoot = await mkdtemp(join(tmpdir(), "busybookie-worker-startup-"));
+  journal = createAcceptanceJournal({ stateRoot: startupStateRoot, directorySync: process.platform === "win32" ? "DEVELOPMENT_BEST_EFFORT" : "REQUIRED" });
 });
 afterEach(async () => {
   await server?.close();
   server = undefined;
+  await rm(startupStateRoot, { recursive: true, force: true });
 });
 afterAll(async () => {
   await pool.end();
@@ -197,7 +202,7 @@ describe("private worker credential opening, end to end", () => {
     const { opener, seen } = recordingOpener(item.plaintext);
     const events: WorkerLogEvent[] = [];
 
-    const result = await runCredentialOpeningOnce({ environment: { PATH: "/usr/bin" }, client, opener, log: (event) => events.push(event) });
+    const result = await runCredentialOpeningOnce({ journal, environment: { PATH: "/usr/bin" }, client, opener, log: (event) => events.push(event) });
 
     expect(result).toEqual({
       status: "CREDENTIAL_OPENED",
@@ -232,7 +237,7 @@ describe("private worker credential opening, end to end", () => {
         return plaintext;
       },
     };
-    const result = await runCredentialOpeningOnce({ environment: {}, client: workerClient(baseUrl, worker).client, opener: watchingOpener });
+    const result = await runCredentialOpeningOnce({ journal, environment: {}, client: workerClient(baseUrl, worker).client, opener: watchingOpener });
     expect(result.status).toBe("CREDENTIAL_OPENED");
     expect(seen.matched).toBe(true);
     expect(openedV2).toBe(false);
@@ -255,7 +260,7 @@ describe("private worker credential opening, end to end", () => {
             : { ...grant, sealedEnvelope: { ...envelope, tag: envelope.tag!.startsWith("A") ? `B${envelope.tag!.slice(1)}` : `A${envelope.tag!.slice(1)}` } };
         },
       };
-      const error = await workerFailure(runCredentialOpeningOnce({ environment: {}, client, opener: testOpener }), [item.plaintext]);
+      const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client, opener: testOpener }), [item.plaintext]);
       expect(error.code).toBe("CREDENTIAL_OPEN_FAILED");
       await server!.close();
       server = undefined;
@@ -278,7 +283,7 @@ describe("private worker credential opening, end to end", () => {
       },
     };
     const { opener, seen } = recordingOpener(item.plaintext);
-    const result = await runCredentialOpeningOnce({ environment: {}, client, opener });
+    const result = await runCredentialOpeningOnce({ journal, environment: {}, client, opener });
     expect(result.status).toBe("CREDENTIAL_OPENED");
     expect(grants).toBe(1);
     expect(seen).toEqual({ opened: 1, matched: true });
@@ -304,7 +309,7 @@ describe("private worker credential opening, end to end", () => {
       },
     };
     const { opener, seen } = recordingOpener(item.plaintext);
-    const error = await workerFailure(runCredentialOpeningOnce({ environment: {}, client, opener }), [item.plaintext]);
+    const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client, opener }), [item.plaintext]);
     expect(error.code).toBe("CREDENTIAL_GRANT_REJECTED");
     expect(seen.opened).toBe(0);
     expect((await attemptRow(item.attemptId)).credential_granted_at).toBeNull();
@@ -323,7 +328,7 @@ describe("private worker credential opening, end to end", () => {
       },
     };
     const { opener, seen } = recordingOpener(item.plaintext);
-    const error = await workerFailure(runCredentialOpeningOnce({ environment: {}, client, opener }), [worker.credential]);
+    const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client, opener }), [worker.credential]);
     expect(error.code).toBe("WORKER_AUTHENTICATION_REJECTED");
     expect(seen.opened).toBe(0);
     expect((await attemptRow(item.attemptId)).credential_granted_at).toBeNull();
@@ -345,7 +350,7 @@ describe("private worker credential opening, end to end", () => {
       },
     };
     const { opener, seen } = recordingOpener(item.plaintext);
-    expect((await workerFailure(runCredentialOpeningOnce({ environment: {}, client, opener }), [])).code).toBe("CREDENTIAL_GRANT_REJECTED");
+    expect((await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client, opener }), [])).code).toBe("CREDENTIAL_GRANT_REJECTED");
     expect(seen.opened).toBe(0);
     expect((await attemptRow(item.attemptId)).credential_granted_at).toBeNull();
   });
@@ -358,7 +363,7 @@ describe("private worker credential opening, end to end", () => {
     // An unrecognised machine credential forces a security event the sink cannot record.
     const stranger = workerClient(baseUrl, { id: worker.id, credential: `fixture-unknown-${randomBytes(8).toString("hex")}` });
     const { opener, seen } = recordingOpener(item.plaintext);
-    const error = await workerFailure(runCredentialOpeningOnce({ environment: {}, client: stranger.client, opener }), []);
+    const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client: stranger.client, opener }), []);
     expect(error.code).toBe("CONTROL_API_UNAVAILABLE");
     expect(stranger.urls).toEqual([`${baseUrl}/worker-control/v1/leases`, `${baseUrl}/worker-control/v1/leases`]);
     expect(seen.opened).toBe(0);
@@ -368,7 +373,7 @@ describe("private worker credential opening, end to end", () => {
   it("returns NO_WORK when nothing is eligible", async () => {
     const worker = await machine();
     const { baseUrl } = await controlPlane([worker]);
-    expect(await runCredentialOpeningOnce({ environment: {}, client: workerClient(baseUrl, worker).client, opener: testOpener })).toEqual({ status: "NO_WORK" });
+    expect(await runCredentialOpeningOnce({ journal, environment: {}, client: workerClient(baseUrl, worker).client, opener: testOpener })).toEqual({ status: "NO_WORK" });
   });
 
   it("refuses to start with a provider-global variable present, before contacting the control plane", async () => {
@@ -377,10 +382,50 @@ describe("private worker credential opening, end to end", () => {
     const { baseUrl } = await controlPlane([worker]);
     const { client, urls } = workerClient(baseUrl, worker);
     for (const name of ["RUNWAYML_API_SECRET", "GEMINI_API_KEY", "GOOGLE_API_KEY"]) {
-      const error = await workerFailure(runCredentialOpeningOnce({ environment: { [name]: "sentinel-secret" }, client, opener: testOpener }), ["sentinel-secret"]);
+      const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: { [name]: "sentinel-secret" }, client, opener: testOpener }), ["sentinel-secret"]);
       expect(error.code).toBe("FORBIDDEN_PROVIDER_ENVIRONMENT");
     }
     expect(urls).toEqual([]);
+  });
+});
+
+describe("startup journal blocks fresh work before reaching the real control plane", () => {
+  it.each([
+    ["published final", "ACCEPTANCE_RECONCILIATION_FAILED"],
+    ["valid temporary", "ACCEPTANCE_RECONCILIATION_FAILED"],
+    ["corrupt final", "ACCEPTANCE_JOURNAL_CORRUPT"],
+    ["conflicting evidence", "ACCEPTANCE_JOURNAL_CONFLICT"],
+  ])("%s prevents every HTTP request, grant and credential open", async (evidence, code) => {
+    const worker = await machine();
+    const item = await work();
+    const { baseUrl, recording } = await controlPlane([worker]);
+    const real = workerClient(baseUrl, worker);
+    const before = await attemptRow(item.attemptId);
+    await journal.prepare();
+    const input = {
+      executionAttemptId: item.attemptId, executionJobId: item.jobId, accountId: item.accountId, attemptNumber: 1,
+      fencingCounter: 1, provider: "EXAMPLE_PROVIDER", generationRequestSha256: "c".repeat(64),
+      submittingAt: new Date("2026-11-11T10:00:00.000Z"), providerAcceptedAt: new Date("2026-11-11T10:00:01.000Z"),
+      providerExecutionId: "synthetic/operations/startup",
+    };
+    const record = buildAcceptanceRecord(input, new Date("2026-11-11T10:00:01.500Z"));
+    const directory = join(startupStateRoot, "acceptance-journal", "v1");
+    if (evidence === "corrupt final") await writeFile(join(directory, `${item.attemptId}.json`), "corrupt");
+    else if (evidence !== "valid temporary") await journal.publish(record);
+    if (evidence === "valid temporary" || evidence === "conflicting evidence") {
+      const temporary = evidence === "valid temporary" ? record : buildAcceptanceRecord({ ...input, providerExecutionId: "synthetic/operations/conflict" }, new Date(record.recordedAt));
+      await writeFile(join(directory, `${item.attemptId}.${"a".repeat(32)}.tmp`), serializeAcceptanceRecord(temporary));
+    }
+    const counted = recordingOpener(item.plaintext);
+    const events: WorkerLogEvent[] = [];
+    const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client: real.client, opener: counted.opener, log: (event) => events.push(event) }), [worker.credential, item.plaintext]);
+    expect(error.code).toBe(code);
+    expect(real.urls).toEqual([]);
+    expect(counted.seen.opened).toBe(0);
+    expect(await attemptRow(item.attemptId)).toEqual(before);
+    expect(recording.events).toEqual([]);
+    expect(events).toEqual([{ stage: "STARTUP", outcome: "FAILED", code }]);
+    expect(JSON.stringify(events)).not.toContain(input.providerExecutionId);
   });
 });
 

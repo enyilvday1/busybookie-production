@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import { isProviderExecutionId } from "./providerExecutionContract.js";
@@ -241,9 +241,11 @@ export type JournalFileSystem = Readonly<{
   makeDirectory: (path: string, mode: number) => Promise<void>;
   chmod: (path: string, mode: number) => Promise<void>;
   isDirectory: (path: string) => Promise<boolean>;
+  readDirectory: (path: string) => Promise<readonly Readonly<{ name: string; regularFile: boolean }>[]>;
 }>;
 
 export const nodeJournalFileSystem: JournalFileSystem = Object.freeze({
+  readDirectory: async (path: string) => (await readdir(path, { withFileTypes: true })).map((entry) => ({ name: entry.name, regularFile: entry.isFile() })),
   openExclusive: async (path: string, mode: number) => {
     const handle = await open(path, "wx", mode);
     return Object.freeze({
@@ -334,7 +336,15 @@ export type AcceptanceJournal = Readonly<{
   inspectTemporary: (fileName: string) => Promise<AcceptanceTemporaryResult>;
   // Moves an INVALID temporary to quarantine/ (exclusive link, then unlink).
   quarantineInvalidTemporary: (fileName: string) => Promise<void>;
+  // Strict, stable enumeration; directories, symlinks and unexpected names fail closed.
+  enumerate: () => Promise<readonly AcceptanceJournalEntry[]>;
+  // Removes only a valid temporary whose exact bytes are already published.
+  removePublishedTemporary: (fileName: string) => Promise<void>;
 }>;
+
+export type AcceptanceJournalEntry =
+  | Readonly<{ kind: "FINAL"; executionAttemptId: string }>
+  | Readonly<{ kind: "TEMPORARY"; executionAttemptId: string; fileName: string }>;
 
 const MAX_TEMPORARY_ATTEMPTS = 4;
 
@@ -366,7 +376,7 @@ export function createAcceptanceJournal(options: AcceptanceJournalOptions): Acce
   };
   const temporaryName = (fileName: string) => {
     const match = TEMPORARY_NAME.exec(fileName);
-    if (match === null) throw new AcceptanceJournalError("ACCEPTANCE_RECORD_INVALID");
+    if (match === null || match[0] !== fileName) throw new AcceptanceJournalError("ACCEPTANCE_RECORD_INVALID");
     return { attemptId: match[1]!, path: join(recordsDirectory, fileName) };
   };
 
@@ -537,8 +547,18 @@ export function createAcceptanceJournal(options: AcceptanceJournalOptions): Acce
     if ((await inspectTemporary(fileName)).status !== "INVALID_TEMPORARY") throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CONFLICT");
     try {
       await fs.link(path, join(quarantineDirectory, fileName));
-    } catch {
-      throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+    } catch (error) {
+      // Restart after the quarantine link but before its source unlink: keep
+      // the same evidence, never overwrite an unrelated quarantine entry.
+      if (errorCode(error) !== "EEXIST") throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+      try {
+        if (!Buffer.from(await fs.readFile(path)).equals(Buffer.from(await fs.readFile(join(quarantineDirectory, fileName))))) {
+          throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CONFLICT");
+        }
+      } catch (caught) {
+        if (caught instanceof AcceptanceJournalError) throw caught;
+        throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+      }
     }
     await syncDirectory(quarantineDirectory, "ACCEPTANCE_JOURNAL_WRITE_FAILED");
     try {
@@ -549,5 +569,38 @@ export function createAcceptanceJournal(options: AcceptanceJournalOptions): Acce
     await syncDirectory(recordsDirectory, "ACCEPTANCE_JOURNAL_WRITE_FAILED");
   }
 
-  return Object.freeze({ prepare, write, publish, read, inspectTemporary, quarantineInvalidTemporary });
+  async function enumerate(): Promise<readonly AcceptanceJournalEntry[]> {
+    try {
+      const entries = [...await fs.readDirectory(recordsDirectory)].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      return Object.freeze(entries.map(({ name, regularFile }) => {
+        if (!regularFile) throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CORRUPT");
+        const temporary = TEMPORARY_NAME.exec(name);
+        if (temporary?.[0] === name) return Object.freeze({ kind: "TEMPORARY" as const, executionAttemptId: temporary[1]!, fileName: name });
+        const stem = name.endsWith(".json") ? name.slice(0, -5) : "";
+        if (UUID.exec(stem)?.[0] !== stem || stem === "") throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CORRUPT");
+        return Object.freeze({ kind: "FINAL" as const, executionAttemptId: stem });
+      }));
+    } catch {
+      throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CORRUPT");
+    }
+  }
+
+  async function removePublishedTemporary(fileName: string): Promise<void> {
+    const { attemptId, path } = temporaryName(fileName);
+    const inspected = await inspectTemporary(fileName);
+    if (inspected.status !== "VALID_TEMPORARY") throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CORRUPT");
+    const published = await read(attemptId);
+    if (published.status !== "VALID_RECORD") throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CORRUPT");
+    if (serializeAcceptanceRecord(inspected.record) !== serializeAcceptanceRecord(published.record)) {
+      throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CONFLICT");
+    }
+    try {
+      await fs.unlink(path);
+    } catch {
+      throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+    }
+    await syncDirectory(recordsDirectory, "ACCEPTANCE_JOURNAL_WRITE_FAILED");
+  }
+
+  return Object.freeze({ prepare, write, publish, read, inspectTemporary, quarantineInvalidTemporary, enumerate, removePublishedTemporary });
 }

@@ -2,16 +2,18 @@ import { parseSealedEnvelope, validateSealingContext, type CredentialOpener } fr
 import { assertNoProviderEnvironment, type WorkerEnvironment } from "./providerEnvironment.js";
 import type { WorkerControlClient } from "./workerControlClient.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
+import type { AcceptanceJournal } from "./acceptanceJournal.js";
+import { assertStartupJournalClear } from "./startupJournalReconciliation.js";
 
 // One unit of private-worker work for this slice (R44B6I), ending at the
 // proof that the exact granted credential can be opened:
 //
-//   startup check -> lease -> exact credential grant -> validate envelope and
+//   environment check -> prepare/reconcile journal -> lease -> exact credential grant -> validate envelope and
 //   context -> open in memory -> STOP
 //
 // It never enters SUBMITTING, never builds a provider client, never calls a
-// provider, writes nothing to disk and keeps no journal (there is no provider
-// acceptance to record yet). The plaintext exists only inside openAndDiscard
+// provider or records a new acceptance. Startup may finish exact publication
+// or quarantine invalid temporaries. The plaintext exists only inside openAndDiscard
 // and is never returned, logged, persisted or placed in an error; JavaScript
 // gives no zeroisation guarantee, so the code only drops every reference as
 // soon as the check is done.
@@ -31,6 +33,8 @@ export type CredentialOpeningClient = Pick<WorkerControlClient, "leaseNextAttemp
 export type CredentialOpeningRunDependencies = Readonly<{
   environment: WorkerEnvironment;
   client: CredentialOpeningClient;
+  // Required explicit composition; no state-root environment binding or bypass.
+  journal: AcceptanceJournal;
   // Injected; only a test implementation exists in this slice.
   opener: CredentialOpener;
   now?: () => Date;
@@ -91,6 +95,7 @@ export async function runCredentialOpeningOnce(dependencies: CredentialOpeningRu
 
   try {
     assertNoProviderEnvironment(dependencies.environment);
+    await assertStartupJournalClear(dependencies.journal, () => log({ stage: "STARTUP", outcome: "OK", code: "ACCEPTANCE_JOURNAL_CORRUPT" }));
   } catch (error) {
     return fail("STARTUP", error);
   }

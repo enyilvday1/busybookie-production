@@ -4,6 +4,10 @@
 // nothing from a transport, the control plane or an opener can be logged by
 // accident.
 export type WorkerErrorCode =
+  | "STATE_ROOT_UNSUITABLE"
+  | "ACCEPTANCE_RECONCILIATION_FAILED"
+  | "ACCEPTANCE_JOURNAL_CORRUPT"
+  | "ACCEPTANCE_JOURNAL_CONFLICT"
   // The provider-global environment fallback is present (startup refusal).
   | "FORBIDDEN_PROVIDER_ENVIRONMENT"
   // Worker configuration is unusable (control-plane URL or machine credential shape).
@@ -31,6 +35,10 @@ export type WorkerErrorCode =
   | "SUBMITTED_REPORT_REJECTED";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
+  STATE_ROOT_UNSUITABLE: "The worker state root is unsuitable for the acceptance journal.",
+  ACCEPTANCE_RECONCILIATION_FAILED: "Acceptance evidence remains unresolved; new work is blocked.",
+  ACCEPTANCE_JOURNAL_CORRUPT: "The acceptance journal requires operator attention; new work is blocked.",
+  ACCEPTANCE_JOURNAL_CONFLICT: "The acceptance journal has conflicting evidence; new work is blocked.",
   FORBIDDEN_PROVIDER_ENVIRONMENT: "Provider credential or provider configuration variables must not be present in the commercial worker environment.",
   WORKER_CONFIGURATION_INVALID: "The commercial worker configuration is invalid.",
   CONTROL_API_UNAVAILABLE: "The worker-control API is unavailable.",

@@ -1,6 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createAcceptanceJournal, type AcceptanceJournal } from "../src/acceptanceJournal.js";
 
 import type { CredentialOpener } from "../src/credentialContracts.js";
 import { runCredentialOpeningOnce, type CredentialOpeningClient, type WorkerLogEvent } from "../src/credentialOpeningRun.js";
@@ -22,6 +26,13 @@ import { createTestCredentialOpener, createTestCredentialSealer, generateTestKey
 const key = generateTestKey("worker-unit-encryption/v1");
 const sealer = createTestCredentialSealer(key);
 const opener = createTestCredentialOpener(key);
+let stateRoot: string;
+let journal: AcceptanceJournal;
+beforeEach(async () => {
+  stateRoot = await mkdtemp(join(tmpdir(), "busybookie-opening-startup-"));
+  journal = createAcceptanceJournal({ stateRoot, directorySync: process.platform === "win32" ? "DEVELOPMENT_BEST_EFFORT" : "REQUIRED" });
+});
+afterEach(async () => { await rm(stateRoot, { recursive: true, force: true }); });
 
 const ACCOUNT = randomUUID();
 const CONNECTION = randomUUID();
@@ -101,7 +112,7 @@ describe("provider-global environment refusal", () => {
   it.each(FORBIDDEN_PROVIDER_ENVIRONMENT_VARIABLES)("refuses to start with %s present, before any work", async (name) => {
     const { client, calls } = fakeClient();
     const counted = countingOpener();
-    const error = await failure(runCredentialOpeningOnce({ environment: { [name]: "sentinel-secret" }, client, opener: counted.opener }));
+    const error = await failure(runCredentialOpeningOnce({ journal, environment: { [name]: "sentinel-secret" }, client, opener: counted.opener }));
     expect(error.code).toBe("FORBIDDEN_PROVIDER_ENVIRONMENT");
     expect(error.message.includes("sentinel-secret")).toBe(false);
     expect(calls).toEqual({ lease: 0, grant: 0 });
@@ -121,7 +132,7 @@ describe("credential opening run", () => {
     const { client, calls } = fakeClient();
     const counted = countingOpener();
     const events: WorkerLogEvent[] = [];
-    const result = await runCredentialOpeningOnce({ environment: {}, client, opener: counted.opener, log: (event) => events.push(event) });
+    const result = await runCredentialOpeningOnce({ journal, environment: {}, client, opener: counted.opener, log: (event) => events.push(event) });
     expect(result).toEqual({ status: "CREDENTIAL_OPENED", executionJobId: JOB, executionAttemptId: ATTEMPT, provider: "EXAMPLE_PROVIDER", fencingCounter: 1, credentialOpened: true });
     expect(counted.seen).toEqual({ opened: 1, sawExactPlaintext: true });
     expect(calls).toEqual({ lease: 1, grant: 1 });
@@ -132,14 +143,14 @@ describe("credential opening run", () => {
 
   it("returns NO_WORK without requesting a grant", async () => {
     const { client, calls } = fakeClient({ lease: async () => null });
-    expect(await runCredentialOpeningOnce({ environment: {}, client, opener })).toEqual({ status: "NO_WORK" });
+    expect(await runCredentialOpeningOnce({ journal, environment: {}, client, opener })).toEqual({ status: "NO_WORK" });
     expect(calls.grant).toBe(0);
   });
 
   it("refuses to continue on a lease that has already expired", async () => {
     const { client, calls } = fakeClient({ lease: async () => lease({ leaseExpiresAt: new Date(Date.now() - 1) }) });
     const counted = countingOpener();
-    expect((await failure(runCredentialOpeningOnce({ environment: {}, client, opener: counted.opener }))).code).toBe("LEASE_EXPIRED");
+    expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client, opener: counted.opener }))).code).toBe("LEASE_EXPIRED");
     expect(calls.grant).toBe(0);
     expect(counted.seen.opened).toBe(0);
   });
@@ -150,14 +161,14 @@ describe("credential opening run", () => {
     ["the credential version", { credentialVersion: 2 }],
   ])("fails to open when %s in the opening context is changed", async (_label, change) => {
     const { client } = fakeClient({ grant: async () => grant({ openingContext: { ...context, ...change } }) });
-    expect((await failure(runCredentialOpeningOnce({ environment: {}, client, opener }))).code).toBe("CREDENTIAL_OPEN_FAILED");
+    expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client, opener }))).code).toBe("CREDENTIAL_OPEN_FAILED");
   });
 
   it("refuses a context for a different provider than the lease, and a context in any other format", async () => {
     for (const openingContext of [{ ...context, provider: "OTHER_PROVIDER" }, { ...context, purpose: "other" }, { ...context, extra: true }, null]) {
       const counted = countingOpener();
       const { client } = fakeClient({ grant: async () => grant({ openingContext }) });
-      expect((await failure(runCredentialOpeningOnce({ environment: {}, client, opener: counted.opener }))).code).toBe("ENVELOPE_INVALID");
+      expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client, opener: counted.opener }))).code).toBe("ENVELOPE_INVALID");
       expect(counted.seen.opened).toBe(0);
     }
   });
@@ -168,12 +179,12 @@ describe("credential opening run", () => {
     // A tampered but well-formed envelope reaches the opener and fails authentication.
     const tampered = countingOpener();
     const { client } = fakeClient({ grant: async () => grant({ sealedEnvelope: { ...env, ciphertext: flipped } }) });
-    expect((await failure(runCredentialOpeningOnce({ environment: {}, client, opener: tampered.opener }))).code).toBe("CREDENTIAL_OPEN_FAILED");
+    expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client, opener: tampered.opener }))).code).toBe("CREDENTIAL_OPEN_FAILED");
     // Anything not exactly the supported envelope format never reaches the opener.
     for (const sealedEnvelope of [{ ...env, format: "other" }, { ...env, extra: "x" }, { ciphertext: env.ciphertext }, "sealed", null]) {
       const counted = countingOpener();
       const bad = fakeClient({ grant: async () => grant({ sealedEnvelope }) });
-      expect((await failure(runCredentialOpeningOnce({ environment: {}, client: bad.client, opener: counted.opener }))).code).toBe("ENVELOPE_INVALID");
+      expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client: bad.client, opener: counted.opener }))).code).toBe("ENVELOPE_INVALID");
       expect(counted.seen.opened).toBe(0);
     }
   });
@@ -187,17 +198,17 @@ describe("credential opening run", () => {
         return grant();
       },
     });
-    expect((await runCredentialOpeningOnce({ environment: {}, client: flaky.client, opener })).status).toBe("CREDENTIAL_OPENED");
+    expect((await runCredentialOpeningOnce({ journal, environment: {}, client: flaky.client, opener })).status).toBe("CREDENTIAL_OPENED");
     expect(flaky.calls).toEqual({ lease: 1, grant: 2 });
 
     const down = fakeClient({ lease: async () => Promise.reject(new WorkerError("CONTROL_API_UNAVAILABLE")) });
-    expect((await failure(runCredentialOpeningOnce({ environment: {}, client: down.client, opener }))).code).toBe("CONTROL_API_UNAVAILABLE");
+    expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client: down.client, opener }))).code).toBe("CONTROL_API_UNAVAILABLE");
     expect(down.calls.lease).toBe(2);
 
     for (const code of ["WORKER_AUTHENTICATION_REJECTED", "CREDENTIAL_GRANT_REJECTED", "MALFORMED_CONTROL_RESPONSE"] as const) {
       const refused = fakeClient({ grant: async () => Promise.reject(new WorkerError(code)) });
       const counted = countingOpener();
-      expect((await failure(runCredentialOpeningOnce({ environment: {}, client: refused.client, opener: counted.opener }))).code).toBe(code);
+      expect((await failure(runCredentialOpeningOnce({ journal, environment: {}, client: refused.client, opener: counted.opener }))).code).toBe(code);
       expect(refused.calls).toEqual({ lease: 1, grant: 1 });
       expect(counted.seen.opened).toBe(0);
     }

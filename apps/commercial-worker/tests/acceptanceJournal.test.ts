@@ -320,6 +320,7 @@ function memoryFileSystem(overrides: Partial<Record<keyof JournalFileSystem | "d
   };
   const err = (code: string) => Object.assign(new Error(code), { code });
   const fs: JournalFileSystem = {
+    readDirectory: async (path) => [...files.keys()].filter((file) => file.startsWith(path + sep)).map((file) => ({ name: file.slice(path.length + 1), regularFile: true })),
     openExclusive: async (path, mode) => {
       calls.push(`openExclusive ${path.split(/[\\/]/).pop()} ${mode.toString(8)}`);
       fail("openExclusive", path);

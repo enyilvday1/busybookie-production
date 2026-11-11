@@ -69,7 +69,19 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   live execution; no API, protocol, migration or provider-adapter change;
   provider execution remains disabled and the fake-provider gate remains
   unmet because the orchestration and the other listed items are still
-  missing: introduction, sections 15, 36 and 37).
+  missing: introduction, sections 15, 36 and 37); R44B6V0 (pre-provider
+  orchestration contract locked after R44B6V discovery exposed unresolved
+  pre-provider liveness semantics: at most 2 `SUBMITTING` acknowledgement
+  attempts, retrying only `CONTROL_API_UNAVAILABLE`, each with a 10000 ms
+  orchestration-owned deadline; no local minimum lease budget is
+  authoritative; a per-attempt `journal.prepare()` is required; a successful
+  heartbeat after `SUBMITTING` is mandatory before provider construction or
+  call; a heartbeat failure before the call leaves the attempt `SUBMITTING`
+  for the authoritative sweep and never calls `submission-failed`; provider
+  construction waits for the pre-provider permit; a worker heartbeat client
+  and granted-`LEASED` recovery are now explicit prerequisites; provider
+  execution remains disabled; no runtime change: introduction, sections 12,
+  15, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -500,7 +512,11 @@ The mechanism guarantees:
 ### Re-lease after expiry
 
 - An expired lease on an attempt that never reached `SUBMITTING` may be
-  released and the job leased again.
+  released and the job leased again. (R44B6V0.) The current reclaim covers
+  only leases with no credential grant: an expired **granted** `LEASED`
+  attempt is not requeued and has no authoritative recovery yet. That
+  recovery/sweep policy is a prerequisite before live provider execution
+  (section 36).
 - An expired lease on a `SUBMITTING` attempt that has no durable provider
   execution ID moves the attempt to `OUTCOME_UNKNOWN`.
 - An expired lease on a `SUBMITTED` attempt permits only recovery of the
@@ -882,7 +898,7 @@ lease
 -> credential open (worker memory only)
 -> journal-root preflight (section 17)
 -> SUBMITTING acknowledgement
--> heartbeat, as needed, throughout
+-> heartbeat: one successful heartbeat is mandatory here (R44B6V0), then as needed throughout
 -> provider create call (exactly one)
 -> definitive provider acceptance
 -> acceptance journal record durably committed (section 17)
@@ -895,6 +911,11 @@ lease
 - No `SUBMITTED` report moves earlier than durable journal acceptance.
 - The journal-root preflight comes before `SUBMITTING`. A worker that cannot
   currently journal must not create provider authority it could not record.
+  (R44B6V0.) It is a per-attempt `journal.prepare()` immediately before the
+  acknowledgement sequence; the startup preparation alone is not sufficient.
+- (R44B6V0.) Between the acknowledgement and the provider create, a
+  successful heartbeat is **mandatory**, not "as needed", and no provider
+  object is constructed before it: see "Pre-provider orchestration" below.
 
 ```text
 PROVIDER_CALL_REQUIRES_COMMITTED_SUBMITTING=YES
@@ -903,7 +924,9 @@ SUBMITTED_REPORT_REQUIRES_DURABLE_JOURNAL=YES
 
 (R44B6U0: a committed `SUBMITTING` grants provider-call authority only
 through a successfully parsed exact acknowledgement; see the worker client
-contract below.)
+contract below. R44B6V0: that authority is usable only once the mandatory
+post-`SUBMITTING` heartbeat has also succeeded and the pre-provider permit
+exists.)
 
 **Rationale.** Without a durable pre-call mark, a crash during the paid call
 is indistinguishable from a crash before it, and a retry could buy the same
@@ -993,11 +1016,11 @@ stopping would move a real attempt `LEASED -> SUBMITTING`, then through the
 sweep to `OUTCOME_UNKNOWN`, without any provider request: manufactured
 unknown-outcome evidence.
 
-**Deferred to a later orchestration slice.** Whether `submitting` is retried
-after `CONTROL_API_UNAVAILABLE`, the maximum attempts, the request deadline,
-its relation to remaining lease lifetime, heartbeat ordering and any
-`AbortSignal` use. Whatever that policy becomes, only an exact successful
-acknowledgement permits the provider call.
+**Orchestration policy.** Deferred by R44B6U0 and now locked by R44B6V0
+("Pre-provider orchestration" below): retry, request deadline, lease
+lifetime, heartbeat ordering and `AbortSignal` ownership. The client itself
+stays single-shot. Only an exact successful acknowledgement permits the
+provider call.
 
 **Boundary.** R44B6U needs no API, protocol-package, migration or
 provider-adapter change; request and response types stay locally defined
@@ -1018,6 +1041,127 @@ SUBMITTING_CLIENT_OWNS_REQUEST_TIMEOUT=NO
 SUBMITTING_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
 SUBMITTING_ACK_FAILURE_CALLS_SUBMISSION_FAILED=NO
 SUBMITTING_CLIENT_REJECTION_WORKER_CODE=SUBMITTING_REJECTED
+```
+
+### Pre-provider orchestration (revision R44B6V0)
+
+**Locked decision (design only; not yet implemented).** The orchestration
+boundary immediately before provider invocation. It covers the per-attempt
+journal preflight, the `SUBMITTING` acknowledgement sequence, its request
+deadline and `AbortSignal` ownership, the mandatory pre-provider heartbeat,
+post-`SUBMITTING`/pre-provider failures, and the provider-construction and
+permit boundary. It implements no heartbeat client, provider client, fake or
+real provider, provider invocation, acceptance handler or `submitted`
+orchestration.
+
+**Order.**
+
+```text
+credential grant
+-> credential validation and open
+-> per-attempt journal.prepare()
+-> SUBMITTING acknowledgement sequence
+-> successful heartbeat
+-> pre-provider permit
+-> exactly one provider create call (outside R44B6V0)
+```
+
+- **Per-attempt journal preflight.** `journal.prepare()` (idempotent) runs
+  for each attempt immediately before the acknowledgement sequence; the
+  worker proves its state root usable when it is about to create provider
+  authority. The startup preparation remains, but is not sufficient. If it
+  fails: no `submitting` call, no provider call, no `submission-failed`; the
+  attempt stays in its pre-`SUBMITTING` state.
+- **Acknowledgement attempts.** At most two in total, the first immediate.
+  The second is made only after `CONTROL_API_UNAVAILABLE`, with no delay,
+  backoff or jitter. `SUBMITTING_REJECTED`, `WORKER_AUTHENTICATION_REJECTED`
+  and `MALFORMED_CONTROL_RESPONSE` are never retried. Both attempts use
+  exactly the same `executionAttemptId`, `fencingCounter` and `leaseToken`;
+  the proof is never changed. The orchestration owns this retry; the client
+  stays single-shot (R44B6U0). The acceptance-recovery policy (section 17)
+  does not apply.
+- **Request deadline and `AbortSignal`.** Each acknowledgement HTTP attempt
+  has a 10000 ms deadline. The orchestration owns a fresh `AbortController`
+  per attempt; its signal covers only that request, never the provider call,
+  and never becomes the provider-execution cancellation signal. A deadline
+  abort is `CONTROL_API_UNAVAILABLE` through the existing client and may use
+  the one allowed retry. The values are architecture constants, not
+  environment configuration; a repository constant location may be chosen
+  at implementation without changing them.
+- **Lost response.** As locked by R44B6U0: a 409 never proves that
+  `SUBMITTING` did not commit. Without an exact parsed 200 there is no
+  provider call and no `submission-failed` report.
+- **No local lease minimum.** No fixed worker-side minimum remaining lease
+  applies before the acknowledgement, and `leaseExpiresAt` never grants
+  provider authority. The control plane stays authoritative for lease
+  validity; the fresh lease budget for the provider call comes from the
+  mandatory heartbeat below, never from local clock arithmetic.
+- **Mandatory pre-provider heartbeat.** After an exact successful
+  acknowledgement and before any provider object is constructed, the worker
+  must obtain a successful heartbeat acknowledgement for the same attempt,
+  fence and lease epoch. The heartbeat renews the authoritative server lease
+  under the existing policy (section 12). No successful heartbeat, no
+  provider call.
+- **Pre-provider heartbeat failure.** If the heartbeat is refused,
+  unavailable, ambiguous, malformed or aborted after a committed
+  `SUBMITTING`: no provider call, no `submission-failed` report and no
+  alternative lifecycle transition. The attempt stays `SUBMITTING`, and the
+  authoritative sweep owns the outcome. That may record `OUTCOME_UNKNOWN`
+  with `WORKER_LEASE_EXPIRED_DURING_SUBMISSION` although this worker knows it
+  never called the provider. This conservatism is intentional: the closed
+  `submission-failed` codes describe provider-submission outcomes, and no
+  code means "worker deliberately stopped before the provider call". R44B6V0
+  adds none (no `PRE_PROVIDER_ABORTED`, `HEARTBEAT_FAILED` or equivalent).
+- **`submission-failed` threshold.** Never before a committed `SUBMITTING`.
+  After it but before the provider call, orchestration or heartbeat failure
+  still never uses `submission-failed`, which stays scoped to the
+  provider-submission contract of R44B6T.
+- **Provider-construction boundary.** No provider client, adapter or
+  provider-create callable is constructed, selected or invoked until the
+  credential context is valid and open, the per-attempt `journal.prepare()`
+  succeeded, an exact acknowledgement was obtained and the mandatory
+  heartbeat succeeded. Every acknowledgement retry and pre-call check
+  finishes before any provider object exists, so the exactly-one-create
+  boundary fails closed.
+- **Pre-provider permit.** The orchestration's conceptual output exists only
+  after every gate above succeeds. Holding it calls nothing. No provider
+  callback or port is passed into the orchestration to test ordering; it
+  stops at the permit, so it stays separable from provider execution. A
+  test-local spy that exists only in test code is not fake-provider
+  execution, but a production source abstraction that can accept or invoke a
+  provider create belongs to provider execution, outside R44B6V.
+- **In-flight heartbeat (deferred).** The heartbeat schedule and retry
+  policy while a provider create is in flight must be locked before live
+  provider execution. Until then section 12 stands: at most every third of
+  the server lease duration (currently 40 seconds of 120), and a heartbeat
+  failure never abandons a create call already in flight.
+
+**Prerequisites and sequence.** The worker has no heartbeat client yet, so
+R44B6V cannot be completed as orchestration now. The expected sequence: a
+client-only worker heartbeat client for the existing route (no provider
+execution); its publication and docs-sync; the R44B6V orchestration that
+stops at the permit; then keeping that orchestration unused by live
+execution until the later provider-composition prerequisites (section 36)
+are met. No production path moves real attempts into `SUBMITTING` only to
+prove the orchestration.
+
+```text
+SUBMITTING_ORCHESTRATION_MAX_ATTEMPTS=2
+SUBMITTING_ORCHESTRATION_RETRIES_CONTROL_API_UNAVAILABLE=YES
+SUBMITTING_ORCHESTRATION_RETRIES_SUBMITTING_REJECTED=NO
+SUBMITTING_ORCHESTRATION_RETRY_BACKOFF=NONE
+SUBMITTING_ORCHESTRATION_RETRY_JITTER=NONE
+SUBMITTING_ACK_REQUEST_DEADLINE_MS=10000
+SUBMITTING_ACK_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
+SUBMITTING_ACK_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
+SUBMITTING_PRE_PROVIDER_HEARTBEAT_REQUIRED=YES
+SUBMITTING_PRE_PROVIDER_HEARTBEAT_FAILURE_CALLS_PROVIDER=NO
+SUBMITTING_PRE_PROVIDER_HEARTBEAT_FAILURE_CALLS_SUBMISSION_FAILED=NO
+PRE_PROVIDER_PERMIT_REQUIRES_SUBMITTING_AND_HEARTBEAT=YES
+PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
+PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
+PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
+WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=NO
 ```
 
 ---
@@ -3434,14 +3578,16 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6U, the following are still missing:
+of R44B6V0, the following are still missing:
 
-- the execution orchestration that wires the `SUBMITTING` client and
-  defines its retry policy, request deadline, relation to remaining lease
-  lifetime, heartbeat ordering and `AbortSignal` ownership, deferred by
-  R44B6U0 to a later architecture slice;
+- a worker heartbeat client for the existing heartbeat route (client-only);
+- the implementation of the pre-provider orchestration locked by R44B6V0
+  (section 15), stopping at the pre-provider permit;
+- an authoritative recovery/sweep policy for granted-but-expired `LEASED`
+  attempts, which the current reclaim does not requeue (section 12);
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
+- the in-flight provider heartbeat schedule and retry policy (section 15);
 - whole-chain crash-point tests (slice 7);
 - the production/deployment state-root binding.
 
@@ -3620,6 +3766,22 @@ SUBMITTING_CLIENT_OWNS_REQUEST_TIMEOUT=NO
 SUBMITTING_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
 SUBMITTING_ACK_FAILURE_CALLS_SUBMISSION_FAILED=NO
 SUBMITTING_CLIENT_REJECTION_WORKER_CODE=SUBMITTING_REJECTED
+SUBMITTING_ORCHESTRATION_MAX_ATTEMPTS=2
+SUBMITTING_ORCHESTRATION_RETRIES_CONTROL_API_UNAVAILABLE=YES
+SUBMITTING_ORCHESTRATION_RETRIES_SUBMITTING_REJECTED=NO
+SUBMITTING_ORCHESTRATION_RETRY_BACKOFF=NONE
+SUBMITTING_ORCHESTRATION_RETRY_JITTER=NONE
+SUBMITTING_ACK_REQUEST_DEADLINE_MS=10000
+SUBMITTING_ACK_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
+SUBMITTING_ACK_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
+SUBMITTING_PRE_PROVIDER_HEARTBEAT_REQUIRED=YES
+SUBMITTING_PRE_PROVIDER_HEARTBEAT_FAILURE_CALLS_PROVIDER=NO
+SUBMITTING_PRE_PROVIDER_HEARTBEAT_FAILURE_CALLS_SUBMISSION_FAILED=NO
+PRE_PROVIDER_PERMIT_REQUIRES_SUBMITTING_AND_HEARTBEAT=YES
+PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
+PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
+PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
+WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=NO
 ACCEPTANCE_JOURNAL_FORMAT=v1
 ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
 STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES

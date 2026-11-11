@@ -48,7 +48,13 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   precede handler body parsing; every body is still parsed before any
   lifecycle transaction, and pair/conflict classification still follows the
   applicable authority proof; no runtime implementation state changed:
-  introduction, sections 18 and 37).
+  introduction, sections 18 and 37); R44B6T1 (R44B6T `submission-failed`
+  control-plane route implemented and published in commit
+  f8ec4cc19721a9d5d2801874920ee90a54b65545 under the R44B6T0 replay
+  contract and the R44B6T0A request order, which remain authoritative; no
+  migration, worker, protocol or provider-adapter change was required;
+  provider execution remains disabled and the fake-provider gate remains
+  unmet: introduction, sections 10, 17, 18, 30, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -420,7 +426,7 @@ under `/worker-control/v1`, all with exact closed JSON bodies:
 | `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
 | `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Implemented (R44B6O, section 18). No worker flow calls it yet. |
 | `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Implemented (R44B6R, section 18). Called only by worker startup reconciliation (R44B6S, section 17). |
-| `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18; replay contract locked by R44B6T0). |
+| `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Implemented (R44B6T, section 18; contract R44B6T0/R44B6T0A). No worker flow calls it yet. |
 
 No route accepts a client-supplied timestamp, Account, connection,
 credential version, provider or job identifier; the server derives them.
@@ -1032,8 +1038,9 @@ provider definitively accepts
 The control-plane `acceptance-recovery` route is implemented (R44B6R,
 section 18), and worker startup reconciliation now calls it through the
 worker acceptance-recovery client (R44B6S, "Startup reconciliation" below).
-`submission-failed` and provider execution of any kind (fake or real)
-remain unimplemented. Startup makes no provider call; it resolves valid
+The control-plane `submission-failed` route is implemented (R44B6T,
+section 18), but no worker flow calls it yet. Provider execution of any kind
+(fake or real) remains unimplemented. Startup makes no provider call; it resolves valid
 published acceptance evidence only through an exact control-plane
 acknowledgement.
 
@@ -1775,9 +1782,11 @@ explicitly composed worker-control router; the default process answers 404.
   route below.
 - **Implemented (R44B6S):** its worker client and the startup reconciliation
   call to it (section 17), under the bounded per-record retry policy.
+- **Implemented (R44B6T):** the control-plane `submission-failed` route
+  below. No worker client for it exists yet.
 - **Not wired:** no provider submission flow writes new acceptance records
-  or calls the `submitted` client.
-- **Not implemented:** worker provider execution and `submission-failed`.
+  or calls the `submitted` client or `submission-failed`.
+- **Not implemented:** worker provider execution.
   Valid published acceptance is resolved at startup only through an exact
   `acceptance-recovery` acknowledgement; otherwise it keeps blocking new work.
 
@@ -1892,7 +1901,7 @@ ACCEPTANCE_RECOVERY_IMPLEMENTED=YES
 ACCEPTANCE_RECOVERY_ROUTE_IMPLEMENTED=YES
 WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=YES
 STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=YES
-SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
+SUBMISSION_FAILED_ROUTE_IMPLEMENTED=YES
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
@@ -2106,12 +2115,20 @@ execution ID in one of two ways only:
 - after the authoritative expiry, through `OUTCOME_UNKNOWN` and
   `acceptance-recovery`.
 
-### Future `submission-failed` route
+### `submission-failed` route
 
-**Locked decision (design only; replay contract locked by R44B6T0).**
+**Locked decision (implemented, R44B6T; contract locked by R44B6T0 and
+R44B6T0A; recorded by R44B6T1).**
 `POST /worker-control/v1/attempts/:attemptId/submission-failed` with exactly
-`{fencingCounter, leaseToken, outcome, failureCode}`. The route is not yet
-implemented. It uses the existing worker-control router conventions: Origin
+`{fencingCounter, leaseToken, outcome, failureCode}`. It exists only on the
+explicitly composed worker-control router; the default process answers 404.
+No worker flow calls it yet. The implementation follows the contract below
+exactly: the first transition requires the live submission epoch; replay is
+authorised by the immutable original-submission provenance, with
+`leaseToken` syntactically required but never replay authority; an exact
+replay is read-only; sweep-recorded failure evidence is never replaced; the
+response is the locked four-field shape. No migration was required and the
+route never calls a provider. It uses the existing worker-control router conventions: Origin
 rejection, strict worker authentication, POST only, canonical lowercase UUID
 route parameter, JSON content type and an exact member set.
 
@@ -3031,7 +3048,7 @@ Control-plane security events (the worker security sink):
 |---|---|
 | `WORKER_SUBMITTED_REJECTED` | The existing lease reasons, plus `PROVIDER_EXECUTION_CONFLICT` (a different ID on `SUBMITTED`), `PROVIDER_EXECUTION_ID_IN_USE` (adopted by another attempt) and `INCOMPATIBLE_ATTEMPT_STATE`. |
 | `WORKER_ACCEPTANCE_RECOVERY_REJECTED` | `SUBMITTING_PRINCIPAL_MISMATCH`, `FENCING_MISMATCH`, `UNKNOWN_ATTEMPT`, `INCOMPATIBLE_ATTEMPT_STATE`, `PROVIDER_EXECUTION_CONFLICT`, `PROVIDER_EXECUTION_ID_IN_USE`, `SUBMITTING_VERSION_DESTROYED`; the shared transaction-local ACTIVE re-check also uses `WORKER_NOT_ACTIVE`. `ATTEMPT_STILL_SUBMITTING` (still `SUBMITTING` after TX1, for the proven original principal and epoch) is an expected wait signal, not a security event (R44B6R1). |
-| `WORKER_SUBMISSION_FAILURE_REJECTED` | The existing lease reasons, plus `INCOMPATIBLE_ATTEMPT_STATE` and `FAILURE_CODE_OUTCOME_MISMATCH`. (R44B6T0.) The replay path uses the existing `SUBMITTING_PRINCIPAL_MISMATCH` and `FENCING_MISMATCH` for a failed original-epoch proof; `FAILURE_CODE_OUTCOME_MISMATCH` is classified only after authority is proven; a successful first transition or exact replay emits no rejection event, and a `400 INVALID_REQUEST` is not a security event. |
+| `WORKER_SUBMISSION_FAILURE_REJECTED` | Implemented (R44B6T), together with the new reason `FAILURE_CODE_OUTCOME_MISMATCH`. The existing lease reasons, plus `INCOMPATIBLE_ATTEMPT_STATE` and `FAILURE_CODE_OUTCOME_MISMATCH`. (R44B6T0.) The replay path uses the existing `SUBMITTING_PRINCIPAL_MISMATCH` and `FENCING_MISMATCH` for a failed original-epoch proof; `FAILURE_CODE_OUTCOME_MISMATCH` is classified only after authority is proven; a successful first transition or exact replay emits no rejection event, and a `400 INVALID_REQUEST` is not a security event. |
 | `WORKER_LEASE_REJECTED` | Existing. A stale worker's heartbeat after its `SUBMITTING` lease was swept (`NOT_LEASED` or `LEASE_EXPIRED`). |
 
 A `SUBMITTING` expiry is a lifecycle fact. It is audited as
@@ -3245,7 +3262,8 @@ each slice under its own authorised gate:
    (section 18). The live `submitted` route is implemented (R44B6O); no
    worker flow calls it yet. The control-plane `acceptance-recovery` route
    is implemented (R44B6R), and its worker client and startup wiring are
-   implemented (R44B6S). `submission-failed` remains to be built.
+   implemented (R44B6S). The control-plane `submission-failed` route is
+   implemented (R44B6T); no worker flow calls it yet.
    Neither this step nor any recovery-lease step may
    grant `SUBMITTED` heartbeat authority to any lease other than the exact
    live-route epoch.
@@ -3275,13 +3293,15 @@ R44B6Q adds focused local startup crash/restart tests, including exact
 temporary publication and interrupted quarantine. R44B6R adds control-plane
 recovery, replay, concurrency, expiry-handoff and rollback coverage. R44B6S
 adds worker recovery-client, retry-policy, retention and startup-wiring
-coverage, including end-to-end recovery against the real router. These
+coverage, including end-to-end recovery against the real router. R44B6T
+adds control-plane `submission-failed` coverage: both outcomes, every
+failure-code pair, exact replay, replay conflicts, sweep evidence, audit
+rollback and concurrency. These
 do not complete the whole-chain crash-point coverage required by slice 7.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6S, the following are still missing:
+of R44B6T, the following are still missing:
 
-- `submission-failed` (slice 4);
 - a worker client for the `SUBMITTING` acknowledgement;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
@@ -3452,7 +3472,7 @@ ACCEPTANCE_RECOVERY_FIRST_TRANSITION_AUDIT_WRITTEN_ONCE=YES
 ACCEPTANCE_RECOVERY_REPLAY_DUPLICATES_AUDIT=NO
 WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=YES
 STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=YES
-SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
+SUBMISSION_FAILED_ROUTE_IMPLEMENTED=YES
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO

@@ -88,6 +88,8 @@ const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
   ],
   "src/acceptanceRecoveryPolicy.ts": ["ATTEMPT_STILL_SUBMITTING", "STILL_SUBMITTING"],
   "src/workerError.ts": ["SUBMITTING_REJECTED", '"The worker-control API rejected the SUBMITTING acknowledgement."'],
+  // R44B6V: the orchestration names only the client method it calls.
+  "src/preProviderOrchestration.ts": ["acknowledgeSubmitting"],
 };
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
@@ -101,6 +103,7 @@ describe("commercial-worker source boundary", () => {
       "src/acceptanceRecoveryPolicy.ts",
       "src/credentialContracts.ts",
       "src/credentialOpeningRun.ts",
+      "src/preProviderOrchestration.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
       "src/startupJournalReconciliation.ts",
@@ -228,10 +231,13 @@ describe("SUBMITTING acknowledgement client boundary", () => {
   const client = clientSource;
   const method = methodSource("acknowledgeSubmitting");
 
-  it("has no production caller and stays outside the credential-opening client", () => {
+  it("is called only by the unused pre-provider orchestration and stays outside the credential-opening client", () => {
+    // R44B6V: the orchestration is the only caller, and nothing calls it (below).
     const callers = sources.filter(({ text }) => /\.acknowledgeSubmitting\s*\(/.test(code(text))).map(({ path }) => path);
-    expect(callers).toEqual([]);
-    expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /acknowledgeSubmitting/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(callers).toEqual(["src/preProviderOrchestration.ts"]);
+    expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /acknowledgeSubmitting/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/preProviderOrchestration.ts",
+    ]);
   });
 
   it("sends one request with no retry, timer, lease clock, lifecycle repair or secret logging", () => {
@@ -255,11 +261,12 @@ describe("SUBMITTING acknowledgement client boundary", () => {
 describe("heartbeat client boundary", () => {
   const method = methodSource("heartbeat");
 
-  it("has no production caller anywhere in worker source", () => {
-    expect(sources.filter(({ text }) => /\.heartbeat\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  it("is called only by the unused pre-provider orchestration", () => {
+    // R44B6V: the orchestration is the only caller, and nothing calls it (below).
+    expect(sources.filter(({ text }) => /\.heartbeat\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/preProviderOrchestration.ts"]);
     expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/heartbeat/i);
     expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /\bheartbeat\b|HEARTBEAT_REJECTED/.test(code(text))).map(({ path }) => path)).toEqual(
-      ["src/workerError.ts"],
+      ["src/preProviderOrchestration.ts", "src/workerError.ts"],
     );
   });
 
@@ -279,6 +286,43 @@ describe("heartbeat client boundary", () => {
   });
 });
 
+// R44B6V0/R44B6V: the pre-provider orchestration stops at the permit. Nothing
+// calls it yet, and it holds no provider abstraction, lifecycle repair,
+// in-flight cadence or local lease-time authority.
+describe("pre-provider orchestration boundary", () => {
+  const ORCHESTRATION = "src/preProviderOrchestration.ts";
+  const orchestration = code(read(join(SRC_ROOT, "preProviderOrchestration.ts")));
+
+  it("has no caller anywhere in worker source, including credential opening", () => {
+    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration|obtainPreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/PreProvider|permit/i);
+  });
+
+  it("locks exactly two attempts and a 10000 ms request deadline owned by the orchestration", () => {
+    expect(orchestration).toMatch(/export const PRE_PROVIDER_MAX_ATTEMPTS = 2;/);
+    expect(orchestration).toMatch(/export const PRE_PROVIDER_REQUEST_DEADLINE_MS = 10000;/);
+    // One controller per request, created only by the deadline helper.
+    expect(orchestration.match(/new AbortController\(\)/g)).toHaveLength(1);
+    // Exactly two guarded call sites, and only CONTROL_API_UNAVAILABLE earns a retry.
+    expect(orchestration.match(/atMostTwoAttempts\(timer,/g)).toHaveLength(2);
+    expect(orchestration.match(/\.acknowledgeSubmitting\(/g)).toHaveLength(1);
+    expect(orchestration.match(/\.heartbeat\(/g)).toHaveLength(1);
+    expect(orchestration).toMatch(/error\.code !== "CONTROL_API_UNAVAILABLE"/);
+    expect(/\bfor\s*\(|\bwhile\s*\(|setInterval|sleep|backoff|jitter|retryUnavailable/i.test(orchestration)).toBe(false);
+  });
+
+  it("makes no provider, lifecycle-repair, in-flight or local-lease decision", () => {
+    expect(
+      /submission-failed|reportSubmitted|recoverAcceptance|leaseNextAttempt|requestCredentialGrant|OUTCOME_UNKNOWN|providerCreate|ProviderPort|createGeneration|imageToVideo|generateVideos|interactions\.create|fake|opener|\.open\(/i.test(orchestration),
+    ).toBe(false);
+    expect(/Date\.now|new Date|performance\.now|getTime\(\)|leaseExpiresAt|LEASE_EXPIRED|interval|cadence/i.test(orchestration)).toBe(false);
+    // The permit carries no secret.
+    const permitType = orchestration.slice(orchestration.indexOf("export type PreProviderPermit"), orchestration.indexOf("export type PreProviderOrchestrationDependencies"));
+    expect(permitType.length).toBeGreaterThan(0);
+    expect(/leaseToken|credential|machine|token/i.test(permitType)).toBe(false);
+  });
+});
+
 // R44B6P: the acceptance journal persists only the closed acceptance record.
 describe("acceptance journal boundary", () => {
   const journal = code(read(join(APP_ROOT, JOURNAL)));
@@ -295,7 +339,9 @@ describe("acceptance journal boundary", () => {
 
   it("is used only for startup checks, and the submitted report is called by nothing in worker source", () => {
     const importers = sources.filter(({ path, text }) => path !== JOURNAL && /acceptanceJournal/.test(text)).map(({ path }) => path);
-    expect(importers.sort()).toEqual(["src/credentialOpeningRun.ts", "src/startupJournalReconciliation.ts"]);
+    // R44B6V: the orchestration needs only the journal's prepare() type.
+    expect(importers.sort()).toEqual(["src/credentialOpeningRun.ts", "src/preProviderOrchestration.ts", "src/startupJournalReconciliation.ts"]);
+    expect(read(join(SRC_ROOT, "preProviderOrchestration.ts"))).toMatch(/import type \{ AcceptanceJournal \} from "\.\/acceptanceJournal\.js";/);
     const callers = sources.filter(({ text }) => /\.reportSubmitted\s*\(/.test(code(text))).map(({ path }) => path);
     expect(callers).toEqual([]);
     // R44B6S: startup reaches the control plane only through the injected

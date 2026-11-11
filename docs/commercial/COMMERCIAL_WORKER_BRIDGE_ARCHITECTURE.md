@@ -260,7 +260,23 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   while state is retained; a concrete deployment binding to the published
   runbook; no live host required; rules for a local fake-provider
   development root; provider flags remain NO; the state-root gate item
-  stays unmet pending implementation: introduction, sections 17, 36 and 37).
+  stays unmet pending implementation: introduction, sections 17, 36 and 37);
+  R44B8B (R44B8 published in commit
+  c733b9450f143ab56e5c17f2e67c2c1e4a5d5ab5: `workerConfig.ts` and
+  `workerStateRoot.ts` added; configuration is explicit and immutable, the
+  production path is enforced exactly, and there is no fallback and no
+  `process.env` read; the root must pre-exist; links at the root and in the
+  managed directories are refused; production enforces Linux, the
+  effective UID and the owner-only mode, with `REQUIRED` directory sync;
+  journal preparation and reconciliation both precede any lease; root
+  failures fail closed; the worker creates no root, logs no path and adds
+  no metadata or locking; no process runner and no provider import or
+  network; 608/608 worker unit, 34/34 worker integration and 558/558
+  commercial-api DB tests, typecheck clean; the deployment runbook is
+  unchanged, and the application and deployment bindings now agree
+  exactly; `WORKER_STATE_ROOT_BINDING_IMPLEMENTED=YES`; the final
+  pre-fake-provider gate item is satisfied and the gate is complete;
+  provider flags remain NO: introduction, sections 17, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -2011,7 +2027,9 @@ commercial-api, the protocol package, migrations, or engine and provider
 adapters. No production caller is required, and Runway, Veo, Google and fake
 or real providers stay unwired. Implementing it removes only the in-flight
 heartbeat item from the section 36 gate; the whole-chain crash-point tests
-and the state-root binding remain. Provider execution stays disabled.
+and the state-root binding remained at that time (both since satisfied, by
+R44B7 and R44B8; the gate is complete as of R44B8B). Provider execution
+stays disabled.
 
 ```text
 IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=YES
@@ -2207,8 +2225,9 @@ acknowledgement.
 input. (R44B8A.) The configuration key `COMMERCIAL_WORKER_STATE_ROOT`, its
 validation and the deployment binding to
 `/var/lib/busybookie/commercial-worker` are now locked ("State-root binding"
-below). They are not yet implemented, and no worker code reads the key
-today.
+below). R44B8 implements them (recorded by R44B8B) as library code with no
+production caller: `loadWorkerConfig` reads the key from an injected
+object, and `bindWorkerStateRoot` binds the journal to it.
 
 **Temporary files and evidence:**
 
@@ -2320,11 +2339,169 @@ nothing else. Any other entry fails the startup scan closed.
 
 ### State-root binding (revision R44B8A)
 
-**Locked decision (R44B8A; not implemented).** The first R44B8A attempt was
+**Status (R44B8; recorded by R44B8B).** Implemented in commit
+c733b9450f143ab56e5c17f2e67c2c1e4a5d5ab5. It adds
+`apps/commercial-worker/src/workerConfig.ts` and
+`apps/commercial-worker/src/workerStateRoot.ts`, plus tests. There is no
+commercial-api, protocol, migration, runbook, provider, manifest or lockfile
+change. The contract below is unchanged.
+
+The implementation is **library-only**. There is still no worker daemon,
+process entry point or start script, and no worker production module reads
+`process.env`; no exemption was added.
+
+**Configuration.** `loadWorkerConfig(environment)` parses an injected
+object.
+
+- It requires `COMMERCIAL_WORKER_ENV`, exactly `development` or
+  `production` with no default, and `COMMERCIAL_WORKER_STATE_ROOT`.
+- It returns a frozen `WorkerConfig` (`{ mode, stateRoot }`).
+- `WORKER_CONFIG_KEYS` and `PRODUCTION_WORKER_STATE_ROOT` are exported.
+- Errors are a `WorkerConfigError` with closed codes and fixed messages
+  that never echo a supplied value or path: `WORKER_ENV_MISSING`,
+  `WORKER_ENV_INVALID`, `WORKER_STATE_ROOT_MISSING`,
+  `WORKER_STATE_ROOT_EMPTY` and `WORKER_STATE_ROOT_NOT_PRODUCTION_ROOT`.
+  No `WorkerError` code was added.
+- Development still requires an explicit root, with no `cwd`, tmp, home,
+  repository or media-root derivation and no root creation.
+- Production accepts **exactly** `/var/lib/busybookie/commercial-worker`
+  and refuses any other root. That is the application half of the
+  published binding: worker root `/var/lib/busybookie/commercial-worker`
+  on the persistent `/var/lib/busybookie` mount.
+
+**Root policy.** `assertWorkerStateRoot(config, host?)` enforces:
+
+- **Shape:** non-empty, no NUL, absolute, no `..` segment.
+- **Existence:** an existing directory, used as the exact configured
+  string with no `realpath` rewriting. The root is never created.
+- **Links:** lstat refuses a linked root and an existing linked
+  `acceptance-journal`, `v1` or `quarantine`. The managed directories are
+  checked again after `prepare()`, which catches a link introduced during
+  preparation. This is trusted-host configuration validation, not
+  hostile-filesystem race-proofing.
+- **Production:** the OS must be `linux`, the effective UID must be
+  available and equal the root's owner, and `(mode & 0o077) == 0`. The
+  root is never chmod-repaired; managed descendants keep `0700`/`0600`.
+  Even a hand-built production configuration binds only the published
+  root.
+- **Directory sync:** `selectDirectorySync` returns `REQUIRED` in
+  production, `DEVELOPMENT_BEST_EFFORT` for Windows development and
+  `REQUIRED` for other development. That last choice deliberately fails
+  closed rather than silently downgrading.
+- **Responsibility split:** the application checks the path shape,
+  existence, links and the production owner/mode. Through the journal's
+  `prepare()` it also probes hard links and directory fsync. The runbook
+  smoke gate checks the filesystem class: persistent, block-backed,
+  ext4/XFS, not NFS/SMB/FAT/exFAT/FUSE/network, no nested mount. Worker
+  code does not detect filesystem type.
+
+**Binding and composition.**
+
+- `bindWorkerStateRoot(config, { host?, journalFileSystem? })` checks the
+  policy, constructs
+  `createAcceptanceJournal({ stateRoot: exact root, directorySync: selected })`,
+  runs `prepare()` and verifies the managed directories.
+- `runConfiguredCredentialOpeningOnce(config, deps)` binds the root, then
+  delegates to the existing `runCredentialOpeningOnce`. It adds no provider
+  work, no loop, no signal handling and no daemon.
+- Every root or filesystem failure converges to the existing
+  `STATE_ROOT_UNSUITABLE`. Configuration parse errors stay
+  `WorkerConfigError`. The only log is the closed
+  `{ stage: "STARTUP", outcome: "FAILED", code: "STATE_ROOT_UNSUITABLE" }`,
+  never the path, and errors are tested for path leakage.
+
+**Proven invariants.**
+
+- **Before any lease:** every root failure causes **zero** lease requests.
+  That covers an invalid path, a missing root, a non-directory, a link,
+  the production OS, owner or mode, a hard-link failure and a required
+  directory-fsync failure.
+- **Reconciliation first:** with a retained record the calls are
+  recovery then lease; a failed reconciliation gives recovery only, with
+  no lease.
+- **Same-root restart:** instance 1 writes a record; instance 2 binds the
+  same root, sees it as FINAL and VALID, and reconciles it before leasing.
+  R44B7 remains the full whole-chain crash and restart proof.
+- **Nothing added:** no lock file; no principal, environment or deployment
+  marker; no root schema file; no migration, old-root discovery or
+  relocation. A missing root is refused and stays absent. One process,
+  one principal and one environment per root, and the relocation
+  prohibition, stay deployment contracts (`deployment/README.md`).
+- **No fallback:** no `process.cwd()`, `os.tmpdir()`, `mkdtemp()`, home or
+  `BUSYBOOKIE_MEDIA_ROOT` in worker production source, checked by the
+  boundary test. Tests use temporary directories only as explicit
+  fixtures.
+- **No provider:** no provider import, Runway, Veo or Google client, SDK,
+  network or credential, and no production caller. This is persistence and
+  configuration work only.
+
+**Test seams.** The optional `host` facts (platform, effective UID, lstat)
+and `journalFileSystem` default to the real host and filesystem. They make
+platform and filesystem policy deterministic in tests and do not weaken
+production behaviour.
+
+**Tests.**
+
+| Suite | Result |
+|---|---|
+| `workerConfig.test.ts` | 27 tests |
+| `workerStateRoot.test.ts` | 34 tests |
+| `boundary.test.ts` | 74 tests (previously 65) |
+| Worker unit | 608/608 across 15 files (previously 538/538 across 13) |
+| Worker integration | 34/34 across 2 files (whole-chain 15/15, credential opening 19/19) |
+| commercial-api DB | 558/558 across 19 files |
+| Typecheck, `git diff --check` | clean |
+
+No provider call.
+
+Focused coverage includes:
+
+- missing and invalid keys;
+- the canonical production path and non-canonical production paths;
+- relative, `./`, `..`, NUL and missing paths, and a regular file;
+- a linked root, linked managed directories, and a link introduced during
+  `prepare()`;
+- ordinary managed directories;
+- the exact configured root, with no rewriting;
+- the production OS, a missing UID, the wrong owner, and each
+  group/other permission bit;
+- production owner-only success;
+- the development sync policy;
+- hard-link and directory-fsync failures;
+- reconciliation ordering and the same-root restart.
+
+**Deployment side and gate.**
+
+- `deployment/README.md` needed no R44B8 change. It remains at sha
+  `93d2b1fbe84de57195137c92adbc2bad71efeb6e9f122538a23ecc14efb7fdd2` (388
+  lines), with `/var/lib/busybookie` containing `media/` and
+  `commercial-worker/`.
+- Both sides now exist:
+  - **application:** production configuration requires
+    `/var/lib/busybookie/commercial-worker` and binds the journal to that
+    exact root;
+  - **deployment:** the runbook reserves that path on the persistent,
+    block-backed ext4/XFS-class `/var/lib/busybookie`.
+
+  The application and deployment paths are concretely bound.
+- **Gate criteria:** every R44B8A gate criterion is met:
+  - explicit keys and no defaults;
+  - an absolute, pre-existing root;
+  - the production owner/mode check and the link checks;
+  - production `REQUIRED` sync and exact journal construction;
+  - reconciliation and root suitability before any lease;
+  - the deployment binding and the same-filesystem runbook semantics;
+  - passing tests and regressions;
+  - provider flags NO and no provider call.
+
+  Unrelated future obligations are not marked complete.
+
+**Locked decision (R44B8A; implemented by R44B8).** The first R44B8A attempt was
 blocked because `deployment/README.md` gave the persistent volume no mount
 path. R44B8P0 published one, and this lock binds the worker to it. This lock
 creates no configuration module, composition, process entry point, test or
-runbook change. Nothing here is implemented yet.
+runbook change. Nothing was implemented at lock time; R44B8 has since
+implemented it (Status above).
 
 **Definition.** The commercial-worker state root is the explicit persistent
 filesystem directory beneath which commercial-worker-owned durable local
@@ -2623,7 +2800,7 @@ all of these hold (a live host is not required):
 13. the provider flags stay NO and no provider call occurs.
 
 ```text
-WORKER_STATE_ROOT_BINDING_IMPLEMENTED=NO
+WORKER_STATE_ROOT_BINDING_IMPLEMENTED=YES
 WORKER_STATE_ROOT_CONFIG_KEY=COMMERCIAL_WORKER_STATE_ROOT
 WORKER_ENV_CONFIG_KEY=COMMERCIAL_WORKER_ENV
 WORKER_STATE_ROOT_DEPLOYMENT_PATH=/var/lib/busybookie/commercial-worker
@@ -3029,7 +3206,8 @@ the local checks as follows, still before requesting any lease:
 1. validates the state root (absolute, local, link-capable, owner-only, and
    directory-fsync-capable in production). R44B8A locks the configuration,
    existence, symlink, production owner/mode and `REQUIRED` sync checks
-   that precede this ("State-root binding" above), not yet implemented;
+   that precede this ("State-root binding" above), implemented by R44B8 in
+   `bindWorkerStateRoot`, which runs before `runCredentialOpeningOnce`;
 2. scans `acceptance-journal/v1/` and applies the corruption table above;
 3. for each valid published record, calls `acceptance-recovery` (section 18)
    with the record's fencing counter and provider execution ID, and then:
@@ -5370,7 +5548,11 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B8A, only the one item below is still missing. (R44B7.) The
+of R44B8B, **no item is missing: the pre-fake-provider gate is complete.**
+(R44B8.) The final item, the production/deployment state-root binding, is
+satisfied by R44B8P0 (the runbook path), R44B8A (the contract) and commit
+c733b9450f143ab56e5c17f2e67c2c1e4a5d5ab5 (the implementation): section 17,
+"State-root binding". (R44B7.) The
 whole-chain crash-point prerequisite (slice 7) is satisfied by the tier-3
 tests of "Whole-chain crash-point test contract" below. They use test-only
 composition; no production provider orchestrator exists. (R44B6Z.) The in-flight
@@ -5396,19 +5578,55 @@ R44B6X did not implement. Its classification is unchanged: section 24's
 "launch-blocking invariant" before commercial generation, not an item of
 this fake-provider gate.
 
-- the production/deployment state-root binding (section 17, "State-root
-  binding"). Its contract is locked by R44B8A and implementation is not yet
-  complete. The binding is `COMMERCIAL_WORKER_STATE_ROOT` and
-  `COMMERCIAL_WORKER_ENV`, bound to `/var/lib/busybookie/commercial-worker`
-  on the persistent `/var/lib/busybookie` mount (`deployment/README.md`,
-  R44B8P0). A successful R44B8 implementation, publication and docs-sync
-  will close the pre-fake-provider gate. The provider flags stay NO
-  afterwards, until a separate fake-provider slice.
+There are **zero** remaining unmet items. Historically (R44B6K to R44B8A)
+the gate listed, in turn:
 
-The gate is therefore not met.
-The remaining item protects the window between `SUBMITTING` and a durable
-`SUBMITTED`, which is the first thing a fake provider exercises. It cannot
-be safely deferred.
+- the acceptance-handler adapter (R44B6Y);
+- the in-flight heartbeat (R44B6Z);
+- the whole-chain crash-point tests (R44B7);
+- the production/deployment state-root binding (R44B8).
+
+Each protected the window between `SUBMITTING` and a durable `SUBMITTED`,
+which is the first thing a fake provider exercises.
+
+**PRE-FAKE-PROVIDER GATE = COMPLETE.** The architecture prerequisites for
+starting a separate fake-provider execution slice are satisfied. That does
+**not** mean:
+
+- fake-provider execution exists or is enabled;
+- a worker process runner exists (the package stays "never started by
+  default");
+- a provider adapter exists;
+- real provider execution exists;
+- production provider submission is enabled.
+
+The R44B7 controlled thunk was test-only composition, not a fake-provider
+implementation.
+
+**Next-slice boundary.** The next phase **may** begin a separate
+fake-provider execution slice. That slice must lock and address its own
+contract, including where applicable:
+
+- the production runner and composer;
+- the provider-create adapter boundary, with SDK create retry disabled or
+  refused when not guaranteed (section 16);
+- the pre-provider permit, the in-flight heartbeat keeper and the
+  acceptance adapter;
+- failure and outcome composition;
+- no real provider network in fake-provider mode.
+
+R44B8B designs and implements none of it.
+
+**Separate items, still open.** These are separate readiness domains that
+neither block nor reopen this gate:
+
+- the live-route `SUBMITTED` lease and capacity lifecycle (below);
+- production provider-failure composition;
+- the SDK create-retry obligation of the future provider-create adapter;
+- section 24's credential-version retention and destruction lifecycle,
+  which stays launch-blocking.
+
+The provider flags stay NO.
 
 The following may come after the first fake-provider slice, which stops at
 `SUBMITTED`, because they act only after a durable provider identity exists
@@ -5547,8 +5765,9 @@ duplicate transition or audit. This confirms the lock.
 - Production composition from definitive or ambiguous create outcomes to
   the right reporting or recovery path stays missing.
 - Polling, output and completion were not tested.
-- The provider flags stay NO, the production/deployment state-root binding
-  stays unmet as the sole remaining gate item, and section 24 is unchanged.
+- The provider flags stay NO and section 24 is unchanged. At R44B7B the
+  production/deployment state-root binding was the sole remaining gate
+  item; R44B8 has since satisfied it, and the gate is complete (R44B8B).
 
 **Locked decision (R44B7A; implemented by R44B7).** R44B7 discovery was blocked
 by slice 7's wording, which conflicted with the architecture in two places:
@@ -5816,9 +6035,9 @@ Component tests alone never satisfy the gate.
 **Independent items.**
 
 - The provider flags stay NO; whole-chain tests enable nothing.
-- The production/deployment state-root binding stays the last gate item
-  after slice 7; slice 7 neither satisfies it nor changes deployment
-  configuration.
+- The production/deployment state-root binding was the last gate item
+  after slice 7; slice 7 neither satisfied it nor changed deployment
+  configuration. R44B8 satisfied it later (R44B8B).
 - Section 24 is unchanged and separately launch-blocking.
 
 ```text
@@ -6174,7 +6393,7 @@ WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_JOURNAL=YES
 WHOLE_CHAIN_CRASH_TESTS_RESTART_PRESERVES_PROCESS_STATE=NO
 WHOLE_CHAIN_CRASH_TESTS_TERMINAL_FIXTURE_ALLOWED=YES
 WHOLE_CHAIN_CRASH_TESTS_STATE_ROOT_BINDING_INCLUDED=NO
-WORKER_STATE_ROOT_BINDING_IMPLEMENTED=NO
+WORKER_STATE_ROOT_BINDING_IMPLEMENTED=YES
 WORKER_STATE_ROOT_CONFIG_KEY=COMMERCIAL_WORKER_STATE_ROOT
 WORKER_ENV_CONFIG_KEY=COMMERCIAL_WORKER_ENV
 WORKER_STATE_ROOT_DEPLOYMENT_PATH=/var/lib/busybookie/commercial-worker

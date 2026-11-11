@@ -114,6 +114,7 @@ describe("commercial-worker source boundary", () => {
       "src/credentialContracts.ts",
       "src/credentialOpeningRun.ts",
       "src/hostFaultLatch.ts",
+      "src/inFlightHeartbeat.ts",
       "src/preProviderOrchestration.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
@@ -278,12 +279,16 @@ describe("SUBMITTING acknowledgement client boundary", () => {
 describe("heartbeat client boundary", () => {
   const method = methodSource("heartbeat");
 
-  it("is called only by the unused pre-provider orchestration", () => {
-    // R44B6V: the orchestration is the only caller, and nothing calls it (below).
-    expect(sources.filter(({ text }) => /\.heartbeat\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/preProviderOrchestration.ts"]);
+  it("is called only by the unused pre-provider orchestration and the unused in-flight keeper", () => {
+    // R44B6V: the orchestration calls it, and nothing calls it (below).
+    // R44B6Z: the in-flight keeper calls it, and nothing calls the keeper.
+    expect(sources.filter(({ text }) => /\.heartbeat\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/inFlightHeartbeat.ts",
+      "src/preProviderOrchestration.ts",
+    ]);
     expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/heartbeat/i);
     expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /\bheartbeat\b|HEARTBEAT_REJECTED/.test(code(text))).map(({ path }) => path)).toEqual(
-      ["src/preProviderOrchestration.ts", "src/workerError.ts"],
+      ["src/inFlightHeartbeat.ts", "src/preProviderOrchestration.ts", "src/workerError.ts"],
     );
   });
 
@@ -313,10 +318,14 @@ describe("pre-provider orchestration boundary", () => {
   it("has no caller anywhere in worker source, including credential opening", () => {
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit|PreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([]);
     // R44B6Y: the unused acceptance adapter reuses only the injectable deadline-timer seam.
+    // R44B6Z: so does the unused in-flight keeper.
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/acceptanceAdapter.ts",
+      "src/inFlightHeartbeat.ts",
     ]);
-    expect(code(read(join(SRC_ROOT, "acceptanceAdapter.ts")))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
+    for (const path of ["acceptanceAdapter.ts", "inFlightHeartbeat.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
+    }
     expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/PreProvider|permit/i);
   });
 
@@ -416,7 +425,8 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
   it("has no production caller: only the adapter uses the handler, nothing uses the adapter, only they use the latch", () => {
     expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual([]);
     expect(users(/acceptanceHandler|createDurableAcceptanceHandler|AcceptanceNotDurableError/, [HANDLER])).toEqual([ADAPTER]);
-    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER]);
+    // R44B6Z: the unused in-flight keeper also takes the injected latch.
+    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/inFlightHeartbeat.ts"]);
     for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
     }
@@ -522,6 +532,73 @@ describe("submission-failed and submitted client boundary", () => {
     }
     // Only the adapter, itself unused, calls the failure report.
     expect(sources.filter(({ text }) => /\.reportSubmissionFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/acceptanceAdapter.ts"]);
+  });
+});
+
+// R44B6Z0/R44B6Z: the generic in-flight lease keeper. Nothing calls it yet. It
+// owns the operation promise and its own heartbeat signals, knows no provider,
+// acceptance record or journal, and makes no local lease-expiry decision.
+describe("in-flight heartbeat keeper boundary", () => {
+  const KEEPER = "src/inFlightHeartbeat.ts";
+  const keeper = code(read(join(SRC_ROOT, "inFlightHeartbeat.ts")));
+
+  it("has no production caller", () => {
+    expect(sources.filter(({ path, text }) => path !== KEEPER && /inFlightHeartbeat|runWithInFlightHeartbeat|InFlightHeartbeat/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  });
+
+  it("imports only the timing seams, client types, latch type and worker errors", () => {
+    expect(importsOf(keeper).sort()).toEqual([
+      "./acceptanceRecoveryPolicy.js",
+      "./hostFaultLatch.js",
+      "./preProviderOrchestration.js",
+      "./workerControlClient.js",
+      "./workerError.js",
+    ]);
+    expect(keeper).toMatch(/import \{ defaultRecoverySleep, type RecoverySleep \} from "\.\/acceptanceRecoveryPolicy\.js";/);
+    expect(keeper).toMatch(/import type \{ LeaseProof, WorkerControlClient \} from "\.\/workerControlClient\.js";/);
+  });
+
+  it("knows no provider, acceptance, journal, recovery or failure report", () => {
+    expect(
+      /src\/execution|runway|veo\b|google|genai|gemini|sdk|ProviderPort|providerFactory|providerSelector|providerExecutionId|\bpoll|credential|apiKey|acceptanceJournal|AcceptanceRecord|createAcceptanceAdapter|createDurableAcceptanceHandler|recoverAcceptance|runAcceptanceRecoveryWithRetry|reportSubmissionFailed|submission-failed|reportSubmitted|\.prepare\(|fake/i.test(keeper),
+    ).toBe(false);
+  });
+
+  it("locks the constants and the attempt policy, with no backoff, jitter or interval timer", () => {
+    expect(keeper).toMatch(/export const IN_FLIGHT_HEARTBEAT_FIRST_TICK_DELAY_MS = 30000;/);
+    expect(keeper).toMatch(/export const IN_FLIGHT_HEARTBEAT_QUIET_INTERVAL_MS = 30000;/);
+    expect(keeper).toMatch(/export const IN_FLIGHT_HEARTBEAT_REQUEST_DEADLINE_MS = 10000;/);
+    expect(keeper).toMatch(/export const IN_FLIGHT_HEARTBEAT_MAX_ATTEMPTS_PER_TICK = 2;/);
+    expect(keeper.match(/\.heartbeat\(/g)).toHaveLength(1);
+    expect(keeper).toMatch(/code === "CONTROL_API_UNAVAILABLE"/);
+    expect(keeper).toMatch(/code === "HEARTBEAT_REJECTED"\) return "STOP";/);
+    expect(/setInterval|setTimeout|backoff|jitter|Math\.random/i.test(keeper)).toBe(false);
+  });
+
+  it("makes no local lease-expiry decision", () => {
+    expect(/leaseExpiresAt|Date\.now|new Date|performance\.now|getTime\(\)|LEASE_EXPIRED|monotonic/i.test(keeper)).toBe(false);
+  });
+
+  it("starts the operation once with no argument, owns its promise, and never races it away", () => {
+    expect(keeper.match(/operation\(/g)).toHaveLength(1);
+    expect(keeper).toMatch(/Promise\.resolve\(operation\(\)\)/);
+    expect(/Promise\.race|Promise\.any/.test(keeper)).toBe(false);
+    expect(keeper).toMatch(/operation: \(\) => Promise<T>/);
+    // Both outcomes are observed before anything else is awaited.
+    expect(keeper.indexOf("outcome.then(")).toBeLessThan(keeper.indexOf("await "));
+    expect(keeper).toMatch(/await settled;\s*await keeper;\s*return outcome;/);
+  });
+
+  it("keeps heartbeat signals heartbeat-local and trips the latch only for faults", () => {
+    // Only two controllers: the keeper's own stop and one per request.
+    expect(keeper.match(/new AbortController\(\)/g)).toHaveLength(2);
+    expect(keeper).toMatch(/client\.heartbeat\(executionAttemptId, proof, controller\.signal\)/);
+    expect(/operation\([^)]/.test(keeper)).toBe(false);
+    // Two trip sites: closed faults in a tick, and an unexpected keeper failure.
+    expect(keeper.match(/latch\.trip\(\)/g)).toHaveLength(2);
+    const unavailable = keeper.slice(keeper.indexOf('if (code === "CONTROL_API_UNAVAILABLE")'), keeper.indexOf('if (code === "HEARTBEAT_REJECTED")'));
+    expect(unavailable.length).toBeGreaterThan(0);
+    expect(/latch|throw/.test(unavailable)).toBe(false);
   });
 });
 

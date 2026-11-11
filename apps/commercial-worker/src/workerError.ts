@@ -33,6 +33,9 @@ export type WorkerErrorCode =
   // The control plane refused the SUBMITTING acknowledgement (R44B6U0); no
   // provider-call authority was granted.
   | "SUBMITTING_REJECTED"
+  // The control plane refused a lease renewal (R44B6W0). Never proves that an
+  // earlier heartbeat did not renew.
+  | "HEARTBEAT_REJECTED"
   // The control plane refused a submitted report (stale or foreign lease,
   // replacement epoch, conflicting or already-adopted provider execution ID).
   | "SUBMITTED_REPORT_REJECTED";
@@ -53,6 +56,7 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   ENVELOPE_INVALID: "The granted credential envelope is invalid.",
   CREDENTIAL_OPEN_FAILED: "The granted credential could not be opened.",
   SUBMITTING_REJECTED: "The worker-control API rejected the SUBMITTING acknowledgement.",
+  HEARTBEAT_REJECTED: "The worker-control API rejected the lease heartbeat.",
   SUBMITTED_REPORT_INVALID: "The submitted report is invalid and was not sent.",
   SUBMITTED_REPORT_REJECTED: "The worker-control API rejected the submitted report.",
 };

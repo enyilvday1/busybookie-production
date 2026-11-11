@@ -212,9 +212,21 @@ describe("commercial-worker source boundary", () => {
 // R44B6U0: the SUBMITTING acknowledgement client is a single-shot, client-only
 // transport primitive. Nothing in worker source calls it (a call followed by
 // no provider request would manufacture OUTCOME_UNKNOWN evidence).
+// One client method's source, up to the next method of the returned client.
+const clientSource = code(read(join(SRC_ROOT, "workerControlClient.ts")));
+const methodSource = (name: string) => {
+  const start = clientSource.indexOf(`${name}: async`);
+  if (start < 0) return "";
+  const next = clientSource.slice(start + name.length).search(/\n {4}[A-Za-z]+: async/);
+  return next < 0 ? clientSource.slice(start) : clientSource.slice(start, start + name.length + next);
+};
+// Shared single-shot transport-primitive guard (R44B6U0, R44B6W0).
+const FORBIDDEN_IN_PRIMITIVE =
+  /retry|attempt\s*\+\+|\bfor\s*\(|\bwhile\s*\(|setTimeout|setInterval|sleep|AbortController|AbortSignal\.timeout|Date\.now|new Date|performance\.now|leaseExpiresAt|LEASE_EXPIRED|submission-failed|reportSubmitted\(|console\.|log\(/i;
+
 describe("SUBMITTING acknowledgement client boundary", () => {
-  const client = code(read(join(SRC_ROOT, "workerControlClient.ts")));
-  const method = client.slice(client.indexOf("acknowledgeSubmitting: async"), client.indexOf("reportSubmitted: async"));
+  const client = clientSource;
+  const method = methodSource("acknowledgeSubmitting");
 
   it("has no production caller and stays outside the credential-opening client", () => {
     const callers = sources.filter(({ text }) => /\.acknowledgeSubmitting\s*\(/.test(code(text))).map(({ path }) => path);
@@ -226,8 +238,7 @@ describe("SUBMITTING acknowledgement client boundary", () => {
     expect(method.length).toBeGreaterThan(0);
     expect(method).toMatch(/await post\(\s*`\/worker-control\/v1\/attempts\/\$\{executionAttemptId\}\/submitting`/);
     expect(method.match(/\bpost\(/g)).toHaveLength(1);
-    const FORBIDDEN_IN_METHOD =
-      /retry|attempt\s*\+\+|\bfor\s*\(|\bwhile\s*\(|setTimeout|setInterval|sleep|AbortController|AbortSignal\.timeout|Date\.now|new Date|performance\.now|leaseExpiresAt|LEASE_EXPIRED|submission-failed|reportSubmitted\(|console\.|log\(/i;
+    const FORBIDDEN_IN_METHOD = FORBIDDEN_IN_PRIMITIVE;
     expect(FORBIDDEN_IN_METHOD.test(method)).toBe(false);
     // Nothing in the client file creates its own timer or deadline.
     expect(/setTimeout|setInterval|AbortSignal\.timeout|new AbortController/.test(client)).toBe(false);
@@ -235,6 +246,36 @@ describe("SUBMITTING acknowledgement client boundary", () => {
     expect(FORBIDDEN_IN_METHOD.test("for (let attempt = 1; ; attempt += 1) {")).toBe(true);
     expect(FORBIDDEN_IN_METHOD.test("if (lease.leaseExpiresAt.getTime() <= Date.now()) throw")).toBe(true);
     expect(FORBIDDEN_IN_METHOD.test("const timer = setTimeout(() => controller.abort(), 30000);")).toBe(true);
+  });
+});
+
+// R44B6W0: the heartbeat client is a neutral, single-shot, client-only lease
+// renewal primitive. Nothing calls it yet; it knows nothing of providers,
+// permits, cadence or lifecycle repair.
+describe("heartbeat client boundary", () => {
+  const method = methodSource("heartbeat");
+
+  it("has no production caller anywhere in worker source", () => {
+    expect(sources.filter(({ text }) => /\.heartbeat\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/heartbeat/i);
+    expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /\bheartbeat\b|HEARTBEAT_REJECTED/.test(code(text))).map(({ path }) => path)).toEqual(
+      ["src/workerError.ts"],
+    );
+  });
+
+  it("sends one request with no retry, timer, cadence, lease clock, lifecycle or provider coupling", () => {
+    expect(method.length).toBeGreaterThan(0);
+    expect(method).toMatch(/await post\(\s*`\/worker-control\/v1\/attempts\/\$\{executionAttemptId\}\/heartbeat`/);
+    expect(method.match(/\bpost\(/g)).toHaveLength(1);
+    expect(method).toMatch(/"HEARTBEAT_REJECTED"/);
+    expect(FORBIDDEN_IN_PRIMITIVE.test(method)).toBe(false);
+    expect(/retryUnavailable|interval|cadence|permit|provider|acknowledgeSubmitting|recoverAcceptance|OUTCOME_UNKNOWN|submitting`|\/submitted`/i.test(method)).toBe(
+      false,
+    );
+    // The parser returns the server expiry as data: no clock, no threshold.
+    const parser = clientSource.slice(clientSource.indexOf("export function parseHeartbeatResponse"), clientSource.indexOf("const RECOVERY_STATES"));
+    expect(parser.length).toBeGreaterThan(0);
+    expect(/Date\.now|performance\.now|getTime\(\)|new Date\(\)|LEASE_EXPIRED|executionAttemptId|state/.test(parser)).toBe(false);
   });
 });
 

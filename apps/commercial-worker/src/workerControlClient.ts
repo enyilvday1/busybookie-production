@@ -59,6 +59,15 @@ export type WorkerSubmittingAcknowledgement = Readonly<{
   submittingAt: Date;
 }>;
 
+// The lease renewal as received (existing heartbeat route; client locked by
+// R44B6W0, architecture section 15). The response names neither the attempt
+// (bound by the request path) nor a state. leaseExpiresAt is authoritative
+// server data, never compared with the local clock here.
+export type WorkerHeartbeatAcknowledgement = Readonly<{
+  fencingCounter: number;
+  leaseExpiresAt: Date;
+}>;
+
 // The token-less acceptance-recovery acknowledgement as received (R44B6R
 // contract, architecture section 18): the first transition or an idempotent
 // replay of the same provider execution ID.
@@ -88,6 +97,11 @@ export type WorkerControlClient = Readonly<{
   // externally supplied `signal` may abort it, which is a transport failure.
   // Anything but the exact acknowledgement grants no provider-call authority.
   acknowledgeSubmitting: (executionAttemptId: string, proof: LeaseProof, signal?: AbortSignal) => Promise<WorkerSubmittingAcknowledgement>;
+  // R44B6W: capability only; no worker path calls it yet (R44B6W0). A neutral,
+  // single-shot lease renewal: no retry, timeout, cadence or lease clock of
+  // its own. An externally supplied `signal` may abort it, which is a
+  // transport failure. The caller interprets the result.
+  heartbeat: (executionAttemptId: string, proof: LeaseProof, signal?: AbortSignal) => Promise<WorkerHeartbeatAcknowledgement>;
   // R44B6S: startup recovery of a durable journal record. Sends no lease
   // token and obtains no lease. `signal` bounds the request by the startup
   // retry budget; its abort is a transport failure.
@@ -238,6 +252,15 @@ export function parseSubmittingResponse(
   return Object.freeze({ executionAttemptId, fencingCounter, state: SUBMITTING_STATE, submittingAt: instant(acknowledgement.submittingAt) });
 }
 
+// The renewal must answer exactly the fencing generation presented, with a
+// canonical server expiry. No attempt or state is present to check.
+export function parseHeartbeatResponse(body: unknown, expected: Readonly<{ fencingCounter: number }>): WorkerHeartbeatAcknowledgement {
+  const renewal = exactKeys(body, ["fencingCounter", "leaseExpiresAt"]);
+  const fencingCounter = positiveSafeInteger(renewal.fencingCounter);
+  if (fencingCounter !== expected.fencingCounter) throw malformed();
+  return Object.freeze({ fencingCounter, leaseExpiresAt: instant(renewal.leaseExpiresAt) });
+}
+
 const RECOVERY_STATES: ReadonlySet<unknown> = new Set(["SUBMITTED", "SUCCEEDED", "SUBMITTED_FAILED", "ABANDONED"]);
 
 // The acknowledgement must answer exactly the attempt, original fencing
@@ -379,6 +402,29 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
         signal,
       );
       return parseSubmittingResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter });
+    },
+    // Exactly one request (R44B6W0): callers own any retry, deadline and
+    // cadence, and only the control plane decides lease expiry. A 409 never
+    // proves that an earlier heartbeat did not renew.
+    heartbeat: async (executionAttemptId: string, proof: LeaseProof, signal?: AbortSignal) => {
+      // As for the credential grant, nothing outside the proof shape is sent.
+      if (
+        !UUID.test(executionAttemptId) ||
+        typeof proof.fencingCounter !== "number" ||
+        !Number.isSafeInteger(proof.fencingCounter) ||
+        proof.fencingCounter < 1 ||
+        typeof proof.leaseToken !== "string" ||
+        !LEASE_TOKEN.test(proof.leaseToken)
+      ) {
+        throw new WorkerError("MALFORMED_CONTROL_RESPONSE");
+      }
+      const body = await post(
+        `/worker-control/v1/attempts/${executionAttemptId}/heartbeat`,
+        { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken },
+        "HEARTBEAT_REJECTED",
+        signal,
+      );
+      return parseHeartbeatResponse(body, { fencingCounter: proof.fencingCounter });
     },
     reportSubmitted: async (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => {
       // Nothing malformed is sent: the request is exactly the published contract.

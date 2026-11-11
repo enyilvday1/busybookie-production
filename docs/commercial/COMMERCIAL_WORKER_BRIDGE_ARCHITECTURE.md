@@ -62,7 +62,14 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   authority; HTTP 409 maps to the new worker code `SUBMITTING_REJECTED`; an
   acknowledgement failure never calls the provider or `submission-failed`;
   orchestration retry and deadline policy is deferred to a later slice; no
-  runtime change: introduction, sections 15, 36 and 37).
+  runtime change: introduction, sections 15, 36 and 37); R44B6U1 (R44B6U
+  published in commit 382e1bb5eced86a8651577300168cc6045695b58: the worker
+  `SUBMITTING` acknowledgement client is implemented, single-shot, owning no
+  retry, deadline or lease-expiry policy, and still client-only and unused by
+  live execution; no API, protocol, migration or provider-adapter change;
+  provider execution remains disabled and the fake-provider gate remains
+  unmet because the orchestration and the other listed items are still
+  missing: introduction, sections 15, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -904,7 +911,14 @@ generation twice.
 
 ### Worker `SUBMITTING` acknowledgement client (revision R44B6U0)
 
-**Locked decision (design only; R44B6U implements it).** R44B6U adds only
+**Status (R44B6U; recorded by R44B6U1).** Implemented in commit
+382e1bb5eced86a8651577300168cc6045695b58 as `acknowledgeSubmitting` on
+the existing `WorkerControlClient`, with its strict response parser, the
+closed worker code `SUBMITTING_REJECTED` and optional pass-through of an
+externally supplied `AbortSignal`. It is still client-only: no production
+worker path calls it. The contract below is unchanged.
+
+**Locked decision (R44B6U0; implemented by R44B6U).** R44B6U adds only
 the worker-side HTTP client for the existing, implemented control-plane
 route (R44B6J; section 10)
 `POST /worker-control/v1/attempts/:attemptId/submitting`, the
@@ -997,7 +1011,7 @@ must be reported before scope widens. Converting the integration test's
 direct `fetch` to the client is optional.
 
 ```text
-WORKER_SUBMITTING_CLIENT_IMPLEMENTED=NO
+WORKER_SUBMITTING_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTING_CLIENT_USED_BY_LIVE_EXECUTION=NO
 SUBMITTING_CLIENT_INTERNAL_RETRY_ENABLED=NO
 SUBMITTING_CLIENT_OWNS_REQUEST_TIMEOUT=NO
@@ -3415,13 +3429,16 @@ failure-code pair, exact replay, replay conflicts, sweep evidence, audit
 rollback and concurrency. These
 do not complete the whole-chain crash-point coverage required by slice 7.
 
-**A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6T, the following are still missing:
+The worker client for the `SUBMITTING` acknowledgement is implemented
+(R44B6U, section 15: single-shot and client-only); no execution path calls
+it yet.
 
-- a worker client for the `SUBMITTING` acknowledgement (contract locked by
-  R44B6U0, section 15: single-shot and client-only);
-- the execution orchestration that wires that client: its `SUBMITTING`
-  retry, request deadline, lease-lifetime and heartbeat policy, deferred by
+**A fake provider adapter may execute only after slices 1 to 7 exist.** As
+of R44B6U, the following are still missing:
+
+- the execution orchestration that wires the `SUBMITTING` client and
+  defines its retry policy, request deadline, relation to remaining lease
+  lifetime, heartbeat ordering and `AbortSignal` ownership, deferred by
   R44B6U0 to a later architecture slice;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
@@ -3596,7 +3613,7 @@ SUBMISSION_FAILED_ROUTE_IMPLEMENTED=YES
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
-WORKER_SUBMITTING_CLIENT_IMPLEMENTED=NO
+WORKER_SUBMITTING_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTING_CLIENT_USED_BY_LIVE_EXECUTION=NO
 SUBMITTING_CLIENT_INTERNAL_RETRY_ENABLED=NO
 SUBMITTING_CLIENT_OWNS_REQUEST_TIMEOUT=NO

@@ -66,6 +66,7 @@ describe("worker-control request security", () => {
     ["POST", `/worker-control/v1/attempts/${attempt}/heartbeat`],
     ["POST", `/worker-control/v1/attempts/${attempt}/release`],
     ["POST", `/worker-control/v1/attempts/${attempt}/submitting`],
+    ["POST", `/worker-control/v1/attempts/${attempt}/submitted`],
   ])("%s %s refuses a browser Origin before authentication and logs it", async (method, path) => {
     const { port, recording } = await start();
     const response = await send(port, method, path, undefined, { Origin: "https://app.example", Authorization: `Bearer ${TOKEN}` });
@@ -103,7 +104,7 @@ describe("worker-control request security", () => {
     expect(response.status).toBe(503);
   });
 
-  it("answers only POST on the five worker paths, and 404 elsewhere", async () => {
+  it("answers only POST on the six worker paths, and 404 elsewhere", async () => {
     const { port } = await start();
     for (const path of [
       "/worker-control/v1/leases",
@@ -111,6 +112,7 @@ describe("worker-control request security", () => {
       `/worker-control/v1/attempts/${attempt}/release`,
       `/worker-control/v1/attempts/${attempt}/credential-grant`,
       `/worker-control/v1/attempts/${attempt}/submitting`,
+      `/worker-control/v1/attempts/${attempt}/submitted`,
     ]) {
       const response = await send(port, "GET", path);
       expect(response.status).toBe(405);
@@ -123,7 +125,9 @@ describe("worker-control request security", () => {
       `/worker-control/v1/attempts/${attempt.toUpperCase()}/heartbeat`,
       `/worker-control/v1/attempts/${attempt}/credential-grants`,
       `/worker-control/v1/attempts/${attempt}/open`,
-      `/worker-control/v1/attempts/${attempt}/submitted`,
+      `/worker-control/v1/attempts/${attempt}/submitted/x`,
+      `/worker-control/v1/attempts/${attempt}/submission-failed`,
+      `/worker-control/v1/attempts/${attempt}/acceptance-recovery`,
       `/worker-control/v1/attempts/${attempt}/submitting/x`,
       "/worker/leases",
     ]) {

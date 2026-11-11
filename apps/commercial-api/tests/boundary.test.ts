@@ -363,10 +363,14 @@ describe("worker-control boundary (lease foundation only)", () => {
   const sources = sourceFiles.map((path) => ({ path: label(path), text: read(path) }));
   const code = (text: string) => text.replace(/^\s*\/\/.*$/gm, "");
   const workerControl = sources.filter(({ path }) => path.startsWith("src/workerControl/"));
-  // Never anywhere in worker-control (R44B6G, narrowed by R44B6J): SUBMITTED,
-  // provider execution identity, fingerprints, decryption or an opener.
+  // Never anywhere in worker-control (R44B6G, narrowed by R44B6J and R44B6O):
+  // fingerprints, decryption or an opener.
   const FORBIDDEN_IN_WORKER_CONTROL =
-    /'SUBMITTED'|state\s*=\s*'SUBMITTED|fingerprint_|CredentialOpener\s*=|:\s*CredentialOpener|\.open\s*\(|createDecipheriv|provider_execution_id\s*=|submitted_at\s*=/i;
+    /fingerprint_|CredentialOpener\s*=|:\s*CredentialOpener|\.open\s*\(|createDecipheriv/i;
+  // R44B6O: entering SUBMITTED and recording a provider execution identity are
+  // confined to the live submitted-acknowledgement service.
+  const SUBMITTED_ONLY = /'SUBMITTED'|provider_execution_id\s*=|submitted_at\s*=/i;
+  const SUBMITTED_SERVICE = "src/workerControl/workerSubmittedService.ts";
   // R44B6H: writing the grant timestamp and reading the sealed envelope are
   // confined to the credential-grant service.
   const GRANT_ONLY = /SET\s[^;`]*credential_granted_at\s*=|sealed_credential/i;
@@ -387,6 +391,7 @@ describe("worker-control boundary (lease foundation only)", () => {
       "src/workerControl/workerLeasePolicy.ts",
       "src/workerControl/workerLeaseService.ts",
       "src/workerControl/workerSecurityEvents.ts",
+      "src/workerControl/workerSubmittedService.ts",
       "src/workerControl/workerSubmittingService.ts",
     ]);
     const routeOwners = sources.filter(({ text }) => /worker-control/.test(code(text))).map(({ path }) => path);
@@ -395,18 +400,31 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect(importers).toEqual([]);
   });
 
-  it("cannot enter SUBMITTED, decrypt, read fingerprints or record a provider execution", () => {
+  it("cannot decrypt or read fingerprints anywhere in worker-control", () => {
     for (const { path, text } of workerControl) {
       expect({ path, violates: FORBIDDEN_IN_WORKER_CONTROL.test(code(text)) }).toEqual({ path, violates: false });
     }
     // Guard the guards.
-    expect("SET state = 'SUBMITTED'").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
-    expect("SET submitted_at = now()").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
-    expect("SET provider_execution_id = $2").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
     expect("SELECT fingerprint_value FROM provider_credential_versions").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
     expect("const plaintext = await opener.open(envelope, context);").toMatch(FORBIDDEN_IN_WORKER_CONTROL);
     expect("type CredentialSealingContext").not.toMatch(FORBIDDEN_IN_WORKER_CONTROL);
-    expect("SET state = 'SUBMITTING', submitting_at = now()").not.toMatch(FORBIDDEN_IN_WORKER_CONTROL);
+  });
+
+  it("confines entering SUBMITTED to the live submitted-acknowledgement service, which reads no secret material and calls no provider", () => {
+    const offenders = workerControl.filter(({ path, text }) => path !== SUBMITTED_SERVICE && SUBMITTED_ONLY.test(code(text))).map(({ path }) => path);
+    expect(offenders).toEqual([]);
+    const service = code(read(join(APP_ROOT, SUBMITTED_SERVICE)));
+    expect(SUBMITTED_ONLY.test(service)).toBe(true);
+    expect(GRANT_ONLY.test(service)).toBe(false);
+    const statements = service.replace(/\/\/.*$/gm, "");
+    // No secret material, no recovery horizon, no job status change, no provider client.
+    expect(/sealed|envelope|recovery_expires_at\s*=|credential_granted_at\s*=|submitting_at\s*=|UPDATE\s+execution_jobs|fetch\s*\(|https?:/i.test(statements)).toBe(false);
+    // Guard the guards.
+    expect("SET state = 'SUBMITTED'").toMatch(SUBMITTED_ONLY);
+    expect("SET submitted_at = now()").toMatch(SUBMITTED_ONLY);
+    expect("SET provider_execution_id = $2").toMatch(SUBMITTED_ONLY);
+    expect('const HEARTBEAT_STATES = ["LEASED", "SUBMITTING", "SUBMITTED"] as const;').not.toMatch(SUBMITTED_ONLY);
+    expect("epoch.provider_execution_id !== providerExecutionId").not.toMatch(SUBMITTED_ONLY);
   });
 
   it("confines entering SUBMITTING to the fenced acknowledgement service, which reads no secret material", () => {

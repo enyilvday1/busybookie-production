@@ -20,7 +20,8 @@ export type WorkerSecurityEventType =
   | "WORKER_LEASE_REJECTED"
   | "WORKER_FENCING_REJECTED"
   | "WORKER_CREDENTIAL_GRANT_REJECTED"
-  | "WORKER_SUBMITTING_REJECTED";
+  | "WORKER_SUBMITTING_REJECTED"
+  | "WORKER_SUBMITTED_REJECTED";
 
 export type WorkerLeaseRejectionReason =
   // The authenticated principal is not ACTIVE when re-checked in the transaction.
@@ -46,9 +47,17 @@ export type WorkerLeaseRejectionReason =
   | "CREDENTIAL_NOT_GRANTED"
   // Invariant failure: an already-SUBMITTING attempt's exact version is DESTROYED.
   | "SUBMITTING_VERSION_DESTROYED"
-  // SUBMITTED heartbeat only: a valid current lease that is not the exact
-  // live-route lease epoch (migration 0006), for example a replacement lease.
-  | "SUBMITTED_LEASE_EPOCH_MISMATCH";
+  // SUBMITTED heartbeat and the live submitted route: a valid current lease
+  // that is not the exact live-route lease epoch (migration 0006), for
+  // example a replacement lease.
+  | "SUBMITTED_LEASE_EPOCH_MISMATCH"
+  // Live submitted route only (architecture section 30): the attempt is not
+  // SUBMITTING (or SUBMITTED for replay); a different provider execution ID on
+  // an already SUBMITTED attempt; an ID already adopted by another attempt of
+  // the same Account and provider.
+  | "INCOMPATIBLE_ATTEMPT_STATE"
+  | "PROVIDER_EXECUTION_CONFLICT"
+  | "PROVIDER_EXECUTION_ID_IN_USE";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 

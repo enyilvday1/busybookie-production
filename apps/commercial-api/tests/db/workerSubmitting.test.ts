@@ -1146,6 +1146,309 @@ describe("SUBMITTING lease liveness and expiry sweep (R44B6M)", () => {
       }
     });
   });
+
+  // R44B6O: the live SUBMITTING -> SUBMITTED acknowledgement (architecture section 18).
+  // Exercised directly: no worker flow calls it yet, and no provider is involved.
+  describe("live submitted acknowledgement (R44B6O)", () => {
+    const submitted = (port: number, worker: Worker, attemptId: string, proof: Proof, providerExecutionId: unknown) =>
+      send(
+        port,
+        "POST",
+        `/worker-control/v1/attempts/${attemptId}/submitted`,
+        JSON.stringify({ fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken, providerExecutionId }),
+        { ...auth(worker), "Content-Type": "application/json" },
+      );
+    const submittedAudits = async (attemptId: string) =>
+      (await clients.migrator.query<{ metadata: Record<string, unknown> }>(
+        "SELECT metadata FROM audit_events WHERE resource_id = $1 AND event_type = 'execution_attempt.submitted' ORDER BY sequence",
+        [attemptId],
+      )).rows.map((row) => row.metadata);
+    const replaceLease = (attemptId: string, workerId: string, token: string) =>
+      clients.runtime.query(
+        `UPDATE execution_attempts SET lease_worker_principal_id = $2, lease_token_sha256 = $3, lease_fencing_counter = lease_fencing_counter + 1,
+                leased_at = now(), lease_expires_at = now() + interval '2 minutes', heartbeat_at = NULL WHERE id = $1`,
+        [attemptId, workerId, createHash("sha256").update(token, "utf8").digest("hex")],
+      );
+    // Another QUEUED attempt in the same Account, bound to the same exact credential version.
+    async function siblingWork(item: Work): Promise<Work> {
+      const source = await q<{ production_id: string; entitlement_grant_id: string }>(
+        "SELECT g.production_id, g.entitlement_grant_id FROM execution_jobs j JOIN generation_authorizations g ON g.id = j.generation_authorization_id WHERE j.id = $1",
+        [item.jobId],
+      );
+      const authorization = await q<{ id: string }>(
+        `INSERT INTO generation_authorizations
+           (account_id, production_id, entitlement_grant_id, billing_mode, provider, model, provider_connection_id,
+            provider_credential_version_id, generation_request, generation_request_sha256, expected_cost_cap_unit,
+            expected_cost_cap_amount, expires_at, created_by_user_id)
+         VALUES ($1, $2, $3, 'USER_BYO', 'EXAMPLE_PROVIDER', 'example-model-1', $4, $5, '{"prompt":"sibling"}'::jsonb, repeat('d', 64),
+                 'MICRO_USD', 2000000, now() + interval '15 minutes', $6) RETURNING id`,
+        [item.accountId, source.production_id, source.entitlement_grant_id, item.connectionId, item.versionId, item.userId],
+      );
+      await clients.migrator.query("UPDATE generation_authorizations SET status = 'CLAIMED', claimed_at = now() WHERE id = $1", [authorization.id]);
+      const job = await q<{ id: string }>(
+        "INSERT INTO execution_jobs (account_id, production_id, generation_authorization_id) VALUES ($1, $2, $3) RETURNING id",
+        [item.accountId, source.production_id, authorization.id],
+      );
+      const sibling = await q<{ id: string }>(
+        `INSERT INTO execution_attempts (account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider, provider_credential_version_id)
+         VALUES ($1, $2, $3, 1, 'USER_BYO', 'EXAMPLE_PROVIDER', $4) RETURNING id`,
+        [item.accountId, job.id, authorization.id, item.versionId],
+      );
+      return { ...item, jobId: job.id, attemptId: sibling.id };
+    }
+
+    it("records SUBMITTING -> SUBMITTED once, keeping the live lease and all submission provenance, with the job RUNNING", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      const before = await fullRow(item.attemptId);
+
+      const response = await submitted(port, worker!, item.attemptId, proof, "models/example/operations/op-123");
+      expect(response.status).toBe(200);
+      const body = json(response);
+      expect(Object.keys(body).sort()).toEqual(["executionAttemptId", "fencingCounter", "providerExecutionId", "state", "submittedAt"]);
+      expect(body).toMatchObject({
+        executionAttemptId: item.attemptId,
+        fencingCounter: 1,
+        state: "SUBMITTED",
+        providerExecutionId: "models/example/operations/op-123",
+      });
+
+      const after = await fullRow(item.attemptId);
+      expect(after).toMatchObject({ state: "SUBMITTED", provider_execution_id: "models/example/operations/op-123", recovery_expires_at: null });
+      expect((after.submitted_at as Date).toISOString()).toBe(body.submittedAt);
+      expect((after.submitted_at as Date).getTime()).toBeGreaterThanOrEqual((before.submitting_at as Date).getTime());
+      // Only state, provider_execution_id, submitted_at and updated_at changed: the live lease and the
+      // barrier provenance (worker, token, fence, timing, grant, submitting_at, principal, epoch) are kept.
+      const unchanged = (row: FullRow) => ({ ...row, state: null, provider_execution_id: null, submitted_at: null, updated_at: null });
+      expect(unchanged(after)).toEqual(unchanged(before));
+      expect(after).toMatchObject({
+        lease_worker_principal_id: worker!.id,
+        lease_fencing_counter: "1",
+        submitting_worker_principal_id: worker!.id,
+        submitting_fencing_counter: "1",
+      });
+      expect(await jobStatus(item.jobId)).toBe("RUNNING");
+      expect(await submittedAudits(item.attemptId)).toEqual([
+        { attemptNumber: 1, fencingCounter: 1, workerPrincipalId: worker!.id, provider: "EXAMPLE_PROVIDER", credentialVersion: 1 },
+      ]);
+      const visible = (await allAuditText()) + JSON.stringify(events);
+      expect(visible.includes("models/example/operations/op-123") || visible.includes(proof.leaseToken) || visible.includes(item.plaintext)).toBe(false);
+      expect(events).toEqual([]);
+      expect(await obligations(item)).toEqual({ hasOpenCredentialRetentionObligation: true, hasOpenProviderRecoveryObligation: true, blocksDestruction: true });
+
+      // The kept live-route lease is heartbeat-eligible under the exact-epoch rule (R44B6N).
+      expect((await call(port, worker!, "heartbeat", item.attemptId, proof)).status).toBe(200);
+      expect((await fullRow(item.attemptId)).state).toBe("SUBMITTED");
+    });
+
+    it("replays an identical acknowledgement, including concurrent ones, with one audit and an unchanged submitted_at", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      const responses = await Promise.all([1, 2, 3].map(() => submitted(port, worker!, item.attemptId, proof, "exec-concurrent-1")));
+      expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+      const bodies = responses.map(json);
+      expect(new Set(bodies.map((body) => JSON.stringify(body))).size).toBe(1);
+      const committed = await fullRow(item.attemptId);
+      const retry = await submitted(port, worker!, item.attemptId, proof, "exec-concurrent-1");
+      expect(retry.status).toBe(200);
+      expect(json(retry)).toEqual(bodies[0]);
+      expect(await fullRow(item.attemptId)).toEqual(committed);
+      expect(await submittedAudits(item.attemptId)).toHaveLength(1);
+      expect(events).toEqual([]);
+    });
+
+    it("refuses a different provider execution ID on an already SUBMITTED attempt as an invariant violation", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      expect((await submitted(port, worker!, item.attemptId, proof, "exec-original")).status).toBe(200);
+      const committed = await fullRow(item.attemptId);
+      const response = await submitted(port, worker!, item.attemptId, proof, "exec-different");
+      expect(response.status).toBe(409);
+      expect(response.body).toBe(REJECTED);
+      expect(eventSummary()).toEqual([["WORKER_SUBMITTED_REJECTED", "PROVIDER_EXECUTION_CONFLICT"]]);
+      expect(JSON.stringify(events).includes("exec-")).toBe(false);
+      expect(await fullRow(item.attemptId)).toEqual(committed);
+      expect(await submittedAudits(item.attemptId)).toHaveLength(1);
+    });
+
+    it("refuses wrong worker, wrong token, stale fence and an expired lease, leaving SUBMITTING untouched", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      const before = await fullRow(item.attemptId);
+      for (const [worker, candidate, reason] of [
+        [list[1]!, proof, "OTHER_WORKER"],
+        [list[0]!, { ...proof, leaseToken: randomBytes(32).toString("base64url") }, "TOKEN_MISMATCH"],
+        [list[0]!, { ...proof, fencingCounter: 2 }, "FENCING_MISMATCH"],
+      ] as const) {
+        const response = await submitted(port, worker, item.attemptId, candidate, "exec-refused");
+        expect(response.status).toBe(409);
+        expect(response.body).toBe(REJECTED);
+        expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason });
+      }
+      expect(await fullRow(item.attemptId)).toEqual(before);
+      await expire(item.attemptId);
+      const expired = await fullRow(item.attemptId);
+      const response = await submitted(port, list[0]!, item.attemptId, proof, "exec-refused");
+      expect(response.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "LEASE_EXPIRED" });
+      expect(await fullRow(item.attemptId)).toEqual(expired);
+      expect(await submittedAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("refuses a replay once the live lease has expired: the worker must then use acceptance-recovery", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      expect((await submitted(port, worker!, item.attemptId, proof, "exec-lost-response")).status).toBe(200);
+      await expire(item.attemptId);
+      const committed = await fullRow(item.attemptId);
+      const response = await submitted(port, worker!, item.attemptId, proof, "exec-lost-response");
+      expect(response.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "LEASE_EXPIRED" });
+      expect(await fullRow(item.attemptId)).toEqual(committed);
+      expect(committed).toMatchObject({ state: "SUBMITTED", provider_execution_id: "exec-lost-response" });
+    });
+
+    it.each([
+      ["the same worker principal (W, N+1, T2)", 0],
+      ["a different worker principal", 1],
+    ] as const)("refuses a replacement lease held by %s on SUBMITTED, though its proof is valid", async (_label, holder) => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      expect((await submitted(port, list[0]!, item.attemptId, proof, "exec-replaced")).status).toBe(200);
+      const token = randomBytes(32).toString("base64url");
+      await replaceLease(item.attemptId, list[holder]!.id, token);
+      const replaced = await fullRow(item.attemptId);
+      expect(replaced).toMatchObject({ lease_fencing_counter: "2", submitting_fencing_counter: "1" });
+      const response = await submitted(port, list[holder]!, item.attemptId, { fencingCounter: 2, leaseToken: token }, "exec-replaced");
+      expect(response.status).toBe(409);
+      expect(response.body).toBe(REJECTED);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "SUBMITTED_LEASE_EPOCH_MISMATCH" });
+      expect(await fullRow(item.attemptId)).toEqual(replaced);
+      expect(await submittedAudits(item.attemptId)).toHaveLength(1);
+    });
+
+    it("refuses LEASED and OUTCOME_UNKNOWN: the live route never reaches SUBMITTED from either", async () => {
+      const [worker] = await workers(1);
+      const leased = await work();
+      const port = await compose([worker!]);
+      const leasedProof = await granted(port, worker!);
+      expect(leasedProof.attemptId).toBe(leased.attemptId);
+      const response = await submitted(port, worker!, leased.attemptId, leasedProof, "exec-too-early");
+      expect(response.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "INCOMPATIBLE_ATTEMPT_STATE" });
+      expect((await fullRow(leased.attemptId)).state).toBe("LEASED");
+
+      // Enter SUBMITTING, let the lease expire and let the sweep move it to OUTCOME_UNKNOWN.
+      expect((await call(port, worker!, "submitting", leased.attemptId, leasedProof)).status).toBe(200);
+      await expire(leased.attemptId);
+      expect((await leaseRequest(port, worker!)).status).toBe(200);
+      expect((await fullRow(leased.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      const unknown = await submitted(port, worker!, leased.attemptId, leasedProof, "exec-too-late");
+      expect(unknown.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "INCOMPATIBLE_ATTEMPT_STATE" });
+      expect(await fullRow(leased.attemptId)).toMatchObject({ state: "OUTCOME_UNKNOWN", provider_execution_id: null, submitted_at: null });
+      expect(await submittedAudits(leased.attemptId)).toEqual([]);
+    });
+
+    it("refuses a provider execution ID already adopted in the same Account and provider; another Account may reuse it", async () => {
+      const list = await workers(3);
+      const first = await work();
+      const sibling = await siblingWork(first);
+      const otherAccount = await work();
+      const port = await compose(list);
+      const firstProof = await submittingAttempt(port, list[0]!, first);
+      expect((await submitted(port, list[0]!, first.attemptId, firstProof, "exec-shared")).status).toBe(200);
+
+      const siblingProof = await submittingAttempt(port, list[1]!, sibling);
+      const conflict = await submitted(port, list[1]!, sibling.attemptId, siblingProof, "exec-shared");
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toBe(REJECTED);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "PROVIDER_EXECUTION_ID_IN_USE" });
+      expect(await fullRow(sibling.attemptId)).toMatchObject({ state: "SUBMITTING", provider_execution_id: null, submitted_at: null });
+      expect(await submittedAudits(sibling.attemptId)).toEqual([]);
+
+      // Uniqueness is scoped to Account + provider: a different Account may adopt the same opaque ID.
+      const otherProof = await submittingAttempt(port, list[2]!, otherAccount);
+      expect((await submitted(port, list[2]!, otherAccount.attemptId, otherProof, "exec-shared")).status).toBe(200);
+    });
+
+    it("keeps the exact credential version retained when the customer disconnects after SUBMITTED, and still replays", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      const original = json(await submitted(port, worker!, item.attemptId, proof, "exec-retained"));
+      await disconnect(item);
+      const row = await version(item.versionId);
+      expect(row.status).toBe("RETAINED_FOR_RECOVERY");
+      expect(row.sealed_credential).not.toBeNull();
+      expect(await obligations(item)).toEqual({ hasOpenCredentialRetentionObligation: true, hasOpenProviderRecoveryObligation: true, blocksDestruction: true });
+      // Connection eligibility is not checked for already-authorised work.
+      const replay = await submitted(port, worker!, item.attemptId, proof, "exec-retained");
+      expect(replay.status).toBe(200);
+      expect(json(replay)).toEqual(original);
+    });
+
+    it("fails closed when the exact version has been destroyed (invariant failure)", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      // Not reachable through disconnect (the open obligation retains it); forced here to prove fail-closed.
+      await clients.migrator.query(DESTROY, [item.versionId]);
+      const response = await submitted(port, worker!, item.attemptId, proof, "exec-destroyed");
+      expect(response.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "SUBMITTING_VERSION_DESTROYED" });
+      expect((await fullRow(item.attemptId)).state).toBe("SUBMITTING");
+    });
+
+    it("validates the body strictly and keeps worker authentication and Origin refusal", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      const path = `/worker-control/v1/attempts/${item.attemptId}/submitted`;
+      const headers = { ...auth(worker!), "Content-Type": "application/json" };
+      // Exactly the proof members; each case below changes one thing.
+      const exact = { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken };
+      for (const body of [
+        { ...exact },
+        { ...exact, providerExecutionId: "" },
+        { ...exact, providerExecutionId: "has space" },
+        { ...exact, providerExecutionId: "https://provider.example/tasks/1" },
+        { ...exact, providerExecutionId: "x".repeat(257) },
+        { ...exact, providerExecutionId: 42 },
+        { ...exact, providerExecutionId: "exec-ok", providerResponse: { id: "exec-ok" } },
+        { ...exact, providerExecutionId: "exec-ok", submittedAt: new Date().toISOString() },
+        { fencingCounter: proof.fencingCounter, providerExecutionId: "exec-ok" },
+        { ...exact, fencingCounter: "1", providerExecutionId: "exec-ok" },
+      ]) {
+        expect((await send(port, "POST", path, JSON.stringify(body), headers)).status).toBe(400);
+      }
+      const valid = JSON.stringify({ ...exact, providerExecutionId: "x".repeat(256) });
+      expect((await send(port, "POST", path, valid, auth(worker!))).status).toBe(415);
+      expect((await send(port, "GET", path, undefined, auth(worker!))).status).toBe(405);
+      expect((await send(port, "POST", path, valid, { "Content-Type": "application/json" })).status).toBe(401);
+      expect((await send(port, "POST", path, valid, { ...headers, Origin: "https://app.example" })).status).toBe(403);
+      expect((await fullRow(item.attemptId)).state).toBe("SUBMITTING");
+      // The control: the same exact body is accepted, and the longest valid ID is stored without normalisation.
+      const accepted = await send(port, "POST", path, valid, headers);
+      expect(accepted.status).toBe(200);
+      expect(json(accepted).providerExecutionId).toBe("x".repeat(256));
+    });
+  });
 });
 
 describe("races with disconnect", () => {

@@ -66,6 +66,9 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
   "src/providerExecutionContract.ts": ["provider execution identity"],
   // R44B6S: startup recovery passes the record's own identity (checked below).
   "src/startupJournalReconciliation.ts": ["provider execution identity"],
+  // R44B8: the state-root binding inspects (lstat) the configured root and
+  // its managed directories; it writes nothing itself (checked below).
+  "src/workerStateRoot.ts": ["local persistence"],
   // R44B6Y: the acceptance handler validates and records the provider
   // execution ID; the adapter passes the record's own ID through unchanged.
   "src/acceptanceHandler.ts": ["provider execution identity"],
@@ -119,8 +122,10 @@ describe("commercial-worker source boundary", () => {
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
       "src/startupJournalReconciliation.ts",
+      "src/workerConfig.ts",
       "src/workerControlClient.ts",
       "src/workerError.ts",
+      "src/workerStateRoot.ts",
     ]);
   });
 
@@ -382,6 +387,8 @@ describe("acceptance journal boundary", () => {
       "src/credentialOpeningRun.ts",
       "src/preProviderOrchestration.ts",
       "src/startupJournalReconciliation.ts",
+      // R44B8: the state-root binding constructs the journal at the configured root.
+      "src/workerStateRoot.ts",
     ]);
     expect(read(join(SRC_ROOT, "preProviderOrchestration.ts"))).toMatch(/import type \{ AcceptanceJournal \} from "\.\/acceptanceJournal\.js";/);
     // R44B6Y: the outer acceptance adapter, itself unused, is the only caller.
@@ -599,6 +606,56 @@ describe("in-flight heartbeat keeper boundary", () => {
     const unavailable = keeper.slice(keeper.indexOf('if (code === "CONTROL_API_UNAVAILABLE")'), keeper.indexOf('if (code === "HEARTBEAT_REJECTED")'));
     expect(unavailable.length).toBeGreaterThan(0);
     expect(/latch|throw/.test(unavailable)).toBe(false);
+  });
+});
+
+// R44B8A/R44B8: the state-root binding. Configuration is parsed from an
+// injected object; no worker production module reads the process
+// environment, falls back to a temporary or working directory, creates or
+// rewrites the root, or logs it.
+describe("state-root binding boundary", () => {
+  const config = code(read(join(SRC_ROOT, "workerConfig.ts")));
+  const binding = code(read(join(SRC_ROOT, "workerStateRoot.ts")));
+
+  it("reads no process environment anywhere in worker production source", () => {
+    expect(sources.filter(({ text }) => /process\.env|process\[["']env["']\]/.test(text)).map(({ path }) => path)).toEqual([]);
+    expect(/process\./.test(config)).toBe(false);
+    // The binding reads only the platform and the effective UID, as host facts.
+    expect(binding.match(/process\.[A-Za-z]+/g)?.sort()).toEqual(["process.geteuid", "process.geteuid", "process.platform"]);
+  });
+
+  it("has no temporary, working-directory, home or realpath fallback and never creates or rewrites the root", () => {
+    for (const text of [config, binding]) {
+      expect(/tmpdir|mkdtemp|process\.cwd|homedir|realpath|resolve\(|BUSYBOOKIE_MEDIA_ROOT/.test(text)).toBe(false);
+    }
+    expect(importsOf(binding).sort()).toEqual(["./acceptanceJournal.js", "./credentialOpeningRun.js", "./workerConfig.js", "./workerError.js", "node:fs/promises", "node:path"]);
+    expect(binding).toMatch(/import \{ lstat \} from "node:fs\/promises";/);
+    expect(/\bmkdir|writeFile|chmod\(|chown|rename|unlink|symlink|\.write\(|open\(/.test(binding)).toBe(false);
+    expect(importsOf(config)).toEqual([]);
+  });
+
+  it("locks the keys, the production root and the sync policy", () => {
+    expect(config).toMatch(/mode: "COMMERCIAL_WORKER_ENV",/);
+    expect(config).toMatch(/stateRoot: "COMMERCIAL_WORKER_STATE_ROOT",/);
+    expect(config).toMatch(/export const PRODUCTION_WORKER_STATE_ROOT = "\/var\/lib\/busybookie\/commercial-worker";/);
+    expect(sources.filter(({ text }) => text.includes("/var/lib/busybookie")).map(({ path }) => path)).toEqual(["src/workerConfig.ts"]);
+    expect(binding).toMatch(/if \(mode === "production"\) return "REQUIRED";/);
+    expect(binding).toMatch(/\(root\.mode & 0o077\) !== 0/);
+    expect(binding).toMatch(/host\.platform !== "linux" \|\| stateRoot !== PRODUCTION_WORKER_STATE_ROOT/);
+  });
+
+  it("logs nothing but the closed startup failure, and calls the existing startup path", () => {
+    expect(binding.match(/log\?\.\(/g)).toHaveLength(1);
+    expect(binding).toMatch(/run\.log\?\.\(\{ stage: "STARTUP", outcome: "FAILED", code: "STATE_ROOT_UNSUITABLE" \}\);/);
+    expect(binding).toMatch(/return runCredentialOpeningOnce\(\{ \.\.\.run, journal \}\);/);
+    expect(/console\.|stateRoot\s*[,}]\s*\)/.test(binding)).toBe(false);
+    // No provider, polling, lock file or root metadata.
+    expect(/provider|lock|marker|metadata|poll/i.test(binding.replace(/CredentialOpening/g, ""))).toBe(false);
+  });
+
+  it("has no production caller and no process entry point", () => {
+    expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /workerStateRoot|runConfiguredCredentialOpeningOnce|bindWorkerStateRoot/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => !["src/workerConfig.ts", "src/workerStateRoot.ts"].includes(path) && /workerConfig|loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([]);
   });
 });
 

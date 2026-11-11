@@ -381,9 +381,13 @@ describe("worker-control boundary (lease foundation only)", () => {
   // SUBMITTING rows, but never sets the state or the barrier timestamp.
   const SUBMITTING_ONLY = /(\bSET|,)\s*state\s*=\s*'SUBMITTING'|submitting_at\s*=(?!=)/i;
   const SUBMITTING_SERVICE = "src/workerControl/workerSubmittingService.ts";
-  // R44B6M: OUTCOME_UNKNOWN is entered only by the control-plane sweep in the lease service.
+  // R44B6M: OUTCOME_UNKNOWN is entered only by the control-plane sweep in the
+  // lease service; R44B6T adds the submission-failed report.
   const OUTCOME_UNKNOWN_ONLY = /(\bSET|,)\s*state\s*=\s*'OUTCOME_UNKNOWN'/i;
   const SWEEP_SERVICE = "src/workerControl/workerLeaseService.ts";
+  // R44B6T: FAILED_BEFORE_SUBMISSION is entered only by the submission-failed report.
+  const FAILED_BEFORE_SUBMISSION_ONLY = /(\bSET|,)\s*state\s*=\s*'FAILED_BEFORE_SUBMISSION'/i;
+  const SUBMISSION_FAILED_SERVICE = "src/workerControl/workerSubmissionFailedService.ts";
 
   it("keeps worker-control routes inside src/workerControl and out of the default process", () => {
     expect(workerControl.map(({ path }) => path).sort()).toEqual([
@@ -393,6 +397,7 @@ describe("worker-control boundary (lease foundation only)", () => {
       "src/workerControl/workerLeasePolicy.ts",
       "src/workerControl/workerLeaseService.ts",
       "src/workerControl/workerSecurityEvents.ts",
+      "src/workerControl/workerSubmissionFailedService.ts",
       "src/workerControl/workerSubmittedService.ts",
       "src/workerControl/workerSubmittingService.ts",
     ]);
@@ -450,12 +455,39 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect("SET state = 'OUTCOME_UNKNOWN', failure_code = 'X' FROM expired WHERE a.id = expired.id AND a.state = 'SUBMITTING'").not.toMatch(SUBMITTING_ONLY);
   });
 
-  it("confines entering OUTCOME_UNKNOWN to the control-plane sweep in the lease service", () => {
-    const offenders = workerControl.filter(({ path, text }) => path !== SWEEP_SERVICE && OUTCOME_UNKNOWN_ONLY.test(code(text))).map(({ path }) => path);
+  it("confines entering OUTCOME_UNKNOWN to the control-plane sweep and the submission-failed report", () => {
+    const offenders = workerControl
+      .filter(({ path, text }) => ![SWEEP_SERVICE, SUBMISSION_FAILED_SERVICE].includes(path) && OUTCOME_UNKNOWN_ONLY.test(code(text)))
+      .map(({ path }) => path);
     expect(offenders).toEqual([]);
     expect(OUTCOME_UNKNOWN_ONLY.test(code(read(join(APP_ROOT, SWEEP_SERVICE))))).toBe(true);
+    expect(OUTCOME_UNKNOWN_ONLY.test(code(read(join(APP_ROOT, SUBMISSION_FAILED_SERVICE))))).toBe(true);
     // Guard the guard.
     expect("SET state = 'OUTCOME_UNKNOWN', failure_code = 'X'").toMatch(OUTCOME_UNKNOWN_ONLY);
+  });
+
+  it("confines entering FAILED_BEFORE_SUBMISSION to the submission-failed report, which is token-free on replay and reads no secret", () => {
+    const offenders = workerControl
+      .filter(({ path, text }) => path !== SUBMISSION_FAILED_SERVICE && FAILED_BEFORE_SUBMISSION_ONLY.test(code(text)))
+      .map(({ path }) => path);
+    expect(offenders).toEqual([]);
+    const service = code(read(join(APP_ROOT, SUBMISSION_FAILED_SERVICE))).replace(/\/\/.*$/gm, "");
+    expect(FAILED_BEFORE_SUBMISSION_ONLY.test(service)).toBe(true);
+    // Never SUBMITTED, a provider identity, SUBMITTING, a grant, secret material, the
+    // sweep-only code, a lease (re)creation or a provider client.
+    expect(SUBMITTED_ONLY.test(service)).toBe(false);
+    expect(SUBMITTING_ONLY.test(service)).toBe(false);
+    expect(GRANT_ONLY.test(service)).toBe(false);
+    const FORBIDDEN_IN_SUBMISSION_FAILED =
+      /sealed|envelope|WORKER_LEASE_EXPIRED_DURING_SUBMISSION|lease_token_sha256\s*=(?!\s*NULL\b)|lease_fencing_counter\s*=(?!=)|submitting_worker_principal_id\s*=(?!=)|submitting_fencing_counter\s*=(?!=)|recovery_expires_at\s*=|fetch\s*\(|https?:/i;
+    expect(FORBIDDEN_IN_SUBMISSION_FAILED.test(service)).toBe(false);
+    // Guard the guards.
+    expect("lease_token_sha256 = NULL, leased_at = NULL").not.toMatch(FORBIDDEN_IN_SUBMISSION_FAILED);
+    expect("lease_token_sha256 = $3").toMatch(FORBIDDEN_IN_SUBMISSION_FAILED);
+    expect("SET lease_fencing_counter = lease_fencing_counter + 1").toMatch(FORBIDDEN_IN_SUBMISSION_FAILED);
+    expect("Number(row.lease_fencing_counter) !== proof.fencingCounter").not.toMatch(FORBIDDEN_IN_SUBMISSION_FAILED);
+    expect("SET state = 'FAILED_BEFORE_SUBMISSION', failure_code = $2").toMatch(FAILED_BEFORE_SUBMISSION_ONLY);
+    expect("WHERE state = 'FAILED_BEFORE_SUBMISSION'").not.toMatch(FAILED_BEFORE_SUBMISSION_ONLY);
   });
 
   it("confines the grant timestamp write and the sealed-envelope read to the credential-grant service", () => {

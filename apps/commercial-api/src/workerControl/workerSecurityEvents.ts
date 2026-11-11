@@ -22,7 +22,8 @@ export type WorkerSecurityEventType =
   | "WORKER_CREDENTIAL_GRANT_REJECTED"
   | "WORKER_SUBMITTING_REJECTED"
   | "WORKER_SUBMITTED_REJECTED"
-  | "WORKER_ACCEPTANCE_RECOVERY_REJECTED";
+  | "WORKER_ACCEPTANCE_RECOVERY_REJECTED"
+  | "WORKER_SUBMISSION_FAILURE_REJECTED";
 
 export type WorkerLeaseRejectionReason =
   // The authenticated principal is not ACTIVE when re-checked in the transaction.
@@ -59,7 +60,10 @@ export type WorkerLeaseRejectionReason =
   // the same Account and provider.
   | "INCOMPATIBLE_ATTEMPT_STATE"
   | "PROVIDER_EXECUTION_CONFLICT"
-  | "PROVIDER_EXECUTION_ID_IN_USE";
+  | "PROVIDER_EXECUTION_ID_IN_USE"
+  // submission-failed only (R44B6T0): a recognised outcome with a recognised
+  // but incompatible failure code, classified only after authority is proven.
+  | "FAILURE_CODE_OUTCOME_MISMATCH";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 

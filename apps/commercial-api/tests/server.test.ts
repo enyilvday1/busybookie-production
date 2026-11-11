@@ -88,6 +88,10 @@ describe("unknown routes", () => {
     const port = await start();
     expect((await send(port, "POST", "/worker-control/v1/attempts/11111111-2222-4333-8444-555555555555/acceptance-recovery", "{}", { "Content-Type": "application/json" })).status).toBe(404);
   });
+  it("does not expose submission-failed in the default composition", async () => {
+    const port = await start();
+    expect((await send(port, "POST", "/worker-control/v1/attempts/11111111-2222-4333-8444-555555555555/submission-failed", "{}", { "Content-Type": "application/json" })).status).toBe(404);
+  });
   it.each(["/", "/api", "/api/v1/health", "/__health/", "/__HEALTH", "/__health/extra", "/health", "/index.html"])(
     "returns JSON 404 for %s",
     async (path) => {

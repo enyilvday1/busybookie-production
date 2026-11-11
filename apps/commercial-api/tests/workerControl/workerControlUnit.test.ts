@@ -87,6 +87,55 @@ describe("worker-control request security", () => {
     expect(response.status).toBe(400);
   });
 
+  const failedPath = `/worker-control/v1/attempts/${attempt}/submission-failed`;
+  const LEASE = "A".repeat(43);
+  const failed = { fencingCounter: 1, leaseToken: LEASE, outcome: "OUTCOME_UNKNOWN", failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS" };
+  it("authenticates submission-failed and fails closed on a security-sink outage", async () => {
+    const { port, recording } = await start();
+    expect((await send(port, "POST", failedPath)).status).toBe(401);
+    expect((await send(port, "POST", failedPath, undefined, { Authorization: "Bearer wrong-fixture" })).status).toBe(401);
+    recording.setFailing(true);
+    expect((await send(port, "POST", failedPath)).status).toBe(503);
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["a missing fencingCounter", { leaseToken: LEASE, outcome: "OUTCOME_UNKNOWN", failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS" }],
+    ["a missing leaseToken", { fencingCounter: 1, outcome: "OUTCOME_UNKNOWN", failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS" }],
+    ["a missing outcome", { fencingCounter: 1, leaseToken: LEASE, failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS" }],
+    ["a missing failureCode", { fencingCounter: 1, leaseToken: LEASE, outcome: "OUTCOME_UNKNOWN" }],
+    ["a zero fencingCounter", { ...failed, fencingCounter: 0 }],
+    ["a fractional fencingCounter", { ...failed, fencingCounter: 1.5 }],
+    ["an unsafe fencingCounter", { ...failed, fencingCounter: 2 ** 53 }],
+    ["a string fencingCounter", { ...failed, fencingCounter: "1" }],
+    ["a short leaseToken", { ...failed, leaseToken: "short" }],
+    ["a non-string leaseToken", { ...failed, leaseToken: 42 }],
+    ["an unknown outcome", { ...failed, outcome: "REJECTED" }],
+    ["a lowercase outcome", { ...failed, outcome: "outcome_unknown" }],
+    ["an unknown failureCode", { ...failed, failureCode: "PROVIDER_TIMEOUT" }],
+    ["the sweep-only failureCode", { ...failed, failureCode: "WORKER_LEASE_EXPIRED_DURING_SUBMISSION" }],
+    ["the sweep-only failureCode with a definitive outcome", { ...failed, outcome: "DEFINITIVELY_REJECTED", failureCode: "WORKER_LEASE_EXPIRED_DURING_SUBMISSION" }],
+    ["a non-string failureCode", { ...failed, failureCode: null }],
+    ["an extra providerExecutionId", { ...failed, providerExecutionId: "op-1" }],
+    ["an extra timestamp", { ...failed, failedAt: "2026-11-11T10:00:00.000Z" }],
+    ["an extra credential field", { ...failed, credential: "x" }],
+  ])("refuses submission-failed with %s before any transaction", async (_label, body) => {
+    const { port, recording } = await start();
+    const response = await send(port, "POST", failedPath, JSON.stringify(body), { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+    expect(response.status).toBe(400);
+    expect(response.body).toBe('{"status":"error","code":"INVALID_REQUEST"}\n');
+    // A request-shape failure is not a security event.
+    expect(recording.events).toEqual([]);
+  });
+
+  it("refuses malformed JSON and a non-JSON content type for submission-failed", async () => {
+    const { port } = await start();
+    const headers = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+    expect((await send(port, "POST", failedPath, "{not json", headers)).status).toBe(400);
+    expect((await send(port, "POST", failedPath, "[]", headers)).status).toBe(400);
+    expect((await send(port, "POST", failedPath, JSON.stringify(failed), { ...headers, "Content-Type": "text/plain" })).status).toBe(415);
+  });
+
   it("requires JSON content type for acceptance recovery", async () => {
     const { port } = await start();
     const response = await send(port, "POST", recoveryPath, JSON.stringify({ fencingCounter: 1, providerExecutionId: "op-1" }), { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" });
@@ -99,6 +148,7 @@ describe("worker-control request security", () => {
     ["POST", `/worker-control/v1/attempts/${attempt}/submitting`],
     ["POST", `/worker-control/v1/attempts/${attempt}/submitted`],
     ["POST", `/worker-control/v1/attempts/${attempt}/acceptance-recovery`],
+    ["POST", `/worker-control/v1/attempts/${attempt}/submission-failed`],
   ])("%s %s refuses a browser Origin before authentication and logs it", async (method, path) => {
     const { port, recording } = await start();
     const response = await send(port, method, path, undefined, { Origin: "https://app.example", Authorization: `Bearer ${TOKEN}` });
@@ -136,7 +186,7 @@ describe("worker-control request security", () => {
     expect(response.status).toBe(503);
   });
 
-  it("answers only POST on the seven worker paths, and 404 elsewhere", async () => {
+  it("answers only POST on the eight worker paths, and 404 elsewhere", async () => {
     const { port } = await start();
     for (const path of [
       "/worker-control/v1/leases",
@@ -146,6 +196,7 @@ describe("worker-control request security", () => {
       `/worker-control/v1/attempts/${attempt}/submitting`,
       `/worker-control/v1/attempts/${attempt}/submitted`,
       `/worker-control/v1/attempts/${attempt}/acceptance-recovery`,
+      `/worker-control/v1/attempts/${attempt}/submission-failed`,
     ]) {
       const response = await send(port, "GET", path);
       expect(response.status).toBe(405);
@@ -159,7 +210,9 @@ describe("worker-control request security", () => {
       `/worker-control/v1/attempts/${attempt}/credential-grants`,
       `/worker-control/v1/attempts/${attempt}/open`,
       `/worker-control/v1/attempts/${attempt}/submitted/x`,
-      `/worker-control/v1/attempts/${attempt}/submission-failed`,
+      `/worker-control/v1/attempts/${attempt}/submission-failed/x`,
+      `/worker-control/v1/attempts/${attempt}/submission-failure`,
+      `/worker-control/v1/attempts/${attempt.toUpperCase()}/submission-failed`,
       `/worker-control/v1/attempts/${attempt}/acceptance-recovery/x`,
       `/worker-control/v1/attempts/${attempt.toUpperCase()}/acceptance-recovery`,
       "/worker-control/v1/attempts/not-a-uuid/acceptance-recovery",

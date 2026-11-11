@@ -34,7 +34,10 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   deferred: introduction, sections 10, 17, 18, 30, 31, 36 and 37);
   R44B6S0 (worker startup acceptance-recovery retry policy locked for future
   R44B6S implementation; no runtime change: introduction, sections 17, 31
-  and 37).
+  and 37); R44B6S1 (R44B6S worker acceptance-recovery client and startup
+  reconciliation wiring implemented under the R44B6S0 policy; provider
+  execution, `submission-failed` and recovery leases remain unimplemented:
+  introduction, sections 10, 17, 18, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -405,7 +408,7 @@ under `/worker-control/v1`, all with exact closed JSON bodies:
 | `attempts/:attemptId/credential-grant` | `{fencingCounter, leaseToken}` | Implemented (R44B6H). |
 | `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
 | `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Implemented (R44B6O, section 18). No worker flow calls it yet. |
-| `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Implemented (R44B6R, section 18). Worker client and startup wiring remain unimplemented. |
+| `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Implemented (R44B6R, section 18). Called only by worker startup reconciliation (R44B6S, section 17). |
 | `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18). |
 
 No route accepts a client-supplied timestamp, Account, connection,
@@ -1016,10 +1019,12 @@ provider definitively accepts
 ```
 
 The control-plane `acceptance-recovery` route is implemented (R44B6R,
-section 18). Its worker client and startup wiring, `submission-failed` and
-provider execution of any kind (fake or real) remain unimplemented.
-R44B6Q still makes no provider call and does not automatically resolve
-valid published acceptance evidence.
+section 18), and worker startup reconciliation now calls it through the
+worker acceptance-recovery client (R44B6S, "Startup reconciliation" below).
+`submission-failed` and provider execution of any kind (fake or real)
+remain unimplemented. Startup makes no provider call; it resolves valid
+published acceptance evidence only through an exact control-plane
+acknowledgement.
 
 **State root.** R44B6P takes the state root as explicit worker composition
 input. No environment variable is read or locked here. The deployment
@@ -1429,8 +1434,8 @@ inspection, startup blocks without completing temporary publication.
 | Local condition | Implemented startup behavior |
 |---|---|
 | No unresolved evidence or other blocking condition | `CLEAR`; fresh lease acquisition may proceed. |
-| Valid published final | Durable provider-acceptance evidence; retain unchanged as `UNRESOLVED_ACCEPTANCE`. Do not delete, overwrite or regenerate it. Fresh work stays blocked until later worker recovery wiring reconciles it through the implemented control-plane route. |
-| Valid complete temporary | Not yet published acceptance evidence. Complete publication through `publish(record)` using the exact existing record, preserving its original `recordedAt`, `recordSha256` and canonical bytes. Never regenerate it through `write(input)`. Remove the source temporary only after verifying the same exact final is published. The resulting final remains unresolved and blocks fresh work. |
+| Valid published final | Durable provider-acceptance evidence; the local scan reports it as `UNRESOLVED_ACCEPTANCE` unchanged. Do not overwrite or regenerate it. (Revised R44B6S1.) Startup then calls `acceptance-recovery` with its exact persisted identity (see "Startup reconciliation with acceptance recovery" below). An exact `SUBMITTED` acknowledgement reconciles it for this startup and retains it; an exact `SUCCEEDED`, `SUBMITTED_FAILED` or `ABANDONED` acknowledgement removes it under "Retention". A blocking failure or retry exhaustion retains it unchanged and prevents `CLEAR`. No lease is requested before `CLEAR`. |
+| Valid complete temporary | Not yet published acceptance evidence. Complete publication through `publish(record)` using the exact existing record, preserving its original `recordedAt`, `recordSha256` and canonical bytes. Never regenerate it through `write(input)`. Remove the source temporary only after verifying the same exact final is published. The resulting final is then a valid published final (row above): unresolved, blocking fresh work until exactly acknowledged by acceptance recovery. |
 | Invalid or partial temporary | Never provider-acceptance evidence. Preserve its bytes through the existing exclusive-link quarantine mechanism and log the safe corruption code. After successful quarantine it does not by itself represent unresolved acceptance; startup may become `CLEAR` if nothing else blocks it. |
 | Quarantine, publication or temporary-cleanup failure | Fail closed. Quarantine failure is never `CLEAR`; conflicting quarantine evidence is `CONFLICT`, and other unsafe I/O failures are `CORRUPT`. |
 | Corrupt published final | `CORRUPT`; retain in place for operator attention. Never treat it as `NOT_FOUND`, overwrite it or regenerate it. Fresh work stays blocked. |
@@ -1445,13 +1450,20 @@ There is no rename or copy fallback, no duplicate evidence and no silent
 discard.
 
 **Repeated startup.** With unchanged state, `CLEAR` stays `CLEAR`; a valid
-final stays unresolved; a valid temporary may become the same exact final;
+final stays unresolved in the local scan and is offered to acceptance
+recovery again (a retained `SUBMITTED` record is replayed idempotently); a
+valid temporary may become the same exact final;
 an invalid temporary is quarantined once without repeated evidence
 mutation; a corrupt final stays fail-closed. Startup manufactures no
-duplicate acceptance records and introduces no garbage collection.
+duplicate acceptance records and introduces no garbage collection: the only
+removal of a valid final is the exact terminal acknowledgement described
+under "Retention" (R44B6S).
 
 **CLEAR gate.** Only `CLEAR` permits lease acquisition. The other local
-results are `UNRESOLVED_ACCEPTANCE`, `CORRUPT` and `CONFLICT`; each means:
+results are `UNRESOLVED_ACCEPTANCE`, `CORRUPT` and `CONFLICT`.
+`UNRESOLVED_ACCEPTANCE` proceeds to acceptance recovery and becomes `CLEAR`
+only when every unresolved valid record of the pass has an exact
+acknowledgement (R44B6S). Until then, and for `CORRUPT` or `CONFLICT`:
 
 ```text
 NEW_WORK_ALLOWED=NO
@@ -1462,8 +1474,12 @@ PROVIDER_CALLS=0
 ```
 
 Startup refusal uses closed worker codes: `STATE_ROOT_UNSUITABLE`,
-`ACCEPTANCE_RECONCILIATION_FAILED` for unresolved acceptance,
-`ACCEPTANCE_JOURNAL_CORRUPT` and `ACCEPTANCE_JOURNAL_CONFLICT`. Logs use safe
+`ACCEPTANCE_RECONCILIATION_FAILED` for unresolved acceptance (definitive
+recovery refusal or retry exhaustion), `ACCEPTANCE_JOURNAL_CORRUPT` and
+`ACCEPTANCE_JOURNAL_CONFLICT` (also for a terminal removal whose final
+drifted or failed). A recovery authentication rejection or malformed control
+response keeps its existing `WORKER_AUTHENTICATION_REJECTED` or
+`MALFORMED_CONTROL_RESPONSE` code; no new code exists. Logs use safe
 codes, never raw filesystem messages, state-root paths, credentials, tokens,
 provider payloads or provider execution IDs (section 29).
 
@@ -1476,18 +1492,19 @@ VALID_TEMP_REUSES_EXACT_RECORD=YES
 VALID_TEMP_REGENERATES_RECORDED_AT=NO
 ```
 
-### Future worker acceptance-recovery integration after local startup checks
+### Startup reconciliation with acceptance recovery
 
-**Boundary.** R44B6Q does not call `acceptance-recovery`, transition
-`OUTCOME_UNKNOWN -> SUBMITTED`, create recovery leases or resolve valid
-published acceptance. All such acceptance remains blocking in the worker.
-R44B6R implements the control-plane route (section 18), but no worker client
-or startup call to it exists yet. The following worker integration remains
-a locked future contract, separate from the implemented local phase.
+**Boundary (revised R44B6S1).** The local phase above (R44B6Q) still runs
+first and alone decides `CORRUPT` and `CONFLICT`; it never calls the
+control plane. R44B6S implements the worker acceptance-recovery client and
+the startup call to the control-plane route (R44B6R, section 18) for the
+valid published records the local phase leaves unresolved. Recovery never
+creates a lease or a recovery lease, never sends a live lease token, and
+never calls a provider. The worker transitions nothing itself: only the
+control plane may move `OUTCOME_UNKNOWN -> SUBMITTED`.
 
-**Locked decision (revision R44B6K).** Once the worker acceptance-recovery
-client and startup wiring are implemented, startup extends the local checks
-as follows, still before requesting any lease:
+**Locked decision (revision R44B6K; implemented R44B6S).** Startup extends
+the local checks as follows, still before requesting any lease:
 
 1. validates the state root (absolute, local, link-capable, owner-only, and
    directory-fsync-capable in production);
@@ -1520,11 +1537,39 @@ as follows, still before requesting any lease:
 
 No step in reconciliation calls a provider create.
 
+**Implementation (R44B6S; recorded by R44B6S1).** After a clean local scan,
+the unresolved valid records are processed one at a time in lexical
+attempt-ID order. Each receives its own fresh bounded budget under the
+retry policy below, and every request reuses exactly that record's persisted
+`executionAttemptId`, `fencingCounter` and `providerExecutionId`; the
+request body is exactly `{fencingCounter, providerExecutionId}`.
+`recordedAt` and `recordSha256` are never regenerated and `write()` is never
+used. Outcomes:
+
+- exact `SUBMITTED` acknowledgement: reconciled for this startup pass and
+  retained unchanged, so a later startup offers it again and the route
+  replays it idempotently;
+- exact `SUCCEEDED`, `SUBMITTED_FAILED` or `ABANDONED` acknowledgement:
+  reconciled, then removed under "Retention" — the final is re-read and must
+  still be byte-identical to the reconciled record, then it is unlinked and
+  the directory is synced under the journal's directory-sync policy. Drift
+  is `ACCEPTANCE_JOURNAL_CONFLICT`; a missing, corrupt or unremovable final
+  is `ACCEPTANCE_JOURNAL_CORRUPT`;
+- `ATTEMPT_STILL_SUBMITTING`, transport failure or HTTP 5xx: retried within
+  that record's budget; never an acknowledgement;
+- definitive refusal (`409 LEASE_REJECTED`), authentication rejection,
+  malformed or unexpected response, or budget exhaustion: fail closed at
+  that record, which is retained intact (no delete, no quarantine); later
+  records are not processed and startup does not become `CLEAR`.
+
+`leaseNextAttempt` is called only after every unresolved record of the pass
+has an exact acknowledgement and startup is `CLEAR`.
+
 ### Startup acceptance-recovery retry policy (revision R44B6S0)
 
-**Architecture decision only.** This locks the policy required by R44B6S;
-the worker acceptance-recovery client and startup calls remain unimplemented.
-Section 37 records the authoritative numeric and classification flags.
+**Locked decision (R44B6S0; implemented R44B6S).** This is the policy the
+worker acceptance-recovery client and startup calls implement. Section 37
+records the authoritative numeric and classification flags.
 
 **Eligibility authority.** Only the control-plane database determines
 recovery eligibility and authoritative lease expiry. The worker retry clock
@@ -1602,8 +1647,17 @@ function; tests must not sleep for production retry durations. Pin immediate
 attempt 1, the delay sequence, the 10-second cap, the maximum 18 attempts,
 the 150-second elapsed bound including request time, no jitter, retryable
 and definitive non-retryable classifications, exact-identity reuse, and
-fail-closed exhaustion with evidence retained. This architecture revision
-does not modify or implement those tests.
+fail-closed exhaustion with evidence retained. R44B6S implements these tests
+on injected time, including request durations and a request that hangs
+through the remaining budget.
+
+**In-flight bound (R44B6S).** Each request is bounded by the remaining
+per-record budget, measured on the same injected monotonic clock and waited
+through the same injected sleep. If that bound is reached first, the request
+is aborted (a transport failure, `CONTROL_API_UNAVAILABLE`) and the record
+is exhausted at once: no budget remains, so no second request can overlap
+it. This bound limits only how long startup asks; it never declares a
+control-plane lease expired.
 
 ### Unresolved journal blocks new work
 
@@ -1707,12 +1761,14 @@ explicitly composed worker-control router; the default process answers 404.
 - **Implemented (R44B6Q):** local startup journal reconciliation and the
   fail-closed new-work gate before lease acquisition (section 17).
 - **Implemented (R44B6R):** the separate control-plane acceptance-recovery
-  route below; its worker client and startup wiring remain unimplemented.
+  route below.
+- **Implemented (R44B6S):** its worker client and the startup reconciliation
+  call to it (section 17), under the bounded per-record retry policy.
 - **Not wired:** no provider submission flow writes new acceptance records
   or calls the `submitted` client.
 - **Not implemented:** worker provider execution and `submission-failed`.
-  Valid published acceptance remains unresolved in the worker until its
-  acceptance-recovery client and startup wiring exist.
+  Valid published acceptance is resolved at startup only through an exact
+  `acceptance-recovery` acknowledgement; otherwise it keeps blocking new work.
 
 The required worker ordering still stands:
 
@@ -1823,8 +1879,8 @@ LIVE_SUBMITTED_LEASE_PRESERVED=YES
 OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
 ACCEPTANCE_RECOVERY_IMPLEMENTED=YES
 ACCEPTANCE_RECOVERY_ROUTE_IMPLEMENTED=YES
-WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=NO
-STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=NO
+WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=YES
+STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=YES
 SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
@@ -2000,10 +2056,12 @@ while TX1's already-committed expiry remains intact.
 expired live token and rewrites neither submitting principal nor submitting
 fencing counter. It manufactures no live-route `SUBMITTED` heartbeat
 authority; replacement/recovery contexts do not inherit that original
-live-route epoch (section 12). R44B6R implements only this control-plane
-route. The worker acceptance-recovery client and startup wiring remain
-unimplemented, so R44B6Q continues to discover and block unresolved durable
-acceptance without automatically resolving it.
+live-route epoch (section 12). R44B6R implements this control-plane route.
+R44B6S implements the worker acceptance-recovery client and the startup
+reconciliation call (section 17): it sends exactly
+`{fencingCounter, providerExecutionId}` from the durable record, never a
+lease token, obtains no lease, and resolves unresolved durable acceptance
+only on an exact acknowledgement; anything else keeps blocking new work.
 
 ```text
 SUBMITTING_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
@@ -2022,8 +2080,8 @@ RECOVERY_REWRITES_SUBMITTING_FENCING_COUNTER=NO
 RECOVERY_MANUFACTURES_SUBMITTED_HEARTBEAT_AUTHORITY=NO
 ACCEPTANCE_RECOVERY_FIRST_TRANSITION_AUDIT_WRITTEN_ONCE=YES
 ACCEPTANCE_RECOVERY_REPLAY_DUPLICATES_AUDIT=NO
-WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=NO
-STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=NO
+WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=YES
+STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=YES
 TOKENLESS_ACCEPTANCE_RECOVERY_FROM_LIVE_SUBMITTING=NO
 TOKENLESS_ACCEPTANCE_RECOVERY_FROM_OUTCOME_UNKNOWN=YES
 SUBMITTING_RESTART_WITH_JOURNAL_CAN_RESUBMIT_PROVIDER=NO
@@ -2887,10 +2945,13 @@ phase: empty state may be `CLEAR`; valid finals remain unresolved and block
 leasing; case G completes exact publication but then remains blocked; case H
 quarantines invalid bytes and may become `CLEAR` if no other condition
 blocks startup. Case F remains fail-closed. Conflicts and invalid filesystem
-state also block. R44B6R now implements the control-plane acceptance-recovery
-behavior used by B, B', C and E below. The worker client and startup calls
-remain future work: R44B6Q does not invoke the route, resolve this evidence
-automatically or create a recovery lease.
+state also block. R44B6R implements the control-plane acceptance-recovery
+behavior used by B, B', C and E below. (Revised R44B6S1.) R44B6S implements
+the worker client and startup calls: after the local phase, each valid
+final (including one completed from case G) is recovered in lexical order
+under its own bounded budget, so B', C and terminal same-ID replays can
+reach `CLEAR`, while B (until a later authoritative sweep) and E fail
+closed. No recovery lease is created.
 
 | Case | Control plane | Local journal | Rule |
 |---|---|---|---|
@@ -3045,8 +3106,8 @@ each slice under its own authorised gate:
 4. The `submitted`, `acceptance-recovery` and `submission-failed` routes
    (section 18). The live `submitted` route is implemented (R44B6O); no
    worker flow calls it yet. The control-plane `acceptance-recovery` route
-   is implemented (R44B6R); its worker client and startup wiring remain
-   unimplemented. `submission-failed` remains to be built.
+   is implemented (R44B6R), and its worker client and startup wiring are
+   implemented (R44B6S). `submission-failed` remains to be built.
    Neither this step nor any recovery-lease step may
    grant `SUBMITTED` heartbeat authority to any lease other than the exact
    live-route epoch.
@@ -3057,9 +3118,10 @@ each slice under its own authorised gate:
    `submitted` client remain unwired to live execution.
 6. Worker startup reconciliation and the unresolved-journal new-work block
    (section 17). Implemented (R44B6Q): prepare and reconcile before leasing;
-   only `CLEAR` permits fresh work. Valid published acceptance remains
-   blocking because the worker acceptance-recovery client and startup
-   wiring are not implemented; the control-plane route now exists (R44B6R).
+   only `CLEAR` permits fresh work. Valid published acceptance is recovered
+   through the control-plane route (R44B6R) by the worker
+   acceptance-recovery client and startup wiring (R44B6S), and keeps
+   blocking unless exactly acknowledged.
 7. Crash-point tests covering every row of the section 31 matrices.
    Faults are injected:
    - before and after each journal step;
@@ -3073,14 +3135,14 @@ each slice under its own authorised gate:
 
 R44B6Q adds focused local startup crash/restart tests, including exact
 temporary publication and interrupted quarantine. R44B6R adds control-plane
-recovery, replay, concurrency, expiry-handoff and rollback coverage. These
+recovery, replay, concurrency, expiry-handoff and rollback coverage. R44B6S
+adds worker recovery-client, retry-policy, retention and startup-wiring
+coverage, including end-to-end recovery against the real router. These
 do not complete the whole-chain crash-point coverage required by slice 7.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6R, the following are still missing:
+of R44B6S, the following are still missing:
 
-- the worker acceptance-recovery client and startup wiring (the control-plane
-  route is implemented);
 - `submission-failed` (slice 4);
 - a worker client for the `SUBMITTING` acknowledgement;
 - the acceptance-handler adapter that wires provider acceptance to the
@@ -3233,8 +3295,8 @@ RECOVERY_REWRITES_SUBMITTING_FENCING_COUNTER=NO
 RECOVERY_MANUFACTURES_SUBMITTED_HEARTBEAT_AUTHORITY=NO
 ACCEPTANCE_RECOVERY_FIRST_TRANSITION_AUDIT_WRITTEN_ONCE=YES
 ACCEPTANCE_RECOVERY_REPLAY_DUPLICATES_AUDIT=NO
-WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=NO
-STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=NO
+WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=YES
+STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=YES
 SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES

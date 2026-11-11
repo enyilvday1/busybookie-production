@@ -136,7 +136,28 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   new security event, failure code, migration, route, protocol or worker
   change; credential versions are untouched and the section 24
   retained-version lifecycle gap stays separately open; provider execution
-  remains disabled: introduction, sections 12, 30, 31, 36 and 37).
+  remains disabled: introduction, sections 12, 30, 31, 36 and 37); R44B6Y0
+  (acceptance-handler contract locked after R44B6Y discovery found six
+  unresolved decisions: the worker uses a worker-local minimal acceptance
+  shape `{provider, providerExecutionId}` and imports no engine execution
+  handler; acceptance handling is split into an inner durable handler, which
+  validates, builds the exact record once, publishes it durably and returns
+  it, and an outer reconciliation adapter, which the future provider
+  callback awaits, so provider polling cannot begin after journal
+  publication but before `SUBMITTED` reconciliation; the pre-provider permit
+  now carries `submittingAt` from the exact `SUBMITTING` acknowledgement;
+  journal durability precedes every `SUBMITTED` request; live `submitted`
+  reporting has at most two attempts of 10 s each, retrying only
+  `CONTROL_API_UNAVAILABLE`; a rejection or exhausted unavailability hands
+  the durable record to the existing acceptance-recovery policy; a 409 is
+  never itself read as lease expiry and no local lease clock is used; the
+  record is kept after `SUBMITTED` under v1 retention; a worker
+  `submission-failed` client is required, used only for failures before
+  durable acceptance, with a journal conflict reported as
+  `ACCEPTANCE_JOURNAL_WRITE_FAILED`; a sticky worker-local host-fault latch
+  is required; no engine, provider, API, protocol or migration change and no
+  implementation; provider execution remains disabled: introduction,
+  sections 12, 15, 17, 18, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -765,7 +786,11 @@ provider create call.
 - A heartbeat failure never authorises the worker to abandon a provider call
   that is already in flight. The worker finishes the call, journals any
   acceptance (section 17) and reports through the route that its remaining
-  authority permits (section 18).
+  authority permits (section 18). (R44B6Y0.) The worker never judges that
+  authority with a local lease clock: the outer acceptance adapter tries
+  the live `submitted` route first and hands the durable record to
+  acceptance recovery when that cannot establish success (section 18,
+  "Acceptance handler and adapter").
 - The worker heartbeats at most every third of the server lease duration
   (currently 40 seconds of a 120-second lease). The worker never chooses the
   duration.
@@ -1113,9 +1138,11 @@ lease
 -> heartbeat: one successful heartbeat is mandatory here (R44B6V0), then as needed throughout
 -> provider create call (exactly one)
 -> definitive provider acceptance
--> acceptance journal record durably committed (section 17)
--> acceptance handler resolves (section 18)
--> report SUBMITTED (section 18)
+-> outer acceptance adapter receives the minimal acceptance (section 18, R44B6Y0)
+-> inner durable handler validates it and durably publishes the exact record (section 17)
+-> inner durable handler returns that record
+-> outer adapter reports SUBMITTED, or hands the record to acceptance recovery (section 18)
+-> outer adapter resolves; only then may provider polling begin
 ```
 
 - No provider call moves earlier than the committed `SUBMITTING`
@@ -1270,7 +1297,9 @@ request settles. The deadline acts through the `AbortSignal`, which the
 production fetch transport honours, and a retry starts only after the
 previous attempt has settled, so attempts never overlap. The timer is an
 injectable seam for tests, not runtime configuration. The returned permit is
-exactly `{executionAttemptId, fencingCounter}`. It excludes the lease token,
+exactly `{executionAttemptId, fencingCounter}`; R44B6Y0 extends the locked
+shape with `submittingAt` (below), which the R44B6Y implementation adds. It
+excludes the lease token,
 machine credential, opened provider credential and `leaseExpiresAt`, and has
 no provider callback or object. It records that the locked pre-provider
 checks completed; holding it is not itself a security boundary. No provider
@@ -1512,8 +1541,14 @@ orchestration; implemented by R44B6V, not wired into live execution).**
 - **Permit.** The client knows nothing of the permit. The orchestration
   alone creates it from an exact `SUBMITTING` acknowledgement plus an exact
   heartbeat acknowledgement, subject to the other R44B6V0 gates. The renewed
-  `leaseExpiresAt` may be exposed to the orchestration; the permit's
-  representation, and whether it carries the expiry, are not locked here.
+  `leaseExpiresAt` may be exposed to the orchestration. (R44B6Y0.) The
+  permit's representation is now locked as exactly
+  `{executionAttemptId, fencingCounter, submittingAt}`. `submittingAt` is
+  copied from the exact validated `SUBMITTING` acknowledgement, in the
+  client's existing timestamp representation. It is never generated, never
+  taken from the heartbeat response and never derived from local time. The
+  permit never carries `leaseExpiresAt`, the lease token, a credential or a
+  provider callback, and stays non-secret.
 
 **In-flight heartbeat (still deferred).** Its scheduling, retry and failure
 policy remain to be locked before live provider execution. Section 12
@@ -1736,7 +1771,9 @@ provider accepted
 Without durable local evidence, BusyBookie cannot distinguish "the provider
 accepted and the response or report was lost" from "the provider did not
 accept". The journal records the accepted provider identity before the
-acceptance handler is considered complete (section 18). A journal record
+acceptance handler is considered complete (section 18; R44B6Y0: before the
+inner durable handler returns, and so before any `SUBMITTED` request). A
+journal record
 only ever lets the worker report the **same** provider execution ID. It never
 authorises a provider create call.
 
@@ -2383,6 +2420,12 @@ acceptance handler:
 6. The worker then reports `SUBMITTED` (below).
 7. The control plane commits `provider_execution_id` and `submitted_at`.
 
+(R44B6Y0.) Steps 2 to 5 belong to the inner durable handler, which resolves
+by returning the exact durable record. Step 6 belongs to the outer
+acceptance adapter. The provider callback is the outer adapter, so the
+callback itself resolves only after step 6 has reached an allowed result or
+failed closed ("Acceptance handler and adapter" below).
+
 The Runway, Veo and Google adapters already stop and refuse to resubmit when
 the handler throws. That behaviour is relied on unchanged.
 
@@ -2397,12 +2440,404 @@ ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
   worker reports `submission-failed` with outcome `OUTCOME_UNKNOWN` and
   failure code `ACCEPTANCE_JOURNAL_WRITE_FAILED` or
   `PROVIDER_EXECUTION_ID_INVALID`. If it cannot report, the section 12 sweep
-  reaches the same state;
+  reaches the same state. (R44B6Y0.) A journal publication conflict is
+  reported as `ACCEPTANCE_JOURNAL_WRITE_FAILED`; the report is best effort
+  under the policy in "Acceptance handler and adapter" below;
 - the worker does **not** report `SUBMITTED`, because `SUBMITTED` requires
   durable local evidence. The in-memory ID is not sent upstream in v1;
 - the worker treats a journal-write failure as a host fault. It halts new
-  submission work until its state root passes the startup checks again;
+  submission work until its state root passes the startup checks again.
+  (R44B6Y0.) The halt is the sticky process-lifetime host-fault latch below:
+  a new process with clean startup reconciliation is the only way back to
+  new work;
 - the attempt is never retried automatically.
+
+### Acceptance handler and adapter (revision R44B6Y0)
+
+**Locked decision (R44B6Y0; not implemented).** R44B6Y discovery found six
+decisions unresolved: the adapter shape, where `SUBMITTED` is reported, the
+source of `submittingAt`, the live `submitted` retry policy, the missing
+`submission-failed` client and host-fault halt, and the lease-liveness
+signal. This lock resolves them. It changes no route, protocol, migration,
+engine module or provider adapter, and implements nothing.
+
+**Two worker-local layers.**
+
+- **Inner durable acceptance handler.** It accepts the minimal acceptance,
+  enforces single use, validates the provider and the provider execution
+  ID, builds the record exactly once, publishes that exact record durably
+  and returns it to its caller. It never calls a provider, owns no provider
+  SDK, never reports `SUBMITTED`, never polls, never deletes the record and
+  imports no engine execution code.
+- **Outer acceptance adapter.** It is the future callback supplied to
+  provider execution. It calls the inner handler, waits until the record is
+  durable, performs the live `submitted` report, hands the exact durable
+  record to acceptance recovery when needed, and resolves only after
+  post-acceptance reconciliation reaches an allowed result. Otherwise it
+  fails closed. It does **not** resolve merely because the inner handler
+  returned.
+
+**Worker-local acceptance shape.** The worker defines its own minimal
+acceptance value, conceptually `{provider, providerExecutionId}`. It imports
+nothing from `src/execution`: not `SingleShotSubmissionAcceptedHandler`,
+not `GoogleGenAiSubmissionAcceptedHandler` and no provider-specific engine
+acceptance type. The worker boundary test continues to forbid those
+imports. The shape carries no `recoveryMetadata`,
+`providerEstimatedCredits`, polling data, provider response or SDK object.
+It is acceptance data, not a provider abstraction or port. Future provider
+composition may adapt its provider callback to it structurally; R44B6Y does
+not do that wiring.
+
+**Validation before publication.**
+
+- The provider equals the attempt and lease provider.
+- The ID passes the existing commercial `isProviderExecutionId` rule.
+- The ID is used exactly as received: no trim, no case change, no
+  normalisation.
+- The engine orchestrator's handler trims IDs and is not reusable by the
+  commercial worker.
+
+**Single use.**
+
+- One handler instance accepts at most one invocation. The first invocation
+  owns the acceptance lifecycle, and is marked as owner synchronously on
+  entry, so two concurrent invocations can never produce two records or two
+  `SUBMITTED` reports.
+- A second invocation fails closed and trips the host-fault latch. It never
+  causes a provider call, creates no record, issues no control-plane request
+  and never competes with the first invocation's lifecycle transition.
+- The first invocation's outcome stays authoritative. The
+  `PROVIDER_EXECUTION_ID_INVALID` classification applies only to the
+  owning invocation's own validation failure. A repeated callback never
+  causes `submission-failed`, in particular after an exact durable record
+  exists.
+
+**Record construction.**
+
+- The record is built once from the acceptance with `buildAcceptanceRecord`
+  (or its exact existing equivalent) and published durably as that exact
+  record. The 13-member schema and the R44B6P1 exact-record, canonical-byte
+  and idempotency rules are unchanged.
+- `recordedAt` never changes because of a retry. Any republication of the
+  same acceptance uses `publish(theSameExactRecord)`, never a new build or
+  `write`.
+- R44B6P1 authorises no automatic in-handler publication retry, so the
+  handler performs one publication. Its failure is a journal persistence
+  failure (above).
+
+Field sources:
+
+| Member | Source |
+|---|---|
+| `executionJobId`, `attemptNumber`, `provider`, `generationRequestSha256` | the immutable lease and job execution context |
+| `accountId` | the credential grant's opening context |
+| `fencingCounter` | the pre-provider permit (the `SUBMITTING` epoch) |
+| `submittingAt` | the pre-provider permit, copied from the exact validated `SUBMITTING` acknowledgement |
+| `providerExecutionId` | the validated acceptance |
+| `providerAcceptedAt`, `recordedAt` | worker timestamps, under the existing journal semantics |
+
+The lease token, machine credential, provider API key and opened credential
+are never persisted. `providerAcceptedAt` and `recordedAt` are never
+lease-liveness or fencing authority, never proof of a control-plane commit,
+and never decide whether to call `submitted` or acceptance recovery. Tests
+may inject a clock under existing worker conventions.
+
+**Journal-first barrier.** No `SUBMITTED` request is ever sent before the
+exact record is durably published:
+
+```text
+provider returns definitive acceptance
+-> outer adapter receives the minimal acceptance
+-> inner handler validates it
+-> inner handler builds the exact record once
+-> inner handler durably publishes the exact record
+-> inner handler returns the durable record
+-> outer adapter attempts SUBMITTED reconciliation
+-> outer adapter resolves only after an allowed authoritative result
+```
+
+Reporting `SUBMITTED` first and journaling afterwards is never allowed. The
+durable journal is the crash boundary.
+
+**Failure before durable acceptance.**
+
+- If the first invocation cannot establish a valid durable record, the
+  worker fails closed and trips the host-fault latch. Causes: provider
+  mismatch, invalid ID, journal persistence failure, or a journal integrity
+  or publication conflict.
+- The worker then makes a best-effort report through the existing
+  `submission-failed` contract, always with outcome `OUTCOME_UNKNOWN`:
+
+  | Cause | Failure code |
+  |---|---|
+  | Provider or ID validation failure | `PROVIDER_EXECUTION_ID_INVALID` |
+  | Journal persistence failure | `ACCEPTANCE_JOURNAL_WRITE_FAILED` |
+  | Journal publication conflict | `ACCEPTANCE_JOURNAL_WRITE_FAILED` |
+
+- For a conflict, the local `WorkerError` may keep `ACCEPTANCE_JOURNAL_CONFLICT`
+  for diagnosis. No new API or protocol failure code is added.
+- Policy for the report:
+  - at most two attempts, both immediate;
+  - only `CONTROL_API_UNAVAILABLE` earns the second;
+  - each attempt has a 10000 ms deadline and a fresh adapter-owned
+    `AbortController`;
+  - no backoff and no jitter;
+  - the same immutable report and lease proof on both attempts.
+- `SUBMISSION_FAILED_REJECTED`, `WORKER_AUTHENTICATION_REJECTED`,
+  `MALFORMED_CONTROL_RESPONSE` and every other non-unavailable error are
+  never retried.
+- If the report cannot be established, the latch stays tripped and the
+  adapter throws. No new provider work starts and no durable record is
+  fabricated. The authoritative `SUBMITTING` expiry sweep (section 12)
+  provides eventual lifecycle recovery.
+
+**`submission-failed` boundary.** `submission-failed` applies only before
+an exact durable acceptance record has been committed. Once that record
+exists, `submission-failed` is **never** called for that acceptance.
+Ambiguity after that point is reconciled only through `submitted` or
+acceptance recovery. Definitive provider rejection before any acceptance
+stays with the existing `submission-failed` contract, outside this path.
+
+**Worker `submission-failed` client.** A missing primitive, conceptually
+`reportSubmissionFailed(executionAttemptId, proof, outcome, failureCode,
+signal?)` on the existing `WorkerControlClient`:
+
+- It uses the existing route, body and four-field response exactly.
+- It is provider-agnostic and single-shot.
+- It owns no retry and no request timer. It accepts an optional
+  externally owned `AbortSignal`.
+- It makes no lease-expiry decision and no provider call.
+
+Status mapping:
+
+| Response | Worker code |
+|---|---|
+| 409 | the new code `SUBMISSION_FAILED_REJECTED` |
+| 401 or 403 | `WORKER_AUTHENTICATION_REJECTED` |
+| transport failure, abort or 5xx | `CONTROL_API_UNAVAILABLE` |
+| any other status, or a malformed response | `MALFORMED_CONTROL_RESPONSE` |
+
+No commercial-api or protocol change is required.
+
+**Host-fault latch.** A sticky worker-local primitive.
+
+- It starts clear. It can be tripped, and once tripped it stays tripped for
+  the life of the process. There is no ordinary runtime clear or reset.
+- Future new-work orchestration must check it before beginning any
+  provider work.
+- The next clear state is a new process after successful startup
+  reconciliation.
+- It stores no secret.
+- It is tripped by:
+  - an invalid or duplicate provider acceptance;
+  - a journal write failure or conflict;
+  - unresolved `SUBMITTED` reconciliation;
+  - an impossible or malformed control-plane response on the
+    post-acceptance path.
+- It is **not** tripped by an ambiguity that the acceptance-recovery policy
+  resolves successfully.
+
+R44B6Y may implement and test the latch without a production leasing loop.
+Live new-work enforcement is not active, because live provider execution
+itself is disabled. Nothing claims that production execution is halted by
+a component with no production caller. Future live composition must
+consult the shared latch before starting another provider attempt.
+
+**Live `submitted` report.** Once the durable record exists, the outer
+adapter uses the existing `reportSubmitted` client:
+
+- at most two attempts, both immediate;
+- only `CONTROL_API_UNAVAILABLE` earns the second;
+- each attempt has a 10000 ms deadline and a fresh adapter-owned
+  `AbortController`;
+- no backoff, no jitter and no local lease clock;
+- both attempts use the same `executionAttemptId`, the same submitting
+  epoch and lease proof, and the same `providerExecutionId`.
+
+`reportSubmitted` may gain an optional externally owned `AbortSignal` for
+this, with no other behaviour change. An exact validated success ends the
+live phase, and the record is **kept**.
+
+**Handover to acceptance recovery.**
+
+- If `reportSubmitted` returns `SUBMITTED_REPORT_REJECTED`, the live route
+  has failed to establish success. A 409 is **not** taken as proof that the
+  lease expired.
+- If both live attempts end in `CONTROL_API_UNAVAILABLE`, the first report
+  may still have committed with its response lost.
+- In both cases the adapter hands the already-durable exact record to the
+  existing `runAcceptanceRecoveryWithRetry` policy. That control-plane
+  recovery, not the worker clock, determines the authoritative state. The
+  provider is never submitted again.
+
+The live fallback reuses that policy unchanged, as locked in section 17:
+
+- 18 attempts and 150000 ms elapsed at most, the first attempt immediate;
+- backoff starting at 1000 ms, doubling, capped at 10000 ms, with no
+  jitter;
+- request duration counted in the elapsed budget;
+- every existing response classification.
+
+No second recovery algorithm exists. `ATTEMPT_STILL_SUBMITTING` is waited
+on only by that policy. There is no additional live wait budget, no local
+expiry arithmetic, no new lease and no resubmission.
+
+**Errors that do not enter recovery.** `WORKER_AUTHENTICATION_REJECTED`,
+`MALFORMED_CONTROL_RESPONSE` and `SUBMITTED_REPORT_INVALID` from the live
+report are never read as lease expiry. They are never converted into a
+recovery loop that would hide the fault. Instead:
+
+- the durable record is kept;
+- the host-fault latch is tripped;
+- the adapter fails closed;
+- the provider is never resubmitted;
+- startup reconciliation may process the record once the host issue is
+  corrected.
+
+**Lease-liveness authority.** The adapter never decides "lease live" or
+"lease expired" from `Date.now()`, `performance.now()`, a `leaseExpiresAt`
+comparison or a deadline derived from lease expiry. It always tries
+`reportSubmitted` under the existing proof first. No heartbeat or
+lease-status probe is used to choose between `reportSubmitted` and
+`recoverAcceptance`.
+
+**Recovery results.** Existing acceptance-recovery semantics are preserved:
+
+- Exact `SUBMITTED`: reconciliation succeeds and the record is kept.
+- A terminal state under the existing policy: the existing terminal
+  record-removal semantics apply, with no resubmission.
+- Exhausted or unresolved: the record is kept, the latch is tripped and the
+  adapter fails closed. That process starts no new provider work.
+
+No second terminal-state policy exists.
+
+**Retention.** A successful `SUBMITTED` acknowledgement never deletes the
+record. Section 17's v1 retention is unchanged: deletion happens only under
+the existing terminal-state rules (`SUCCEEDED`, `SUBMITTED_FAILED` or
+`ABANDONED` with the same ID). "Authoritative acknowledgement" never means
+permission to delete a merely `SUBMITTED` record.
+
+**Live and startup paths.** Live acceptance and startup recovery do **not**
+share an entry point:
+
+```text
+live:    provider acceptance -> inner durable handler -> live reportSubmitted
+         -> acceptance-recovery fallback if needed
+startup: existing durable record -> acceptance recovery
+```
+
+They share:
+
+- the exact record format;
+- the attempt, fence and provider-ID identity;
+- the `runAcceptanceRecoveryWithRetry` policy.
+
+Startup recovery never re-validates a provider response, never calls the
+inner handler and never creates a second record. The bridge between live
+and recovery execution is the canonical durable record, not a shared
+provider callback.
+
+**Provider-polling barrier.** Future provider execution must await the
+outer adapter. Its callback resolves only on one of:
+
+- an exact live `SUBMITTED` acknowledgement;
+- an allowed successful acceptance-recovery reconciliation;
+- a closed failure, by throwing.
+
+So provider polling can never begin between journal durability and
+control-plane reconciliation. R44B6Y does not wire this into any provider.
+
+**In-flight heartbeat boundary.** This lock does not define the in-flight
+heartbeat policy, which remains a separate gate item (section 36).
+
+- A heartbeat failure never abandons a create already in flight.
+- An acceptance that arrives after lease authority has lapsed is still
+  journaled, then follows the same `submitted` and recovery policy.
+- The adapter never cancels a known-accepted provider operation, never
+  calls `submission-failed` after durable acceptance and never resubmits.
+
+**`prepare()`.** R44B6V's orchestration already runs `journal.prepare()`
+before `SUBMITTING`. Acceptance handling never runs it again for the same
+attempt. It operates only once a valid permit exists, which is evidence
+that the `prepare()`, `SUBMITTING` and heartbeat gates completed. Startup
+reconciliation keeps its own preparation unchanged.
+
+**Secrets.** Neither the record nor the latch contains:
+
+- the lease token or its hash;
+- the provider API key or opened credential;
+- the machine credential.
+
+The lease token stays in memory only for the live `reportSubmitted` and
+`submission-failed` requests. It is never logged or persisted. The provider
+execution ID stays out of audit metadata as section 30 requires.
+
+**No provider abstraction.** R44B6Y adds no `ProviderPort`, provider factory
+or selector, SDK wrapper, Runway, Veo or Google dependency, or fake or real
+provider. The worker-local acceptance shape and the async adapter callback
+are not a provider abstraction.
+
+**Boundary and expected scope.** No change to:
+
+- commercial-api;
+- the protocol package;
+- migrations;
+- provider adapters.
+
+The existing `submitted`, `acceptance-recovery` and `submission-failed`
+routes are authoritative and sufficient. If implementation discovery proves
+otherwise, it stops.
+
+Expected R44B6Y scope, all in `apps/commercial-worker`:
+
+- **New:**
+  - the acceptance handler and adapter source;
+  - the host-fault latch source, if kept separate;
+  - focused handler and adapter tests.
+- **Modified:**
+  - `preProviderOrchestration.ts`, to propagate `submittingAt`;
+  - `workerControlClient.ts`, for the `submission-failed` client and the
+    optional `reportSubmitted` signal;
+  - `workerError.ts`, for `SUBMISSION_FAILED_REJECTED` and only genuinely
+    required worker-local codes;
+  - `boundary.test.ts`, the pre-provider orchestration tests and existing
+    client tests as necessary.
+
+The architecture is not edited during implementation. No production caller
+is required, and the component may stay unused by live execution.
+
+```text
+WORKER_ACCEPTANCE_HANDLER_IMPLEMENTED=NO
+WORKER_ACCEPTANCE_HANDLER_USED_BY_LIVE_EXECUTION=NO
+ACCEPTANCE_HANDLER_ENGINE_IMPORTS_ALLOWED=NO
+ACCEPTANCE_HANDLER_NORMALIZES_PROVIDER_EXECUTION_ID=NO
+ACCEPTANCE_HANDLER_JOURNAL_BEFORE_SUBMITTED=YES
+ACCEPTANCE_HANDLER_SINGLE_USE=YES
+ACCEPTANCE_HANDLER_DELETES_RECORD_ON_SUBMITTED_ACK=NO
+PRE_PROVIDER_PERMIT_INCLUDES_SUBMITTING_AT=YES
+LIVE_SUBMITTED_MAX_ATTEMPTS=2
+LIVE_SUBMITTED_RETRIES_CONTROL_API_UNAVAILABLE=YES
+LIVE_SUBMITTED_RETRIES_SUBMITTED_REPORT_REJECTED=NO
+LIVE_SUBMITTED_RETRY_BACKOFF=NONE
+LIVE_SUBMITTED_RETRY_JITTER=NONE
+LIVE_SUBMITTED_REQUEST_DEADLINE_MS=10000
+LIVE_SUBMITTED_LOCAL_LEASE_EXPIRY_AUTHORITY=NO
+LIVE_SUBMITTED_REJECTION_HANDS_TO_ACCEPTANCE_RECOVERY=YES
+LIVE_SUBMITTED_UNAVAILABLE_EXHAUSTION_HANDS_TO_ACCEPTANCE_RECOVERY=YES
+SUBMISSION_FAILED_CLIENT_IMPLEMENTED=NO
+SUBMISSION_FAILED_CLIENT_INTERNAL_RETRY_ENABLED=NO
+SUBMISSION_FAILED_CLIENT_OWNS_REQUEST_TIMEOUT=NO
+SUBMISSION_FAILED_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
+SUBMISSION_FAILED_CLIENT_REJECTION_WORKER_CODE=SUBMISSION_FAILED_REJECTED
+ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS=2
+ACCEPTANCE_FAILURE_REPORT_RETRIES_CONTROL_API_UNAVAILABLE=YES
+ACCEPTANCE_FAILURE_REPORT_RETRY_BACKOFF=NONE
+ACCEPTANCE_FAILURE_REPORT_RETRY_JITTER=NONE
+ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS=10000
+ACCEPTANCE_RECORD_RETAINED_AFTER_SUBMITTED_ACK=YES
+ACCEPTANCE_HOST_FAULT_LATCH_IMPLEMENTED=NO
+ACCEPTANCE_HOST_FAULT_LATCH_RUNTIME_CLEAR_ALLOWED=NO
+```
 
 ### Definitive rejection and ambiguous outcomes
 
@@ -2445,14 +2880,17 @@ explicitly composed worker-control router; the default process answers 404.
 - **Not implemented:** worker provider execution.
   Valid published acceptance is resolved at startup only through an exact
   `acceptance-recovery` acknowledgement; otherwise it keeps blocking new work.
+- **Locked, not implemented (R44B6Y0):** the inner durable acceptance
+  handler, the outer acceptance adapter, the worker `submission-failed`
+  client and the host-fault latch ("Acceptance handler and adapter" above).
 
-The required worker ordering still stands:
+The required worker ordering still stands (R44B6Y0 wording):
 
 ```text
 provider accepts
--> durable acceptance journal (section 17)
--> submission-accepted handler resolves
--> worker reports submitted
+-> inner durable handler publishes the exact record (section 17) and returns it
+-> outer acceptance adapter reports submitted (or hands over to acceptance recovery)
+-> outer adapter resolves; only then may provider polling begin
 ```
 
 The route's existence does not mean the crash-safe submission path is
@@ -2541,7 +2979,11 @@ complete.
   replay. If the lease has expired meanwhile, the attempt is already
   `SUBMITTED`, because the commit happened. The worker then uses
   `acceptance-recovery`, which replays it. Neither path creates a second
-  audit row or changes the provider ID.
+  audit row or changes the provider ID. (R44B6Y0.) The worker does not
+  itself determine that the lease expired: a refused live report
+  (`SUBMITTED_REPORT_REJECTED`) or two unavailable live attempts hand the
+  exact record to acceptance recovery, which establishes the authoritative
+  state.
 
 ```text
 SUBMITTED_REPORT_IDEMPOTENT=YES
@@ -2778,7 +3220,9 @@ R44B6T0A; recorded by R44B6T1).**
 `POST /worker-control/v1/attempts/:attemptId/submission-failed` with exactly
 `{fencingCounter, leaseToken, outcome, failureCode}`. It exists only on the
 explicitly composed worker-control router; the default process answers 404.
-No worker flow calls it yet. The implementation follows the contract below
+No worker flow calls it yet. (R44B6Y0 locks its worker client and restricts
+its acceptance-path use to failures before an exact durable acceptance
+record exists; section 18, "Acceptance handler and adapter".) The implementation follows the contract below
 exactly: the first transition requires the live submission epoch; replay is
 authorised by the immutable original-submission provenance, with
 `leaseToken` syntactically required but never replay authority; an exact
@@ -2929,8 +3373,12 @@ remain database authority but are not part of this response.
 If the journal holds a provider execution ID but the upstream report fails:
 
 - do not resubmit;
-- retry `submitted` while the lease is live, otherwise use
-  `acceptance-recovery`;
+- (R44B6Y0) retry `submitted` under the locked live policy (at most two
+  attempts, unavailable-only), then hand the exact record to
+  `acceptance-recovery` on a refusal or exhausted unavailability. The
+  worker never decides lease liveness from a local clock, and never reads a
+  409 as proof of expiry;
+- never call `submission-failed` once the exact record is durable;
 - do not lease or start another job until the accepted record is reconciled
   with the control plane (section 17).
 
@@ -3744,7 +4192,7 @@ execution ID or a filesystem path.
 | Leased, before credential grant | `LEASED` | The lease may expire or be released normally. |
 | Credential granted, before `SUBMITTING` | `LEASED`, grant audited | A credential-retention obligation exists. If the lease is definitively revoked and no provider call occurred, the obligation can close. (R44B6X0.) Once the lease expires by server time while the row is still `LEASED`, provider-call authority provably never committed: the control plane requeues it (`LEASED -> QUEUED`, grant and lease cleared, job `QUEUED`; section 12). Not `OUTCOME_UNKNOWN`. Implemented (R44B6X). A row that already committed `SUBMITTING` is instead owned by the existing `SUBMITTING` sweep. |
 | `SUBMITTING`, provider call in flight | `SUBMITTING` | A provider-recovery obligation exists. A crash or ambiguous network outcome becomes `OUTCOME_UNKNOWN`. Never auto-resubmit. |
-| Provider accepted, local journal durable | journal entry | On restart, report the same provider ID upstream. No resubmission. |
+| Provider accepted, local journal durable | journal entry | On restart, report the same provider ID upstream. No resubmission. (R44B6Y0.) Without a restart, the outer acceptance adapter reports `submitted`, or hands the record to acceptance recovery; `submission-failed` is never used. |
 | `SUBMITTED`, polling or recovery | `SUBMITTED` with provider ID | Resume the same provider execution ID with the exact original credential version. |
 | Provider success before output persistence | `SUBMITTED` | Remains recoverable until output is securely persisted. |
 | Output local, upstream completion missing | local output and hash | Re-upload or report idempotently. |
@@ -3964,7 +4412,7 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6X1, the following are still missing. The worker heartbeat client
+of R44B6Y0, the following are still missing. The worker heartbeat client
 (R44B6W) and the pre-provider orchestration (R44B6V: `journal.prepare()`,
 then the `SUBMITTING` acknowledgement, then the mandatory heartbeat, then the
 permit) are implemented (section 15); neither is used by live execution, and
@@ -3979,8 +4427,11 @@ R44B6X did not implement. Its classification is unchanged: section 24's
 "launch-blocking invariant" before commercial generation, not an item of
 this fake-provider gate.
 
-- the acceptance-handler adapter that wires provider acceptance to the
-  journal, then the handler, then `submitted` (section 18);
+- the acceptance-handler adapter (section 18). Its contract is locked by
+  R44B6Y0 and not implemented: the inner durable handler journals the
+  provider acceptance, then the outer adapter reports `submitted` or hands
+  over to acceptance recovery. Its implementation satisfies only this item,
+  not the three below;
 - the in-flight provider heartbeat schedule, retry and failure policy
   (section 15; still unlocked after R44B6W0);
 - whole-chain crash-point tests (slice 7);
@@ -4266,6 +4717,36 @@ SUBMITTING_FENCING_COUNTER_PREFERRED_DISCRIMINATOR=YES
 SUBMITTING_FENCING_COUNTER_IMPLEMENTED=YES
 RECOVERY_LEASE_AUTOMATICALLY_GETS_SUBMITTED_HEARTBEAT_AUTHORITY=NO
 SUBMITTED_HEARTBEAT_DISCRIMINATOR_MIGRATION=0006
+WORKER_ACCEPTANCE_HANDLER_IMPLEMENTED=NO
+WORKER_ACCEPTANCE_HANDLER_USED_BY_LIVE_EXECUTION=NO
+ACCEPTANCE_HANDLER_ENGINE_IMPORTS_ALLOWED=NO
+ACCEPTANCE_HANDLER_NORMALIZES_PROVIDER_EXECUTION_ID=NO
+ACCEPTANCE_HANDLER_JOURNAL_BEFORE_SUBMITTED=YES
+ACCEPTANCE_HANDLER_SINGLE_USE=YES
+ACCEPTANCE_HANDLER_DELETES_RECORD_ON_SUBMITTED_ACK=NO
+PRE_PROVIDER_PERMIT_INCLUDES_SUBMITTING_AT=YES
+LIVE_SUBMITTED_MAX_ATTEMPTS=2
+LIVE_SUBMITTED_RETRIES_CONTROL_API_UNAVAILABLE=YES
+LIVE_SUBMITTED_RETRIES_SUBMITTED_REPORT_REJECTED=NO
+LIVE_SUBMITTED_RETRY_BACKOFF=NONE
+LIVE_SUBMITTED_RETRY_JITTER=NONE
+LIVE_SUBMITTED_REQUEST_DEADLINE_MS=10000
+LIVE_SUBMITTED_LOCAL_LEASE_EXPIRY_AUTHORITY=NO
+LIVE_SUBMITTED_REJECTION_HANDS_TO_ACCEPTANCE_RECOVERY=YES
+LIVE_SUBMITTED_UNAVAILABLE_EXHAUSTION_HANDS_TO_ACCEPTANCE_RECOVERY=YES
+SUBMISSION_FAILED_CLIENT_IMPLEMENTED=NO
+SUBMISSION_FAILED_CLIENT_INTERNAL_RETRY_ENABLED=NO
+SUBMISSION_FAILED_CLIENT_OWNS_REQUEST_TIMEOUT=NO
+SUBMISSION_FAILED_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
+SUBMISSION_FAILED_CLIENT_REJECTION_WORKER_CODE=SUBMISSION_FAILED_REJECTED
+ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS=2
+ACCEPTANCE_FAILURE_REPORT_RETRIES_CONTROL_API_UNAVAILABLE=YES
+ACCEPTANCE_FAILURE_REPORT_RETRY_BACKOFF=NONE
+ACCEPTANCE_FAILURE_REPORT_RETRY_JITTER=NONE
+ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS=10000
+ACCEPTANCE_RECORD_RETAINED_AFTER_SUBMITTED_ACK=YES
+ACCEPTANCE_HOST_FAULT_LATCH_IMPLEMENTED=NO
+ACCEPTANCE_HOST_FAULT_LATCH_RUNTIME_CLEAR_ALLOWED=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

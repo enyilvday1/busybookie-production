@@ -119,6 +119,7 @@ export async function audit(
     provider?: string;
     credentialVersion?: number;
     failureCode?: string;
+    recoveredFromJournal?: true;
   }>,
 ): Promise<void> {
   await client.query(INSERT_AUDIT, [attempt.accountId, eventType, attempt.id, correlationId, JSON.stringify(metadata)]);
@@ -174,10 +175,11 @@ async function reclaimExpiredLeases(client: RuntimeClient, correlationId: string
 // immutable submitting principal are kept; the parent job needs attention.
 // Recognising lost authority uses transaction-stable now() (R44B6K5): at
 // worst an expiry is recognised one transaction later, never earlier.
-// SKIP LOCKED leaves a row that a heartbeat or another sweep holds; the outer
-// state predicate makes a concurrent conversion a no-op. Runs inside the
-// caller's READ COMMITTED transaction; no network work happens here.
-export async function sweepExpiredSubmittingAttempts(client: RuntimeClient, correlationId: string): Promise<void> {
+// The acquisition batch skips locked rows. A named acceptance-recovery scan
+// waits for its row instead, then applies the same expiry predicate. The
+// outer state predicate makes a concurrent conversion a no-op. Runs inside
+// the caller's READ COMMITTED transaction; no network work happens here.
+export async function sweepExpiredSubmittingAttempts(client: RuntimeClient, correlationId: string, attemptId?: string): Promise<void> {
   const swept = await client.query<{
     id: string;
     account_id: string;
@@ -189,15 +191,17 @@ export async function sweepExpiredSubmittingAttempts(client: RuntimeClient, corr
     `WITH expired AS (
        SELECT id, lease_worker_principal_id FROM execution_attempts
         WHERE state = 'SUBMITTING' AND lease_expires_at <= now()
+          ${attemptId === undefined ? "" : "AND id = $1"}
         ORDER BY lease_expires_at, id
         LIMIT ${WORKER_EXPIRED_LEASE_RECLAIM_LIMIT}
-          FOR UPDATE SKIP LOCKED
+          ${attemptId === undefined ? "FOR UPDATE SKIP LOCKED" : "FOR UPDATE"}
      )
      UPDATE execution_attempts a
         SET state = 'OUTCOME_UNKNOWN', failure_code = '${SUBMITTING_LEASE_EXPIRED_FAILURE_CODE}', ${CLEAR_LEASE}, updated_at = now()
        FROM expired
       WHERE a.id = expired.id AND a.state = 'SUBMITTING'
      RETURNING a.id, a.account_id, a.execution_job_id, a.attempt_number, a.lease_fencing_counter, expired.lease_worker_principal_id`,
+    attemptId === undefined ? undefined : [attemptId],
   );
   for (const row of swept.rows) {
     await client.query("UPDATE execution_jobs SET status = 'NEEDS_ATTENTION', updated_at = now() WHERE id = $1 AND status = 'RUNNING'", [

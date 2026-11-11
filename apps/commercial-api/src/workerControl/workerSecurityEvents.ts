@@ -21,7 +21,8 @@ export type WorkerSecurityEventType =
   | "WORKER_FENCING_REJECTED"
   | "WORKER_CREDENTIAL_GRANT_REJECTED"
   | "WORKER_SUBMITTING_REJECTED"
-  | "WORKER_SUBMITTED_REJECTED";
+  | "WORKER_SUBMITTED_REJECTED"
+  | "WORKER_ACCEPTANCE_RECOVERY_REJECTED";
 
 export type WorkerLeaseRejectionReason =
   // The authenticated principal is not ACTIVE when re-checked in the transaction.
@@ -51,6 +52,7 @@ export type WorkerLeaseRejectionReason =
   // that is not the exact live-route lease epoch (migration 0006), for
   // example a replacement lease.
   | "SUBMITTED_LEASE_EPOCH_MISMATCH"
+  | "SUBMITTING_PRINCIPAL_MISMATCH"
   // Live submitted route only (architecture section 30): the attempt is not
   // SUBMITTING (or SUBMITTED for replay); a different provider execution ID on
   // an already SUBMITTED attempt; an ID already adopted by another attempt of

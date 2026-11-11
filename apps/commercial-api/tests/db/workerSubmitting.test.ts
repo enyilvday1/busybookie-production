@@ -10,6 +10,7 @@ import { PROVIDER_CREDENTIAL_PURPOSE } from "commercial-worker-protocol";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../../src/startCommercialApiServer.js";
 import { createWorkerControlApplication } from "../../src/workerControl/workerControlApplication.js";
 import type { WorkerSecurityEvent } from "../../src/workerControl/workerSecurityEvents.js";
+import { sweepExpiredSubmittingAttempts, withTransaction } from "../../src/workerControl/workerLeaseService.js";
 import { send, type TestResponse } from "../httpClient.js";
 import { createTestCredentialFingerprinter, createTestCredentialSealer, generateTestKey } from "../support/testCredentialCrypto.js";
 import { createTestWorkerAuthenticationAdapter } from "../support/testWorkerAuthentication.js";
@@ -1149,6 +1150,312 @@ describe("SUBMITTING lease liveness and expiry sweep (R44B6M)", () => {
 
   // R44B6O: the live SUBMITTING -> SUBMITTED acknowledgement (architecture section 18).
   // Exercised directly: no worker flow calls it yet, and no provider is involved.
+  describe("acceptance recovery (R44B6R)", () => {
+    const recover = (port: number, worker: Worker, attemptId: string, providerExecutionId = "synthetic/operations/recovered", fencingCounter = 1) =>
+      send(port, "POST", `/worker-control/v1/attempts/${attemptId}/acceptance-recovery`, JSON.stringify({ fencingCounter, providerExecutionId }), { ...auth(worker), "Content-Type": "application/json" });
+    const acceptedAudits = async (id: string) => (await clients.migrator.query<{ metadata: Record<string, unknown> }>(
+      "SELECT metadata FROM audit_events WHERE resource_id=$1 AND event_type='execution_attempt.submitted' ORDER BY sequence", [id],
+    )).rows.map(row => row.metadata);
+    async function ready() {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const proof = await submittingAttempt(port, worker!, item);
+      await expire(item.attemptId);
+      return { worker: worker!, item, port, proof };
+    }
+    const sweep = (id: string) => withTransaction(pool, client => sweepExpiredSubmittingAttempts(client, randomUUID(), id));
+    async function sibling(item: Work): Promise<Work> {
+      const authorization = await q<{ id: string }>(`INSERT INTO generation_authorizations
+        (account_id,production_id,entitlement_grant_id,billing_mode,provider,model,provider_connection_id,provider_credential_version_id,
+         generation_request,generation_request_sha256,expected_cost_cap_unit,expected_cost_cap_amount,expires_at,created_by_user_id)
+        SELECT g.account_id,g.production_id,g.entitlement_grant_id,g.billing_mode,g.provider,g.model,g.provider_connection_id,g.provider_credential_version_id,
+               g.generation_request,g.generation_request_sha256,g.expected_cost_cap_unit,g.expected_cost_cap_amount,now()+interval '15 minutes',g.created_by_user_id
+          FROM generation_authorizations g JOIN execution_jobs j ON j.generation_authorization_id=g.id WHERE j.id=$1 RETURNING id`, [item.jobId]);
+      await clients.migrator.query("UPDATE generation_authorizations SET status='CLAIMED', claimed_at=now() WHERE id=$1", [authorization.id]);
+      const job = await q<{ id: string }>(`INSERT INTO execution_jobs (account_id,production_id,generation_authorization_id)
+        SELECT account_id,production_id,id FROM generation_authorizations WHERE id=$1 RETURNING id`, [authorization.id]);
+      const second = await q<{ id: string }>(`INSERT INTO execution_attempts (account_id,execution_job_id,generation_authorization_id,attempt_number,billing_mode,provider,provider_credential_version_id)
+        VALUES ($1,$2,$3,1,'USER_BYO','EXAMPLE_PROVIDER',$4) RETURNING id`, [item.accountId, job.id, authorization.id, item.versionId]);
+      return { ...item, jobId: job.id, attemptId: second.id };
+    }
+    function failingPool(failure: Error, auditFailure = false): TransactionalPool {
+      return { query: pool.query, end: async () => {}, connect: async () => {
+        const inner = await pool.connect();
+        return { release: inner.release, query: async <Row extends object>(sql: string, params?: unknown[]) => {
+          if (auditFailure ? sql.includes("INSERT INTO audit_events") && params?.[1] === "execution_attempt.submitted" : sql.includes("UPDATE execution_attempts SET state = 'SUBMITTED'")) throw failure;
+          return inner.query<Row>(sql, params);
+        } };
+      } };
+    }
+
+    it("recovers OUTCOME_UNKNOWN with the closed response, exact write set, original epoch and one safe audit", async () => {
+      const { worker, item, port } = await ready();
+      await sweep(item.attemptId);
+      const before = await fullRow(item.attemptId);
+      expect(before.state).toBe("OUTCOME_UNKNOWN");
+      expect(await jobStatus(item.jobId)).toBe("NEEDS_ATTENTION");
+      const response = await recover(port, worker, item.attemptId);
+      expect(response.status).toBe(200);
+      expect(json(response)).toEqual({ executionAttemptId: item.attemptId, fencingCounter: 1, state: "SUBMITTED", providerExecutionId: "synthetic/operations/recovered" });
+      const after = await fullRow(item.attemptId);
+      expect(after).toMatchObject({ state: "SUBMITTED", failure_code: null, provider_execution_id: "synthetic/operations/recovered", lease_worker_principal_id: null,
+        lease_token_sha256: null, submitting_worker_principal_id: worker.id, submitting_fencing_counter: "1", recovery_expires_at: null });
+      expect(after.submitted_at).toBeInstanceOf(Date);
+      const unchanged = (row: FullRow) => ({ ...row, state: null, provider_execution_id: null, submitted_at: null, failure_code: null, updated_at: null });
+      expect(unchanged(after)).toEqual(unchanged(before));
+      expect(await jobStatus(item.jobId)).toBe("RUNNING");
+      expect(await acceptedAudits(item.attemptId)).toEqual([{ attemptNumber: 1, fencingCounter: 1, workerPrincipalId: worker.id, provider: "EXAMPLE_PROVIDER", credentialVersion: 1, recoveredFromJournal: true }]);
+      expect(events).toEqual([]);
+      const visible = await allAuditText() + JSON.stringify(events);
+      for (const value of [worker.token, item.plaintext, item.fingerprintValue, "synthetic/operations/recovered"]) expect(visible.includes(value)).toBe(false);
+    });
+
+    it("commits the named expiry in transaction one, then recovers in a fresh READ COMMITTED transaction", async () => {
+      const { worker, item } = await ready();
+      await server!.close();
+      const recorded = recordingPool();
+      const port = await compose([worker], recorded.pool);
+      expect((await recover(port, worker, item.attemptId)).status).toBe(200);
+      expect(recorded.statements.filter(sql => sql.startsWith("BEGIN"))).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED", "BEGIN ISOLATION LEVEL READ COMMITTED"]);
+      expect(recorded.statements.filter(sql => sql === "COMMIT")).toHaveLength(2);
+      const firstCommit = recorded.statements.indexOf("COMMIT");
+      expect(recorded.statements.findIndex(sql => sql.includes("submitting_fencing_counter") && sql.includes("FOR UPDATE"))).toBeGreaterThan(firstCommit);
+      expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+      expect(await acceptedAudits(item.attemptId)).toHaveLength(1);
+    });
+
+    it("returns the expected wait only to the original principal/epoch while SUBMITTING is live, without writes or security events", async () => {
+      const [worker, other] = await workers(2);
+      const item = await work();
+      const port = await compose([worker!, other!]);
+      await submittingAttempt(port, worker!, item);
+      const before = await fullRow(item.attemptId);
+      const response = await recover(port, worker!, item.attemptId);
+      expect(response.status).toBe(409);
+      expect(response.body).toBe('{"status":"error","code":"ATTEMPT_STILL_SUBMITTING"}\n');
+      expect(await fullRow(item.attemptId)).toEqual(before);
+      expect(await outcomeAudits(item.attemptId)).toEqual([]);
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+      expect(events).toEqual([]);
+      expect((await recover(port, other!, item.attemptId)).body).toBe(REJECTED);
+      expect((await recover(port, worker!, item.attemptId, "op-1", 2)).body).toBe(REJECTED);
+      expect(eventSummary()).toEqual([["WORKER_ACCEPTANCE_RECOVERY_REJECTED", "SUBMITTING_PRINCIPAL_MISMATCH"], ["WORKER_ACCEPTANCE_RECOVERY_REJECTED", "FENCING_MISMATCH"]]);
+    });
+
+    it.each(["QUEUED", "LEASED"])("refuses %s without manufacturing submission provenance", async state => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      if (state === "LEASED") await granted(port, worker!);
+      const before = await fullRow(item.attemptId);
+      expect((await recover(port, worker!, item.attemptId)).body).toBe(REJECTED);
+      expect(await fullRow(item.attemptId)).toEqual(before);
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("refuses unknown attempts and wrong principal/fence, while the independent expiry remains committed", async () => {
+      const { worker, item, port } = await ready();
+      expect((await recover(port, worker, randomUUID())).body).toBe(REJECTED);
+      expect((await recover(port, worker, item.attemptId, "op-1", 2)).body).toBe(REJECTED);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+      expect(eventSummary()).toEqual([["WORKER_ACCEPTANCE_RECOVERY_REJECTED", "UNKNOWN_ATTEMPT"], ["WORKER_ACCEPTANCE_RECOVERY_REJECTED", "FENCING_MISMATCH"]]);
+    });
+
+    it("replays identical concurrent recovery with one audit, stable timestamp and no repeated job mutation", async () => {
+      const { worker, item, port } = await ready();
+      const responses = await Promise.all([1, 2, 3].map(() => recover(port, worker, item.attemptId)));
+      expect(responses.map(response => response.status)).toEqual([200, 200, 200]);
+      expect(new Set(responses.map(response => response.body)).size).toBe(1);
+      const before = await fullRow(item.attemptId);
+      const jobBefore = (await clients.migrator.query("SELECT * FROM execution_jobs WHERE id=$1", [item.jobId])).rows[0];
+      expect((await recover(port, worker, item.attemptId)).body).toBe(responses[0]!.body);
+      expect(await fullRow(item.attemptId)).toEqual(before);
+      expect((await clients.migrator.query("SELECT * FROM execution_jobs WHERE id=$1", [item.jobId])).rows[0]).toEqual(jobBefore);
+      expect(await acceptedAudits(item.attemptId)).toHaveLength(1);
+      expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+    });
+
+    it.each(["same Account", "different Account"])("uses the database Account/provider/ID uniqueness authority for %s", async scope => {
+      const [worker, other] = await workers(2);
+      const first = await work();
+      const port = await compose([worker!, other!]);
+      await submittingAttempt(port, worker!, first);
+      const second = scope === "same Account" ? await sibling(first) : await work();
+      await submittingAttempt(port, other!, second);
+      await expire(first.attemptId); await expire(second.attemptId);
+      expect((await recover(port, worker!, first.attemptId, "shared-provider-id")).status).toBe(200);
+      const response = await recover(port, other!, second.attemptId, "shared-provider-id");
+      expect(response.status).toBe(scope === "same Account" ? 409 : 200);
+      if (scope === "same Account") {
+        expect(response.body).toBe(REJECTED);
+        expect(events.at(-1)?.reason).toBe("PROVIDER_EXECUTION_ID_IN_USE");
+        expect(await acceptedAudits(second.attemptId)).toEqual([]);
+        expect((await attempt(second.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      }
+    });
+
+    it("scopes the independent expiry to the named attempt and refuses a foreign submitting principal", async () => {
+      const [worker, other] = await workers(2);
+      const first = await work();
+      const port = await compose([worker!, other!]);
+      await submittingAttempt(port, worker!, first);
+      const second = await work();
+      await submittingAttempt(port, other!, second);
+      await expire(first.attemptId); await expire(second.attemptId);
+      expect((await recover(port, other!, first.attemptId)).body).toBe(REJECTED);
+      expect((await attempt(first.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect((await attempt(second.attemptId)).state).toBe("SUBMITTING");
+      expect(await outcomeAudits(second.attemptId)).toEqual([]);
+      expect(events.at(-1)?.reason).toBe("SUBMITTING_PRINCIPAL_MISMATCH");
+    });
+
+    it.each(["provider", "job_authorization_id", "provider_credential_version_id"])("fails closed when authoritative binding %s is inconsistent", async field => {
+      const { worker, item } = await ready();
+      await server!.close();
+      const wrapped: TransactionalPool = { query: pool.query, end: async () => {}, connect: async () => {
+        const inner = await pool.connect();
+        return { release: inner.release, query: async <Row extends object>(sql: string, params?: unknown[]) => {
+          const result = await inner.query<Row>(sql, params);
+          if (sql.includes("AS job_authorization_id")) return { rows: result.rows.map(row => ({ ...row, [field]: randomUUID() })) };
+          return result;
+        } };
+      } };
+      const port = await compose([worker], wrapped);
+      expect((await recover(port, worker, item.attemptId)).body).toBe(REJECTED);
+      expect(events.at(-1)?.reason).toBe("INCOMPATIBLE_ATTEMPT_STATE");
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("serializes different concurrent IDs so only one wins and the loser is a safe conflict", async () => {
+      const { worker, item, port } = await ready();
+      const responses = await Promise.all(["op-a", "op-b"].map(id => recover(port, worker, item.attemptId, id)));
+      expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
+      const winner = responses.find(response => response.status === 200)!;
+      expect((await attempt(item.attemptId)).provider_execution_id).toBe(json(winner).providerExecutionId);
+      expect(await acceptedAudits(item.attemptId)).toHaveLength(1);
+      expect(eventSummary()).toEqual([["WORKER_ACCEPTANCE_RECOVERY_REJECTED", "PROVIDER_EXECUTION_CONFLICT"]]);
+    });
+
+    it.each(["SUCCEEDED", "SUBMITTED_FAILED", "ABANDONED"])("returns identical acceptance from %s without a write or duplicate audit", async state => {
+      const { worker, item, port } = await ready();
+      expect((await recover(port, worker, item.attemptId)).status).toBe(200);
+      await clients.migrator.query(`UPDATE execution_attempts SET state=$2, completed_at=now(),
+        failure_code=CASE WHEN $2='SUCCEEDED' THEN NULL ELSE 'TERMINAL_FIXTURE' END,
+        output_object_key=CASE WHEN $2='SUCCEEDED' THEN 'fixture/output.mp4' ELSE NULL END,
+        output_sha256=CASE WHEN $2='SUCCEEDED' THEN repeat('c',64) ELSE NULL END,
+        output_byte_count=CASE WHEN $2='SUCCEEDED' THEN 1 ELSE NULL END,
+        output_content_type=CASE WHEN $2='SUCCEEDED' THEN 'video/mp4' ELSE NULL END WHERE id=$1`, [item.attemptId, state]);
+      const before = await fullRow(item.attemptId);
+      const response = await recover(port, worker, item.attemptId);
+      expect(response.status).toBe(200);
+      expect(json(response).state).toBe(state);
+      expect(await fullRow(item.attemptId)).toEqual(before);
+      expect(await acceptedAudits(item.attemptId)).toHaveLength(1);
+      expect((await recover(port, worker, item.attemptId, "different-op")).body).toBe(REJECTED);
+    });
+
+    it("refuses an ABANDONED attempt without the accepted ID", async () => {
+      const { worker, item, port } = await ready();
+      await sweep(item.attemptId);
+      await clients.migrator.query("UPDATE execution_attempts SET state='ABANDONED', completed_at=now(), failure_code='OPERATOR_ABANDONED' WHERE id=$1", [item.attemptId]);
+      expect((await recover(port, worker, item.attemptId)).body).toBe(REJECTED);
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("recovers after disconnect while retaining the same credential and both obligations", async () => {
+      const { worker, item, port } = await ready();
+      await disconnect(item);
+      const before = await version(item.versionId);
+      expect(before.status).toBe("RETAINED_FOR_RECOVERY");
+      expect((await recover(port, worker, item.attemptId)).status).toBe(200);
+      const after = await version(item.versionId);
+      expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+      expect(await obligations(item)).toMatchObject({ hasOpenCredentialRetentionObligation: true, hasOpenProviderRecoveryObligation: true, blocksDestruction: true });
+    });
+
+    it("refuses a destroyed original version without substituting another credential", async () => {
+      const { worker, item, port } = await ready();
+      await clients.migrator.query(DESTROY, [item.versionId]);
+      expect((await recover(port, worker, item.attemptId)).body).toBe(REJECTED);
+      expect(eventSummary()).toEqual([["WORKER_ACCEPTANCE_RECOVERY_REJECTED", "SUBMITTING_VERSION_DESTROYED"]]);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+    });
+
+    it("never revives the old live token or manufactures heartbeat authority for a replacement lease", async () => {
+      const { worker, item, port, proof } = await ready();
+      expect((await recover(port, worker, item.attemptId)).status).toBe(200);
+      expect((await call(port, worker, "heartbeat", item.attemptId, proof)).body).toBe(REJECTED);
+      const replacementToken = randomBytes(32).toString("base64url");
+      await clients.runtime.query(`UPDATE execution_attempts SET lease_worker_principal_id=$2, lease_token_sha256=$3,
+        lease_fencing_counter=lease_fencing_counter+1, leased_at=now(), lease_expires_at=now()+interval '2 minutes', heartbeat_at=NULL WHERE id=$1`,
+      [item.attemptId, worker.id, createHash("sha256").update(replacementToken).digest("hex")]);
+      expect((await call(port, worker, "heartbeat", item.attemptId, { fencingCounter: 2, leaseToken: replacementToken })).body).toBe(REJECTED);
+      expect(events.at(-1)?.reason).toBe("SUBMITTED_LEASE_EPOCH_MISMATCH");
+      expect((await recover(port, worker, item.attemptId, "synthetic/operations/recovered", 2)).body).toBe(REJECTED);
+      expect((await fullRow(item.attemptId)).submitting_fencing_counter).toBe("1");
+    });
+
+    it("keeps the live submitted route unable to recover OUTCOME_UNKNOWN", async () => {
+      const { worker, item, port, proof } = await ready();
+      await sweep(item.attemptId);
+      const live = await send(port, "POST", `/worker-control/v1/attempts/${item.attemptId}/submitted`, JSON.stringify({ ...proof, attemptId: undefined, providerExecutionId: "op-live" }), { ...auth(worker), "Content-Type": "application/json" });
+      expect(live.body).toBe(REJECTED);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+    });
+
+    it("rechecks ACTIVE in transaction two after independently committed expiry", async () => {
+      const { worker, item } = await ready();
+      await server!.close();
+      let begins = 0;
+      const gated = gatedPool(sql => sql.startsWith("BEGIN") && ++begins === 2);
+      const port = await compose([worker], gated.pool);
+      const pending = recover(port, worker, item.attemptId);
+      await gated.paused;
+      await clients.migrator.query("UPDATE worker_principals SET status='DISABLED', disabled_at=now() WHERE id=$1", [worker.id]);
+      gated.release();
+      expect((await pending).status).toBe(401);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+    });
+
+    it.each([
+      { code: "23505", constraint: "unrelated_unique_index" },
+      { code: "23514", constraint: "execution_attempts_provider_execution_uq" },
+      { code: "XX000", constraint: "execution_attempts_provider_execution_uq" },
+    ])("does not misclassify unrelated database errors %# as provider conflicts", async identity => {
+      const { worker, item } = await ready();
+      await server!.close();
+      const port = await compose([worker], failingPool(Object.assign(new Error("injected database failure"), identity)));
+      expect((await recover(port, worker, item.attemptId)).status).toBe(503);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+      expect(events).toEqual([]);
+    });
+
+    it("rolls back recovery and job mutation on audit failure but preserves committed expiry", async () => {
+      const { worker, item } = await ready();
+      await server!.close();
+      const port = await compose([worker], failingPool(new Error("injected audit failure"), true));
+      expect((await recover(port, worker, item.attemptId)).status).toBe(503);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await jobStatus(item.jobId)).toBe("NEEDS_ATTENTION");
+      expect(await outcomeAudits(item.attemptId)).toHaveLength(1);
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+    });
+
+    it("keeps refused recovery fail-closed when its security sink is unavailable", async () => {
+      const { worker, item, port } = await ready();
+      setSinkFailing(true);
+      expect((await recover(port, worker, item.attemptId, "op-1", 2)).status).toBe(503);
+      expect((await attempt(item.attemptId)).state).toBe("OUTCOME_UNKNOWN");
+      expect(await acceptedAudits(item.attemptId)).toEqual([]);
+    });
+  });
+
   describe("live submitted acknowledgement (R44B6O)", () => {
     const submitted = (port: number, worker: Worker, attemptId: string, proof: Proof, providerExecutionId: unknown) =>
       send(

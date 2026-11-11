@@ -367,10 +367,11 @@ describe("worker-control boundary (lease foundation only)", () => {
   // fingerprints, decryption or an opener.
   const FORBIDDEN_IN_WORKER_CONTROL =
     /fingerprint_|CredentialOpener\s*=|:\s*CredentialOpener|\.open\s*\(|createDecipheriv/i;
-  // R44B6O: entering SUBMITTED and recording a provider execution identity are
-  // confined to the live submitted-acknowledgement service.
+  // R44B6O/R44B6R: only the live acknowledgement and tokenless recovery
+  // services may enter SUBMITTED and record a provider execution identity.
   const SUBMITTED_ONLY = /'SUBMITTED'|provider_execution_id\s*=|submitted_at\s*=/i;
   const SUBMITTED_SERVICE = "src/workerControl/workerSubmittedService.ts";
+  const RECOVERY_SERVICE = "src/workerControl/workerAcceptanceRecoveryService.ts";
   // R44B6H: writing the grant timestamp and reading the sealed envelope are
   // confined to the credential-grant service.
   const GRANT_ONLY = /SET\s[^;`]*credential_granted_at\s*=|sealed_credential/i;
@@ -378,14 +379,15 @@ describe("worker-control boundary (lease foundation only)", () => {
   // R44B6J: entering SUBMITTING is confined to the fenced acknowledgement service.
   // R44B6M narrows this to writes: the expired-SUBMITTING sweep may select
   // SUBMITTING rows, but never sets the state or the barrier timestamp.
-  const SUBMITTING_ONLY = /(\bSET|,)\s*state\s*=\s*'SUBMITTING'|submitting_at\s*=/i;
+  const SUBMITTING_ONLY = /(\bSET|,)\s*state\s*=\s*'SUBMITTING'|submitting_at\s*=(?!=)/i;
   const SUBMITTING_SERVICE = "src/workerControl/workerSubmittingService.ts";
   // R44B6M: OUTCOME_UNKNOWN is entered only by the control-plane sweep in the lease service.
-  const OUTCOME_UNKNOWN_ONLY = /state\s*=\s*'OUTCOME_UNKNOWN'/i;
+  const OUTCOME_UNKNOWN_ONLY = /(\bSET|,)\s*state\s*=\s*'OUTCOME_UNKNOWN'/i;
   const SWEEP_SERVICE = "src/workerControl/workerLeaseService.ts";
 
   it("keeps worker-control routes inside src/workerControl and out of the default process", () => {
     expect(workerControl.map(({ path }) => path).sort()).toEqual([
+      "src/workerControl/workerAcceptanceRecoveryService.ts",
       "src/workerControl/workerControlApplication.ts",
       "src/workerControl/workerCredentialGrantService.ts",
       "src/workerControl/workerLeasePolicy.ts",
@@ -410,8 +412,8 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect("type CredentialSealingContext").not.toMatch(FORBIDDEN_IN_WORKER_CONTROL);
   });
 
-  it("confines entering SUBMITTED to the live submitted-acknowledgement service, which reads no secret material and calls no provider", () => {
-    const offenders = workerControl.filter(({ path, text }) => path !== SUBMITTED_SERVICE && SUBMITTED_ONLY.test(code(text))).map(({ path }) => path);
+  it("confines entering SUBMITTED to the live acknowledgement and acceptance-recovery services", () => {
+    const offenders = workerControl.filter(({ path, text }) => ![SUBMITTED_SERVICE, RECOVERY_SERVICE].includes(path) && SUBMITTED_ONLY.test(code(text))).map(({ path }) => path);
     expect(offenders).toEqual([]);
     const service = code(read(join(APP_ROOT, SUBMITTED_SERVICE)));
     expect(SUBMITTED_ONLY.test(service)).toBe(true);
@@ -425,6 +427,10 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect("SET provider_execution_id = $2").toMatch(SUBMITTED_ONLY);
     expect('const HEARTBEAT_STATES = ["LEASED", "SUBMITTING", "SUBMITTED"] as const;').not.toMatch(SUBMITTED_ONLY);
     expect("epoch.provider_execution_id !== providerExecutionId").not.toMatch(SUBMITTED_ONLY);
+    const recovery = code(read(join(APP_ROOT, RECOVERY_SERVICE))).replace(/\/\/.*$/gm, "");
+    expect(SUBMITTED_ONLY.test(recovery)).toBe(true);
+    expect(GRANT_ONLY.test(recovery)).toBe(false);
+    expect(/sealed|envelope|fetch\s*\(|https?:|recovery_expires_at\s*=(?!=)|submitting_at\s*=(?!=)|submitting_worker_principal_id\s*=(?!=)|submitting_fencing_counter\s*=(?!=)|lease_token_sha256\s*=(?!=)|lease_worker_principal_id\s*=(?!=)|lease_fencing_counter\s*=(?!=)/i.test(recovery)).toBe(false);
   });
 
   it("confines entering SUBMITTING to the fenced acknowledgement service, which reads no secret material", () => {
@@ -439,6 +445,8 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect("UPDATE execution_attempts SET heartbeat_at = now(), state = 'SUBMITTING'").toMatch(SUBMITTING_ONLY);
     expect('acceptedStates = ["LEASED"]').not.toMatch(SUBMITTING_ONLY);
     expect("SELECT id FROM execution_attempts WHERE state = 'SUBMITTING' AND lease_expires_at <= now()").not.toMatch(SUBMITTING_ONLY);
+    expect("attempt.submitting_at === null").not.toMatch(SUBMITTING_ONLY);
+    expect("SET submitting_at = now()").toMatch(SUBMITTING_ONLY);
     expect("SET state = 'OUTCOME_UNKNOWN', failure_code = 'X' FROM expired WHERE a.id = expired.id AND a.state = 'SUBMITTING'").not.toMatch(SUBMITTING_ONLY);
   });
 

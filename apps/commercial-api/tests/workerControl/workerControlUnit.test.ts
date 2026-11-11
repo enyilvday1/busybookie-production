@@ -61,12 +61,44 @@ describe("worker-control composition", () => {
 });
 
 describe("worker-control request security", () => {
+  const recoveryPath = `/worker-control/v1/attempts/${attempt}/acceptance-recovery`;
+  it("authenticates acceptance recovery and fails closed on a security-sink outage", async () => {
+    const { port, recording } = await start();
+    expect((await send(port, "POST", recoveryPath)).status).toBe(401);
+    expect((await send(port, "POST", recoveryPath, undefined, { Authorization: "Bearer wrong-fixture" })).status).toBe(401);
+    recording.setFailing(true);
+    expect((await send(port, "POST", recoveryPath)).status).toBe(503);
+  });
+
+  it.each([
+    {}, { fencingCounter: 1 }, { providerExecutionId: "op-1" },
+    { fencingCounter: 0, providerExecutionId: "op-1" }, { fencingCounter: 1.5, providerExecutionId: "op-1" },
+    { fencingCounter: 2 ** 53, providerExecutionId: "op-1" }, { fencingCounter: "1", providerExecutionId: "op-1" },
+    { fencingCounter: 1, providerExecutionId: "" }, { fencingCounter: 1, providerExecutionId: "op 1" },
+    { fencingCounter: 1, providerExecutionId: "https://provider.invalid/op" }, { fencingCounter: 1, providerExecutionId: "x".repeat(257) },
+    { fencingCounter: 1, providerExecutionId: "op-\u00e9" }, { fencingCounter: 1, providerExecutionId: "op-1\n" },
+    { fencingCounter: 1, providerExecutionId: "op-1", leaseToken: "must-not-be-accepted" },
+    { fencingCounter: 1, providerExecutionId: "op-1", recordSha256: "c".repeat(64) },
+    { fencingCounter: 1, providerExecutionId: "op-1", accountId: WORKER_ID },
+    { fencingCounter: 1, providerExecutionId: "op-1", generationRequestSha256: "c".repeat(64) },
+  ])("refuses an invalid or non-closed recovery body %# before any transaction", async (body) => {
+    const { port } = await start();
+    const response = await send(port, "POST", recoveryPath, JSON.stringify(body), { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+    expect(response.status).toBe(400);
+  });
+
+  it("requires JSON content type for acceptance recovery", async () => {
+    const { port } = await start();
+    const response = await send(port, "POST", recoveryPath, JSON.stringify({ fencingCounter: 1, providerExecutionId: "op-1" }), { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" });
+    expect(response.status).toBe(415);
+  });
   it.each([
     ["POST", "/worker-control/v1/leases"],
     ["POST", `/worker-control/v1/attempts/${attempt}/heartbeat`],
     ["POST", `/worker-control/v1/attempts/${attempt}/release`],
     ["POST", `/worker-control/v1/attempts/${attempt}/submitting`],
     ["POST", `/worker-control/v1/attempts/${attempt}/submitted`],
+    ["POST", `/worker-control/v1/attempts/${attempt}/acceptance-recovery`],
   ])("%s %s refuses a browser Origin before authentication and logs it", async (method, path) => {
     const { port, recording } = await start();
     const response = await send(port, method, path, undefined, { Origin: "https://app.example", Authorization: `Bearer ${TOKEN}` });
@@ -104,7 +136,7 @@ describe("worker-control request security", () => {
     expect(response.status).toBe(503);
   });
 
-  it("answers only POST on the six worker paths, and 404 elsewhere", async () => {
+  it("answers only POST on the seven worker paths, and 404 elsewhere", async () => {
     const { port } = await start();
     for (const path of [
       "/worker-control/v1/leases",
@@ -113,6 +145,7 @@ describe("worker-control request security", () => {
       `/worker-control/v1/attempts/${attempt}/credential-grant`,
       `/worker-control/v1/attempts/${attempt}/submitting`,
       `/worker-control/v1/attempts/${attempt}/submitted`,
+      `/worker-control/v1/attempts/${attempt}/acceptance-recovery`,
     ]) {
       const response = await send(port, "GET", path);
       expect(response.status).toBe(405);
@@ -127,7 +160,9 @@ describe("worker-control request security", () => {
       `/worker-control/v1/attempts/${attempt}/open`,
       `/worker-control/v1/attempts/${attempt}/submitted/x`,
       `/worker-control/v1/attempts/${attempt}/submission-failed`,
-      `/worker-control/v1/attempts/${attempt}/acceptance-recovery`,
+      `/worker-control/v1/attempts/${attempt}/acceptance-recovery/x`,
+      `/worker-control/v1/attempts/${attempt.toUpperCase()}/acceptance-recovery`,
+      "/worker-control/v1/attempts/not-a-uuid/acceptance-recovery",
       `/worker-control/v1/attempts/${attempt}/submitting/x`,
       "/worker/leases",
     ]) {

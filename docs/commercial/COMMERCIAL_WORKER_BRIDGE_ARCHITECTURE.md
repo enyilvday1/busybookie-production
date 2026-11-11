@@ -193,7 +193,21 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   no new API, protocol or migration; provider-failure outcome composition
   stays separate and polling-phase heartbeat is out of scope; provider
   execution remains disabled: introduction, sections 12, 15, 18, 36 and
-  37).
+  37); R44B6Z1 (R44B6Z published in commit
+  2f9683c4ce3d5e9036595eee7cbc6907d3a028db: the generic in-flight lease
+  keeper `runWithInFlightHeartbeat` is implemented; the operation starts
+  exactly once, its promise is never abandoned and its own result or error
+  stays authoritative; the 30-second first delay and quiet interval, two
+  10-second attempts per tick and unavailable-only retry are implemented;
+  exhausted unavailability keeps the cadence; a 409 stops the keeper without
+  a host-fault trip; authentication, malformed-response and invariant
+  failures trip the latch; the keeper's own shutdown abort is not a failure;
+  no heartbeat signal reaches the operation; no local lease-expiry
+  authority, no `submission-failed` or acceptance coupling, and no provider
+  knowledge or wiring; component tests cover shutdown, race and
+  promise-lifetime semantics; the in-flight heartbeat gate item is
+  satisfied and two fake-provider gate items remain; provider execution
+  remains disabled: introduction, sections 15, 18, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -1435,7 +1449,8 @@ credential grant
   execution, but a production source abstraction that can accept or invoke a
   provider create belongs to provider execution, outside R44B6V.
 - **In-flight heartbeat.** Locked by R44B6Z0 ("In-flight provider heartbeat"
-  below) and not implemented. The keeper starts only after this permit
+  below) and implemented by R44B6Z as `runWithInFlightHeartbeat`, which no
+  production path calls yet. The keeper starts only after this permit
   exists, and a heartbeat failure never abandons a create already in flight.
 
 **Prerequisites and sequence.** The expected sequence: a client-only worker
@@ -1621,7 +1636,97 @@ PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
 
 ### In-flight provider heartbeat (revision R44B6Z0)
 
-**Locked decision (R44B6Z0; not implemented).** R44B6Z discovery found the
+**Status (R44B6Z; recorded by R44B6Z1).** Implemented in commit
+2f9683c4ce3d5e9036595eee7cbc6907d3a028db as `runWithInFlightHeartbeat` in
+`apps/commercial-worker/src/inFlightHeartbeat.ts`. Only the worker changed:
+there is no `workerError.ts`, acceptance-component, commercial-api,
+protocol, migration, engine, provider-adapter, manifest or lockfile change,
+and no provider is invoked. The contract below is unchanged.
+
+- **API.** `runWithInFlightHeartbeat<T>(context, operation)`. The context
+  holds only:
+  - `executionAttemptId`;
+  - an immutable `LeaseProof`, frozen into a copy;
+  - a client exposing only `heartbeat`;
+  - the injected host-fault latch;
+  - an optional `DeadlineTimer` (default `realDeadlineTimer`);
+  - an optional abortable `RecoverySleep`-compatible sleep (default
+    `defaultRecoverySleep`).
+
+  The operation is a no-argument async thunk. The keeper receives no
+  provider SDK, provider identity, provider execution ID, credential,
+  acceptance record, journal or polling metadata. It knows nothing of
+  acceptance itself: `IN_FLIGHT_HEARTBEAT_ACCEPTANCE_RECONCILIATION_INCLUDED`
+  and `IN_FLIGHT_HEARTBEAT_POLLING_PHASE_INCLUDED` describe the future
+  composition of the operation it will wrap, and no provider runner is
+  wired.
+- **Operation ownership.** `operation()` is invoked exactly once, first.
+  Settlement handlers are attached before any heartbeat wait. There is no
+  `Promise.race`. The keeper joins its heartbeat task, then returns the
+  operation's exact value or rethrows its exact error; tests check identity.
+  A synchronous throw propagates with no keeper started. Heartbeat status
+  never replaces the outcome.
+- **Cadence.** 30000 ms first delay and 30000 ms quiet interval, run
+  sequentially: sleep, tick, wait for the tick to settle, then the next
+  sleep. There is no immediate heartbeat, no `setInterval`, no overlap and
+  no local lease-expiry calculation (no `leaseExpiresAt`, `Date` or
+  `performance.now` logic).
+- **Attempts.** At most two per tick. Each gets a fresh `AbortController`
+  and a fresh 10000 ms deadline, with the same attempt ID and frozen proof.
+  Only `CONTROL_API_UNAVAILABLE` earns the second; no backoff or jitter.
+- **Results.**
+
+  | Heartbeat result | Keeper | Latch |
+  |---|---|---|
+  | `CONTROL_API_UNAVAILABLE` on both attempts | ends only that tick; no throw, cancellation or expiry inference; the 30000 ms cadence resumes | not tripped |
+  | `HEARTBEAT_REJECTED` | stops scheduling for the wrapped operation, with no retry; never aborts the operation or replaces its result, and is never read as a provider outcome | not tripped |
+  | `WORKER_AUTHENTICATION_REJECTED`, `MALFORMED_CONTROL_RESPONSE`, or any unexpected client, keeper or invariant failure | stops scheduling; keeps awaiting the operation | tripped |
+
+  Tests cover several exhausted ticks followed by a later success. The
+  latch is implemented but not wired into any production provider or
+  work-acquisition loop, so no live enforcement exists.
+- **Shutdown.** When the operation settles, the keeper:
+  - aborts a pending quiet sleep or heartbeat request;
+  - suppresses any further retry or tick;
+  - joins the heartbeat task, leaving no timer or request behind.
+
+  That keeper-owned abort is not a failure. An unavailability result seen
+  while the keeper is stopping means shutdown: no retry, no latch trip and
+  no later heartbeat. A deadline abort while the operation is still pending
+  is `CONTROL_API_UNAVAILABLE` and follows the retry policy. Tests cover
+  both explicitly.
+- **Signals.** Heartbeat signals stay heartbeat-local. The operation is
+  invoked with no arguments, so no heartbeat deadline or shutdown can
+  cancel it.
+- **Boundaries.** Boundary tests prove:
+  - no production caller: no provider adapter, credential opening,
+    pre-provider orchestration, acceptance component or startup
+    reconciliation calls it;
+  - no `reportSubmissionFailed` or route reference, so the separately
+    tracked provider-failure composition gap is unchanged;
+  - no acceptance adapter or handler, journal, `recoverAcceptance`,
+    `runAcceptanceRecoveryWithRetry` or `prepare()`;
+  - no Runway, Veo or Google, SDK, port, factory, selector, provider
+    execution ID, polling or credential.
+- **Tests.** Deterministic component tests cover:
+  - immediate resolution and rejection, and a synchronous throw;
+  - a successful tick;
+  - unavailable then retry success;
+  - several exhausted ticks then success;
+  - a 409 followed by the operation resolving or rejecting;
+  - authentication, malformed and unexpected faults followed by
+    settlement;
+  - the operation settling during a request, between attempts, or during
+    the quiet sleep;
+  - no overlap;
+  - a deadline abort versus the keeper's own shutdown abort;
+  - exact preservation of the operation's result and error.
+
+  These are keeper component tests only. They are **not** the whole-chain
+  crash-point tests of section 36, which must exercise the composed chain
+  across components.
+
+**Locked decision (R44B6Z0; implemented by R44B6Z).** R44B6Z discovery found the
 earlier cadence wording, "at most every third of the lease", in conflict
 with the control-plane lease policy. Read literally, that wording sets a
 minimum gap; the policy intends renewal every 30 to 40 seconds of a
@@ -1856,7 +1961,7 @@ heartbeat item from the section 36 gate; the whole-chain crash-point tests
 and the state-root binding remain. Provider execution stays disabled.
 
 ```text
-IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=NO
+IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=YES
 IN_FLIGHT_HEARTBEAT_USED_BY_LIVE_EXECUTION=NO
 IN_FLIGHT_HEARTBEAT_FIRST_TICK_DELAY_MS=30000
 IN_FLIGHT_HEARTBEAT_QUIET_INTERVAL_MS=30000
@@ -3175,7 +3280,8 @@ control-plane reconciliation. R44B6Y does not wire this into any provider.
 
 **In-flight heartbeat boundary.** This lock does not define the in-flight
 heartbeat policy. R44B6Z0 locks it separately (section 15, "In-flight
-provider heartbeat"); its keeper wraps the provider-submission operation,
+provider heartbeat"), and R44B6Z implements its keeper, unused by live
+execution. That keeper wraps the provider-submission operation,
 including this adapter's awaited reconciliation.
 
 - A heartbeat failure never abandons a create already in flight.
@@ -4847,7 +4953,11 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6Z0, the following three are still missing. (R44B6Y.) The
+of R44B6Z1, the following two are still missing. (R44B6Z.) The in-flight
+heartbeat prerequisite is satisfied at component level: the generic
+keeper `runWithInFlightHeartbeat` is implemented (section 15), unused by
+live execution. Its component tests do not satisfy the whole-chain
+crash-point item. (R44B6Y.) The
 acceptance-handler adapter prerequisite is satisfied: the inner durable
 handler, the outer reconciliation adapter, the `submission-failed` client
 and the host-fault latch are implemented (section 18), unused by live
@@ -4866,10 +4976,8 @@ R44B6X did not implement. Its classification is unchanged: section 24's
 "launch-blocking invariant" before commercial generation, not an item of
 this fake-provider gate.
 
-- the in-flight provider heartbeat keeper (section 15). Its contract is
-  locked by R44B6Z0 and not implemented. Its implementation satisfies only
-  this item, not the two below;
-- whole-chain crash-point tests (slice 7);
+- whole-chain crash-point tests (slice 7), exercising the composed
+  execution chain and its crash boundaries across components;
 - the production/deployment state-root binding.
 
 The gate is therefore not met.
@@ -5182,7 +5290,7 @@ ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS=10000
 ACCEPTANCE_RECORD_RETAINED_AFTER_SUBMITTED_ACK=YES
 ACCEPTANCE_HOST_FAULT_LATCH_IMPLEMENTED=YES
 ACCEPTANCE_HOST_FAULT_LATCH_RUNTIME_CLEAR_ALLOWED=NO
-IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=NO
+IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=YES
 IN_FLIGHT_HEARTBEAT_USED_BY_LIVE_EXECUTION=NO
 IN_FLIGHT_HEARTBEAT_FIRST_TICK_DELAY_MS=30000
 IN_FLIGHT_HEARTBEAT_QUIET_INTERVAL_MS=30000

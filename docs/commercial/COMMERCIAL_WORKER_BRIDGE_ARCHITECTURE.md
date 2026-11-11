@@ -42,7 +42,13 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   live-lease first transition, token-less original-submission-epoch replay
   authority, exact replay match, exact response, closed request vocabulary,
   conflict ordering and credential-version replay rule; no runtime change:
-  introduction, sections 10, 18, 30 and 37).
+  introduction, sections 10, 18, 30 and 37); R44B6T0A (`submission-failed`
+  request order aligned with the established worker-control wrapper, as
+  R44B6T implementation evidence confirmed: Origin and worker authentication
+  precede handler body parsing; every body is still parsed before any
+  lifecycle transaction, and pair/conflict classification still follows the
+  applicable authority proof; no runtime implementation state changed:
+  introduction, sections 18 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -2109,6 +2115,26 @@ implemented. It uses the existing worker-control router conventions: Origin
 rejection, strict worker authentication, POST only, canonical lowercase UUID
 route parameter, JSON content type and an exact member set.
 
+**Request order (R44B6T0A).** The route uses the established worker-control
+route wrapper unchanged; there is no special pre-authentication parser:
+
+1. route-level Origin policy (`403 ORIGIN_NOT_ALLOWED`);
+2. route-level worker machine authentication (`401`, or `503` when the
+   verifier is unavailable);
+3. the authenticated handler parses and validates the exact request body;
+4. the service transaction re-checks the worker `ACTIVE`;
+5. the service proves the applicable lifecycle authority: the full live
+   lease for a `SUBMITTING` first transition, or the immutable
+   original-submission epoch for a non-`SUBMITTING` replay candidate;
+6. only then is a recognised outcome/failure-code pairing classified;
+7. the first transition or the exact replay comparison follows.
+
+An unauthenticated or Origin-bearing request is therefore refused by the
+established layers before its body vocabulary is interpreted, so a malformed
+unauthenticated request is not necessarily a `400`. Every body is parsed and
+validated before any lifecycle transaction or mutation. The established
+`401`, `403`, `413`, `415` and `503` conventions are unchanged.
+
 **Closed request vocabulary (R44B6T0).** Worker-reportable values are:
 
 | `outcome` | Valid `failureCode` | Target state |
@@ -2117,10 +2143,13 @@ route parameter, JSON content type and an exact member set.
 | `OUTCOME_UNKNOWN` | `PROVIDER_SUBMISSION_AMBIGUOUS`, `ACCEPTANCE_JOURNAL_WRITE_FAILED` or `PROVIDER_EXECUTION_ID_INVALID` | `OUTCOME_UNKNOWN` |
 
 `WORKER_LEASE_EXPIRED_DURING_SUBMISSION` is set only by the control-plane
-expiry sweep (section 12) and is never worker-reportable. An unknown
+expiry sweep (section 12) and is never worker-reportable. Once a request
+reaches the authenticated handler (step 3 above), malformed JSON, an unknown
 `outcome`, an unknown `failureCode`, the sweep-only code, a malformed
 `fencingCounter` or `leaseToken`, or a missing or extra member is
-`400 INVALID_REQUEST`. These request-shape failures mutate nothing.
+`400 INVALID_REQUEST`. These request-shape failures reach no lifecycle
+transaction, mutate nothing and record no
+`WORKER_SUBMISSION_FAILURE_REJECTED` event.
 
 A recognised `outcome` with a recognised but incompatible `failureCode` (for
 example `DEFINITIVELY_REJECTED` with `PROVIDER_SUBMISSION_AMBIGUOUS`) is
@@ -3331,6 +3360,7 @@ SUBMISSION_FAILED_SWEEP_FAILURE_CODE_REPLACEABLE=NO
 SUBMISSION_FAILED_INVALID_VOCABULARY_HTTP_STATUS=400
 SUBMISSION_FAILED_VALID_PAIR_MISMATCH_HTTP_STATUS=409
 SUBMISSION_FAILED_MISMATCH_CLASSIFIED_AFTER_AUTHORITY=YES
+SUBMISSION_FAILED_ROUTE_AUTHENTICATES_BEFORE_BODY_PARSE=YES
 ARCHITECTURE_STATUS=LOCKED
 BRIDGE_DIRECTION=PRIVATE_WORKER_OUTBOUND_TO_COMMERCIAL_CONTROL_PLANE
 WORKER_PROCESS=apps/commercial-worker

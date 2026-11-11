@@ -98,7 +98,19 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   production caller and unused by live execution; no pre-provider
   orchestration was implemented; no API, protocol, migration or
   provider-adapter change; provider execution remains disabled and the
-  fake-provider gate remains unmet: introduction, sections 15, 36 and 37).
+  fake-provider gate remains unmet: introduction, sections 15, 36 and 37);
+  R44B6V1 (R44B6V published in commit
+  836cca5c06a92bcc1c729a59dad0cd1fc6badd3b: the pre-provider orchestration
+  is implemented as `obtainPreProviderPermit` and unused by live execution;
+  `journal.prepare()`, then `SUBMITTING`, then heartbeat, then the permit,
+  with both network steps under the locked two-attempt, unavailable-only
+  retry policy and a 10-second per-attempt deadline; the permit holds no
+  secret and invokes nothing; no provider abstraction or call was added;
+  `credentialOpeningRun.ts` is unchanged; no API, protocol, migration or
+  provider-adapter change; provider execution remains disabled; the
+  fake-provider gate remains unmet, and recovery of granted-but-expired
+  `LEASED` attempts is now the next major lifecycle blocker: introduction,
+  sections 15, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -1062,7 +1074,27 @@ SUBMITTING_CLIENT_REJECTION_WORKER_CODE=SUBMITTING_REJECTED
 
 ### Pre-provider orchestration (revision R44B6V0)
 
-**Locked decision (design only; not yet implemented).** The orchestration
+**Status (R44B6V; recorded by R44B6V1).** Implemented in commit
+836cca5c06a92bcc1c729a59dad0cd1fc6badd3b as `obtainPreProviderPermit`, a
+separate unit that no production path calls: `runCredentialOpeningOnce` is
+unchanged and does not invoke it, so current execution moves no real attempt
+into `SUBMITTING` through it. It runs the per-attempt `journal.prepare()`,
+then the `SUBMITTING` acknowledgement and the mandatory heartbeat, each with
+the locked two-attempt, unavailable-only retry policy, using one unchanged
+proof throughout. Each request attempt gets a fresh orchestration-owned
+`AbortController` and a 10000 ms deadline that is cancelled as soon as the
+request settles. The deadline acts through the `AbortSignal`, which the
+production fetch transport honours, and a retry starts only after the
+previous attempt has settled, so attempts never overlap. The timer is an
+injectable seam for tests, not runtime configuration. The returned permit is
+exactly `{executionAttemptId, fencingCounter}`. It excludes the lease token,
+machine credential, opened provider credential and `leaseExpiresAt`, and has
+no provider callback or object. It records that the locked pre-provider
+checks completed; holding it is not itself a security boundary. No provider
+abstraction, provider construction or invocation exists. The contract below
+is unchanged.
+
+**Locked decision (R44B6V0; implemented by R44B6V).** The orchestration
 boundary immediately before provider invocation. It covers the per-attempt
 journal preflight, the `SUBMITTING` acknowledgement sequence, its request
 deadline and `AbortSignal` ownership, the mandatory pre-provider heartbeat,
@@ -1158,7 +1190,7 @@ credential grant
 **Prerequisites and sequence.** The expected sequence: a client-only worker
 heartbeat client for the existing route (no provider execution); its
 publication and docs-sync (both done: R44B6W, R44B6W1); the R44B6V
-orchestration that stops at the permit (not yet implemented); then keeping
+orchestration that stops at the permit (done: R44B6V, R44B6V1); then keeping
 that orchestration unused by live execution until the later
 provider-composition prerequisites (section 36) are met. No production path
 moves real attempts into `SUBMITTING` only to prove the orchestration.
@@ -1178,7 +1210,7 @@ SUBMITTING_PRE_PROVIDER_HEARTBEAT_FAILURE_CALLS_SUBMISSION_FAILED=NO
 PRE_PROVIDER_PERMIT_REQUIRES_SUBMITTING_AND_HEARTBEAT=YES
 PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
 PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
-PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
+PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=YES
 WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=YES
 ```
 
@@ -1189,9 +1221,10 @@ commit d4f3923d2bf265b0413add63820c797a994276d1 as `heartbeat` on the
 existing `WorkerControlClient`, returning a `WorkerHeartbeatAcknowledgement`
 through its strict response parser, with the closed worker code
 `HEARTBEAT_REJECTED` and optional pass-through of an externally supplied
-`AbortSignal`. It is a client-only transport with no production caller. The
-pre-provider heartbeat policy below stays locked but unwired: it belongs to
-the R44B6V orchestration, which is not implemented. The contract below is
+`AbortSignal`. It is a client-only transport with no production caller; its
+only caller is the R44B6V orchestration, which itself has no production
+caller (R44B6V1). The pre-provider heartbeat policy below is implemented by
+that orchestration but not wired into live execution. The contract below is
 unchanged.
 
 **Locked decision (R44B6W0; client implemented by R44B6W).** The
@@ -1278,7 +1311,7 @@ sweep or `submission-failed`; the orchestration interprets its result.
   provider execution.
 
 **Mandatory pre-provider heartbeat policy (owned by the R44B6V
-orchestration; locked, not yet implemented or wired).**
+orchestration; implemented by R44B6V, not wired into live execution).**
 
 - **Attempts.** At most two in total, the first immediate. The second only
   after `CONTROL_API_UNAVAILABLE`; `HEARTBEAT_REJECTED`,
@@ -3744,16 +3777,15 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6W1, the following are still missing (the worker heartbeat client is
-implemented by R44B6W, section 15: single-shot and client-only, with no
-production caller):
+of R44B6V1, the following are still missing. The worker heartbeat client
+(R44B6W) and the pre-provider orchestration (R44B6V: `journal.prepare()`,
+then the `SUBMITTING` acknowledgement, then the mandatory heartbeat, then the
+permit) are implemented (section 15); neither is used by live execution, and
+neither touches a provider.
 
-- the implementation of the pre-provider orchestration locked by R44B6V0
-  (section 15): `journal.prepare()`, then the `SUBMITTING` acknowledgement,
-  then the mandatory heartbeat under the policy locked by R44B6W0, then the
-  pre-provider permit;
 - an authoritative recovery/sweep policy for granted-but-expired `LEASED`
-  attempts, which the current reclaim does not requeue (section 12);
+  attempts, which the current reclaim does not requeue (section 12); R44B6V
+  does not close this gap, and it is now the next major lifecycle blocker;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
 - the in-flight provider heartbeat schedule, retry and failure policy
@@ -3950,7 +3982,7 @@ SUBMITTING_PRE_PROVIDER_HEARTBEAT_FAILURE_CALLS_SUBMISSION_FAILED=NO
 PRE_PROVIDER_PERMIT_REQUIRES_SUBMITTING_AND_HEARTBEAT=YES
 PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
 PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
-PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
+PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=YES
 WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=YES
 WORKER_HEARTBEAT_CLIENT_USED_BY_LIVE_EXECUTION=NO
 HEARTBEAT_CLIENT_INTERNAL_RETRY_ENABLED=NO

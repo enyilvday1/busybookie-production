@@ -37,7 +37,12 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   and 37); R44B6S1 (R44B6S worker acceptance-recovery client and startup
   reconciliation wiring implemented under the R44B6S0 policy; provider
   execution, `submission-failed` and recovery leases remain unimplemented:
-  introduction, sections 10, 17, 18, 31, 36 and 37).
+  introduction, sections 10, 17, 18, 31, 36 and 37); R44B6T0
+  (`submission-failed` contract completed for future R44B6T implementation:
+  live-lease first transition, token-less original-submission-epoch replay
+  authority, exact replay match, exact response, closed request vocabulary,
+  conflict ordering and credential-version replay rule; no runtime change:
+  introduction, sections 10, 18, 30 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -409,7 +414,7 @@ under `/worker-control/v1`, all with exact closed JSON bodies:
 | `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
 | `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Implemented (R44B6O, section 18). No worker flow calls it yet. |
 | `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Implemented (R44B6R, section 18). Called only by worker startup reconciliation (R44B6S, section 17). |
-| `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18). |
+| `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18; replay contract locked by R44B6T0). |
 
 No route accepts a client-supplied timestamp, Account, connection,
 credential version, provider or job identifier; the server derives them.
@@ -2097,24 +2102,125 @@ execution ID in one of two ways only:
 
 ### Future `submission-failed` route
 
-**Locked decision (design only).**
+**Locked decision (design only; replay contract locked by R44B6T0).**
 `POST /worker-control/v1/attempts/:attemptId/submission-failed` with exactly
-`{fencingCounter, leaseToken, outcome, failureCode}`.
+`{fencingCounter, leaseToken, outcome, failureCode}`. The route is not yet
+implemented. It uses the existing worker-control router conventions: Origin
+rejection, strict worker authentication, POST only, canonical lowercase UUID
+route parameter, JSON content type and an exact member set.
 
-- `outcome` is `DEFINITIVELY_REJECTED` or `OUTCOME_UNKNOWN`.
-- `failureCode` comes from the closed taxonomy of section 27, and each code
-  is valid for only one outcome.
-- The route requires the live-lease proof and state `SUBMITTING`.
-- It writes the target state, `failure_code`, the cleared lease and
-  `updated_at`. `DEFINITIVELY_REJECTED` also writes `completed_at`.
-- It audits `execution_attempt.failed_before_submission` or
-  `execution_attempt.outcome_unknown`.
-- A replay with the same outcome and code returns the committed result. Any
-  other report on a no-longer-`SUBMITTING` attempt is refused.
-- The parent job becomes `NEEDS_ATTENTION` for `OUTCOME_UNKNOWN`. For
-  `DEFINITIVELY_REJECTED` it becomes `FAILED`, unless a separately locked
-  retry policy creates a new attempt. That policy is deferred and is never
-  automatic in v1.
+**Closed request vocabulary (R44B6T0).** Worker-reportable values are:
+
+| `outcome` | Valid `failureCode` | Target state |
+|---|---|---|
+| `DEFINITIVELY_REJECTED` | `PROVIDER_REJECTED_DEFINITIVELY` only | `FAILED_BEFORE_SUBMISSION` |
+| `OUTCOME_UNKNOWN` | `PROVIDER_SUBMISSION_AMBIGUOUS`, `ACCEPTANCE_JOURNAL_WRITE_FAILED` or `PROVIDER_EXECUTION_ID_INVALID` | `OUTCOME_UNKNOWN` |
+
+`WORKER_LEASE_EXPIRED_DURING_SUBMISSION` is set only by the control-plane
+expiry sweep (section 12) and is never worker-reportable. An unknown
+`outcome`, an unknown `failureCode`, the sweep-only code, a malformed
+`fencingCounter` or `leaseToken`, or a missing or extra member is
+`400 INVALID_REQUEST`. These request-shape failures mutate nothing.
+
+A recognised `outcome` with a recognised but incompatible `failureCode` (for
+example `DEFINITIVELY_REJECTED` with `PROVIDER_SUBMISSION_AMBIGUOUS`) is
+`409 LEASE_REJECTED` with security reason `FAILURE_CODE_OUTCOME_MISMATCH`.
+That classification is made only after the applicable authority proof below
+succeeds, so a caller without that authority learns nothing about route
+semantics.
+
+**First transition (live-lease authority).** On an attempt that is
+`SUBMITTING`, the request is a first-transition candidate. In one
+transaction, with the established lock order (worker principal `FOR SHARE`,
+attempt `FOR UPDATE`, ProviderConnection `FOR SHARE`, exact credential
+version `FOR SHARE`), it requires:
+
+- an authenticated principal, re-checked `ACTIVE`;
+- the current lease held by that principal;
+- `fencingCounter` equal to `lease_fencing_counter`;
+- `leaseToken` matching the current stored verifier (constant-time);
+- an unexpired lease;
+- `submitting_worker_principal_id` equal to the authenticated principal;
+- `submitting_fencing_counter` equal to `fencingCounter`, and so to
+  `lease_fencing_counter`.
+
+A replacement or recovery lease never reports the original provider-call
+failure. Connection eligibility is not checked (section 23); the exact
+credential version must not be `DESTROYED` (`SUBMITTING_VERSION_DESTROYED`).
+After that proof, a mismatched pair is refused as above. The first
+transition then writes:
+
+- `DEFINITIVELY_REJECTED`: `SUBMITTING -> FAILED_BEFORE_SUBMISSION`,
+  `failure_code`, `completed_at = now()`, `updated_at = now()` and every
+  current-lease field cleared. The parent job moves `RUNNING -> FAILED` with
+  server `completed_at` and `updated_at`. One
+  `execution_attempt.failed_before_submission` audit.
+- `OUTCOME_UNKNOWN`: `SUBMITTING -> OUTCOME_UNKNOWN`, `failure_code`,
+  `updated_at = now()` and every current-lease field cleared;
+  `completed_at` stays `NULL`. The parent job moves
+  `RUNNING -> NEEDS_ATTENTION`. One `execution_attempt.outcome_unknown`
+  audit.
+
+Both keep `submitting_at`, `submitting_worker_principal_id`,
+`submitting_fencing_counter`, the retained `lease_fencing_counter` and the
+credential-grant evidence (migrations 0004 to 0006). Audit metadata is the
+section 30 safe set with `failureCode`. The attempt write, job write and audit
+commit or roll back together; security events follow the established
+fail-closed sink convention. There is no automatic retry, new attempt or
+resubmission. A separately locked retry policy could later create a new
+attempt after `DEFINITIVELY_REJECTED`; it is deferred and never automatic in
+v1.
+
+**Replay (original-submission-epoch authority).** Both target states clear
+the lease, so no lease-token verifier survives the first commit. A request
+for an attempt that is no longer `SUBMITTING` is a replay candidate. It is
+authorised exactly like the acceptance-recovery epoch proof (section 18,
+`acceptance-recovery`), before any state is disclosed:
+
+- an authenticated principal, re-checked `ACTIVE`;
+- that principal equal to the immutable `submitting_worker_principal_id`;
+- `submitting_at` present;
+- `fencingCounter` equal to `submitting_fencing_counter` and to the retained
+  `lease_fencing_counter`.
+
+`leaseToken` stays in the fixed wire schema and must still be well formed,
+but on replay it is not authority: nothing can verify it, and the route
+never claims to have validated it. No replay token, verifier column,
+migration or recovery lease is introduced.
+
+After the epoch proof, a mismatched pair is `FAILURE_CODE_OUTCOME_MISMATCH`.
+Otherwise the replay succeeds only on an exact match with the committed row:
+`DEFINITIVELY_REJECTED` + `PROVIDER_REJECTED_DEFINITIVELY` matches only
+`FAILED_BEFORE_SUBMISSION` with that `failure_code`; each `OUTCOME_UNKNOWN`
+code matches only `OUTCOME_UNKNOWN` with that same `failure_code`. A
+successful replay writes nothing: no attempt or job write, no audit, no
+security event, and no change to `completed_at`, `updated_at` or
+`failure_code`. It recreates no lease, opens no credential and calls no
+provider. It neither locks nor requires the credential version: a committed
+`FAILED_BEFORE_SUBMISSION` closes its obligations (section 23) and may later
+permit destruction, and replay must not depend on that timing.
+`OUTCOME_UNKNOWN` keeps its recovery obligation independently.
+
+Anything else, after the epoch proof, is `409 LEASE_REJECTED` with
+`INCOMPATIBLE_ATTEMPT_STATE`. That covers a different outcome, a different
+valid failure code, an attempt the expiry sweep moved to `OUTCOME_UNKNOWN`
+with `WORKER_LEASE_EXPIRED_DURING_SUBMISSION` (never replaced by a later
+worker report), and any other state. Existing reasons keep their meaning:
+`UNKNOWN_ATTEMPT`; `OTHER_WORKER`, `FENCING_MISMATCH`, `TOKEN_MISMATCH` and
+`LEASE_EXPIRED` on the live-lease path; `SUBMITTING_PRINCIPAL_MISMATCH` and
+`FENCING_MISMATCH` on the epoch path. No new rejection reason is introduced
+beyond `FAILURE_CODE_OUTCOME_MISMATCH` (section 30).
+
+**Exact response (200), first transition and replay alike.**
+
+```text
+{executionAttemptId, fencingCounter, state, failureCode}
+```
+
+`state` is `FAILED_BEFORE_SUBMISSION` or `OUTCOME_UNKNOWN`; `failureCode` is
+the committed code. There is no `outcome`, timestamp, provider execution ID,
+lease field, worker principal or credential information. Server timestamps
+remain database authority but are not part of this response.
 
 ### Upstream reporting after the journal
 
@@ -2364,7 +2470,10 @@ OPEN_RETENTION_OR_RECOVERY_OBLIGATION_BLOCKS_DESTRUCTION=YES
   already-authorised work: heartbeat, `submitted`, `acceptance-recovery`,
   `submission-failed` and the `submitting` replay. They therefore never
   check connection eligibility. Each one fails closed if the exact version
-  is `DESTROYED`, which is an invariant failure.
+  is `DESTROYED`, which is an invariant failure. (R44B6T0.) The exception is
+  a read-only `submission-failed` replay: its first transition already
+  committed and may have closed the obligation, so it neither locks nor
+  requires the version (section 18).
 - **No new create.** Disconnect never authorises a new provider create. A
   first `SUBMITTING` after disconnect is refused (R44B6J).
 - **Recovery use only.** A retained credential may be used only to recover
@@ -2893,7 +3002,7 @@ Control-plane security events (the worker security sink):
 |---|---|
 | `WORKER_SUBMITTED_REJECTED` | The existing lease reasons, plus `PROVIDER_EXECUTION_CONFLICT` (a different ID on `SUBMITTED`), `PROVIDER_EXECUTION_ID_IN_USE` (adopted by another attempt) and `INCOMPATIBLE_ATTEMPT_STATE`. |
 | `WORKER_ACCEPTANCE_RECOVERY_REJECTED` | `SUBMITTING_PRINCIPAL_MISMATCH`, `FENCING_MISMATCH`, `UNKNOWN_ATTEMPT`, `INCOMPATIBLE_ATTEMPT_STATE`, `PROVIDER_EXECUTION_CONFLICT`, `PROVIDER_EXECUTION_ID_IN_USE`, `SUBMITTING_VERSION_DESTROYED`; the shared transaction-local ACTIVE re-check also uses `WORKER_NOT_ACTIVE`. `ATTEMPT_STILL_SUBMITTING` (still `SUBMITTING` after TX1, for the proven original principal and epoch) is an expected wait signal, not a security event (R44B6R1). |
-| `WORKER_SUBMISSION_FAILURE_REJECTED` | The existing lease reasons, plus `INCOMPATIBLE_ATTEMPT_STATE` and `FAILURE_CODE_OUTCOME_MISMATCH`. |
+| `WORKER_SUBMISSION_FAILURE_REJECTED` | The existing lease reasons, plus `INCOMPATIBLE_ATTEMPT_STATE` and `FAILURE_CODE_OUTCOME_MISMATCH`. (R44B6T0.) The replay path uses the existing `SUBMITTING_PRINCIPAL_MISMATCH` and `FENCING_MISMATCH` for a failed original-epoch proof; `FAILURE_CODE_OUTCOME_MISMATCH` is classified only after authority is proven; a successful first transition or exact replay emits no rejection event, and a `400 INVALID_REQUEST` is not a security event. |
 | `WORKER_LEASE_REJECTED` | Existing. A stale worker's heartbeat after its `SUBMITTING` lease was swept (`NOT_LEASED` or `LEASE_EXPIRED`). |
 
 A `SUBMITTING` expiry is a lifecycle fact. It is audited as
@@ -3206,6 +3315,22 @@ ACCEPTANCE_RECOVERY_RETRY_BUDGET_SCOPE=PER_RECORD
 ALL_UNRESOLVED_RECORDS_MUST_RECOVER_BEFORE_NEW_WORK=YES
 ACCEPTANCE_RECOVERY_SENDS_LIVE_LEASE_TOKEN=NO
 ACCEPTANCE_RECOVERY_CREATES_RECOVERY_LEASE=NO
+SUBMISSION_FAILED_FIRST_TRANSITION_REQUIRES_LIVE_LEASE=YES
+SUBMISSION_FAILED_FIRST_TRANSITION_REQUIRES_SUBMISSION_EPOCH_MATCH=YES
+SUBMISSION_FAILED_FIRST_TRANSITION_DESTROYED_VERSION_ALLOWED=NO
+SUBMISSION_FAILED_REPLAY_REQUIRES_LIVE_LEASE=NO
+SUBMISSION_FAILED_REPLAY_AUTHORITY=SUBMITTING_PRINCIPAL_AND_RETAINED_FENCING_COUNTER
+SUBMISSION_FAILED_REPLAY_USES_LEASE_TOKEN_AS_AUTHORITY=NO
+SUBMISSION_FAILED_REPLAY_REQUIRES_EXACT_OUTCOME_AND_FAILURE_CODE=YES
+SUBMISSION_FAILED_REPLAY_MUTATES_STATE=NO
+SUBMISSION_FAILED_REPLAY_DUPLICATES_AUDIT=NO
+SUBMISSION_FAILED_REPLAY_REQUIRES_USABLE_CREDENTIAL_VERSION=NO
+SUBMISSION_FAILED_RESPONSE_FIELDS=EXECUTION_ATTEMPT_ID_FENCING_COUNTER_STATE_FAILURE_CODE
+SUBMISSION_FAILED_SWEEP_ONLY_FAILURE_CODE_WORKER_REPORTABLE=NO
+SUBMISSION_FAILED_SWEEP_FAILURE_CODE_REPLACEABLE=NO
+SUBMISSION_FAILED_INVALID_VOCABULARY_HTTP_STATUS=400
+SUBMISSION_FAILED_VALID_PAIR_MISMATCH_HTTP_STATUS=409
+SUBMISSION_FAILED_MISMATCH_CLASSIFIED_AFTER_AUTHORITY=YES
 ARCHITECTURE_STATUS=LOCKED
 BRIDGE_DIRECTION=PRIVATE_WORKER_OUTBOUND_TO_COMMERCIAL_CONTROL_PLANE
 WORKER_PROCESS=apps/commercial-worker

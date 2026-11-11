@@ -18,6 +18,7 @@ import type { CredentialOpener } from "../../src/credentialContracts.js";
 import { runCredentialOpeningOnce, type CredentialOpeningClient, type WorkerLogEvent } from "../../src/credentialOpeningRun.js";
 import { createHttpWorkerControlClient } from "../../src/workerControlClient.js";
 import { WorkerError } from "../../src/workerError.js";
+import { fakeRecoveryTime } from "../support/fakeRecoveryTime.js";
 import { createTestCredentialFingerprinter, createTestCredentialOpener, createTestCredentialSealer, generateTestKey } from "../support/testCredentialOpening.js";
 
 // End to end: the private worker's real HTTP client and opening run against
@@ -252,6 +253,7 @@ describe("private worker credential opening, end to end", () => {
       const real = workerClient(baseUrl, worker).client;
       const client: CredentialOpeningClient = {
         leaseNextAttempt: real.leaseNextAttempt,
+        recoverAcceptance: real.recoverAcceptance,
         requestCredentialGrant: async (attemptId, proof) => {
           const grant = await real.requestCredentialGrant(attemptId, proof);
           const envelope = grant.sealedEnvelope as Record<string, string>;
@@ -275,6 +277,7 @@ describe("private worker credential opening, end to end", () => {
     let grants = 0;
     const client: CredentialOpeningClient = {
       leaseNextAttempt: real.client.leaseNextAttempt,
+      recoverAcceptance: real.client.recoverAcceptance,
       requestCredentialGrant: async (attemptId, proof) => {
         grants += 1;
         await real.client.requestCredentialGrant(attemptId, proof); // committed; response "lost"
@@ -303,6 +306,7 @@ describe("private worker credential opening, end to end", () => {
     const real = workerClient(baseUrl, worker).client;
     const client: CredentialOpeningClient = {
       leaseNextAttempt: real.leaseNextAttempt,
+      recoverAcceptance: real.recoverAcceptance,
       requestCredentialGrant: async (attemptId, proof) => {
         await disconnect(item);
         return real.requestCredentialGrant(attemptId, proof);
@@ -322,6 +326,7 @@ describe("private worker credential opening, end to end", () => {
     const real = workerClient(baseUrl, worker).client;
     const client: CredentialOpeningClient = {
       leaseNextAttempt: real.leaseNextAttempt,
+      recoverAcceptance: real.recoverAcceptance,
       requestCredentialGrant: async (attemptId, proof) => {
         await clients.migrator.query("UPDATE worker_principals SET status = 'DISABLED', disabled_at = now() WHERE id = $1", [worker.id]);
         return real.requestCredentialGrant(attemptId, proof);
@@ -341,6 +346,7 @@ describe("private worker credential opening, end to end", () => {
     const real = workerClient(baseUrl, worker).client;
     const client: CredentialOpeningClient = {
       leaseNextAttempt: real.leaseNextAttempt,
+      recoverAcceptance: real.recoverAcceptance,
       requestCredentialGrant: async (attemptId, proof) => {
         await clients.migrator.query(
           "UPDATE execution_attempts SET leased_at = now() - interval '10 minutes', heartbeat_at = now() - interval '10 minutes', lease_expires_at = now() - interval '1 second' WHERE id = $1",
@@ -389,13 +395,18 @@ describe("private worker credential opening, end to end", () => {
   });
 });
 
-describe("startup journal blocks fresh work before reaching the real control plane", () => {
+// R44B6S: valid evidence is now offered to acceptance-recovery. Here the
+// attempt never entered SUBMITTING, so the control plane refuses it
+// definitively (no original submitting principal): one recovery request, no
+// lease, no grant, the record retained. Corrupt or conflicting evidence
+// still sends nothing at all.
+describe("startup journal blocks fresh work against the real control plane", () => {
   it.each([
     ["published final", "ACCEPTANCE_RECONCILIATION_FAILED"],
     ["valid temporary", "ACCEPTANCE_RECONCILIATION_FAILED"],
     ["corrupt final", "ACCEPTANCE_JOURNAL_CORRUPT"],
     ["conflicting evidence", "ACCEPTANCE_JOURNAL_CONFLICT"],
-  ])("%s prevents every HTTP request, grant and credential open", async (evidence, code) => {
+  ])("%s prevents every lease, grant and credential open", async (evidence, code) => {
     const worker = await machine();
     const item = await work();
     const { baseUrl, recording } = await controlPlane([worker]);
@@ -420,12 +431,116 @@ describe("startup journal blocks fresh work before reaching the real control pla
     const events: WorkerLogEvent[] = [];
     const error = await workerFailure(runCredentialOpeningOnce({ journal, environment: {}, client: real.client, opener: counted.opener, log: (event) => events.push(event) }), [worker.credential, item.plaintext]);
     expect(error.code).toBe(code);
-    expect(real.urls).toEqual([]);
+    const recoverable = evidence === "published final" || evidence === "valid temporary";
+    expect(real.urls).toEqual(recoverable ? [`${baseUrl}/worker-control/v1/attempts/${item.attemptId}/acceptance-recovery`] : []);
     expect(counted.seen.opened).toBe(0);
     expect(await attemptRow(item.attemptId)).toEqual(before);
-    expect(recording.events).toEqual([]);
+    expect(recording.events.map(({ type, reason }) => ({ type, reason }))).toEqual(
+      recoverable ? [{ type: "WORKER_ACCEPTANCE_RECOVERY_REJECTED", reason: "SUBMITTING_PRINCIPAL_MISMATCH" }] : [],
+    );
+    if (recoverable) {
+      expect(await readFile(join(directory, `${item.attemptId}.json`), "latin1")).toBe(serializeAcceptanceRecord(record));
+    }
     expect(events).toEqual([{ stage: "STARTUP", outcome: "FAILED", code }]);
     expect(JSON.stringify(events)).not.toContain(input.providerExecutionId);
+  });
+});
+
+// R44B6S: startup acceptance recovery end to end. The test enters SUBMITTING
+// and journals a synthetic acceptance itself (no worker path does yet), then
+// the real opening run recovers it through the real router on injected time.
+describe("startup acceptance recovery against the real control plane", () => {
+  async function submittingWithJournal(options: Readonly<{ fencingOffset?: number }> = {}) {
+    const worker = await machine();
+    const item = await work();
+    const { baseUrl, recording } = await controlPlane([worker]);
+    const real = workerClient(baseUrl, worker);
+    const lease = (await real.client.leaseNextAttempt())!;
+    const proof = { fencingCounter: lease.fencingCounter, leaseToken: lease.leaseToken };
+    await real.client.requestCredentialGrant(lease.executionAttemptId, proof);
+    const response = await fetch(`${baseUrl}/worker-control/v1/attempts/${lease.executionAttemptId}/submitting`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${worker.credential}`, "Content-Type": "application/json" },
+      body: JSON.stringify(proof),
+    });
+    expect(response.status).toBe(200);
+    const submittingAt = new Date(((await response.json()) as { submittingAt: string }).submittingAt);
+    await journal.prepare();
+    const { record } = await journal.write({
+      executionAttemptId: lease.executionAttemptId, executionJobId: lease.executionJobId, accountId: item.accountId,
+      attemptNumber: lease.attemptNumber, fencingCounter: lease.fencingCounter + (options.fencingOffset ?? 0), provider: lease.provider,
+      generationRequestSha256: lease.generationRequestSha256, submittingAt, providerExecutionId: "synthetic/operations/recovered",
+      providerAcceptedAt: new Date(),
+    });
+    real.urls.length = 0;
+    const finalPath = join(startupStateRoot, "acceptance-journal", "v1", `${lease.executionAttemptId}.json`);
+    return { worker, item, baseUrl, recording, real, lease, record, finalPath };
+  }
+  // Authoritative server-side expiry of the live SUBMITTING lease; the worker clock is never consulted.
+  const expireLease = (attemptId: string) =>
+    clients.migrator.query(
+      "UPDATE execution_attempts SET leased_at = now() - interval '10 minutes', heartbeat_at = now() - interval '10 minutes', lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [attemptId],
+    );
+  const recoveryUrl = (baseUrl: string, attemptId: string) => `${baseUrl}/worker-control/v1/attempts/${attemptId}/acceptance-recovery`;
+
+  it("recovers OUTCOME_UNKNOWN to SUBMITTED, retains the record, becomes CLEAR and only then requests a lease", async () => {
+    const setup = await submittingWithJournal();
+    await expireLease(setup.lease.executionAttemptId);
+    const before = await readFile(setup.finalPath, "latin1");
+    const time = fakeRecoveryTime();
+    const { opener, seen } = recordingOpener(setup.item.plaintext);
+    for (let restart = 0; restart < 2; restart++) {
+      setup.real.urls.length = 0;
+      const result = await runCredentialOpeningOnce({ journal, environment: {}, client: setup.real.client, opener, monotonicNow: time.monotonicNow, sleep: time.sleep });
+      expect(result).toEqual({ status: "NO_WORK" });
+      // The second startup replays the same acknowledgement idempotently.
+      expect(setup.real.urls).toEqual([recoveryUrl(setup.baseUrl, setup.lease.executionAttemptId), `${setup.baseUrl}/worker-control/v1/leases`]);
+      expect(await attemptRow(setup.lease.executionAttemptId)).toMatchObject({ state: "SUBMITTED", provider_execution_id: "synthetic/operations/recovered" });
+      // SUBMITTED is not terminal: the exact record stays on disk.
+      expect(await readFile(setup.finalPath, "latin1")).toBe(before);
+    }
+    expect(seen.opened).toBe(0);
+    expect(time.backoffs).toEqual([]);
+    expect(setup.recording.events.filter(({ type }) => type === "WORKER_ACCEPTANCE_RECOVERY_REJECTED")).toEqual([]);
+  });
+
+  it("keeps a still-SUBMITTING attempt blocked through the whole bounded budget on injected time, then fails closed", async () => {
+    const setup = await submittingWithJournal();
+    const before = await readFile(setup.finalPath, "latin1");
+    const time = fakeRecoveryTime();
+    const events: WorkerLogEvent[] = [];
+    const error = await workerFailure(
+      runCredentialOpeningOnce({ journal, environment: {}, client: setup.real.client, opener: testOpener, monotonicNow: time.monotonicNow, sleep: time.sleep, log: (event) => events.push(event) }),
+      [setup.worker.credential, setup.lease.leaseToken, "synthetic/operations/recovered"],
+    );
+    expect(error.code).toBe("ACCEPTANCE_RECONCILIATION_FAILED");
+    expect(setup.real.urls).toEqual(Array(18).fill(recoveryUrl(setup.baseUrl, setup.lease.executionAttemptId)));
+    expect(time.backoffs).toEqual([1000, 2000, 4000, 8000, ...Array(13).fill(10000)]);
+    expect(time.now()).toBe(145000);
+    // The worker clock declared nothing: the live lease is untouched and still SUBMITTING.
+    expect(await attemptRow(setup.lease.executionAttemptId)).toMatchObject({ state: "SUBMITTING", provider_execution_id: null });
+    expect(await readFile(setup.finalPath, "latin1")).toBe(before);
+    expect(setup.recording.events.filter(({ type }) => type === "WORKER_ACCEPTANCE_RECOVERY_REJECTED")).toEqual([]);
+    expect(events).toEqual([{ stage: "STARTUP", outcome: "FAILED", code: "ACCEPTANCE_RECONCILIATION_FAILED" }]);
+  });
+
+  it("fails closed on a fencing mismatch without retrying, retaining the record and requesting no lease", async () => {
+    const setup = await submittingWithJournal({ fencingOffset: 1 });
+    await expireLease(setup.lease.executionAttemptId);
+    const before = await readFile(setup.finalPath, "latin1");
+    const time = fakeRecoveryTime();
+    const error = await workerFailure(
+      runCredentialOpeningOnce({ journal, environment: {}, client: setup.real.client, opener: testOpener, monotonicNow: time.monotonicNow, sleep: time.sleep }),
+      [setup.worker.credential, "synthetic/operations/recovered"],
+    );
+    expect(error.code).toBe("ACCEPTANCE_RECONCILIATION_FAILED");
+    expect(setup.real.urls).toEqual([recoveryUrl(setup.baseUrl, setup.lease.executionAttemptId)]);
+    expect(time.backoffs).toEqual([]);
+    // TX1's authoritative expiry stays committed; recovery itself wrote nothing.
+    expect(await attemptRow(setup.lease.executionAttemptId)).toMatchObject({ state: "OUTCOME_UNKNOWN", provider_execution_id: null });
+    expect(await readFile(setup.finalPath, "latin1")).toBe(before);
+    expect(setup.recording.events.at(-1)).toMatchObject({ type: "WORKER_ACCEPTANCE_RECOVERY_REJECTED", reason: "FENCING_MISMATCH" });
   });
 });
 

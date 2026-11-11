@@ -64,7 +64,18 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
   [JOURNAL]: ["local persistence", "SUBMITTING vocabulary", "provider execution identity"],
   "src/workerControlClient.ts": ["provider execution identity"],
   "src/providerExecutionContract.ts": ["provider execution identity"],
+  // R44B6S: startup recovery passes the record's own identity (checked below).
+  "src/startupJournalReconciliation.ts": ["provider execution identity"],
 };
+// R44B6S: the exact acceptance-recovery vocabulary a file may name. Only these
+// tokens are removed before the rules run, so /submitting, submission-failed,
+// outcome-unknown or any other SUBMITTING text still fails in these files.
+const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
+  "src/workerControlClient.ts": ["/acceptance-recovery`", "ATTEMPT_STILL_SUBMITTING"],
+  "src/acceptanceRecoveryPolicy.ts": ["ATTEMPT_STILL_SUBMITTING", "STILL_SUBMITTING"],
+};
+const withoutAllowedTokens = (path: string, text: string) =>
+  (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
 // The two worker files that import the shared protocol package.
 const PROTOCOL_IMPORTERS = new Set(["src/credentialContracts.ts", "src/providerExecutionContract.ts"]);
 
@@ -72,6 +83,7 @@ describe("commercial-worker source boundary", () => {
   it("scans the worker source", () => {
     expect(sources.map(({ path }) => path).sort()).toEqual([
       "src/acceptanceJournal.ts",
+      "src/acceptanceRecoveryPolicy.ts",
       "src/credentialContracts.ts",
       "src/credentialOpeningRun.ts",
       "src/providerEnvironment.ts",
@@ -102,7 +114,7 @@ describe("commercial-worker source boundary", () => {
     // refuses; it is exempt from the brand pattern only (checked below).
     const exempt = new Set([...(EXEMPTIONS[path] ?? []), ...(path === "src/providerEnvironment.ts" ? ["provider SDK or brand"] : [])]);
     const rules = FORBIDDEN.filter(({ label: name }) => !exempt.has(name));
-    const violations = rules.filter(({ pattern }) => pattern.test(code(text))).map(({ label: name }) => name);
+    const violations = rules.filter(({ pattern }) => pattern.test(withoutAllowedTokens(path, code(text)))).map(({ label: name }) => name);
     expect({ path, violations }).toEqual({ path, violations: [] });
   });
 
@@ -168,6 +180,14 @@ describe("commercial-worker source boundary", () => {
     expect(hit("await client.imageToVideo.create(request);")).toContain("provider create or polling");
     expect(hit('import "../../commercial-api/src/workerControl/workerLeaseService.js";')).toContain("commercial-api worker or connection services");
     expect(hit('import { parseSealedEnvelope } from "../../commercial-api/src/providerCredentials/sealedEnvelope.js";')).toContain("commercial-api module");
+    // The allowed recovery tokens hide nothing else.
+    const allowed = (path: string, text: string) => FORBIDDEN.filter(({ pattern }) => pattern.test(withoutAllowedTokens(path, text))).map(({ label: name }) => name);
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/acceptance-recovery`")).toEqual([]);
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submitting`")).toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submission-failed`")).toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(allowed("src/workerControlClient.ts", 'state === "SUBMITTING"')).toContain("SUBMITTING vocabulary");
+    expect(allowed("src/acceptanceRecoveryPolicy.ts", "acknowledgeSubmitting()")).toContain("SUBMITTING vocabulary");
+    expect(allowed("src/acceptanceRecoveryPolicy.ts", "/acceptance-recovery")).toContain("SUBMITTING acknowledgement or recovery routes");
   });
 });
 
@@ -190,9 +210,25 @@ describe("acceptance journal boundary", () => {
     expect(importers.sort()).toEqual(["src/credentialOpeningRun.ts", "src/startupJournalReconciliation.ts"]);
     const callers = sources.filter(({ text }) => /\.reportSubmitted\s*\(/.test(code(text))).map(({ path }) => path);
     expect(callers).toEqual([]);
+    // R44B6S: startup reaches the control plane only through the injected
+    // client's recoverAcceptance, never by direct HTTP, and never constructs,
+    // re-hashes or rewrites a record.
     const startup = code(read(join(SRC_ROOT, "startupJournalReconciliation.ts")));
-    expect(startup).not.toMatch(/\.write\s*\(|\.reportSubmitted\s*\(|\bfetch\s*\(|workerControlClient|providerExecutionId|recordedAt\s*:/);
+    expect(startup).not.toMatch(/\.write\s*\(|\.reportSubmitted\s*\(|\bfetch\s*\(|recordedAt\s*:|recordSha256\s*:|buildAcceptanceRecord|acceptanceRecordDigest|createHttpWorkerControlClient|leaseNextAttempt|leaseToken/);
     expect(startup).toMatch(/await journal\.publish\(record\)/);
+    expect(startup).toMatch(/import type \{ WorkerControlClient \} from "\.\/workerControlClient\.js";/);
+    // The provider execution ID is only ever the record's own, passed through unchanged.
+    expect(startup.match(/providerExecutionId/g)).toHaveLength(2);
+    expect(startup).toMatch(/const \{ executionAttemptId, fencingCounter, providerExecutionId \} = record;/);
+    expect(startup).toMatch(/recovery\.client\.recoverAcceptance\(executionAttemptId, fencingCounter, providerExecutionId, signal\)/);
+  });
+
+  it("keeps the acceptance-recovery policy pure: injected time, no I/O, no lease", () => {
+    const policy = code(read(join(SRC_ROOT, "acceptanceRecoveryPolicy.ts")));
+    expect(importsOf(policy).sort()).toEqual(["./workerError.js", "node:timers/promises"]);
+    expect(policy).not.toMatch(/\bfetch\s*\(|Date\.now|new Date|leaseToken|leaseNextAttempt|journal|providerExecutionId/);
+    expect(policy).toMatch(/time\.monotonicNow\(\)/);
+    expect(policy).toMatch(/time\.sleep\(/);
   });
 });
 

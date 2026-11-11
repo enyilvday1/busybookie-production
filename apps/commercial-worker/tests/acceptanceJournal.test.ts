@@ -504,3 +504,82 @@ describe("write algorithm ordering (section 17, steps 2-7)", () => {
     expect(memory.calls).toEqual([]);
   });
 });
+
+// R44B6S: retention removal after an exact terminal acknowledgement.
+describe("removeAcknowledgedRecord (section 17 retention)", () => {
+  const FINAL = () => join(STATE_ROOT, "acceptance-journal", "v1", `${ATTEMPT}.json`);
+  async function published(overrides: Parameters<typeof memoryFileSystem>[0] = {}, directorySync: "REQUIRED" | "DEVELOPMENT_BEST_EFFORT" = "REQUIRED") {
+    const memory = memoryFileSystem(overrides);
+    const journal = createAcceptanceJournal({ stateRoot: STATE_ROOT, directorySync, fileSystem: memory.fs, randomSuffix: suffixes(), clock });
+    const { record } = await journal.write(INPUT);
+    memory.calls.length = 0;
+    return { memory, journal, record };
+  }
+
+  it("re-reads the exact bytes, unlinks the final, then flushes the directory", async () => {
+    const { memory, journal, record } = await published();
+    const before = Buffer.from(memory.files.get(FINAL())!).toString("latin1");
+    await journal.removeAcknowledgedRecord(record);
+    expect(memory.calls).toEqual([`unlink ${ATTEMPT}.json`, "openDirectory v1", "dirSync", "dirClose"]);
+    expect(memory.files.has(FINAL())).toBe(false);
+    // The removed bytes were exactly the reconciled record: nothing regenerated.
+    expect(before).toBe(serializeAcceptanceRecord(record));
+  });
+
+  it("refuses a record that no longer matches the published bytes, leaving it in place", async () => {
+    const { memory, journal, record } = await published();
+    for (const other of [
+      buildAcceptanceRecord(INPUT, new Date("2026-11-11T10:00:09.000Z")),
+      buildAcceptanceRecord({ ...INPUT, providerExecutionId: "models/x/operations/other" }, RECORDED_AT),
+    ]) {
+      expect(await codeOf(journal.removeAcknowledgedRecord(other))).toBe("ACCEPTANCE_JOURNAL_CONFLICT");
+    }
+    expect(memory.calls).toEqual([]);
+    expect(Buffer.from(memory.files.get(FINAL())!).toString("latin1")).toBe(serializeAcceptanceRecord(record));
+  });
+
+  it("refuses a corrupt or missing final without unlinking", async () => {
+    const corrupt = await published();
+    corrupt.memory.files.set(FINAL(), bytesOf("corrupt\n"));
+    expect(await codeOf(corrupt.journal.removeAcknowledgedRecord(corrupt.record))).toBe("ACCEPTANCE_JOURNAL_CORRUPT");
+    expect(corrupt.memory.calls).toEqual([]);
+    expect(corrupt.memory.files.has(FINAL())).toBe(true);
+
+    const missing = await published();
+    missing.memory.files.delete(FINAL());
+    expect(await codeOf(missing.journal.removeAcknowledgedRecord(missing.record))).toBe("ACCEPTANCE_JOURNAL_CORRUPT");
+    expect(missing.memory.calls).toEqual([]);
+  });
+
+  it("refuses an invalid record shape before touching the filesystem", async () => {
+    const { memory, journal, record } = await published();
+    expect(await codeOf(journal.removeAcknowledgedRecord({ ...record, executionAttemptId: "../escape" }))).toBe("ACCEPTANCE_RECORD_INVALID");
+    expect(memory.calls).toEqual([]);
+  });
+
+  it("fails closed when the unlink fails, keeping the record", async () => {
+    const { memory, journal, record } = await published({ unlink: (path) => (path.endsWith(".json") ? new Error("EPERM") : undefined) });
+    expect(await codeOf(journal.removeAcknowledgedRecord(record))).toBe("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+    expect(memory.files.has(FINAL())).toBe(true);
+    expect(memory.calls).toEqual([`unlink ${ATTEMPT}.json`]);
+  });
+
+  it("treats a failed directory flush as a write failure under REQUIRED and as best effort in development", async () => {
+    let flushes = 0;
+    const failAfterWrite = () => (flushes++ >= 1 ? new Error("EIO") : undefined);
+    const required = await published({ dirSync: failAfterWrite });
+    expect(await codeOf(required.journal.removeAcknowledgedRecord(required.record))).toBe("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+    expect(required.memory.calls).toEqual([`unlink ${ATTEMPT}.json`, "openDirectory v1", "dirSync", "dirClose"]);
+
+    flushes = 0;
+    const development = await published({ dirSync: failAfterWrite }, "DEVELOPMENT_BEST_EFFORT");
+    await development.journal.removeAcknowledgedRecord(development.record);
+    expect(development.memory.files.has(FINAL())).toBe(false);
+  });
+
+  it("never constructs a record: no write, link or new temporary during removal", async () => {
+    const { memory, journal, record } = await published();
+    await journal.removeAcknowledgedRecord(record);
+    expect(memory.calls.some((call) => /^(openExclusive|write|link|chmod)/.test(call))).toBe(false);
+  });
+});

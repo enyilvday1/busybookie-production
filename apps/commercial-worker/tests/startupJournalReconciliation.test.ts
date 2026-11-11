@@ -7,8 +7,11 @@ import {
   buildAcceptanceRecord, createAcceptanceJournal, nodeJournalFileSystem, serializeAcceptanceRecord,
   type AcceptanceJournal, type AcceptanceRecord, type JournalFileSystem,
 } from "../src/acceptanceJournal.js";
-import { runCredentialOpeningOnce, type WorkerLogEvent } from "../src/credentialOpeningRun.js";
+import { runCredentialOpeningOnce, type CredentialOpeningClient, type WorkerLogEvent } from "../src/credentialOpeningRun.js";
 import { reconcileStartupJournal } from "../src/startupJournalReconciliation.js";
+import type { AcceptanceRecoveryState, WorkerAcceptanceRecoveryResult } from "../src/workerControlClient.js";
+import { WorkerError, type WorkerErrorCode } from "../src/workerError.js";
+import { fakeRecoveryTime } from "./support/fakeRecoveryTime.js";
 
 const A = "11111111-2222-4333-8444-555555555555";
 const B = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -38,15 +41,27 @@ afterEach(async () => {
   await rm(stateRoot, { recursive: true, force: true });
 });
 
-function gated(journalDependency: AcceptanceJournal = journal) {
-  const client = { leaseNextAttempt: vi.fn(async () => null), requestCredentialGrant: vi.fn() };
+// The local-phase cases below keep their meaning under R44B6S: the injected
+// control plane refuses recovery definitively, so valid evidence stays
+// unresolved and blocks with ACCEPTANCE_RECONCILIATION_FAILED.
+type Recover = CredentialOpeningClient["recoverAcceptance"];
+const refuse: Recover = async () => {
+  throw new WorkerError("ACCEPTANCE_RECONCILIATION_FAILED");
+};
+function gated(journalDependency: AcceptanceJournal = journal, recover: Recover = refuse) {
+  const time = fakeRecoveryTime();
+  const client = { leaseNextAttempt: vi.fn(async () => null), requestCredentialGrant: vi.fn(), recoverAcceptance: vi.fn(recover) };
   const opener = { open: vi.fn() };
   const events: WorkerLogEvent[] = [];
-  const run = () => runCredentialOpeningOnce({ environment: {}, journal: journalDependency, client, opener, log: (event) => events.push(event) });
-  return { client, opener, events, run };
+  const run = () =>
+    runCredentialOpeningOnce({
+      environment: {}, journal: journalDependency, client, opener, log: (event) => events.push(event),
+      monotonicNow: time.monotonicNow, sleep: time.sleep,
+    });
+  return { client, opener, events, run, time };
 }
-async function blocked(expectedCode: string, dependency = journal) {
-  const run = gated(dependency);
+async function blocked(expectedCode: string, dependency = journal, recover: Recover = refuse) {
+  const run = gated(dependency, recover);
   await expect(run.run()).rejects.toMatchObject({ code: expectedCode });
   expect(run.client.leaseNextAttempt).not.toHaveBeenCalled();
   expect(run.client.requestCredentialGrant).not.toHaveBeenCalled();
@@ -271,5 +286,171 @@ describe("local startup reconciliation (section 17 and restart matrix A-H)", () 
 
   it("refuses a missing composition value instead of allowing a startup bypass", async () => {
     await blocked("STATE_ROOT_UNSUITABLE", null as unknown as AcceptanceJournal);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R44B6S: section 17 steps 3 and 4. Valid published evidence is recovered
+// through the injected control client under the bounded per-record policy,
+// on injected time; the global fetch stays forbidden.
+
+const C = "cccccccc-dddd-4eee-8fff-000000000000";
+const acknowledged = (state: AcceptanceRecoveryState, id: string, fencingCounter = 3, providerExecutionId = "synthetic/operations/one"): WorkerAcceptanceRecoveryResult =>
+  ({ status: "ACKNOWLEDGED", acknowledgement: { executionAttemptId: id, fencingCounter, state, providerExecutionId } });
+const STILL: WorkerAcceptanceRecoveryResult = { status: "ATTEMPT_STILL_SUBMITTING" };
+
+// Answers per attempt ID in order, repeating the last answer.
+function scriptedRecovery(script: Record<string, readonly (WorkerAcceptanceRecoveryResult | WorkerErrorCode)[]>) {
+  const calls: { id: string; fencingCounter: number; providerExecutionId: string; signal: boolean }[] = [];
+  const recover: Recover = async (id, fencingCounter, providerExecutionId, signal) => {
+    calls.push({ id, fencingCounter, providerExecutionId, signal: signal instanceof AbortSignal });
+    const answers = script[id] ?? [];
+    const answer = answers[Math.min(calls.filter((call) => call.id === id).length - 1, answers.length - 1)];
+    if (answer === undefined) throw new Error("unexpected recovery request");
+    if (typeof answer === "string") throw new WorkerError(answer);
+    return answer;
+  };
+  return { recover, calls };
+}
+
+describe("startup acceptance recovery (section 17 steps 3-4, R44B6S)", () => {
+  it("recovers every record in lexical order with its exact persisted identity, then becomes CLEAR and leases", async () => {
+    // Published in reverse order; recovery order is still lexical.
+    for (const id of [C, B, A]) await journal.publish(record(id, `synthetic/operations/${id.slice(0, 4)}`));
+    const script = scriptedRecovery({
+      [A]: [acknowledged("SUBMITTED", A, 3, "synthetic/operations/1111")],
+      [B]: [acknowledged("SUBMITTED", B, 3, "synthetic/operations/aaaa")],
+      [C]: [acknowledged("SUBMITTED", C, 3, "synthetic/operations/cccc")],
+    });
+    const run = gated(journal, script.recover);
+    expect(await run.run()).toEqual({ status: "NO_WORK" });
+    expect(script.calls).toEqual([
+      { id: A, fencingCounter: 3, providerExecutionId: "synthetic/operations/1111", signal: true },
+      { id: B, fencingCounter: 3, providerExecutionId: "synthetic/operations/aaaa", signal: true },
+      { id: C, fencingCounter: 3, providerExecutionId: "synthetic/operations/cccc", signal: true },
+    ]);
+    expect(run.client.leaseNextAttempt).toHaveBeenCalledTimes(1);
+    expect(run.client.leaseNextAttempt.mock.invocationCallOrder[0]!).toBeGreaterThan(run.client.recoverAcceptance.mock.invocationCallOrder.at(-1)!);
+  });
+
+  it("retains a SUBMITTED record byte-for-byte, and recovers it again on the next startup", async () => {
+    await journal.publish(record());
+    const before = await readFile(final());
+    const script = scriptedRecovery({ [A]: [acknowledged("SUBMITTED", A)] });
+    for (let restart = 0; restart < 2; restart++) {
+      const run = gated(journal, script.recover);
+      expect(await run.run()).toEqual({ status: "NO_WORK" });
+      expect(await readFile(final())).toEqual(before);
+    }
+    expect(script.calls).toHaveLength(2);
+  });
+
+  it.each(["SUCCEEDED", "SUBMITTED_FAILED", "ABANDONED"] as const)("removes exactly the reconciled record after a terminal %s acknowledgement", async (state) => {
+    await journal.publish(record());
+    await journal.publish(record(B));
+    const remove = vi.fn(journal.removeAcknowledgedRecord);
+    const write = vi.fn(journal.write);
+    const script = scriptedRecovery({ [A]: [acknowledged(state, A)], [B]: [acknowledged("SUBMITTED", B)] });
+    const run = gated({ ...journal, removeAcknowledgedRecord: remove, write }, script.recover);
+    expect(await run.run()).toEqual({ status: "NO_WORK" });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(record());
+    expect(write).not.toHaveBeenCalled();
+    expect(await readdir(records())).toEqual([`${B}.json`]);
+  });
+
+  it("re-checks the exact bytes before removal and blocks if the final changed", async () => {
+    await journal.publish(record());
+    const replaced = serializeAcceptanceRecord(record(A, "synthetic/operations/replaced"));
+    const script = scriptedRecovery({ [A]: [acknowledged("SUCCEEDED", A)] });
+    const recover: Recover = async (...args) => {
+      // The final is replaced on disk after the scan but before removal.
+      await writeFile(final(), replaced);
+      return script.recover(...args);
+    };
+    const run = await blocked("ACCEPTANCE_JOURNAL_CONFLICT", journal, recover);
+    expect(run.client.recoverAcceptance).toHaveBeenCalledTimes(1);
+    expect(await readFile(final(), "utf8")).toBe(replaced);
+  });
+
+  it("gives each record a fresh budget: a record needing most of its budget does not shorten the next", async () => {
+    await journal.publish(record());
+    await journal.publish(record(B));
+    const waits = Array<WorkerAcceptanceRecoveryResult>(17).fill(STILL);
+    const script = scriptedRecovery({ [A]: [...waits, acknowledged("SUBMITTED", A)], [B]: [...waits, acknowledged("SUBMITTED", B)] });
+    const run = gated(journal, script.recover);
+    expect(await run.run()).toEqual({ status: "NO_WORK" });
+    expect(script.calls.filter((call) => call.id === A)).toHaveLength(18);
+    expect(script.calls.filter((call) => call.id === B)).toHaveLength(18);
+    // 145 s of waiting per record: 290 s in all, beyond one record's 150 s.
+    expect(run.time.now()).toBe(290000);
+  });
+
+  it("retains the record and blocks on exhaustion of ATTEMPT_STILL_SUBMITTING, without reaching later records", async () => {
+    await journal.publish(record());
+    await journal.publish(record(B));
+    const before = await readFile(final());
+    const script = scriptedRecovery({ [A]: [STILL], [B]: [acknowledged("SUBMITTED", B)] });
+    await blocked("ACCEPTANCE_RECONCILIATION_FAILED", journal, script.recover);
+    expect(script.calls.map((call) => call.id)).toEqual(Array(18).fill(A));
+    expect(await readFile(final())).toEqual(before);
+    expect((await readdir(records())).sort()).toEqual([`${A}.json`, `${B}.json`]);
+    expect(await readdir(join(stateRoot, "acceptance-journal", "quarantine"))).toEqual([]);
+  });
+
+  it("retains the record and blocks on exhaustion of transient unavailability", async () => {
+    await journal.publish(record());
+    const script = scriptedRecovery({ [A]: ["CONTROL_API_UNAVAILABLE"] });
+    await blocked("ACCEPTANCE_RECONCILIATION_FAILED", journal, script.recover);
+    expect(script.calls).toHaveLength(18);
+    expect(await readdir(records())).toEqual([`${A}.json`]);
+  });
+
+  it.each([
+    ["a definitive refusal", "ACCEPTANCE_RECONCILIATION_FAILED"],
+    ["an authentication rejection", "WORKER_AUTHENTICATION_REJECTED"],
+    ["a malformed response", "MALFORMED_CONTROL_RESPONSE"],
+  ] as const)("stops at %s on the first record, retains it, and never reaches later records", async (_label, code) => {
+    await journal.publish(record());
+    await journal.publish(record(B));
+    const before = await readFile(final());
+    const script = scriptedRecovery({ [A]: [STILL, code], [B]: [acknowledged("SUBMITTED", B)] });
+    const run = await blocked(code, journal, script.recover);
+    expect(script.calls.map((call) => call.id)).toEqual([A, A]);
+    expect(run.time.backoffs).toEqual([1000]);
+    expect(await readFile(final())).toEqual(before);
+    expect((await readdir(records())).sort()).toEqual([`${A}.json`, `${B}.json`]);
+  });
+
+  it("recovers a record completed from a valid temporary with its original recordedAt and digest", async () => {
+    const original = record();
+    await writeFile(temporary(), serializeAcceptanceRecord(original));
+    const script = scriptedRecovery({ [A]: [acknowledged("SUBMITTED", A)] });
+    const run = gated(journal, script.recover);
+    expect(await run.run()).toEqual({ status: "NO_WORK" });
+    expect(await journal.read(A)).toEqual({ status: "VALID_RECORD", record: original });
+    expect(original.recordedAt).toBe(TIME.toISOString());
+  });
+
+  it("never asks the control plane while the journal is corrupt", async () => {
+    await journal.publish(record(B));
+    await writeFile(final(), "corrupt");
+    const corrupt = await blocked("ACCEPTANCE_JOURNAL_CORRUPT", journal, scriptedRecovery({ [B]: [acknowledged("SUBMITTED", B)] }).recover);
+    expect(corrupt.client.recoverAcceptance).not.toHaveBeenCalled();
+  });
+
+  it("has no lease request while recovery is still waiting", async () => {
+    await journal.publish(record());
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const run = gated(journal, async () => {
+      await held;
+      return acknowledged("SUBMITTED", A);
+    });
+    const pending = run.run();
+    await vi.waitFor(() => expect(run.client.recoverAcceptance).toHaveBeenCalledTimes(1));
+    expect(run.client.leaseNextAttempt).not.toHaveBeenCalled();
+    release();
+    expect(await pending).toEqual({ status: "NO_WORK" });
+    expect(run.client.leaseNextAttempt).toHaveBeenCalledTimes(1);
   });
 });

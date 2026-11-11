@@ -3,17 +3,19 @@ import { assertNoProviderEnvironment, type WorkerEnvironment } from "./providerE
 import type { WorkerControlClient } from "./workerControlClient.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
 import type { AcceptanceJournal } from "./acceptanceJournal.js";
+import { defaultMonotonicNow, defaultRecoverySleep, type MonotonicClock, type RecoverySleep } from "./acceptanceRecoveryPolicy.js";
 import { assertStartupJournalClear } from "./startupJournalReconciliation.js";
 
 // One unit of private-worker work for this slice (R44B6I), ending at the
 // proof that the exact granted credential can be opened:
 //
-//   environment check -> prepare/reconcile journal -> lease -> exact credential grant -> validate envelope and
-//   context -> open in memory -> STOP
+//   environment check -> prepare/reconcile journal -> recover unresolved acceptance (R44B6S) -> CLEAR ->
+//   lease -> exact credential grant -> validate envelope and context -> open in memory -> STOP
 //
 // It never enters SUBMITTING, never builds a provider client, never calls a
-// provider or records a new acceptance. Startup may finish exact publication
-// or quarantine invalid temporaries. The plaintext exists only inside openAndDiscard
+// provider or records a new acceptance. Startup may finish exact publication,
+// quarantine invalid temporaries, or remove a record the control plane has
+// acknowledged as terminal. The plaintext exists only inside openAndDiscard
 // and is never returned, logged, persisted or placed in an error; JavaScript
 // gives no zeroisation guarantee, so the code only drops every reference as
 // soon as the check is done.
@@ -26,9 +28,9 @@ export type WorkerLogEvent = Readonly<{
   provider?: string;
 }>;
 
-// The opening run needs only leasing and the credential grant; it never
-// reports a submission (R44B6P).
-export type CredentialOpeningClient = Pick<WorkerControlClient, "leaseNextAttempt" | "requestCredentialGrant">;
+// The opening run needs leasing, the credential grant and startup acceptance
+// recovery (R44B6S); it never reports a submission (R44B6P).
+export type CredentialOpeningClient = Pick<WorkerControlClient, "leaseNextAttempt" | "requestCredentialGrant" | "recoverAcceptance">;
 
 export type CredentialOpeningRunDependencies = Readonly<{
   environment: WorkerEnvironment;
@@ -38,6 +40,11 @@ export type CredentialOpeningRunDependencies = Readonly<{
   // Injected; only a test implementation exists in this slice.
   opener: CredentialOpener;
   now?: () => Date;
+  // Startup acceptance-recovery time (R44B6S): a monotonic clock in
+  // milliseconds and a sleep that also bounds an in-flight recovery request.
+  // Never used for lease expiry.
+  monotonicNow?: MonotonicClock;
+  sleep?: RecoverySleep;
   // Optional, safe fields only (never a token, envelope, context or credential).
   log?: (event: WorkerLogEvent) => void;
 }>;
@@ -95,7 +102,12 @@ export async function runCredentialOpeningOnce(dependencies: CredentialOpeningRu
 
   try {
     assertNoProviderEnvironment(dependencies.environment);
-    await assertStartupJournalClear(dependencies.journal, () => log({ stage: "STARTUP", outcome: "OK", code: "ACCEPTANCE_JOURNAL_CORRUPT" }));
+    const recovery = {
+      client: dependencies.client,
+      monotonicNow: dependencies.monotonicNow ?? defaultMonotonicNow,
+      sleep: dependencies.sleep ?? defaultRecoverySleep,
+    };
+    await assertStartupJournalClear(dependencies.journal, recovery, () => log({ stage: "STARTUP", outcome: "OK", code: "ACCEPTANCE_JOURNAL_CORRUPT" }));
   } catch (error) {
     return fail("STARTUP", error);
   }

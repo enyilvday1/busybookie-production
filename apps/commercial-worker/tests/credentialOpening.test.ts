@@ -80,6 +80,10 @@ function fakeClient(options: { lease?: () => Promise<WorkerLease | null>; grant?
       calls.grant += 1;
       return (options.grant ?? (async () => grant()))();
     },
+    // These runs start with an empty journal, so startup recovery never asks.
+    recoverAcceptance: async () => {
+      throw new Error("acceptance recovery must not be requested with an empty journal");
+    },
   };
   return { client, calls };
 }

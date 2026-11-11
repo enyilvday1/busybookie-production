@@ -340,6 +340,10 @@ export type AcceptanceJournal = Readonly<{
   enumerate: () => Promise<readonly AcceptanceJournalEntry[]>;
   // Removes only a valid temporary whose exact bytes are already published.
   removePublishedTemporary: (fileName: string) => Promise<void>;
+  // Retention (section 17, v1 policy): unlinks the published final only when
+  // it is still byte-identical to `record`, then syncs the directory. Callers
+  // use it only after an exact terminal control-plane acknowledgement.
+  removeAcknowledgedRecord: (record: AcceptanceRecord) => Promise<void>;
 }>;
 
 export type AcceptanceJournalEntry =
@@ -602,5 +606,34 @@ export function createAcceptanceJournal(options: AcceptanceJournalOptions): Acce
     await syncDirectory(recordsDirectory, "ACCEPTANCE_JOURNAL_WRITE_FAILED");
   }
 
-  return Object.freeze({ prepare, write, publish, read, inspectTemporary, quarantineInvalidTemporary, enumerate, removePublishedTemporary });
+  async function removeAcknowledgedRecord(record: AcceptanceRecord): Promise<void> {
+    const attemptId = (record as { executionAttemptId?: unknown })?.executionAttemptId;
+    if (!isUuid(attemptId)) throw new AcceptanceJournalError("ACCEPTANCE_RECORD_INVALID");
+    const path = finalPath(attemptId);
+    // Re-read: never unlink a final that was replaced, corrupted or removed
+    // since it was reconciled.
+    const published = await read(attemptId);
+    if (published.status !== "VALID_RECORD") throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CORRUPT");
+    if (serializeAcceptanceRecord(published.record) !== serializeAcceptanceRecord(record)) {
+      throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_CONFLICT");
+    }
+    try {
+      await fs.unlink(path);
+    } catch {
+      throw new AcceptanceJournalError("ACCEPTANCE_JOURNAL_WRITE_FAILED");
+    }
+    await syncDirectory(recordsDirectory, "ACCEPTANCE_JOURNAL_WRITE_FAILED");
+  }
+
+  return Object.freeze({
+    prepare,
+    write,
+    publish,
+    read,
+    inspectTemporary,
+    quarantineInvalidTemporary,
+    enumerate,
+    removePublishedTemporary,
+    removeAcknowledgedRecord,
+  });
 }

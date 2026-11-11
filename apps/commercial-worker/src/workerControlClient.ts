@@ -48,6 +48,23 @@ export type WorkerSubmittedAcknowledgement = Readonly<{
   submittedAt: Date;
 }>;
 
+// The token-less acceptance-recovery acknowledgement as received (R44B6R
+// contract, architecture section 18): the first transition or an idempotent
+// replay of the same provider execution ID.
+export type AcceptanceRecoveryState = "SUBMITTED" | "SUCCEEDED" | "SUBMITTED_FAILED" | "ABANDONED";
+export type WorkerAcceptanceRecoveryAcknowledgement = Readonly<{
+  executionAttemptId: string;
+  fencingCounter: number;
+  state: AcceptanceRecoveryState;
+  providerExecutionId: string;
+}>;
+
+// ATTEMPT_STILL_SUBMITTING is an expected lifecycle wait, not an error and
+// never an acknowledgement; the startup retry policy decides what follows.
+export type WorkerAcceptanceRecoveryResult =
+  | Readonly<{ status: "ACKNOWLEDGED"; acknowledgement: WorkerAcceptanceRecoveryAcknowledgement }>
+  | Readonly<{ status: "ATTEMPT_STILL_SUBMITTING" }>;
+
 export type WorkerControlClient = Readonly<{
   leaseNextAttempt: () => Promise<WorkerLease | null>;
   requestCredentialGrant: (executionAttemptId: string, proof: LeaseProof) => Promise<WorkerCredentialGrant>;
@@ -55,6 +72,15 @@ export type WorkerControlClient = Readonly<{
   // journal record to exist before this is called; no execution path calls
   // it yet.
   reportSubmitted: (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => Promise<WorkerSubmittedAcknowledgement>;
+  // R44B6S: startup recovery of a durable journal record. Sends no lease
+  // token and obtains no lease. `signal` bounds the request by the startup
+  // retry budget; its abort is a transport failure.
+  recoverAcceptance: (
+    executionAttemptId: string,
+    fencingCounter: number,
+    providerExecutionId: string,
+    signal?: AbortSignal,
+  ) => Promise<WorkerAcceptanceRecoveryResult>;
 }>;
 
 export type WorkerControlClientOptions = Readonly<{
@@ -181,6 +207,41 @@ export function parseSubmittedResponse(
   });
 }
 
+const RECOVERY_STATES: ReadonlySet<unknown> = new Set(["SUBMITTED", "SUCCEEDED", "SUBMITTED_FAILED", "ABANDONED"]);
+
+// The acknowledgement must answer exactly the attempt, original fencing
+// counter and provider execution ID recovered, in one of the four states.
+export function parseAcceptanceRecoveryResponse(
+  body: unknown,
+  expected: Readonly<{ executionAttemptId: string; fencingCounter: number; providerExecutionId: string }>,
+): WorkerAcceptanceRecoveryAcknowledgement {
+  const acknowledgement = exactKeys(body, ["executionAttemptId", "fencingCounter", "state", "providerExecutionId"]);
+  const executionAttemptId = text(acknowledgement.executionAttemptId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (
+    executionAttemptId !== expected.executionAttemptId ||
+    fencingCounter !== expected.fencingCounter ||
+    !RECOVERY_STATES.has(acknowledgement.state) ||
+    acknowledgement.providerExecutionId !== expected.providerExecutionId
+  ) {
+    throw malformed();
+  }
+  return Object.freeze({
+    executionAttemptId,
+    fencingCounter,
+    state: acknowledgement.state as AcceptanceRecoveryState,
+    providerExecutionId: expected.providerExecutionId,
+  });
+}
+
+// The only 409 bodies the recovery route answers: {"status":"error","code":...}
+// with ATTEMPT_STILL_SUBMITTING (wait) or the uniform LEASE_REJECTED (refusal).
+export function parseAcceptanceRecoveryConflict(body: unknown): "ATTEMPT_STILL_SUBMITTING" | "LEASE_REJECTED" {
+  const conflict = exactKeys(body, ["status", "code"]);
+  if (conflict.status !== "error" || (conflict.code !== "ATTEMPT_STILL_SUBMITTING" && conflict.code !== "LEASE_REJECTED")) throw malformed();
+  return conflict.code;
+}
+
 function controlUrl(options: WorkerControlClientOptions): URL {
   let base: URL;
   try {
@@ -209,12 +270,11 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
   }
   const fetchImpl = options.fetchImpl ?? fetch;
 
-  // Status mapping. 401 and 403 are never retried; 409 is the protocol's
-  // uniform lease/grant refusal; 5xx and transport failures are UNAVAILABLE.
-  async function post(path: string, body: unknown, rejected: WorkerErrorCode): Promise<unknown> {
-    let response: Response;
+  // The single outbound request. A transport failure, including an abort by
+  // the caller's signal, is UNAVAILABLE.
+  async function send(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     try {
-      response = await fetchImpl(new URL(path, base), {
+      return await fetchImpl(new URL(path, base), {
         method: "POST",
         headers:
           body === undefined
@@ -222,10 +282,25 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
             : { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: "error",
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch {
       throw new WorkerError("CONTROL_API_UNAVAILABLE");
     }
+  }
+
+  async function readJson(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch {
+      throw malformed();
+    }
+  }
+
+  // Status mapping. 401 and 403 are never retried; 409 is the protocol's
+  // uniform lease/grant refusal; 5xx and transport failures are UNAVAILABLE.
+  async function post(path: string, body: unknown, rejected: WorkerErrorCode): Promise<unknown> {
+    const response = await send(path, body);
     if (response.status === 200) {
       try {
         return await response.json();
@@ -269,6 +344,42 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
         "SUBMITTED_REPORT_REJECTED",
       );
       return parseSubmittedResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter, providerExecutionId });
+    },
+    // The one route whose 409 body is read: it separates the expected
+    // ATTEMPT_STILL_SUBMITTING wait from the uniform refusal. Every other
+    // status maps exactly as post() does.
+    recoverAcceptance: async (executionAttemptId: string, fencingCounter: number, providerExecutionId: string, signal?: AbortSignal) => {
+      // The identity comes from a strictly validated journal record; anything
+      // else is unresolved evidence and nothing is sent.
+      if (
+        !UUID.test(executionAttemptId) ||
+        typeof fencingCounter !== "number" ||
+        !Number.isSafeInteger(fencingCounter) ||
+        fencingCounter < 1 ||
+        !isProviderExecutionId(providerExecutionId)
+      ) {
+        throw new WorkerError("ACCEPTANCE_RECONCILIATION_FAILED");
+      }
+      const response = await send(
+        `/worker-control/v1/attempts/${executionAttemptId}/acceptance-recovery`,
+        { fencingCounter, providerExecutionId },
+        signal,
+      );
+      const expected = { executionAttemptId, fencingCounter, providerExecutionId };
+      if (response.status === 200) {
+        const acknowledgement = parseAcceptanceRecoveryResponse(await readJson(response), expected);
+        return Object.freeze({ status: "ACKNOWLEDGED" as const, acknowledgement });
+      }
+      if (response.status === 409) {
+        if (parseAcceptanceRecoveryConflict(await readJson(response)) === "ATTEMPT_STILL_SUBMITTING") {
+          return Object.freeze({ status: "ATTEMPT_STILL_SUBMITTING" as const });
+        }
+        throw new WorkerError("ACCEPTANCE_RECONCILIATION_FAILED");
+      }
+      await response.body?.cancel().catch(() => undefined);
+      if (response.status === 401 || response.status === 403) throw new WorkerError("WORKER_AUTHENTICATION_REJECTED");
+      if (response.status >= 500) throw new WorkerError("CONTROL_API_UNAVAILABLE");
+      throw malformed();
     },
   });
 }

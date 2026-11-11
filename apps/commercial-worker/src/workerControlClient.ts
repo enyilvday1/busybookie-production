@@ -48,6 +48,17 @@ export type WorkerSubmittedAcknowledgement = Readonly<{
   submittedAt: Date;
 }>;
 
+// The fenced LEASED -> SUBMITTING acknowledgement as received (R44B6J
+// contract; client locked by R44B6U0, architecture section 15). Only this
+// exact acknowledgement grants provider-call authority.
+const SUBMITTING_STATE = "SUBMITTING" as const;
+export type WorkerSubmittingAcknowledgement = Readonly<{
+  executionAttemptId: string;
+  fencingCounter: number;
+  state: typeof SUBMITTING_STATE;
+  submittingAt: Date;
+}>;
+
 // The token-less acceptance-recovery acknowledgement as received (R44B6R
 // contract, architecture section 18): the first transition or an idempotent
 // replay of the same provider execution ID.
@@ -72,6 +83,11 @@ export type WorkerControlClient = Readonly<{
   // journal record to exist before this is called; no execution path calls
   // it yet.
   reportSubmitted: (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => Promise<WorkerSubmittedAcknowledgement>;
+  // R44B6U: capability only; no worker path calls it yet (R44B6U0). One
+  // request per call: no retry, no timeout of its own and no lease clock. An
+  // externally supplied `signal` may abort it, which is a transport failure.
+  // Anything but the exact acknowledgement grants no provider-call authority.
+  acknowledgeSubmitting: (executionAttemptId: string, proof: LeaseProof, signal?: AbortSignal) => Promise<WorkerSubmittingAcknowledgement>;
   // R44B6S: startup recovery of a durable journal record. Sends no lease
   // token and obtains no lease. `signal` bounds the request by the startup
   // retry budget; its abort is a transport failure.
@@ -207,6 +223,21 @@ export function parseSubmittedResponse(
   });
 }
 
+// The acknowledgement must answer exactly the attempt and fencing generation
+// presented, in state SUBMITTING, with a canonical server timestamp.
+export function parseSubmittingResponse(
+  body: unknown,
+  expected: Readonly<{ executionAttemptId: string; fencingCounter: number }>,
+): WorkerSubmittingAcknowledgement {
+  const acknowledgement = exactKeys(body, ["executionAttemptId", "fencingCounter", "state", "submittingAt"]);
+  const executionAttemptId = text(acknowledgement.executionAttemptId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (executionAttemptId !== expected.executionAttemptId || fencingCounter !== expected.fencingCounter || acknowledgement.state !== SUBMITTING_STATE) {
+    throw malformed();
+  }
+  return Object.freeze({ executionAttemptId, fencingCounter, state: SUBMITTING_STATE, submittingAt: instant(acknowledgement.submittingAt) });
+}
+
 const RECOVERY_STATES: ReadonlySet<unknown> = new Set(["SUBMITTED", "SUCCEEDED", "SUBMITTED_FAILED", "ABANDONED"]);
 
 // The acknowledgement must answer exactly the attempt, original fencing
@@ -299,8 +330,8 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
 
   // Status mapping. 401 and 403 are never retried; 409 is the protocol's
   // uniform lease/grant refusal; 5xx and transport failures are UNAVAILABLE.
-  async function post(path: string, body: unknown, rejected: WorkerErrorCode): Promise<unknown> {
-    const response = await send(path, body);
+  async function post(path: string, body: unknown, rejected: WorkerErrorCode, signal?: AbortSignal): Promise<unknown> {
+    const response = await send(path, body, signal);
     if (response.status === 200) {
       try {
         return await response.json();
@@ -325,6 +356,29 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
         "CREDENTIAL_GRANT_REJECTED",
       );
       return parseCredentialGrantResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter });
+    },
+    // Exactly one request (R44B6U0): the caller owns any retry and deadline,
+    // and only the control plane decides lease expiry. A 409 is the route's
+    // uniform refusal and never proves that SUBMITTING did not commit.
+    acknowledgeSubmitting: async (executionAttemptId: string, proof: LeaseProof, signal?: AbortSignal) => {
+      // As for the credential grant, nothing outside the proof shape is sent.
+      if (
+        !UUID.test(executionAttemptId) ||
+        typeof proof.fencingCounter !== "number" ||
+        !Number.isSafeInteger(proof.fencingCounter) ||
+        proof.fencingCounter < 1 ||
+        typeof proof.leaseToken !== "string" ||
+        !LEASE_TOKEN.test(proof.leaseToken)
+      ) {
+        throw new WorkerError("MALFORMED_CONTROL_RESPONSE");
+      }
+      const body = await post(
+        `/worker-control/v1/attempts/${executionAttemptId}/submitting`,
+        { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken },
+        "SUBMITTING_REJECTED",
+        signal,
+      );
+      return parseSubmittingResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter });
     },
     reportSubmitted: async (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => {
       // Nothing malformed is sent: the request is exactly the published contract.

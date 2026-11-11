@@ -70,9 +70,24 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
 // R44B6S: the exact acceptance-recovery vocabulary a file may name. Only these
 // tokens are removed before the rules run, so /submitting, submission-failed,
 // outcome-unknown or any other SUBMITTING text still fails in these files.
+// R44B6U adds the client's own SUBMITTING acknowledgement vocabulary: the exact
+// route path, the single named state constant and its identifiers. A bare
+// "SUBMITTING" literal or any other route still fails.
 const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
-  "src/workerControlClient.ts": ["/acceptance-recovery`", "ATTEMPT_STILL_SUBMITTING"],
+  "src/workerControlClient.ts": [
+    "/acceptance-recovery`",
+    "ATTEMPT_STILL_SUBMITTING",
+    "/submitting`",
+    'const SUBMITTING_STATE = "SUBMITTING" as const;',
+    "SUBMITTING_STATE",
+    "SUBMITTING_REJECTED",
+    "WorkerSubmittingAcknowledgement",
+    "parseSubmittingResponse",
+    "acknowledgeSubmitting",
+    "submittingAt",
+  ],
   "src/acceptanceRecoveryPolicy.ts": ["ATTEMPT_STILL_SUBMITTING", "STILL_SUBMITTING"],
+  "src/workerError.ts": ["SUBMITTING_REJECTED", '"The worker-control API rejected the SUBMITTING acknowledgement."'],
 };
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
@@ -183,11 +198,43 @@ describe("commercial-worker source boundary", () => {
     // The allowed recovery tokens hide nothing else.
     const allowed = (path: string, text: string) => FORBIDDEN.filter(({ pattern }) => pattern.test(withoutAllowedTokens(path, text))).map(({ label: name }) => name);
     expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/acceptance-recovery`")).toEqual([]);
-    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submitting`")).toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submitting`")).toEqual([]);
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submitting/replay`")).toContain("SUBMITTING acknowledgement or recovery routes");
     expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submission-failed`")).toContain("SUBMITTING acknowledgement or recovery routes");
     expect(allowed("src/workerControlClient.ts", 'state === "SUBMITTING"')).toContain("SUBMITTING vocabulary");
+    expect(allowed("src/workerControlClient.ts", "submittingDeadlineMs")).toContain("SUBMITTING vocabulary");
+    expect(allowed("src/workerError.ts", '"SUBMITTING"')).toContain("SUBMITTING vocabulary");
     expect(allowed("src/acceptanceRecoveryPolicy.ts", "acknowledgeSubmitting()")).toContain("SUBMITTING vocabulary");
     expect(allowed("src/acceptanceRecoveryPolicy.ts", "/acceptance-recovery")).toContain("SUBMITTING acknowledgement or recovery routes");
+  });
+});
+
+// R44B6U0: the SUBMITTING acknowledgement client is a single-shot, client-only
+// transport primitive. Nothing in worker source calls it (a call followed by
+// no provider request would manufacture OUTCOME_UNKNOWN evidence).
+describe("SUBMITTING acknowledgement client boundary", () => {
+  const client = code(read(join(SRC_ROOT, "workerControlClient.ts")));
+  const method = client.slice(client.indexOf("acknowledgeSubmitting: async"), client.indexOf("reportSubmitted: async"));
+
+  it("has no production caller and stays outside the credential-opening client", () => {
+    const callers = sources.filter(({ text }) => /\.acknowledgeSubmitting\s*\(/.test(code(text))).map(({ path }) => path);
+    expect(callers).toEqual([]);
+    expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /acknowledgeSubmitting/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  });
+
+  it("sends one request with no retry, timer, lease clock, lifecycle repair or secret logging", () => {
+    expect(method.length).toBeGreaterThan(0);
+    expect(method).toMatch(/await post\(\s*`\/worker-control\/v1\/attempts\/\$\{executionAttemptId\}\/submitting`/);
+    expect(method.match(/\bpost\(/g)).toHaveLength(1);
+    const FORBIDDEN_IN_METHOD =
+      /retry|attempt\s*\+\+|\bfor\s*\(|\bwhile\s*\(|setTimeout|setInterval|sleep|AbortController|AbortSignal\.timeout|Date\.now|new Date|performance\.now|leaseExpiresAt|LEASE_EXPIRED|submission-failed|reportSubmitted\(|console\.|log\(/i;
+    expect(FORBIDDEN_IN_METHOD.test(method)).toBe(false);
+    // Nothing in the client file creates its own timer or deadline.
+    expect(/setTimeout|setInterval|AbortSignal\.timeout|new AbortController/.test(client)).toBe(false);
+    // Guard the guards.
+    expect(FORBIDDEN_IN_METHOD.test("for (let attempt = 1; ; attempt += 1) {")).toBe(true);
+    expect(FORBIDDEN_IN_METHOD.test("if (lease.leaseExpiresAt.getTime() <= Date.now()) throw")).toBe(true);
+    expect(FORBIDDEN_IN_METHOD.test("const timer = setTimeout(() => controller.abort(), 30000);")).toBe(true);
   });
 });
 

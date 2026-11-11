@@ -54,7 +54,15 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   contract and the R44B6T0A request order, which remain authoritative; no
   migration, worker, protocol or provider-adapter change was required;
   provider execution remains disabled and the fake-provider gate remains
-  unmet: introduction, sections 10, 17, 18, 30, 36 and 37).
+  unmet: introduction, sections 10, 17, 18, 30, 36 and 37); R44B6U0
+  (worker `SUBMITTING` acknowledgement client contract locked after R44B6U
+  discovery found its liveness and error semantics unlocked: R44B6U is
+  client-only and single-shot, owning no retry, timeout or lease-expiry
+  decision; only an exact successful acknowledgement grants provider-call
+  authority; HTTP 409 maps to the new worker code `SUBMITTING_REJECTED`; an
+  acknowledgement failure never calls the provider or `submission-failed`;
+  orchestration retry and deadline policy is deferred to a later slice; no
+  runtime change: introduction, sections 15, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -886,9 +894,117 @@ PROVIDER_CALL_REQUIRES_COMMITTED_SUBMITTING=YES
 SUBMITTED_REPORT_REQUIRES_DURABLE_JOURNAL=YES
 ```
 
+(R44B6U0: a committed `SUBMITTING` grants provider-call authority only
+through a successfully parsed exact acknowledgement; see the worker client
+contract below.)
+
 **Rationale.** Without a durable pre-call mark, a crash during the paid call
 is indistinguishable from a crash before it, and a retry could buy the same
 generation twice.
+
+### Worker `SUBMITTING` acknowledgement client (revision R44B6U0)
+
+**Locked decision (design only; R44B6U implements it).** R44B6U adds only
+the worker-side HTTP client for the existing, implemented control-plane
+route (R44B6J; section 10)
+`POST /worker-control/v1/attempts/:attemptId/submitting`, the
+`LEASED -> SUBMITTING` acknowledgement. It is not a second "about to
+submit" route, provider execution, acceptance handling, a `submitted` or
+`submission-failed` caller, or orchestration wiring. The control-plane
+contract stays authoritative: the attempt ID in the path, the body exactly
+`{fencingCounter, leaseToken}`, and the success response (200) exactly:
+
+```text
+{executionAttemptId, fencingCounter, state: "SUBMITTING", submittingAt}
+```
+
+- **Single shot.** One HTTP request per invocation: no internal retry loop,
+  counter, backoff, jitter or sleep, no lease-expiry clock, no provider
+  call and no lifecycle effect beyond what the route itself commits. The
+  client is a transport primitive; it copies neither the acceptance-recovery
+  retry policy (section 17) nor the callers' credential-opening retry.
+- **Timeout ownership.** The client chooses and starts no timeout. It may
+  pass through an externally supplied `AbortSignal` where the shared
+  transport already supports one; an abort is a transport failure. Any
+  real request deadline belongs to the later orchestration slice, before
+  provider execution can become live.
+- **No local lease authority.** The client neither receives nor inspects
+  `leaseExpiresAt` and never declares a lease expired. A future
+  orchestration layer may conservatively decline to continue on its local
+  view of the lease, but that is only a decision not to proceed, never
+  lifecycle evidence; only the control plane refuses with `LEASE_EXPIRED`,
+  and the worker never mutates or reports lifecycle state from local time.
+- **Strict success.** Only an exact 200 body is accepted: exactly the four
+  members above, `executionAttemptId` equal to the requested attempt,
+  `fencingCounter` equal to the presented proof, `state` exactly
+  `SUBMITTING`, and `submittingAt` a canonical UTC millisecond instant that
+  round-trips (the existing worker-control parser rule). Anything else is
+  `MALFORMED_CONTROL_RESPONSE`.
+- **Error mapping (closed worker codes).** HTTP 409 maps to a dedicated new
+  code `SUBMITTING_REJECTED`, never `LEASE_REJECTED` (which names lease
+  acquisition refusal); the control-plane reason is not exposed. 401 and 403
+  map to `WORKER_AUTHENTICATION_REJECTED`; 5xx and transport failure to
+  `CONTROL_API_UNAVAILABLE`; any other status or a malformed body to
+  `MALFORMED_CONTROL_RESPONSE`. This is the existing per-route
+  worker-control convention.
+- **Transport and secrets.** It reuses `createHttpWorkerControlClient` and
+  its Bearer machine credential; there is no second transport or
+  authentication mechanism. The lease token appears only in the request body
+  and the machine credential only in the `Authorization` header. Neither
+  appears in a `WorkerError`, log, metric label or worker event, and no raw
+  transport cause is retained.
+
+**Provider-call authority.** `PROVIDER_CALL_REQUIRES_COMMITTED_SUBMITTING`
+(above) is satisfied only by a successfully parsed exact 200
+acknowledgement. Transport ambiguity, a reset, a timeout or abort, any 409,
+5xx or authentication refusal, a malformed response or the local lease clock
+never imply that `SUBMITTING` committed. Without an exact acknowledgement the
+worker makes no provider call and no `submission-failed` report:
+`submission-failed` applies only to an attempt the control plane has
+actually committed as `SUBMITTING`.
+
+**Lost response.** The route is replay-idempotent under the same valid live
+proof (section 11), so a later caller may resend the exact request if a
+future policy allows it. But if the first request committed `SUBMITTING`
+and its response was lost, a retry after the lease expired may receive
+`409 LEASE_EXPIRED` although `SUBMITTING` committed. A 409 therefore never
+proves that the transition did not happen. The worker stays conservative
+(no exact acknowledgement, no provider call), and the section 12 sweep
+later records `OUTCOME_UNKNOWN`. R44B6U does not repair this ambiguity.
+
+**Client only.** After R44B6U the method exists and is tested, but no
+production worker path calls it, including `runCredentialOpeningOnce`.
+Provider execution does not exist yet, so calling the route and then
+stopping would move a real attempt `LEASED -> SUBMITTING`, then through the
+sweep to `OUTCOME_UNKNOWN`, without any provider request: manufactured
+unknown-outcome evidence.
+
+**Deferred to a later orchestration slice.** Whether `submitting` is retried
+after `CONTROL_API_UNAVAILABLE`, the maximum attempts, the request deadline,
+its relation to remaining lease lifetime, heartbeat ordering and any
+`AbortSignal` use. Whatever that policy becomes, only an exact successful
+acknowledgement permits the provider call.
+
+**Boundary.** R44B6U needs no API, protocol-package, migration or
+provider-adapter change; request and response types stay locally defined
+by the established convention. Expected worker scope:
+`apps/commercial-worker/src/workerControlClient.ts`,
+`apps/commercial-worker/src/workerError.ts` (only `SUBMITTING_REJECTED`),
+`apps/commercial-worker/tests/boundary.test.ts` and a new
+`apps/commercial-worker/tests/submittingClient.test.ts`. No production
+caller changes; a compile-only need to touch `credentialOpeningRun.ts`
+must be reported before scope widens. Converting the integration test's
+direct `fetch` to the client is optional.
+
+```text
+WORKER_SUBMITTING_CLIENT_IMPLEMENTED=NO
+WORKER_SUBMITTING_CLIENT_USED_BY_LIVE_EXECUTION=NO
+SUBMITTING_CLIENT_INTERNAL_RETRY_ENABLED=NO
+SUBMITTING_CLIENT_OWNS_REQUEST_TIMEOUT=NO
+SUBMITTING_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
+SUBMITTING_ACK_FAILURE_CALLS_SUBMISSION_FAILED=NO
+SUBMITTING_CLIENT_REJECTION_WORKER_CODE=SUBMITTING_REJECTED
+```
 
 ---
 
@@ -3302,7 +3418,11 @@ do not complete the whole-chain crash-point coverage required by slice 7.
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
 of R44B6T, the following are still missing:
 
-- a worker client for the `SUBMITTING` acknowledgement;
+- a worker client for the `SUBMITTING` acknowledgement (contract locked by
+  R44B6U0, section 15: single-shot and client-only);
+- the execution orchestration that wires that client: its `SUBMITTING`
+  retry, request deadline, lease-lifetime and heartbeat policy, deferred by
+  R44B6U0 to a later architecture slice;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
 - whole-chain crash-point tests (slice 7);
@@ -3476,6 +3596,13 @@ SUBMISSION_FAILED_ROUTE_IMPLEMENTED=YES
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
+WORKER_SUBMITTING_CLIENT_IMPLEMENTED=NO
+WORKER_SUBMITTING_CLIENT_USED_BY_LIVE_EXECUTION=NO
+SUBMITTING_CLIENT_INTERNAL_RETRY_ENABLED=NO
+SUBMITTING_CLIENT_OWNS_REQUEST_TIMEOUT=NO
+SUBMITTING_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
+SUBMITTING_ACK_FAILURE_CALLS_SUBMISSION_FAILED=NO
+SUBMITTING_CLIENT_REJECTION_WORKER_CODE=SUBMITTING_REJECTED
 ACCEPTANCE_JOURNAL_FORMAT=v1
 ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
 STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES

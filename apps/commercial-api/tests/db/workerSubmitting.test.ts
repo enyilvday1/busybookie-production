@@ -776,74 +776,117 @@ describe("SUBMITTING lease liveness and expiry sweep (R44B6M)", () => {
       expect(events).toEqual([]);
     });
 
-    it("R44B6M1: does not renew any SUBMITTED lease until the live-route epoch is durably provable", async () => {
-      const list = await workers(2);
-      const item = await work();
-      const port = await compose(list);
-      const proof = await submittingAttempt(port, list[0]!, item);
-      // No /submitted route exists yet: the owner commits SUBMITTED, keeping the lease (as the live route will).
-      await clients.migrator.query(
-        "UPDATE execution_attempts SET state = 'SUBMITTED', provider_execution_id = 'fixture-execution-1', submitted_at = now() WHERE id = $1",
-        [item.attemptId],
-      );
-      await age(item.attemptId);
-      const before = await fullRow(item.attemptId);
-      // Even the genuine live-route lease is refused: nothing durable distinguishes it from a replacement epoch.
-      const live = await call(port, list[0]!, "heartbeat", item.attemptId, proof);
-      expect(live.status).toBe(409);
-      expect(live.body).toBe(REJECTED);
-      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
-      expect(await fullRow(item.attemptId)).toEqual(before);
-
-      // A different lease on SUBMITTED (the future recovery-lease shape) is not renewable either,
-      // even with a fully valid proof for that lease.
-      const recoveryToken = randomBytes(32).toString("base64url");
-      await clients.migrator.query(
+    // R44B6N: SUBMITTED renewal only for the exact live-route lease epoch (migration 0006).
+    // No /submitted route exists yet: the owner commits SUBMITTED, keeping the live lease (W, N=1, T1),
+    // as the live route will.
+    const commitSubmitted = (attemptId: string, executionId: string) =>
+      clients.migrator.query("UPDATE execution_attempts SET state = 'SUBMITTED', provider_execution_id = $2, submitted_at = now() WHERE id = $1", [
+        attemptId,
+        executionId,
+      ]);
+    const replaceLease = (client: typeof clients.runtime, attemptId: string, workerId: string, token: string) =>
+      client.query(
         `UPDATE execution_attempts SET lease_worker_principal_id = $2, lease_token_sha256 = $3, lease_fencing_counter = lease_fencing_counter + 1,
                 leased_at = now(), lease_expires_at = now() + interval '2 minutes', heartbeat_at = NULL WHERE id = $1`,
-        [item.attemptId, list[1]!.id, createHash("sha256").update(recoveryToken, "utf8").digest("hex")],
+        [attemptId, workerId, createHash("sha256").update(token, "utf8").digest("hex")],
       );
-      const other = await call(port, list[1]!, "heartbeat", item.attemptId, { fencingCounter: 2, leaseToken: recoveryToken });
-      expect(other.status).toBe(409);
-      expect(other.body).toBe(REJECTED);
-      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
-    });
 
-    it("R44B6M1: a same-principal replacement lease on SUBMITTED is reachable under current authority and must not be renewable", async () => {
+    it("R44B6N: renews the genuine live-route SUBMITTED lease, writing only heartbeat_at, lease_expires_at and updated_at", async () => {
       const [worker] = await workers(1);
       const item = await work();
       const port = await compose([worker!]);
-      await submittingAttempt(port, worker!, item);
-      // No /submitted route exists yet: the owner commits SUBMITTED, keeping the live lease (W, N=1, T1).
-      await clients.migrator.query(
-        "UPDATE execution_attempts SET state = 'SUBMITTED', provider_execution_id = 'fixture-execution-3', submitted_at = now() WHERE id = $1",
-        [item.attemptId],
-      );
+      const proof = await submittingAttempt(port, worker!, item);
+      await commitSubmitted(item.attemptId, "fixture-execution-1");
+      await age(item.attemptId);
+      const before = await fullRow(item.attemptId);
+      expect(before).toMatchObject({ lease_fencing_counter: "1", submitting_fencing_counter: "1", submitting_worker_principal_id: worker!.id });
 
-      // Reachability under current authority: the restricted runtime role itself may replace the lease on
-      // SUBMITTED with a new epoch for the SAME principal (W, N+1, T2). Migration 0004/0005 forbid re-leasing
-      // only while SUBMITTING; on SUBMITTED a lease is optional and a new one only needs a higher generation.
+      const response = await call(port, worker!, "heartbeat", item.attemptId, proof);
+      expect(response.status).toBe(200);
+      expect(json(response).fencingCounter).toBe(1);
+      const after = await fullRow(item.attemptId);
+      expect((after.lease_expires_at as Date).getTime()).toBeGreaterThan((before.lease_expires_at as Date).getTime());
+      expect((after.heartbeat_at as Date).getTime()).toBeGreaterThan((before.heartbeat_at as Date).getTime());
+      const unchanged = (row: FullRow) => ({ ...row, lease_expires_at: null, heartbeat_at: null, updated_at: null });
+      // State, epoch, provenance, barrier and provider identity untouched; no new fencing epoch.
+      expect(unchanged(after)).toEqual(unchanged(before));
+      expect(events).toEqual([]);
+
+      // The ordinary proof still applies in SUBMITTED: wrong token, stale fence and an expired lease are refused.
+      for (const [candidate, reason] of [
+        [{ ...proof, leaseToken: randomBytes(32).toString("base64url") }, "TOKEN_MISMATCH"],
+        [{ ...proof, fencingCounter: 2 }, "FENCING_MISMATCH"],
+      ] as const) {
+        expect((await call(port, worker!, "heartbeat", item.attemptId, candidate)).status).toBe(409);
+        expect(events.at(-1)).toMatchObject({ reason });
+      }
+      await expire(item.attemptId);
+      expect((await call(port, worker!, "heartbeat", item.attemptId, proof)).status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "LEASE_EXPIRED" });
+    });
+
+    it("R44B6N: refuses a same-principal replacement lease on SUBMITTED (W, N+1, T2), though its proof is valid", async () => {
+      const [worker] = await workers(1);
+      const item = await work();
+      const port = await compose([worker!]);
+      const original = await submittingAttempt(port, worker!, item);
+      await commitSubmitted(item.attemptId, "fixture-execution-2");
+      // Reachable under current authority: the restricted runtime role itself installs the replacement.
       const replacementToken = randomBytes(32).toString("base64url");
-      await clients.runtime.query(
-        `UPDATE execution_attempts SET lease_worker_principal_id = $2, lease_token_sha256 = $3, lease_fencing_counter = lease_fencing_counter + 1,
-                leased_at = now(), lease_expires_at = now() + interval '2 minutes', heartbeat_at = NULL WHERE id = $1`,
-        [item.attemptId, worker!.id, createHash("sha256").update(replacementToken, "utf8").digest("hex")],
-      );
+      await replaceLease(clients.runtime, item.attemptId, worker!.id, replacementToken);
       const replaced = await fullRow(item.attemptId);
       expect(replaced).toMatchObject({
         state: "SUBMITTED",
         lease_worker_principal_id: worker!.id,
         submitting_worker_principal_id: worker!.id,
         lease_fencing_counter: "2",
+        submitting_fencing_counter: "1",
       });
 
-      // Principal equality cannot tell this epoch from the live-route lease (R44B6M accepted it with 200), so
-      // SUBMITTED renewal is refused outright.
       const response = await call(port, worker!, "heartbeat", item.attemptId, { fencingCounter: 2, leaseToken: replacementToken });
       expect(response.status).toBe(409);
       expect(response.body).toBe(REJECTED);
-      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "NOT_LEASED" });
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "SUBMITTED_LEASE_EPOCH_MISMATCH" });
+      expect(JSON.stringify(events).includes(replacementToken)).toBe(false);
+      // The superseded live-route proof is now stale.
+      expect((await call(port, worker!, "heartbeat", item.attemptId, original)).status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ reason: "FENCING_MISMATCH" });
       expect(await fullRow(item.attemptId)).toEqual(replaced);
+    });
+
+    it("R44B6N: refuses a different-principal replacement lease on SUBMITTED", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      await submittingAttempt(port, list[0]!, item);
+      await commitSubmitted(item.attemptId, "fixture-execution-3");
+      const recoveryToken = randomBytes(32).toString("base64url");
+      await replaceLease(clients.runtime, item.attemptId, list[1]!.id, recoveryToken);
+      const replaced = await fullRow(item.attemptId);
+
+      const response = await call(port, list[1]!, "heartbeat", item.attemptId, { fencingCounter: 2, leaseToken: recoveryToken });
+      expect(response.status).toBe(409);
+      expect(response.body).toBe(REJECTED);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "SUBMITTED_LEASE_EPOCH_MISMATCH" });
+      expect(await fullRow(item.attemptId)).toEqual(replaced);
+    });
+
+    it("R44B6N: refuses the live-route epoch's token and fence when the lease principal is no longer the submitting principal", async () => {
+      const list = await workers(2);
+      const item = await work();
+      const port = await compose(list);
+      const proof = await submittingAttempt(port, list[0]!, item);
+      await commitSubmitted(item.attemptId, "fixture-execution-4");
+      // On SUBMITTED the guard lets the owner move the lease principal without a new token or generation;
+      // the fencing match alone must then not authorise the other principal.
+      await clients.migrator.query("UPDATE execution_attempts SET lease_worker_principal_id = $2 WHERE id = $1", [item.attemptId, list[1]!.id]);
+      const moved = await fullRow(item.attemptId);
+      expect(moved).toMatchObject({ lease_fencing_counter: "1", submitting_fencing_counter: "1", lease_worker_principal_id: list[1]!.id });
+
+      const response = await call(port, list[1]!, "heartbeat", item.attemptId, proof);
+      expect(response.status).toBe(409);
+      expect(events.at(-1)).toMatchObject({ type: "WORKER_LEASE_REJECTED", reason: "SUBMITTED_LEASE_EPOCH_MISMATCH" });
+      expect(await fullRow(item.attemptId)).toEqual(moved);
     });
 
     it("rejects wrong worker, wrong token, stale fence and an expired lease in SUBMITTING, without extending it", async () => {

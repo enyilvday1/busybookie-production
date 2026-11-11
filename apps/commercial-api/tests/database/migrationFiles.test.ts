@@ -125,7 +125,7 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001 to 0005 in order, contiguously, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0006 in order, contiguously, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
@@ -134,8 +134,9 @@ describe("committed migrations", () => {
       "0003_generation_authorizations.sql",
       "0004_worker_bridge_persistence.sql",
       "0005_submission_authority_provenance.sql",
+      "0006_submission_lease_epoch_provenance.sql",
     ]);
-    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
@@ -143,10 +144,11 @@ describe("committed migrations", () => {
     }
     // Earlier migrations are byte-for-byte unchanged.
     expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
-    expect(migrations.slice(1, 4).map((entry) => entry.sha256)).toEqual([
+    expect(migrations.slice(1, 5).map((entry) => entry.sha256)).toEqual([
       "599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06",
       "639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868",
       "c19113d3e3022f26e17cb4eeba9cee2719a387914549d5c2996fc66fcd8cfe49",
+      "ff12efddc15441e2c529796632ca3e1ad188ebb6c7df5ddfb1058426065934ec",
     ]);
   });
 
@@ -180,6 +182,33 @@ describe("committed migrations", () => {
     expect("ADD COLUMN sealed_credential jsonb").toMatch(SECRET_COLUMN);
     expect("ADD COLUMN submitting_worker_principal_id uuid").not.toMatch(SECRET_COLUMN);
     expect("GRANT UPDATE (x) ON t TO r;").toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b|\bREVOKE\b/im);
+  });
+
+  it("adds submission lease-epoch provenance in 0006 only: one bigint column, no backfill, no table, role, grant, secret or provider brand", async () => {
+    const migrations = await discoverMigrations();
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const epoch = migrations[5]!;
+    const statements = withoutComments(epoch.sql);
+    expect(migrations.slice(0, 5).some((migration) => /submitting_fencing_counter/.test(migration.sql))).toBe(false);
+
+    expect(statements).not.toMatch(/^CREATE TABLE/m);
+    // Exactly the SQL type of lease_fencing_counter (migration 0004), nullable, no default.
+    expect(migrations[3]!.sql).toMatch(/^\s+lease_fencing_counter\s+bigint\s+NOT NULL DEFAULT 0,$/m);
+    expect([...statements.matchAll(/ADD COLUMN (\w+) (\w+) (\w+)/g)].map((match) => [match[1], match[2], match[3]])).toEqual([
+      ["submitting_fencing_counter", "bigint", "NULL"],
+    ]);
+    expect(statements).not.toMatch(/\bDEFAULT\b/);
+    // No backfill: nothing is written to execution_attempts except through the guard.
+    expect(statements).not.toMatch(/^\s*UPDATE\b/im);
+    expect(statements).not.toMatch(/audit_events/);
+    expect(epoch.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+    expect(statements).not.toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b|\bREVOKE\b/im);
+    expect(statements).not.toMatch(/\bDELETE\s+FROM\b|\bTRUNCATE\b|\bCASCADE\b/i);
+    expect(statements).toMatch(/^CREATE OR REPLACE FUNCTION execution_attempts_guard\(\) RETURNS trigger/m);
+    expect(statements).not.toMatch(/\bDROP\b|CREATE TRIGGER/i);
+    // Guard the guards.
+    expect("UPDATE execution_attempts SET x = 1").toMatch(/^\s*UPDATE\b/im);
+    expect("  ADD COLUMN submitting_fencing_counter bigint NULL;").toMatch(/ADD COLUMN (\w+) (\w+) (\w+)/);
   });
 
   it("creates exactly the tables the runtime grant manifest covers", async () => {

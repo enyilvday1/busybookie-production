@@ -115,7 +115,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 5 }]);
+      expect(version.rows).toEqual([{ version: 6 }]);
     });
   });
 
@@ -171,6 +171,19 @@ describe("runtime role authority", () => {
     expect(RUNTIME_TABLE_PRIVILEGES.execution_attempts!.updateColumns).not.toContain("submitting_worker_principal_id");
     await inRolledBackTransaction(clients.runtime, async () => {
       await expectSqlError(clients.runtime, "UPDATE execution_attempts SET submitting_worker_principal_id = NULL", [], { code: INSUFFICIENT_PRIVILEGE });
+    });
+  });
+
+  it("has no UPDATE on submission lease-epoch provenance: only the database guard derives it (migration 0006)", async () => {
+    const privileges = await clients.runtime.query(
+      `SELECT has_column_privilege(current_user, 'public.execution_attempts', 'submitting_fencing_counter', 'UPDATE') AS update,
+              has_column_privilege(current_user, 'public.execution_attempts', 'submitting_fencing_counter', 'SELECT') AS select,
+              has_column_privilege(current_user, 'public.execution_attempts', 'submitting_fencing_counter', 'REFERENCES') AS references`,
+    );
+    expect(privileges.rows).toEqual([{ update: false, select: true, references: false }]);
+    expect(RUNTIME_TABLE_PRIVILEGES.execution_attempts!.updateColumns).not.toContain("submitting_fencing_counter");
+    await inRolledBackTransaction(clients.runtime, async () => {
+      await expectSqlError(clients.runtime, "UPDATE execution_attempts SET submitting_fencing_counter = 1", [], { code: INSUFFICIENT_PRIVILEGE });
     });
   });
 

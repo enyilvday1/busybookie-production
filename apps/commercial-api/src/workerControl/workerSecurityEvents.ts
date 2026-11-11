@@ -45,7 +45,10 @@ export type WorkerLeaseRejectionReason =
   // SUBMITTING barrier only: no credential was granted under this lease.
   | "CREDENTIAL_NOT_GRANTED"
   // Invariant failure: an already-SUBMITTING attempt's exact version is DESTROYED.
-  | "SUBMITTING_VERSION_DESTROYED";
+  | "SUBMITTING_VERSION_DESTROYED"
+  // SUBMITTED heartbeat only: a valid current lease that is not the exact
+  // live-route lease epoch (migration 0006), for example a replacement lease.
+  | "SUBMITTED_LEASE_EPOCH_MISMATCH";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 

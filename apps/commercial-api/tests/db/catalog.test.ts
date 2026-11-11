@@ -179,10 +179,12 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "execution_attempts_submitting_at_ck",
     "execution_attempts_submitting_worker_ck",
     "execution_attempts_submitting_worker_fk",
+    "execution_attempts_submitting_fencing_ck",
+    "execution_attempts_submitting_epoch_ck",
   ],
 };
 
-describe("schema catalog (migrations 0001 to 0005)", () => {
+describe("schema catalog (migrations 0001 to 0006)", () => {
   it("contains exactly the eleven domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -464,8 +466,44 @@ describe("schema catalog (migrations 0001 to 0005)", () => {
       expect(guard[0]!.src).toContain(rule);
     }
 
-    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations WHERE version = 5");
     expect(version).toEqual([{ version: 5, name: "submission_authority_provenance" }]);
+  });
+
+  it("records submission lease-epoch provenance (0006): a nullable bigint like lease_fencing_counter, two checks and the extended guard", async () => {
+    const columns = await rows<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'execution_attempts'
+          AND column_name IN ('lease_fencing_counter', 'submitting_fencing_counter') ORDER BY column_name`,
+    );
+    expect(columns).toEqual([
+      { column_name: "lease_fencing_counter", data_type: "bigint", is_nullable: "NO", column_default: "0" },
+      { column_name: "submitting_fencing_counter", data_type: "bigint", is_nullable: "YES", column_default: null },
+    ]);
+
+    const checks = await rows<{ conname: string; def: string; validated: boolean }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def, convalidated AS validated FROM pg_constraint
+        WHERE conname IN ('execution_attempts_submitting_fencing_ck', 'execution_attempts_submitting_epoch_ck') ORDER BY conname`,
+    );
+    expect(checks).toEqual([
+      {
+        conname: "execution_attempts_submitting_epoch_ck",
+        def: "CHECK (((state <> 'SUBMITTING'::text) OR (lease_fencing_counter = submitting_fencing_counter)))",
+        validated: true,
+      },
+      { conname: "execution_attempts_submitting_fencing_ck", def: "CHECK (((submitting_at IS NULL) = (submitting_fencing_counter IS NULL)))", validated: true },
+    ]);
+
+    const guard = await rows<{ src: string }>("SELECT prosrc AS src FROM pg_proc WHERE proname = 'execution_attempts_guard'");
+    expect(guard).toHaveLength(1);
+    expect(guard[0]!.src).toContain("NEW.submitting_fencing_counter := OLD.lease_fencing_counter;");
+    // The 0005 rules remain, including the wall-clock barrier and its stable refusal identity.
+    expect(guard[0]!.src).toContain("NEW.submitting_worker_principal_id := OLD.lease_worker_principal_id;");
+    expect(guard[0]!.src).toContain("OLD.lease_expires_at <= clock_timestamp()");
+    expect(guard[0]!.src).toContain("CONSTRAINT = 'execution_attempts_submitting_lease_unexpired'");
+
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
+    expect(version).toEqual([{ version: 6, name: "submission_lease_epoch_provenance" }]);
   });
 
   it("stores no secret, sealed credential, fingerprint or plaintext lease token on worker-bridge tables", async () => {

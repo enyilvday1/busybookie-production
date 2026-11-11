@@ -1205,6 +1205,130 @@ describe("submitting worker provenance (migration 0005)", () => {
     });
   });
 
+  describe("submitting lease epoch (migration 0006)", () => {
+    const epoch = async (client: pg.Client, id: string) =>
+      (
+        await client.query<{ state: string; lease_fencing_counter: string; submitting_fencing_counter: string | null; lease_worker_principal_id: string | null }>(
+          "SELECT state, lease_fencing_counter, submitting_fencing_counter, lease_worker_principal_id FROM execution_attempts WHERE id = $1",
+          [id],
+        )
+      ).rows[0]!;
+
+    it("stamps the lease's fencing generation on the first LEASED -> SUBMITTING, without the statement naming it", async () => {
+      expect(SUBMITTING_SET).not.toContain("submitting_fencing_counter");
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await leasedAttempt(clients.runtime, "wb-epoch-stamp");
+        // A second lease epoch, so the stamp is visibly not a constant.
+        await move(clients.runtime, id, "QUEUED");
+        await move(clients.runtime, id, "LEASED", workerA);
+        expect(await epoch(clients.runtime, id)).toMatchObject({ lease_fencing_counter: "2", submitting_fencing_counter: null });
+        await move(clients.runtime, id, "SUBMITTING");
+        expect(await epoch(clients.runtime, id)).toMatchObject({ state: "SUBMITTING", lease_fencing_counter: "2", submitting_fencing_counter: "2" });
+      });
+    });
+
+    it("rejects a supplied lease epoch other than the lease's generation, and re-derives a matching one", async () => {
+      await inRolledBackTransaction(clients.migrator, async () => {
+        const id = await leasedAttempt(clients.migrator, "wb-epoch-supplied");
+        await expectTriggerError(
+          clients.migrator,
+          `UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_fencing_counter = 7 WHERE id = $1`,
+          [id],
+          "submitting lease epoch must be the lease fencing generation",
+        );
+        await clients.migrator.query(`UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_fencing_counter = 1 WHERE id = $1`, [id]);
+        expect(await epoch(clients.migrator, id)).toMatchObject({ submitting_fencing_counter: "1" });
+      });
+    });
+
+    it("never changes or clears the lease epoch, and never sets it before the barrier or at insert", async () => {
+      await inRolledBackTransaction(clients.migrator, async () => {
+        const id = await leasedAttempt(clients.migrator, "wb-epoch-immutable");
+        await move(clients.migrator, id, "SUBMITTING");
+        for (const value of [2, null]) {
+          await expectTriggerError(
+            clients.migrator,
+            "UPDATE execution_attempts SET submitting_fencing_counter = $2 WHERE id = $1",
+            [id, value],
+            "submitting lease-epoch provenance is immutable",
+          );
+        }
+        const early = await leasedAttempt(clients.migrator, "wb-epoch-early");
+        await expectTriggerError(
+          clients.migrator,
+          "UPDATE execution_attempts SET submitting_fencing_counter = 1 WHERE id = $1",
+          [early],
+          "submitting lease-epoch provenance is immutable",
+        );
+      });
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const f = await fixture(clients.runtime, "wb-epoch-insert");
+        await expectTriggerError(
+          clients.runtime,
+          `INSERT INTO execution_attempts
+             (account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider,
+              provider_credential_version_id, submitting_fencing_counter)
+           VALUES ($1, $2, $3, 1, 'USER_BYO', $4, $5, 1)`,
+          [f.accountId, f.jobId, f.authorizationId, f.provider, f.versionId],
+          "created without submitting lease-epoch provenance",
+        );
+        const id = await leasedAttempt(clients.runtime, "wb-epoch-runtime");
+        await move(clients.runtime, id, "SUBMITTING");
+        await expectSqlError(clients.runtime, "UPDATE execution_attempts SET submitting_fencing_counter = 2 WHERE id = $1", [id], { code: DENIED });
+      });
+    });
+
+    it("freezes the fencing generation while SUBMITTING, closing the gap that made a schema-5 backfill unprovable", async () => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await leasedAttempt(clients.runtime, "wb-epoch-frozen");
+        await move(clients.runtime, id, "SUBMITTING");
+        await expectSqlError(clients.runtime, "UPDATE execution_attempts SET lease_fencing_counter = lease_fencing_counter + 1 WHERE id = $1", [id], {
+          code: CHECK,
+          constraint: "execution_attempts_submitting_epoch_ck",
+        });
+        expect(await epoch(clients.runtime, id)).toMatchObject({ lease_fencing_counter: "1", submitting_fencing_counter: "1" });
+      });
+    });
+
+    it("survives the lease clearing, OUTCOME_UNKNOWN and a replacement lease on SUBMITTED, which takes a higher generation", async () => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const unknown = await leasedAttempt(clients.runtime, "wb-epoch-unknown");
+        await walk(clients.runtime, unknown, ["SUBMITTING", "OUTCOME_UNKNOWN"]);
+        expect(await epoch(clients.runtime, unknown)).toMatchObject({ lease_worker_principal_id: null, submitting_fencing_counter: "1" });
+
+        const submitted = await leasedAttempt(clients.runtime, "wb-epoch-replaced");
+        await walk(clients.runtime, submitted, ["SUBMITTING", "SUBMITTED"]);
+        // Same principal, new token: the replacement must take a higher generation, so it never matches the epoch.
+        await clients.runtime.query(
+          `UPDATE execution_attempts SET lease_token_sha256 = repeat('7', 64), lease_fencing_counter = lease_fencing_counter + 1,
+                  leased_at = now(), lease_expires_at = now() + interval '5 minutes' WHERE id = $1`,
+          [submitted],
+        );
+        expect(await epoch(clients.runtime, submitted)).toMatchObject({
+          state: "SUBMITTED",
+          lease_worker_principal_id: workerA,
+          lease_fencing_counter: "2",
+          submitting_fencing_counter: "1",
+        });
+        await expectTriggerError(
+          clients.runtime,
+          "UPDATE execution_attempts SET lease_token_sha256 = repeat('8', 64) WHERE id = $1",
+          [submitted],
+          "fencing generation must increase",
+        );
+      });
+    });
+
+    it.each(STATES)("holds a lease epoch exactly when the barrier was crossed, through every path to %s", async (to) => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const f = await fixture(clients.runtime, `wb-epoch-path-${to}`);
+        const id = await insertAttempt(clients.runtime, attemptFor(f));
+        await walk(clients.runtime, id, PATH_TO[to]);
+        expect((await epoch(clients.runtime, id)).submitting_fencing_counter).toBe(PATH_TO[to].includes("SUBMITTING") ? "1" : null);
+      });
+    });
+  });
+
   it("refuses an insert that carries submitting authority", async () => {
     await inRolledBackTransaction(clients.runtime, async () => {
       const f = await fixture(clients.runtime, "wb-prov-insert");
@@ -1226,7 +1350,9 @@ describe("submitting worker provenance (migration 0005)", () => {
     await inRolledBackTransaction(clients.migrator, async () => {
       const id = await leasedAttempt(clients.migrator, "wb-prov-check");
       await clients.migrator.query("ALTER TABLE execution_attempts DISABLE TRIGGER execution_attempts_guard");
-      await expectSqlError(clients.migrator, `UPDATE execution_attempts SET ${SUBMITTING_SET} WHERE id = $1`, [id], {
+      // Each check is isolated: the 0006 lease epoch is supplied wherever only the 0005 principal check is under test.
+      const EPOCH = "submitting_fencing_counter = lease_fencing_counter";
+      await expectSqlError(clients.migrator, `UPDATE execution_attempts SET ${SUBMITTING_SET}, ${EPOCH} WHERE id = $1`, [id], {
         code: CHECK,
         constraint: "execution_attempts_submitting_worker_ck",
       });
@@ -1236,9 +1362,20 @@ describe("submitting worker provenance (migration 0005)", () => {
       });
       await expectSqlError(
         clients.migrator,
-        `UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_worker_principal_id = '00000000-0000-4000-8000-000000000000' WHERE id = $1`,
+        `UPDATE execution_attempts SET ${SUBMITTING_SET}, ${EPOCH}, submitting_worker_principal_id = '00000000-0000-4000-8000-000000000000' WHERE id = $1`,
         [id],
         { code: FOREIGN_KEY, constraint: "execution_attempts_submitting_worker_fk" },
+      );
+      // Migration 0006: the lease-epoch equivalence and the SUBMITTING epoch check also stand alone.
+      await expectSqlError(clients.migrator, `UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_worker_principal_id = $2 WHERE id = $1`, [id, workerA], {
+        code: CHECK,
+        constraint: "execution_attempts_submitting_fencing_ck",
+      });
+      await expectSqlError(
+        clients.migrator,
+        `UPDATE execution_attempts SET ${SUBMITTING_SET}, submitting_worker_principal_id = $2, submitting_fencing_counter = lease_fencing_counter + 1 WHERE id = $1`,
+        [id, workerA],
+        { code: CHECK, constraint: "execution_attempts_submitting_epoch_ck" },
       );
     });
   });
@@ -1357,8 +1494,9 @@ describe("runtime privileges on worker-bridge tables", () => {
       "provider",
       "provider_credential_version_id",
       "created_at",
-      // Migration 0005: derived by the guard, never written by the application.
+      // Migrations 0005 and 0006: derived by the guard, never written by the application.
       "submitting_worker_principal_id",
+      "submitting_fencing_counter",
     ]) {
       expect(attemptColumns).not.toContain(immutable);
     }

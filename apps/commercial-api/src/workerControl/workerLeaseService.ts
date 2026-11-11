@@ -392,18 +392,34 @@ export async function lockCurrentLease(
 }
 
 // States whose current lease may be renewed (architecture section 12,
-// R44B6M): LEASED; and SUBMITTING, so the worker that holds provider-call
-// authority keeps owning the attempt during the create call. Never
+// R44B6M and R44B6N): LEASED; SUBMITTING, so the worker that holds
+// provider-call authority keeps owning the attempt during the create call;
+// and SUBMITTED, only for the exact live-route lease epoch (below). Never
 // OUTCOME_UNKNOWN or a terminal state, which carry no lease.
-//
-// SUBMITTED is deliberately excluded (R44B6M1). The architecture permits
-// renewal there only for the lease that entered SUBMITTED through the live
-// route, but migrations 0004/0005 let a SUBMITTED attempt carry a replacement
-// lease (a new token at a higher fencing generation), including for the same
-// worker principal, so neither the principal nor the current proof can show
-// that the lease is that live-route epoch. SUBMITTED renewal waits for a
-// durable discriminator of that epoch.
-const HEARTBEAT_STATES = ["LEASED", "SUBMITTING"] as const;
+const HEARTBEAT_STATES = ["LEASED", "SUBMITTING", "SUBMITTED"] as const;
+
+// A SUBMITTED attempt may carry a replacement lease (a new token at a higher
+// fencing generation), even for the same worker principal, so the principal
+// and the current proof alone never show the live-route epoch (R44B6M1). The
+// database-stamped, immutable submitting_fencing_counter (migration 0006)
+// does: every new token takes a strictly higher generation, so only the epoch
+// that entered SUBMITTING still equals it. The principal must also be the
+// submitting principal. The row is already locked by lockCurrentLease.
+async function requireLiveRouteLeaseEpoch(client: RuntimeClient, attemptId: string, context: WorkerControlContext, fencingCounter: number): Promise<void> {
+  const result = await client.query<{ submitting_fencing_counter: string | null; submitting_worker_principal_id: string | null }>(
+    "SELECT submitting_fencing_counter, submitting_worker_principal_id FROM execution_attempts WHERE id = $1",
+    [attemptId],
+  );
+  const row = result.rows[0];
+  if (
+    row === undefined ||
+    row.submitting_fencing_counter === null ||
+    Number(row.submitting_fencing_counter) !== fencingCounter ||
+    row.submitting_worker_principal_id !== context.workerPrincipalId
+  ) {
+    throw new WorkerLeaseError("LEASE_REJECTED", "SUBMITTED_LEASE_EPOCH_MISMATCH");
+  }
+}
 
 // Renews the caller's current lease: heartbeat_at and lease_expires_at move
 // forward; state, fencing generation, provenance and everything else stay
@@ -417,6 +433,7 @@ export async function heartbeatWorkerLease(
   return withTransaction(pool, async (client) => {
     await requireActiveWorker(client, context.workerPrincipalId);
     const lease = await lockCurrentLease(client, context, attemptId, proof, HEARTBEAT_STATES);
+    if (lease.state === "SUBMITTED") await requireLiveRouteLeaseEpoch(client, lease.id, context, lease.fencingCounter);
     const renewed = await client.query<{ lease_expires_at: Date }>(
       `UPDATE execution_attempts
           SET heartbeat_at = now(), lease_expires_at = now() + make_interval(secs => $2), updated_at = now()

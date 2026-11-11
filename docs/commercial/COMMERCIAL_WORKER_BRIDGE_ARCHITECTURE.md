@@ -123,7 +123,20 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   granted marker; no new security event, state, failure code, route,
   protocol change or migration; a stale worker's plaintext API key is outside
   fencing and governed by the trusted-worker invariant; no runtime change:
-  introduction, sections 12, 31, 36 and 37).
+  introduction, sections 12, 31, 36 and 37); R44B6X1 (R44B6X published in
+  commit 8b8044ede555a9a295c045e3e79d61160c8e5ae8: granted-but-expired
+  `LEASED` recovery is implemented; `reclaimExpiredLeases` handles granted
+  expired rows, and `acquireWorkerLease` runs a pass scoped to the requesting
+  worker before the shared batch and the capacity check; the attempt and job
+  move atomically, `credential_granted_at` and the lease proof are cleared,
+  the fence is kept and the next lease increments it; stale heartbeat, grant
+  and `SUBMITTING` proofs are refused, with race coverage; the audit stays
+  `execution_attempt.lease_expired`, with `grantedLeaseRecovered: true` on
+  the granted branch, now listed in the section 30 metadata vocabulary; no
+  new security event, failure code, migration, route, protocol or worker
+  change; credential versions are untouched and the section 24
+  retained-version lifecycle gap stays separately open; provider execution
+  remains disabled: introduction, sections 12, 30, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -554,12 +567,9 @@ The mechanism guarantees:
 ### Re-lease after expiry
 
 - An expired lease on an attempt that never reached `SUBMITTING` may be
-  released and the job leased again. (R44B6V0.) The current reclaim covers
-  only leases with no credential grant: an expired **granted** `LEASED`
-  attempt is not requeued yet. (R44B6X0.) Its authoritative recovery is now
-  locked as an automatic requeue ("Granted-but-expired `LEASED` recovery"
-  below) but not yet implemented; it remains a prerequisite before live
-  provider execution (section 36).
+  released and the job leased again. (R44B6X, recorded by R44B6X1.) This
+  includes an expired **granted** `LEASED` attempt: it is requeued
+  automatically ("Granted-but-expired `LEASED` recovery" below).
 - An expired lease on a `SUBMITTING` attempt that has no durable provider
   execution ID moves the attempt to `OUTCOME_UNKNOWN`.
 - An expired lease on a `SUBMITTED` attempt permits only recovery of the
@@ -568,7 +578,34 @@ The mechanism guarantees:
 
 ### Granted-but-expired `LEASED` recovery (revision R44B6X0)
 
-**Locked decision (design only; not yet implemented).** An attempt whose
+**Status (R44B6X; recorded by R44B6X1).** Implemented in commit
+8b8044ede555a9a295c045e3e79d61160c8e5ae8, in the control plane only.
+`reclaimExpiredLeases` now handles every expired `LEASED` attempt, granted
+or not, under the existing `FOR UPDATE SKIP LOCKED` scan and server time: it
+moves the attempt `LEASED -> QUEUED`, clears `credential_granted_at` and the
+live lease ownership and proof with the existing lease-clearing semantics,
+keeps the fence, and moves the job `RUNNING -> QUEUED` in the same
+transaction. The next lease increments the fence normally. `acquireWorkerLease`
+first runs a pass scoped to the requesting worker, then the unchanged shared
+bounded pass, and only then evaluates capacity, so the requester's own stale
+granted lease is never starved by the global batch; the batch size,
+`WORKER_MAX_CURRENT_LEASES` and `SKIP LOCKED` are unchanged and locking is
+never bypassed (a row another transaction holds is skipped, and the ordinary
+capacity refusal applies). The ordinary ungranted reclaim behaves as before.
+Tests establish that recovery serialises on the attempt row with heartbeat,
+credential grant and `SUBMITTING`: a heartbeat holding the row wins and its
+live lease survives; a `SUBMITTING` holding the row past expiry is refused by
+the barrier and the row is recovered afterwards; an already committed
+`SUBMITTING` row is never requeued (the existing sweep owns it). After
+recovery the old proof is refused for heartbeat, credential grant and
+`SUBMITTING`; after a re-lease the new lease has a higher fence and a new
+token. Recovery never touches `provider_credential_versions` (a
+`RETAINED_FOR_RECOVERY` version stays so), adds no failure code, uses no
+`OUTCOME_UNKNOWN` and emits no security event. None of this revokes a
+long-lived BYO key already disclosed to worker memory; the trusted-worker
+assumption below still governs that. The contract below is unchanged.
+
+**Locked decision (R44B6X0; implemented by R44B6X).** An attempt whose
 lease received a credential grant and then expired before `SUBMITTING` is
 **automatically requeued** by the control plane. R44B6X discovery found the
 gap is worse than a stranded attempt: the expired lease still counts against
@@ -651,7 +688,8 @@ receiving another lease.
 - **Audit and security.** Each recovery is audited with the existing
   `execution_attempt.lease_expired` event; its metadata distinguishes a
   granted pre-submission recovery from the ordinary ungranted reclaim with a
-  marker, alongside the existing safe fields (attempt number, fencing
+  marker (published by R44B6X as `grantedLeaseRecovered: true`, section 30),
+  alongside the existing safe fields (attempt number, fencing
   counter, worker principal). Never the token, its verifier, the sealed
   envelope, plaintext or the machine credential. No new security event: an
   expired granted lease is an operational condition, not evidence of
@@ -676,7 +714,7 @@ receiving another lease.
   acquire under the normal queue and eligibility rules.
 
 ```text
-GRANTED_EXPIRED_LEASE_RECOVERY_IMPLEMENTED=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_IMPLEMENTED=YES
 GRANTED_EXPIRED_LEASE_RECOVERY_POLICY=REQUEUE
 GRANTED_EXPIRED_LEASE_RECOVERY_OWNER=LEASE_ACQUISITION_TRANSACTION
 GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_STATE=LEASED
@@ -3648,7 +3686,11 @@ lifecycle.
 
 Domain AuditEvent (`execution_attempt` resource). Metadata is limited to:
 `attemptNumber`, `fencingCounter`, `workerPrincipalId`, `provider`,
-`credentialVersion` (the number), `failureCode` and `recoveredFromJournal`.
+`credentialVersion` (the number), `failureCode`, `recoveredFromJournal` and
+`grantedLeaseRecovered`. (R44B6X.) `grantedLeaseRecovered` is the boolean
+`true`, present only on `execution_attempt.lease_expired` for a
+granted-but-expired `LEASED` recovery (section 12); the ordinary ungranted
+reclaim's `lease_expired` omits it. It carries no secret material.
 
 | Event | When |
 |---|---|
@@ -3700,7 +3742,7 @@ execution ID or a filesystem path.
 |---|---|---|
 | Before lease | job `QUEUED` | No side effect. |
 | Leased, before credential grant | `LEASED` | The lease may expire or be released normally. |
-| Credential granted, before `SUBMITTING` | `LEASED`, grant audited | A credential-retention obligation exists. If the lease is definitively revoked and no provider call occurred, the obligation can close. (R44B6X0.) Once the lease expires by server time while the row is still `LEASED`, provider-call authority provably never committed: the control plane requeues it (`LEASED -> QUEUED`, grant and lease cleared, job `QUEUED`; section 12). Not `OUTCOME_UNKNOWN`. Locked, not yet implemented. |
+| Credential granted, before `SUBMITTING` | `LEASED`, grant audited | A credential-retention obligation exists. If the lease is definitively revoked and no provider call occurred, the obligation can close. (R44B6X0.) Once the lease expires by server time while the row is still `LEASED`, provider-call authority provably never committed: the control plane requeues it (`LEASED -> QUEUED`, grant and lease cleared, job `QUEUED`; section 12). Not `OUTCOME_UNKNOWN`. Implemented (R44B6X). A row that already committed `SUBMITTING` is instead owned by the existing `SUBMITTING` sweep. |
 | `SUBMITTING`, provider call in flight | `SUBMITTING` | A provider-recovery obligation exists. A crash or ambiguous network outcome becomes `OUTCOME_UNKNOWN`. Never auto-resubmit. |
 | Provider accepted, local journal durable | journal entry | On restart, report the same provider ID upstream. No resubmission. |
 | `SUBMITTED`, polling or recovery | `SUBMITTED` with provider ID | Resume the same provider execution ID with the exact original credential version. |
@@ -3922,21 +3964,21 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6V1, the following are still missing. The worker heartbeat client
+of R44B6X1, the following are still missing. The worker heartbeat client
 (R44B6W) and the pre-provider orchestration (R44B6V: `journal.prepare()`,
 then the `SUBMITTING` acknowledgement, then the mandatory heartbeat, then the
 permit) are implemented (section 15); neither is used by live execution, and
-neither touches a provider.
+neither touches a provider. Granted-but-expired `LEASED` recovery is
+implemented (R44B6X, section 12), meeting every removal condition R44B6X0
+set: attempt and job recovery work, stale control-plane proofs are refused,
+the requesting worker's capacity is released, the races are covered and the
+audit is recorded. The credential-version retention gap it identified stays
+separately tracked: destroying a `RETAINED_FOR_RECOVERY` version when its
+final obligation closes needs the lifecycle service of section 24, which
+R44B6X did not implement. Its classification is unchanged: section 24's
+"launch-blocking invariant" before commercial generation, not an item of
+this fake-provider gate.
 
-- the implementation of granted-but-expired `LEASED` recovery, which the
-  current reclaim does not requeue and which also permanently consumes the
-  worker's lease capacity (policy locked by R44B6X0 as an automatic requeue,
-  section 12). This item may be removed only once attempt and job recovery
-  works, stale control-plane proofs are refused, the requesting worker's
-  capacity is released, the races are covered, the audit is recorded, and any
-  separate credential-version retention gap found is tracked explicitly.
-  Until then live provider execution, fake or real, stays disabled; an
-  unwired fake or test provider slice may still be developed;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
 - the in-flight provider heartbeat schedule, retry and failure policy
@@ -4149,7 +4191,7 @@ PRE_PROVIDER_HEARTBEAT_RETRY_JITTER=NONE
 PRE_PROVIDER_HEARTBEAT_REQUEST_DEADLINE_MS=10000
 PRE_PROVIDER_HEARTBEAT_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
 PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
-GRANTED_EXPIRED_LEASE_RECOVERY_IMPLEMENTED=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_IMPLEMENTED=YES
 GRANTED_EXPIRED_LEASE_RECOVERY_POLICY=REQUEUE
 GRANTED_EXPIRED_LEASE_RECOVERY_OWNER=LEASE_ACQUISITION_TRANSACTION
 GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_STATE=LEASED

@@ -81,7 +81,16 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   construction waits for the pre-provider permit; a worker heartbeat client
   and granted-`LEASED` recovery are now explicit prerequisites; provider
   execution remains disabled; no runtime change: introduction, sections 12,
-  15, 36 and 37).
+  15, 36 and 37); R44B6W0 (worker heartbeat client contract locked: the
+  heartbeat route was already implemented but its worker-side client
+  semantics were not; the client is neutral, client-only and single-shot,
+  owning no retry, timeout, cadence or lease-expiry authority; its exact
+  success is `{fencingCounter, leaseExpiresAt}`; HTTP 409 maps to the new
+  worker code `HEARTBEAT_REJECTED`; the mandatory pre-provider heartbeat gets
+  at most two attempts, retrying only `CONTROL_API_UNAVAILABLE`, each with a
+  10000 ms orchestration-owned deadline; no successful heartbeat means no
+  permit and no provider call; in-flight heartbeat scheduling stays
+  deferred; no runtime change: introduction, sections 15, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -1101,7 +1110,9 @@ credential grant
   must obtain a successful heartbeat acknowledgement for the same attempt,
   fence and lease epoch. The heartbeat renews the authoritative server lease
   under the existing policy (section 12). No successful heartbeat, no
-  provider call.
+  provider call. Its attempts, retryable errors and 10000 ms per-attempt
+  deadline are locked by R44B6W0 ("Worker heartbeat client and pre-provider
+  heartbeat" below).
 - **Pre-provider heartbeat failure.** If the heartbeat is refused,
   unavailable, ambiguous, malformed or aborted after a committed
   `SUBMITTING`: no provider call, no `submission-failed` report and no
@@ -1162,6 +1173,144 @@ PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
 PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
 PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
 WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=NO
+```
+
+### Worker heartbeat client and pre-provider heartbeat (revision R44B6W0)
+
+**Locked decision (design only; R44B6W implements the client).** The
+control-plane route is already implemented (section 10; section 12):
+`POST /worker-control/v1/attempts/:attemptId/heartbeat`, body exactly
+`{fencingCounter, leaseToken}`, success (200) exactly:
+
+```text
+{fencingCounter, leaseExpiresAt}
+```
+
+There is no `executionAttemptId`, `state`, `heartbeatAt`, worker or token
+member. Allowed states stay `LEASED`, `SUBMITTING` and `SUBMITTED` (exact
+live-route epoch only). Authority is the full live-lease proof: an `ACTIVE`
+worker, current lease ownership of the attempt, the exact fencing counter, a
+valid token, an unexpired lease and, in `SUBMITTED`, the live-route epoch. A
+success writes only `heartbeat_at`, `lease_expires_at` and `updated_at`; it
+never changes state, fence, token or principal and writes no lifecycle
+audit.
+
+**Renewal, not replay.** Each success is a fresh renewal:
+`lease_expires_at = server now + the authoritative lease duration`
+(currently 120 seconds). Repeated identical deliveries are safe and may
+renew again. A heartbeat after authoritative expiry is refused; a heartbeat
+never revives an expired lease. A lost response leaves the worker unsure
+whether the lease renewed, and an exact retry is safe: a second success
+renews again and its `leaseExpiresAt` becomes the current data. A later
+retry after expiry may return 409, so `HEARTBEAT_REJECTED` never proves that
+an earlier heartbeat did not renew. The worker never infers whether an
+ambiguous heartbeat committed: without an exactly parsed success there is no
+pre-provider permit and no provider call.
+
+**The client (R44B6W).** One neutral worker-side transport method for this
+route, usable both for the mandatory pre-provider heartbeat (R44B6V0) and,
+later, for periodic heartbeat while a provider call is in flight. It knows
+nothing of provider calls or cancellation, permits, cadence, scheduling,
+sweep or `submission-failed`; the orchestration interprets its result.
+
+- **Signature and transport.** Conceptually
+  `heartbeat(executionAttemptId, proof: LeaseProof, signal?: AbortSignal)`
+  returning a heartbeat acknowledgement; naming follows `WorkerControlClient`
+  and there is exactly one heartbeat method. The attempt ID is in the path,
+  the body is exactly `{fencingCounter, leaseToken}`, and it reuses
+  `createHttpWorkerControlClient` and its shared `send`/`post` transport.
+- **Single shot.** At most one HTTP request per call: no retry loop or
+  counter, backoff, jitter, sleep, interval or scheduling. Callers own retry
+  and scheduling; neither the acceptance-recovery policy, nor the
+  `SUBMITTING` orchestration policy, nor a future in-flight schedule is
+  copied into it.
+- **No timeout of its own.** It creates no `AbortController`, timer or
+  deadline. It may pass through an externally supplied `AbortSignal`; an
+  external abort is `CONTROL_API_UNAVAILABLE`.
+- **No local lease authority.** It never reads the clock to judge validity,
+  compares `leaseExpiresAt` with local time, declares or synthesises lease
+  expiry, or refuses a success because the expiry looks near.
+  `leaseExpiresAt` is authoritative server data returned to the caller.
+- **Strict success.** Exactly `fencingCounter` and `leaseExpiresAt`: the
+  counter a positive safe integer equal to the presented proof, the expiry a
+  canonical UTC millisecond instant that round-trips (the existing
+  worker-control parser rule), no missing or extra member. The response
+  carries no attempt ID or state, so the client neither claims nor checks
+  them (the request path binds the attempt), and it never requires the
+  expiry to be later than local time or any local threshold.
+- **Error mapping (closed worker codes).** HTTP 409 maps to a dedicated new
+  code `HEARTBEAT_REJECTED`, never `LEASE_REJECTED` (lease-acquisition
+  refusal), `SUBMITTING_REJECTED` (the `submitting` route) or
+  `LEASE_EXPIRED` (the worker's conservative local pre-grant check). The
+  control-plane reason is not exposed. 401 and 403 map to
+  `WORKER_AUTHENTICATION_REJECTED`; 5xx, transport failure and external
+  abort to `CONTROL_API_UNAVAILABLE`; any other status (including 400, 404
+  and 415) or a malformed 200 to `MALFORMED_CONTROL_RESPONSE`.
+- **Secrets.** The machine credential appears only in `Authorization` and
+  the token only in the request body; neither appears in a `WorkerError`,
+  retained cause, log, metric label, worker event or production-style
+  diagnostic, and the request body is never logged. Messages are fixed.
+- **Failure semantics.** It only returns a validated acknowledgement or
+  throws a closed `WorkerError`. It never calls `submission-failed`,
+  `submitted` or `submitting`, changes lifecycle state, triggers a sweep,
+  infers `OUTCOME_UNKNOWN`, constructs or invokes a provider, aborts an
+  in-flight provider call, or declares the lease expired.
+- **Client only.** After R44B6W the client exists and is tested, but no
+  production path calls it: not `runCredentialOpeningOnce`,
+  `acknowledgeSubmitting`, a pre-provider permit, a heartbeat loop or any
+  provider execution.
+
+**Mandatory pre-provider heartbeat policy (owned by the R44B6V
+orchestration).**
+
+- **Attempts.** At most two in total, the first immediate. The second only
+  after `CONTROL_API_UNAVAILABLE`; `HEARTBEAT_REJECTED`,
+  `WORKER_AUTHENTICATION_REJECTED` and `MALFORMED_CONTROL_RESPONSE` are never
+  retried. Both use exactly the same `executionAttemptId`, `fencingCounter`
+  and `leaseToken`. No delay, backoff or jitter. The client stays
+  single-shot.
+- **Deadline.** Each heartbeat HTTP attempt has a 10000 ms deadline, set by
+  this lock (not inherited from the `SUBMITTING` deadline). The orchestration
+  owns a fresh `AbortController` per attempt; its signal covers only that
+  heartbeat request and never extends to provider construction or
+  invocation, never becomes a provider cancellation signal and never cancels
+  a started create. A deadline abort is `CONTROL_API_UNAVAILABLE` and may use
+  the one retry. These are architecture constants, not configuration.
+- **Permit.** The client knows nothing of the permit. The orchestration
+  alone creates it from an exact `SUBMITTING` acknowledgement plus an exact
+  heartbeat acknowledgement, subject to the other R44B6V0 gates. The renewed
+  `leaseExpiresAt` may be exposed to the orchestration; the permit's
+  representation, and whether it carries the expiry, are not locked here.
+
+**In-flight heartbeat (still deferred).** Its scheduling, retry and failure
+policy remain to be locked before live provider execution. Section 12
+stands: at most every third of the authoritative lease duration (currently
+40 seconds of 120), and a heartbeat failure never abandons a create call
+already in flight.
+
+**Boundary.** No API, protocol-package, migration or provider-adapter
+change. Expected R44B6W scope: `apps/commercial-worker/src/workerControlClient.ts`,
+`apps/commercial-worker/src/workerError.ts` (only `HEARTBEAT_REJECTED`),
+`apps/commercial-worker/tests/boundary.test.ts` and a new
+`apps/commercial-worker/tests/heartbeatClient.test.ts`. No production caller
+change, no `credentialOpeningRun.ts` change to exercise it, and no
+scheduling or orchestration code.
+
+```text
+WORKER_HEARTBEAT_CLIENT_USED_BY_LIVE_EXECUTION=NO
+HEARTBEAT_CLIENT_INTERNAL_RETRY_ENABLED=NO
+HEARTBEAT_CLIENT_OWNS_REQUEST_TIMEOUT=NO
+HEARTBEAT_CLIENT_OWNS_CADENCE=NO
+HEARTBEAT_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
+HEARTBEAT_CLIENT_REJECTION_WORKER_CODE=HEARTBEAT_REJECTED
+PRE_PROVIDER_HEARTBEAT_MAX_ATTEMPTS=2
+PRE_PROVIDER_HEARTBEAT_RETRIES_CONTROL_API_UNAVAILABLE=YES
+PRE_PROVIDER_HEARTBEAT_RETRIES_HEARTBEAT_REJECTED=NO
+PRE_PROVIDER_HEARTBEAT_RETRY_BACKOFF=NONE
+PRE_PROVIDER_HEARTBEAT_RETRY_JITTER=NONE
+PRE_PROVIDER_HEARTBEAT_REQUEST_DEADLINE_MS=10000
+PRE_PROVIDER_HEARTBEAT_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
+PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
 ```
 
 ---
@@ -3578,16 +3727,19 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6V0, the following are still missing:
+of R44B6W0, the following are still missing:
 
-- a worker heartbeat client for the existing heartbeat route (client-only);
+- the implementation of the worker heartbeat client for the existing
+  heartbeat route (client-only; contract locked by R44B6W0, section 15);
 - the implementation of the pre-provider orchestration locked by R44B6V0
-  (section 15), stopping at the pre-provider permit;
+  (section 15), including the pre-provider heartbeat policy locked by
+  R44B6W0, stopping at the pre-provider permit;
 - an authoritative recovery/sweep policy for granted-but-expired `LEASED`
   attempts, which the current reclaim does not requeue (section 12);
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
-- the in-flight provider heartbeat schedule and retry policy (section 15);
+- the in-flight provider heartbeat schedule, retry and failure policy
+  (section 15; still unlocked after R44B6W0);
 - whole-chain crash-point tests (slice 7);
 - the production/deployment state-root binding.
 
@@ -3782,6 +3934,20 @@ PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
 PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
 PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
 WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=NO
+WORKER_HEARTBEAT_CLIENT_USED_BY_LIVE_EXECUTION=NO
+HEARTBEAT_CLIENT_INTERNAL_RETRY_ENABLED=NO
+HEARTBEAT_CLIENT_OWNS_REQUEST_TIMEOUT=NO
+HEARTBEAT_CLIENT_OWNS_CADENCE=NO
+HEARTBEAT_CLIENT_CAN_DECLARE_LEASE_EXPIRED=NO
+HEARTBEAT_CLIENT_REJECTION_WORKER_CODE=HEARTBEAT_REJECTED
+PRE_PROVIDER_HEARTBEAT_MAX_ATTEMPTS=2
+PRE_PROVIDER_HEARTBEAT_RETRIES_CONTROL_API_UNAVAILABLE=YES
+PRE_PROVIDER_HEARTBEAT_RETRIES_HEARTBEAT_REJECTED=NO
+PRE_PROVIDER_HEARTBEAT_RETRY_BACKOFF=NONE
+PRE_PROVIDER_HEARTBEAT_RETRY_JITTER=NONE
+PRE_PROVIDER_HEARTBEAT_REQUEST_DEADLINE_MS=10000
+PRE_PROVIDER_HEARTBEAT_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
+PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
 ACCEPTANCE_JOURNAL_FORMAT=v1
 ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
 STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES

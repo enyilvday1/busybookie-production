@@ -22,7 +22,10 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   36 and 37); R44B6N (migration 0006 lease-epoch provenance implemented and
   `SUBMITTED` heartbeat enabled for the exact live-route epoch only: sections
   10, 12, 18, 36 and 37); R44B6O1 (live `submitted` route implemented by
-  R44B6O, with no worker flow calling it yet: sections 10, 18, 36 and 37).
+  R44B6O, with no worker flow calling it yet: sections 10, 18, 36 and 37);
+  R44B6P1 (acceptance journal v1 and the worker `submitted` client
+  implemented by R44B6P, not yet invoked by execution code, plus the
+  exact-record retry rule: sections 17, 18, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -965,6 +968,65 @@ WORKER_LOCAL_ACCEPTANCE_JOURNAL_REQUIRED=YES
 The worker keeps a small local durable journal for the ambiguity window
 around provider acceptance. It does not rely on volatile memory.
 
+### Implementation status (revision R44B6P1)
+
+**Repository fact (R44B6P).** The private worker implements this section's
+journal `v1`:
+
+- the closed record schema, canonical bytes and `recordSha256`, with an
+  independently computed test vector;
+- the strict reader and writer;
+- the exclusive-hard-link publication algorithm, with no rename, copy or
+  direct-write fallback;
+- `EEXIST` byte comparison;
+- corruption and conflict detection, failing closed;
+- quarantine of invalid temporary files;
+- state-root validation (link probe, and directory-fsync probe under the
+  required policy).
+
+The provider execution ID rule is shared with the control plane through the
+protocol package.
+
+The worker also has a strict client for the live `submitted` route (section
+18).
+
+**What is not implemented.** Neither the journal nor the `submitted` client
+is invoked by any execution code. The required chain is still unwired:
+
+```text
+provider definitively accepts
+-> acceptance record becomes durable (this section)
+-> SingleShotSubmissionAcceptedHandler may resolve (section 18)
+-> worker may report submitted (section 18)
+```
+
+Startup reconciliation, the unresolved-journal new-work block,
+`acceptance-recovery`, `submission-failed` and provider execution of any
+kind (fake or real) remain unimplemented. R44B6P makes no provider call.
+
+**State root.** R44B6P takes the state root as explicit worker composition
+input. No environment variable is read or locked here. The deployment
+binding remains a later composition decision (section 36).
+
+**Temporary files and evidence:**
+
+- an incomplete or invalid temporary file is never acceptance evidence, and
+  is quarantined;
+- a valid temporary file is not yet **published** acceptance evidence. It is
+  retained, never quarantined, so that future startup reconciliation can
+  finish publishing exactly its record;
+- only a valid published final record is acceptance evidence;
+- a corrupt published record fails closed and is left for an operator.
+
+```text
+ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
+ACCEPTANCE_JOURNAL_FORMAT=v1
+ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
+WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
+WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
+STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=NO
+```
+
 ### Purpose
 
 The journal closes this crash window:
@@ -1019,6 +1081,8 @@ JOURNAL_RECORD_IMMUTABLE=YES
 worker-owned **state root**. The worker composition receives it as an
 explicit configuration value. Deployment may supply it, for example as
 `COMMERCIAL_WORKER_STATE_ROOT`. No machine path is fixed by this document.
+The environment variable name is not locked: R44B6P accepts the root only as
+explicit composition input, and the deployment binding is a later decision.
 
 The state root must be:
 
@@ -1205,6 +1269,29 @@ The provider execution ID is opaque:
 
 Only after step 6 succeeds has the journal record been durably committed.
 
+**Exact-record retry (revision R44B6P1).** `recordedAt` is part of the
+canonical record and of its digest. So the record for one provider
+acceptance is constructed **once**, from the acceptance input, when it is
+first written. Every later attempt to publish that acceptance reuses that
+**exact** record, including:
+
+- a retry after a failed or interrupted write;
+- completion from a valid temporary file;
+- republication after a crash between steps 4 and 7.
+
+The original `recordedAt`, and therefore the original `recordSha256`, are
+kept. A caller never regenerates `recordedAt`, or builds a new record, for
+the same provider acceptance merely because publication is retried.
+
+Step 5 stays authoritative. `EEXIST` succeeds only when the existing final
+file is **byte-identical**. A record that is semantically similar but
+byte-different, including one that differs only in `recordedAt`, is
+`ACCEPTANCE_JOURNAL_CONFLICT`. It is never resolved by comparing fields.
+
+```text
+ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
+```
+
 ```text
 CONFLICTING_JOURNAL_RECORD_OVERWRITTEN=NO
 ACCEPTANCE_JOURNAL_PUBLICATION=EXCLUSIVE_HARD_LINK_AFTER_FSYNC
@@ -1222,6 +1309,13 @@ ACCEPTANCE_JOURNAL_PUBLICATION=EXCLUSIVE_HARD_LINK_AFTER_FSYNC
   durability across power loss is not guaranteed until the NTFS log flushes.
   A Windows worker is therefore **development-only** for durability claims.
   Directory-sync failure is tolerated only in the development composition.
+  R44B6P implements this as two explicit policies:
+  - the required policy (Linux deployment), the durability standard;
+  - a development best-effort policy, which reports that the directory was
+    not flushed rather than claiming Linux-equivalent durability.
+
+  Node applies file modes on Windows only as the read-only attribute, so
+  owner-only access there depends on the state root's ACL.
 - **Safety under a lost link.** If a platform loses a published link after
   power loss, the record is simply absent. That is restart case A (section
   31): `OUTCOME_UNKNOWN`, never resubmission. A durability gap can lose
@@ -1401,10 +1495,14 @@ ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
 `{fencingCounter, leaseToken, providerExecutionId}`. It exists only in the
 explicitly composed worker-control router; the default process answers 404.
 
-**Status.** The route exists, but the worker submission flow does not. No
-worker code calls it. The acceptance journal (section 17), worker provider
-execution, `acceptance-recovery` and `submission-failed` are not
-implemented. The required worker ordering still stands:
+**Status.** The route exists, but the worker submission flow does not.
+- **Implemented (R44B6P):** the acceptance journal (section 17) and a strict
+  worker client for this route.
+- **Not wired:** no execution code calls the journal or the client.
+- **Not implemented:** startup reconciliation, worker provider execution,
+  `acceptance-recovery` and `submission-failed`.
+
+The required worker ordering still stands:
 
 ```text
 provider accepts
@@ -1513,7 +1611,10 @@ LIVE_SUBMITTED_LEASE_PRESERVED=YES
 OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
 ACCEPTANCE_RECOVERY_IMPLEMENTED=NO
 SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
-ACCEPTANCE_JOURNAL_IMPLEMENTED=NO
+ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
+WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
+WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
+STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=NO
 WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 ```
 
@@ -2600,9 +2701,11 @@ each slice under its own authorised gate:
    grant `SUBMITTED` heartbeat authority to any lease other than the exact
    live-route epoch.
 5. The worker acceptance journal: state-root validation, write algorithm,
-   read validation and corruption handling (section 17).
+   read validation and corruption handling (section 17). Implemented
+   (R44B6P), together with the worker's `submitted` client; neither is yet
+   invoked by execution code.
 6. Worker startup reconciliation and the unresolved-journal new-work block
-   (section 17).
+   (section 17). Not implemented.
 7. Crash-point tests covering every row of the section 31 matrices.
    Faults are injected:
    - before and after each journal step;
@@ -2614,7 +2717,18 @@ each slice under its own authorised gate:
    - with an SDK client whose create retry is not disabled, which must be
      refused (R44B6K1).
 
-**A fake provider adapter may execute only after slices 1 to 7 exist.**
+**A fake provider adapter may execute only after slices 1 to 7 exist.** As
+of R44B6P, the following are still missing:
+
+- startup reconciliation and the new-work block (slice 6);
+- `acceptance-recovery` and `submission-failed` (slice 4);
+- a worker client for the `SUBMITTING` acknowledgement;
+- the acceptance-handler adapter that wires provider acceptance to the
+  journal, then the handler, then `submitted` (section 18);
+- whole-chain crash-point tests (slice 7);
+- the state-root deployment binding.
+
+The gate is therefore not met.
 Every one of them protects the window between `SUBMITTING` and a durable
 `SUBMITTED`, which is the first thing a fake provider exercises. None can be
 safely deferred.
@@ -2719,7 +2833,12 @@ LIVE_SUBMITTED_LEASE_PRESERVED=YES
 OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
 ACCEPTANCE_RECOVERY_IMPLEMENTED=NO
 SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
-ACCEPTANCE_JOURNAL_IMPLEMENTED=NO
+ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
+WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
+WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
+ACCEPTANCE_JOURNAL_FORMAT=v1
+ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
+STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=NO
 WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 SUBMITTED_CAN_CALL_PROVIDER_CREATE_AGAIN=NO
 UNRESOLVED_ACCEPTANCE_JOURNAL_BLOCKS_NEW_SUBMISSION_WORK=YES

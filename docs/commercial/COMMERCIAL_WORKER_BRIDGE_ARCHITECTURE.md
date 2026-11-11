@@ -174,7 +174,26 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   wiring; the acceptance-handler gate item is satisfied and three
   fake-provider gate items remain; the section 24 lifecycle stays separately
   open; provider flags remain NO: introduction, sections 10, 15, 17, 18, 36
-  and 37).
+  and 37); R44B6Z0 (in-flight provider heartbeat contract locked after
+  R44B6Z discovery found the cadence wording in conflict: "at most every
+  third of the lease" read as a minimum gap, while the control-plane lease
+  policy intends renewal every 30 to 40 seconds of a lease that stays 120
+  seconds; a generic, provider-agnostic in-flight lease keeper wraps the
+  provider-submission operation, including the awaited R44B6Y acceptance
+  reconciliation and excluding polling; it waits a 30-second quiet interval
+  after start and after each settled tick; each tick has at most two
+  requests of 10 seconds, retrying only `CONTROL_API_UNAVAILABLE`, with no
+  overlap, backoff or jitter; an exhausted tick keeps the cadence; a 409
+  stops the keeper without tripping the latch or cancelling the provider;
+  authentication, malformed-response, invariant and unexpected keeper faults
+  trip the latch; a started provider operation is never cancelled or
+  abandoned and its own result stays authoritative; heartbeat abort signals
+  never reach the provider; acceptance after lease loss follows R44B6Y; a
+  definitive provider failure after lease loss may remain `OUTCOME_UNKNOWN`;
+  no new API, protocol or migration; provider-failure outcome composition
+  stays separate and polling-phase heartbeat is out of scope; provider
+  execution remains disabled: introduction, sections 12, 15, 18, 36 and
+  37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -808,9 +827,13 @@ provider create call.
   the live `submitted` route first and hands the durable record to
   acceptance recovery when that cannot establish success (section 18,
   "Acceptance handler and adapter").
-- The worker heartbeats at most every third of the server lease duration
-  (currently 40 seconds of a 120-second lease). The worker never chooses the
-  duration.
+- (R44B6Z0.) While a provider submission is in flight, the worker renews
+  the lease under the in-flight keeper of section 15: a 30-second quiet
+  interval after start and after each settled tick, so successful renewals
+  are normally 30 to 40 seconds apart within the 120-second lease. That
+  replaces the earlier "at most every third of the lease" wording, which
+  read as a minimum gap. The worker never chooses the duration and never
+  derives its schedule from `leaseExpiresAt`.
 
 ```text
 SUBMITTING_HEARTBEAT_ALLOWED=YES
@@ -1411,11 +1434,9 @@ credential grant
   test-local spy that exists only in test code is not fake-provider
   execution, but a production source abstraction that can accept or invoke a
   provider create belongs to provider execution, outside R44B6V.
-- **In-flight heartbeat (deferred).** The heartbeat schedule and retry
-  policy while a provider create is in flight must be locked before live
-  provider execution. Until then section 12 stands: at most every third of
-  the server lease duration (currently 40 seconds of 120), and a heartbeat
-  failure never abandons a create call already in flight.
+- **In-flight heartbeat.** Locked by R44B6Z0 ("In-flight provider heartbeat"
+  below) and not implemented. The keeper starts only after this permit
+  exists, and a heartbeat failure never abandons a create already in flight.
 
 **Prerequisites and sequence.** The expected sequence: a client-only worker
 heartbeat client for the existing route (no provider execution); its
@@ -1568,10 +1589,9 @@ orchestration; implemented by R44B6V, not wired into live execution).**
   permit never carries `leaseExpiresAt`, the lease token, a credential or a
   provider callback, and stays non-secret.
 
-**In-flight heartbeat (still deferred).** Its scheduling, retry and failure
-policy remain to be locked before live provider execution. Section 12
-stands: at most every third of the authoritative lease duration (currently
-40 seconds of 120), and a heartbeat failure never abandons a create call
+**In-flight heartbeat.** Its scheduling, retry and failure policy is locked
+by R44B6Z0 ("In-flight provider heartbeat" below), separately from this
+pre-provider policy. A heartbeat failure never abandons a create call
 already in flight.
 
 **Boundary.** No API, protocol-package, migration or provider-adapter
@@ -1597,6 +1617,269 @@ PRE_PROVIDER_HEARTBEAT_RETRY_JITTER=NONE
 PRE_PROVIDER_HEARTBEAT_REQUEST_DEADLINE_MS=10000
 PRE_PROVIDER_HEARTBEAT_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
 PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
+```
+
+### In-flight provider heartbeat (revision R44B6Z0)
+
+**Locked decision (R44B6Z0; not implemented).** R44B6Z discovery found the
+earlier cadence wording, "at most every third of the lease", in conflict
+with the control-plane lease policy. Read literally, that wording sets a
+minimum gap; the policy intends renewal every 30 to 40 seconds of a
+120-second lease. This lock replaces it and fixes the full in-flight policy.
+It changes no route, protocol, migration, engine module or provider adapter,
+and implements nothing.
+
+**Control-plane authority (unchanged).**
+
+- `POST /worker-control/v1/attempts/:id/heartbeat` with exactly
+  `{fencingCounter, leaseToken}`.
+- It is allowed only under the exact live lease epoch, in `LEASED`,
+  `SUBMITTING` or `SUBMITTED`; in `SUBMITTED` only for the live-route epoch
+  (section 12).
+- The database clock is authoritative. A success sets
+  `lease_expires_at = now() + 120 s` and updates `heartbeat_at`.
+- It cannot revive an already-expired lease; the route never runs the
+  expiry sweep.
+- It never changes state, fence or token, grants no provider-call
+  authority, creates no acceptance and cancels no provider work.
+- The worker heartbeat client is unchanged (R44B6W0): single-shot, no retry
+  or timer of its own, an optional external `AbortSignal`, no expiry
+  authority and no provider knowledge.
+
+**Keeper model.** A generic, provider-agnostic, worker-local in-flight lease
+keeper, conceptually:
+
+```text
+runWithInFlightHeartbeat({executionAttemptId, proof, client: heartbeat, latch, deadlineTimer, sleep}, operation)
+```
+
+The implementation may follow repository naming. The keeper never receives
+a provider SDK, opened credential, API key, acceptance record, provider
+execution ID or polling metadata. All it knows of provider work is the
+lifetime of the supplied async operation.
+
+**Operation lifetime.**
+
+- The keeper starts the operation exactly once and attaches to its promise
+  before any other await. It keeps ownership of that promise for its whole
+  life.
+- The promise is never abandoned because a heartbeat failed. No
+  `Promise.race` or equivalent may:
+  - return before the operation settles;
+  - drop a later acceptance or rejection;
+  - leave a provider rejection unhandled.
+- The keeper returns exactly the operation's resolved result, or rethrows
+  exactly its error, after heartbeat cleanup.
+- Heartbeat status never replaces or wraps that outcome; no compound result
+  exists without a later amendment.
+
+**Composition boundary.**
+
+- The supplied operation is the provider-submission phase. For an accepted
+  submission that phase includes the create, the provider acceptance
+  callback and the awaited R44B6Y outer acceptance adapter through
+  authoritative reconciliation. It is not complete merely because the
+  provider returned an ID.
+- Provider polling begins only after that callback resolves, and is out of
+  scope.
+- R44B6Z does not wire this composition.
+
+**Start and stop.**
+
+```text
+pre-provider permit (mandatory pre-provider heartbeat succeeded)
+-> keeper starts
+-> provider-submission operation invoked exactly once
+-> keeper heartbeats concurrently
+-> operation settles (resolves or rejects)
+-> keeper stops, cleans up, then returns or rethrows the operation outcome
+```
+
+- No keeper exists before the permit.
+- The keeper stops only when the operation settles. Because an accepted
+  submission's operation includes the awaited R44B6Y adapter, heartbeats
+  naturally continue through acceptance reconciliation.
+- That may briefly include heartbeats while the attempt is `SUBMITTED`
+  under the exact live epoch.
+- The keeper never continues into polling. No polling-phase heartbeat
+  policy exists in R44B6Z.
+
+**Timing.**
+
+- **First tick.** No immediate heartbeat: the pre-provider heartbeat has
+  just renewed the lease. The first tick starts after a 30000 ms quiet
+  interval from keeper start.
+- **Cadence.** Strictly sequential: sleep 30000 ms, run one tick, and only
+  after the tick fully settles sleep another 30000 ms.
+- **Spacing.** With each request bounded by its 10-second deadline,
+  successful renewals are normally 30 to 40 seconds apart. Example: from a
+  renewal at t0, the first tick starts at t0+30 and, even if both its
+  attempts fail by t0+50, the next tick starts at t0+80 and can renew by
+  t0+90, inside the 120-second lease. One fully failed tick is tolerated.
+- This is not a fixed 40-second gap, and no `setInterval`-style scheduling
+  is used.
+- The schedule is proactive only. It is never derived from
+  `leaseExpiresAt`, and the worker never declares expiry from a local
+  clock.
+- **Deadline.** Each heartbeat HTTP attempt has a 10000 ms deadline, owned
+  by the keeper, under a fresh `AbortController` per attempt. The signal
+  covers only that request.
+- **Attempts per tick.** At most two, both immediate. Only
+  `CONTROL_API_UNAVAILABLE` earns the second. `HEARTBEAT_REJECTED`,
+  `WORKER_AUTHENTICATION_REJECTED`, `MALFORMED_CONTROL_RESPONSE` and every
+  other closed result are never retried. No backoff and no jitter.
+- **No overlap.** At most one tick and at most one heartbeat request are
+  active at any time; the sequential loop guarantees it by construction.
+
+**Outcome policy.** In every case the keeper keeps awaiting the operation.
+It never cancels it, never resubmits and never calls `submission-failed`
+because of a heartbeat result.
+
+| Heartbeat result | Keeper | Host-fault latch |
+|---|---|---|
+| Success | continue the cadence | unchanged |
+| `CONTROL_API_UNAVAILABLE` twice in one tick (transport, 5xx or request deadline) | tick exhausted; continue the normal cadence; no consecutive-failure threshold | not tripped |
+| `HEARTBEAT_REJECTED` (409) | stop scheduling | not tripped for the rejection alone |
+| `WORKER_AUTHENTICATION_REJECTED` | stop scheduling | **tripped** |
+| `MALFORMED_CONTROL_RESPONSE` | stop scheduling | **tripped** |
+| Scheduler invariant violation (for example an impossible overlap) | stop scheduling | **tripped** |
+| Unexpected heartbeat-loop error | stop scheduling | **tripped** |
+| Keeper-owned stop abort | shut down | not tripped |
+
+- Temporary unavailability does not make the host unsafe. If the lease
+  lapses meanwhile, a later request receives 409 and the rejection row
+  applies.
+- A 409 establishes only that the route refused the current proof or state.
+  It is never translated into a provider outcome, and never proves that the
+  provider did or did not accept.
+- A tripped latch means new work is unsafe until restart and clean startup
+  reconciliation. The already-started provider operation continues.
+- An unexpected keeper error never orphans the operation or creates an
+  unhandled provider rejection.
+
+**Keeper-owned stop.** When the operation settles, the keeper promptly
+aborts its own pending sleep or heartbeat request, then joins and cleans up
+its heartbeat task before returning or rethrowing. No timer is left behind.
+That stop abort:
+
+- is not a control-plane failure and never counts as
+  `CONTROL_API_UNAVAILABLE`;
+- trips nothing;
+- schedules nothing;
+- cannot affect the already-settled operation.
+
+**Signal separation and cancellation.**
+
+- Heartbeat signals are strictly heartbeat-local and never reach the
+  provider operation. Neither a heartbeat timeout nor a keeper shutdown
+  aborts the provider; the pre-provider rule
+  (`PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO`)
+  extends here.
+- No heartbeat or control-plane condition may abort, cancel, detach from,
+  race away or replace a provider create or submit that has started. A
+  control-plane failure does not prove the provider refused the request.
+- Provider timeouts and cancellation stay with the existing provider-owned
+  mechanisms; the SDK-owned create timeouts are unchanged.
+
+**Acceptance after heartbeat failure.** After unavailability, rejection,
+authentication failure, a malformed response, database expiry or the
+`SUBMITTING` sweep, an acceptance still follows R44B6Y:
+
+```text
+durable journal -> live reportSubmitted if possible -> acceptance recovery when required
+```
+
+- `SUBMITTED_REPORT_REJECTED` after lost authority hands the record to
+  database-authoritative recovery.
+- `submission-failed` stays forbidden once the record is durable, and the
+  provider is never resubmitted.
+- The keeper never inspects records, calls `recoverAcceptance`, decides
+  expiry or creates a lease.
+
+**Provider failure after lease loss.** The keeper never reports provider
+outcomes. A future provider-outcome handler may try the existing
+`submission-failed` route under its own policy, but:
+
+- if the live lease has expired, the first transition is refused;
+- if the sweep already recorded `OUTCOME_UNKNOWN`, a later definitive
+  report never overwrites it (section 18).
+
+The attempt then stays `OUTCOME_UNKNOWN` with the job `NEEDS_ATTENTION`, and
+operator resolution is authoritative. That loses precision but never makes
+a false definitive transition. No new route or API change is made.
+
+**Provider-failure composition gap.** Worker-side composition for a
+provider result that is definitively rejected, or ambiguously failed,
+before acceptance is **not** part of the keeper and is not implemented.
+R44B6Z never becomes that component. It is a known provider-execution
+composition item for later whole-chain or provider-execution work, outside
+the current fake-provider gate.
+
+**Races.** All transitions serialise on the attempt row. No API change is
+required.
+
+| Race | Result |
+|---|---|
+| Heartbeat commits before the sweep | the lease is renewed; a later sweep finds it unexpired |
+| Sweep commits before the heartbeat | the attempt is `OUTCOME_UNKNOWN` with no lease proof; the heartbeat gets 409 and the keeper stops |
+| Live `SUBMITTED` commits first | an exact live-epoch heartbeat may still renew until keeper shutdown |
+| Acceptance recovery clears or replaces authority | a later heartbeat is refused and the keeper stops; reconciliation is never reversed |
+
+**Residuals and boundaries.**
+
+- **Process crash.** A crash after the create is dispatched but before
+  durable acceptance stays a known residual. Startup cannot prove whether
+  the provider accepted, and the attempt becomes `OUTCOME_UNKNOWN` through
+  the existing sweep and recovery path. Heartbeat cannot close this window.
+- **Idempotency.** Provider idempotency keys are still not used, even where
+  an SDK offers one (section 16). This needs a separate lock.
+- **Timing seams.** Reuse `DeadlineTimer` and `realDeadlineTimer` for
+  request deadlines, and an abortable `RecoverySleep`-compatible sleep for
+  the cadence. No second timing framework is introduced. `MonotonicClock`,
+  if used at all, is a test aid and never lease authority.
+- **Section 24.** Independent: the keeper changes no credential-version
+  status and creates, releases or destroys no retention obligation.
+
+**Expected scope.** Worker-only:
+
+- a new keeper source;
+- focused keeper tests;
+- `boundary.test.ts`;
+- `workerError.ts` only if a genuinely necessary local invariant code is
+  missing.
+
+There is no change to the acceptance handler, adapter or journal,
+commercial-api, the protocol package, migrations, or engine and provider
+adapters. No production caller is required, and Runway, Veo, Google and fake
+or real providers stay unwired. Implementing it removes only the in-flight
+heartbeat item from the section 36 gate; the whole-chain crash-point tests
+and the state-root binding remain. Provider execution stays disabled.
+
+```text
+IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=NO
+IN_FLIGHT_HEARTBEAT_USED_BY_LIVE_EXECUTION=NO
+IN_FLIGHT_HEARTBEAT_FIRST_TICK_DELAY_MS=30000
+IN_FLIGHT_HEARTBEAT_QUIET_INTERVAL_MS=30000
+IN_FLIGHT_HEARTBEAT_REQUEST_DEADLINE_MS=10000
+IN_FLIGHT_HEARTBEAT_MAX_ATTEMPTS_PER_TICK=2
+IN_FLIGHT_HEARTBEAT_RETRIES_CONTROL_API_UNAVAILABLE=YES
+IN_FLIGHT_HEARTBEAT_RETRY_BACKOFF=NONE
+IN_FLIGHT_HEARTBEAT_RETRY_JITTER=NONE
+IN_FLIGHT_HEARTBEAT_OVERLAP_ALLOWED=NO
+IN_FLIGHT_HEARTBEAT_LOCAL_LEASE_EXPIRY_AUTHORITY=NO
+IN_FLIGHT_HEARTBEAT_UNAVAILABLE_STOPS_KEEPER=NO
+IN_FLIGHT_HEARTBEAT_UNAVAILABLE_TRIPS_HOST_FAULT=NO
+IN_FLIGHT_HEARTBEAT_REJECTION_STOPS_KEEPER=YES
+IN_FLIGHT_HEARTBEAT_REJECTION_TRIPS_HOST_FAULT=NO
+IN_FLIGHT_HEARTBEAT_AUTH_FAILURE_TRIPS_HOST_FAULT=YES
+IN_FLIGHT_HEARTBEAT_MALFORMED_RESPONSE_TRIPS_HOST_FAULT=YES
+IN_FLIGHT_HEARTBEAT_CANCELS_PROVIDER_OPERATION=NO
+IN_FLIGHT_HEARTBEAT_ABANDONS_PROVIDER_PROMISE=NO
+IN_FLIGHT_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
+IN_FLIGHT_HEARTBEAT_KEEPER_STOP_ABORT_IS_FAILURE=NO
+IN_FLIGHT_HEARTBEAT_FAILURE_OVERRIDES_OPERATION_OUTCOME=NO
+IN_FLIGHT_HEARTBEAT_ACCEPTANCE_RECONCILIATION_INCLUDED=YES
+IN_FLIGHT_HEARTBEAT_POLLING_PHASE_INCLUDED=NO
 ```
 
 ---
@@ -2891,7 +3174,9 @@ So provider polling can never begin between journal durability and
 control-plane reconciliation. R44B6Y does not wire this into any provider.
 
 **In-flight heartbeat boundary.** This lock does not define the in-flight
-heartbeat policy, which remains a separate gate item (section 36).
+heartbeat policy. R44B6Z0 locks it separately (section 15, "In-flight
+provider heartbeat"); its keeper wraps the provider-submission operation,
+including this adapter's awaited reconciliation.
 
 - A heartbeat failure never abandons a create already in flight.
 - An acceptance that arrives after lease authority has lapsed is still
@@ -4562,7 +4847,7 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6Y1, the following three are still missing. (R44B6Y.) The
+of R44B6Z0, the following three are still missing. (R44B6Y.) The
 acceptance-handler adapter prerequisite is satisfied: the inner durable
 handler, the outer reconciliation adapter, the `submission-failed` client
 and the host-fault latch are implemented (section 18), unused by live
@@ -4581,8 +4866,9 @@ R44B6X did not implement. Its classification is unchanged: section 24's
 "launch-blocking invariant" before commercial generation, not an item of
 this fake-provider gate.
 
-- the in-flight provider heartbeat schedule, retry and failure policy
-  (section 15; still unlocked after R44B6W0);
+- the in-flight provider heartbeat keeper (section 15). Its contract is
+  locked by R44B6Z0 and not implemented. Its implementation satisfies only
+  this item, not the two below;
 - whole-chain crash-point tests (slice 7);
 - the production/deployment state-root binding.
 
@@ -4896,6 +5182,30 @@ ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS=10000
 ACCEPTANCE_RECORD_RETAINED_AFTER_SUBMITTED_ACK=YES
 ACCEPTANCE_HOST_FAULT_LATCH_IMPLEMENTED=YES
 ACCEPTANCE_HOST_FAULT_LATCH_RUNTIME_CLEAR_ALLOWED=NO
+IN_FLIGHT_HEARTBEAT_KEEPER_IMPLEMENTED=NO
+IN_FLIGHT_HEARTBEAT_USED_BY_LIVE_EXECUTION=NO
+IN_FLIGHT_HEARTBEAT_FIRST_TICK_DELAY_MS=30000
+IN_FLIGHT_HEARTBEAT_QUIET_INTERVAL_MS=30000
+IN_FLIGHT_HEARTBEAT_REQUEST_DEADLINE_MS=10000
+IN_FLIGHT_HEARTBEAT_MAX_ATTEMPTS_PER_TICK=2
+IN_FLIGHT_HEARTBEAT_RETRIES_CONTROL_API_UNAVAILABLE=YES
+IN_FLIGHT_HEARTBEAT_RETRY_BACKOFF=NONE
+IN_FLIGHT_HEARTBEAT_RETRY_JITTER=NONE
+IN_FLIGHT_HEARTBEAT_OVERLAP_ALLOWED=NO
+IN_FLIGHT_HEARTBEAT_LOCAL_LEASE_EXPIRY_AUTHORITY=NO
+IN_FLIGHT_HEARTBEAT_UNAVAILABLE_STOPS_KEEPER=NO
+IN_FLIGHT_HEARTBEAT_UNAVAILABLE_TRIPS_HOST_FAULT=NO
+IN_FLIGHT_HEARTBEAT_REJECTION_STOPS_KEEPER=YES
+IN_FLIGHT_HEARTBEAT_REJECTION_TRIPS_HOST_FAULT=NO
+IN_FLIGHT_HEARTBEAT_AUTH_FAILURE_TRIPS_HOST_FAULT=YES
+IN_FLIGHT_HEARTBEAT_MALFORMED_RESPONSE_TRIPS_HOST_FAULT=YES
+IN_FLIGHT_HEARTBEAT_CANCELS_PROVIDER_OPERATION=NO
+IN_FLIGHT_HEARTBEAT_ABANDONS_PROVIDER_PROMISE=NO
+IN_FLIGHT_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
+IN_FLIGHT_HEARTBEAT_KEEPER_STOP_ABORT_IS_FAILURE=NO
+IN_FLIGHT_HEARTBEAT_FAILURE_OVERRIDES_OPERATION_OUTCOME=NO
+IN_FLIGHT_HEARTBEAT_ACCEPTANCE_RECONCILIATION_INCLUDED=YES
+IN_FLIGHT_HEARTBEAT_POLLING_PHASE_INCLUDED=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

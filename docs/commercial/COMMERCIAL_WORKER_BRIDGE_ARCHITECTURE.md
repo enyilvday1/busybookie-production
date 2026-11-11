@@ -25,7 +25,10 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   R44B6O, with no worker flow calling it yet: sections 10, 18, 36 and 37);
   R44B6P1 (acceptance journal v1 and the worker `submitted` client
   implemented by R44B6P, not yet invoked by execution code, plus the
-  exact-record retry rule: sections 17, 18, 36 and 37).
+  exact-record retry rule: sections 17, 18, 36 and 37); R44B6Q1 (R44B6Q
+  local startup journal reconciliation and the fail-closed new-work gate
+  implemented, with acceptance recovery still deferred: introduction,
+  sections 17, 18, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -968,7 +971,7 @@ WORKER_LOCAL_ACCEPTANCE_JOURNAL_REQUIRED=YES
 The worker keeps a small local durable journal for the ambiguity window
 around provider acceptance. It does not rely on volatile memory.
 
-### Implementation status (revision R44B6P1)
+### Implementation status (revision R44B6Q1)
 
 **Repository fact (R44B6P).** The private worker implements this section's
 journal `v1`:
@@ -990,8 +993,14 @@ protocol package.
 The worker also has a strict client for the live `submitted` route (section
 18).
 
-**What is not implemented.** Neither the journal nor the `submitted` client
-is invoked by any execution code. The required chain is still unwired:
+**Repository fact (R44B6Q).** The worker now prepares and reconciles the
+journal before the credential-opening run may request a lease. Only a
+`CLEAR` local startup result permits fresh work. The implemented local
+phase and its limits are recorded under "Startup reconciliation" below.
+
+**What is not implemented.** No provider submission flow writes a new
+acceptance record or calls the `submitted` client. The required chain is
+still unwired:
 
 ```text
 provider definitively accepts
@@ -1000,9 +1009,9 @@ provider definitively accepts
 -> worker may report submitted (section 18)
 ```
 
-Startup reconciliation, the unresolved-journal new-work block,
 `acceptance-recovery`, `submission-failed` and provider execution of any
-kind (fake or real) remain unimplemented. R44B6P makes no provider call.
+kind (fake or real) remain unimplemented. R44B6Q makes no provider call and
+does not resolve valid published acceptance evidence.
 
 **State root.** R44B6P takes the state root as explicit worker composition
 input. No environment variable is read or locked here. The deployment
@@ -1013,8 +1022,8 @@ binding remains a later composition decision (section 36).
 - an incomplete or invalid temporary file is never acceptance evidence, and
   is quarantined;
 - a valid temporary file is not yet **published** acceptance evidence. It is
-  retained, never quarantined, so that future startup reconciliation can
-  finish publishing exactly its record;
+  never quarantined; startup can finish publishing exactly its record,
+  then remove the temporary only after the exact final is published;
 - only a valid published final record is acceptance evidence;
 - a corrupt published record fails closed and is left for an operator.
 
@@ -1024,7 +1033,7 @@ ACCEPTANCE_JOURNAL_FORMAT=v1
 ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
-STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=NO
+STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES
 ```
 
 ### Purpose
@@ -1079,10 +1088,10 @@ JOURNAL_RECORD_IMMUTABLE=YES
 
 **Locked decision (revision R44B6K).** The journal lives under a private,
 worker-owned **state root**. The worker composition receives it as an
-explicit configuration value. Deployment may supply it, for example as
-`COMMERCIAL_WORKER_STATE_ROOT`. No machine path is fixed by this document.
-The environment variable name is not locked: R44B6P accepts the root only as
-explicit composition input, and the deployment binding is a later decision.
+explicit configuration value. No machine path or environment-variable name
+is locked by this document. R44B6Q continues to accept the root only through
+explicit worker composition; the production/deployment binding remains a
+later decision.
 
 The state root must be:
 
@@ -1373,8 +1382,103 @@ create call. The control-plane outcome for such an attempt is
 
 ### Startup reconciliation
 
-**Locked decision (revision R44B6K).** On startup, before requesting any
-lease, the worker:
+**Implemented local phase (R44B6Q; recorded by R44B6Q1).** The existing
+credential-opening workflow requires an explicitly composed acceptance
+journal. Startup ordering is:
+
+```text
+environment/startup checks
+-> acceptance journal prepare
+-> acceptance journal reconciliation
+-> CLEAR required
+-> lease acquisition permitted
+-> credential grant
+-> credential open
+```
+
+The worker never requests fresh work before reconciliation completes
+successfully. `prepare()` is reused for state-root preparation and startup
+refusal, including link-support probing and the directory-sync policy.
+Preparation failure prevents leasing. Deployment requires `REQUIRED`;
+Windows development may explicitly use `DEVELOPMENT_BEST_EFFORT`, without
+claiming equivalent durability (see "Platform durability" above).
+
+The local reconciler uses the journal's existing strict readers and
+inspection APIs; it does not duplicate canonical JSON, digest, path or
+provider-execution-ID validation. Enumeration accepts only the canonical
+final and temporary filenames in the layout above, with full-name matches.
+Unexpected filenames, directories, symlinks in the records directory, or
+scan/enumeration failure fail closed. Arbitrary entries are never interpreted
+as acceptance evidence. A discovered entry disappearing during inspection
+also fails closed.
+
+Entries are inspected in stable lexical filename order, independent of
+filesystem enumeration order. The entire snapshot is inspected before
+publication. Conflicting valid records are preserved; lexical order never
+selects one as authoritative. If corruption or conflict is detected during
+inspection, startup blocks without completing temporary publication.
+
+| Local condition | Implemented startup behavior |
+|---|---|
+| No unresolved evidence or other blocking condition | `CLEAR`; fresh lease acquisition may proceed. |
+| Valid published final | Durable provider-acceptance evidence; retain unchanged as `UNRESOLVED_ACCEPTANCE`. Do not delete, overwrite or regenerate it. Fresh work stays blocked until later acceptance recovery resolves it. |
+| Valid complete temporary | Not yet published acceptance evidence. Complete publication through `publish(record)` using the exact existing record, preserving its original `recordedAt`, `recordSha256` and canonical bytes. Never regenerate it through `write(input)`. Remove the source temporary only after verifying the same exact final is published. The resulting final remains unresolved and blocks fresh work. |
+| Invalid or partial temporary | Never provider-acceptance evidence. Preserve its bytes through the existing exclusive-link quarantine mechanism and log the safe corruption code. After successful quarantine it does not by itself represent unresolved acceptance; startup may become `CLEAR` if nothing else blocks it. |
+| Quarantine, publication or temporary-cleanup failure | Fail closed. Quarantine failure is never `CLEAR`; conflicting quarantine evidence is `CONFLICT`, and other unsafe I/O failures are `CORRUPT`. |
+| Corrupt published final | `CORRUPT`; retain in place for operator attention. Never treat it as `NOT_FOUND`, overwrite it or regenerate it. Fresh work stays blocked. |
+| Conflicting valid evidence | `CONFLICT`; preserve the evidence without automatically choosing a winner. Fresh work stays blocked. |
+
+**Interrupted quarantine.** If a prior process created the quarantine
+hard-link but crashed before unlinking the source invalid temporary,
+startup accepts the existing quarantine entry only when its bytes match
+exactly. It then completes directory sync and source unlink safely. A
+different existing quarantine entry is a conflict and is never overwritten.
+There is no rename or copy fallback, no duplicate evidence and no silent
+discard.
+
+**Repeated startup.** With unchanged state, `CLEAR` stays `CLEAR`; a valid
+final stays unresolved; a valid temporary may become the same exact final;
+an invalid temporary is quarantined once without repeated evidence
+mutation; a corrupt final stays fail-closed. Startup manufactures no
+duplicate acceptance records and introduces no garbage collection.
+
+**CLEAR gate.** Only `CLEAR` permits lease acquisition. The other local
+results are `UNRESOLVED_ACCEPTANCE`, `CORRUPT` and `CONFLICT`; each means:
+
+```text
+NEW_WORK_ALLOWED=NO
+LEASE_REQUESTS=0
+CREDENTIAL_GRANT_REQUESTS=0
+CREDENTIAL_OPENS=0
+PROVIDER_CALLS=0
+```
+
+Startup refusal uses closed worker codes: `STATE_ROOT_UNSUITABLE`,
+`ACCEPTANCE_RECONCILIATION_FAILED` for unresolved acceptance,
+`ACCEPTANCE_JOURNAL_CORRUPT` and `ACCEPTANCE_JOURNAL_CONFLICT`. Logs use safe
+codes, never raw filesystem messages, state-root paths, credentials, tokens,
+provider payloads or provider execution IDs (section 29).
+
+```text
+STARTUP_RECONCILIATION_RUNS_BEFORE_LEASE=YES
+UNRESOLVED_ACCEPTANCE_BLOCKS_NEW_WORK=YES
+CORRUPT_JOURNAL_BLOCKS_NEW_WORK=YES
+CONFLICTING_JOURNAL_BLOCKS_NEW_WORK=YES
+VALID_TEMP_REUSES_EXACT_RECORD=YES
+VALID_TEMP_REGENERATES_RECORDED_AT=NO
+```
+
+### Future acceptance recovery after local startup checks
+
+**Boundary.** R44B6Q does not call `acceptance-recovery`, transition
+`OUTCOME_UNKNOWN -> SUBMITTED`, create recovery leases or resolve valid
+published acceptance. All such acceptance remains blocking. The following
+full recovery lifecycle remains a locked future contract, separate from the
+implemented local phase.
+
+**Locked decision (revision R44B6K).** Once acceptance recovery is
+implemented, startup extends the local checks as follows, still before
+requesting any lease:
 
 1. validates the state root (absolute, local, link-capable, owner-only, and
    directory-fsync-capable in production);
@@ -1498,9 +1602,12 @@ explicitly composed worker-control router; the default process answers 404.
 **Status.** The route exists, but the worker submission flow does not.
 - **Implemented (R44B6P):** the acceptance journal (section 17) and a strict
   worker client for this route.
-- **Not wired:** no execution code calls the journal or the client.
-- **Not implemented:** startup reconciliation, worker provider execution,
-  `acceptance-recovery` and `submission-failed`.
+- **Implemented (R44B6Q):** local startup journal reconciliation and the
+  fail-closed new-work gate before lease acquisition (section 17).
+- **Not wired:** no provider submission flow writes new acceptance records
+  or calls the `submitted` client.
+- **Not implemented:** worker provider execution, `acceptance-recovery`
+  and `submission-failed`. Valid published acceptance remains unresolved.
 
 The required worker ordering still stands:
 
@@ -1614,7 +1721,7 @@ SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
-STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=NO
+STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES
 WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 ```
 
@@ -2544,6 +2651,15 @@ execution ID or a filesystem path.
 **Locked decision.** The worker's local evidence is compared with the
 control-plane state during startup reconciliation (section 17).
 
+**Implementation boundary (R44B6Q1).** R44B6Q implements the local startup
+phase: empty state may be `CLEAR`; valid finals remain unresolved and block
+leasing; case G completes exact publication but then remains blocked; case H
+quarantines invalid bytes and may become `CLEAR` if no other condition
+blocks startup. Case F remains fail-closed. Conflicts and invalid filesystem
+state also block. The control-plane comparisons and acceptance-recovery
+actions in B, B', C and E below remain future work; R44B6Q does not perform
+them or create a recovery lease.
+
 | Case | Control plane | Local journal | Rule |
 |---|---|---|---|
 | A | `SUBMITTING`, or `OUTCOME_UNKNOWN` after the sweep | none | Acceptance cannot be proven. No resubmission. The attempt becomes or stays `OUTCOME_UNKNOWN` (section 12 sweep) for operator resolution. |
@@ -2702,10 +2818,13 @@ each slice under its own authorised gate:
    live-route epoch.
 5. The worker acceptance journal: state-root validation, write algorithm,
    read validation and corruption handling (section 17). Implemented
-   (R44B6P), together with the worker's `submitted` client; neither is yet
-   invoked by execution code.
+   (R44B6P), together with the worker's `submitted` client. R44B6Q uses the
+   journal for local startup checks; the provider-acceptance chain and the
+   `submitted` client remain unwired to live execution.
 6. Worker startup reconciliation and the unresolved-journal new-work block
-   (section 17). Not implemented.
+   (section 17). Implemented (R44B6Q): prepare and reconcile before leasing;
+   only `CLEAR` permits fresh work. Valid published acceptance remains
+   blocking because acceptance recovery is not implemented.
 7. Crash-point tests covering every row of the section 31 matrices.
    Faults are injected:
    - before and after each journal step;
@@ -2717,16 +2836,19 @@ each slice under its own authorised gate:
    - with an SDK client whose create retry is not disabled, which must be
      refused (R44B6K1).
 
-**A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6P, the following are still missing:
+R44B6Q adds focused local startup crash/restart tests, including exact
+temporary publication and interrupted quarantine. These do not complete the
+whole-chain crash-point coverage required by slice 7.
 
-- startup reconciliation and the new-work block (slice 6);
+**A fake provider adapter may execute only after slices 1 to 7 exist.** As
+of R44B6Q, the following are still missing:
+
 - `acceptance-recovery` and `submission-failed` (slice 4);
 - a worker client for the `SUBMITTING` acknowledgement;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
 - whole-chain crash-point tests (slice 7);
-- the state-root deployment binding.
+- the production/deployment state-root binding.
 
 The gate is therefore not met.
 Every one of them protects the window between `SUBMITTING` and a durable
@@ -2838,7 +2960,13 @@ WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_USED_BY_LIVE_EXECUTION=NO
 ACCEPTANCE_JOURNAL_FORMAT=v1
 ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
-STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=NO
+STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES
+STARTUP_RECONCILIATION_RUNS_BEFORE_LEASE=YES
+UNRESOLVED_ACCEPTANCE_BLOCKS_NEW_WORK=YES
+CORRUPT_JOURNAL_BLOCKS_NEW_WORK=YES
+CONFLICTING_JOURNAL_BLOCKS_NEW_WORK=YES
+VALID_TEMP_REUSES_EXACT_RECORD=YES
+VALID_TEMP_REGENERATES_RECORDED_AT=NO
 WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 SUBMITTED_CAN_CALL_PROVIDER_CREATE_AGAIN=NO
 UNRESOLVED_ACCEPTANCE_JOURNAL_BLOCKS_NEW_SUBMISSION_WORK=YES

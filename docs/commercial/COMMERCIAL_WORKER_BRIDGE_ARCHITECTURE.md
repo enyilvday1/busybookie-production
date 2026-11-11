@@ -110,7 +110,20 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   provider-adapter change; provider execution remains disabled; the
   fake-provider gate remains unmet, and recovery of granted-but-expired
   `LEASED` attempts is now the next major lifecycle blocker: introduction,
-  sections 15, 36 and 37).
+  sections 15, 36 and 37); R44B6X0 (granted-but-expired `LEASED` recovery
+  locked after R44B6X discovery found the gap also permanently consumes the
+  worker's lease capacity: the locked database row is the recovery
+  authority, and an expired row still `LEASED` proves `SUBMITTING` never
+  committed; such attempts are requeued automatically (`LEASED -> QUEUED`)
+  with `credential_granted_at` and the lease proof cleared, the fence kept
+  and incremented by the next lease, and the job moved `RUNNING -> QUEUED`;
+  recovery runs in the lease-acquisition transaction before the capacity
+  check, and the requesting worker can never be batch-starved by its own
+  stale lease; the audit reuses `execution_attempt.lease_expired` with a
+  granted marker; no new security event, state, failure code, route,
+  protocol change or migration; a stale worker's plaintext API key is outside
+  fencing and governed by the trusted-worker invariant; no runtime change:
+  introduction, sections 12, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -543,14 +556,146 @@ The mechanism guarantees:
 - An expired lease on an attempt that never reached `SUBMITTING` may be
   released and the job leased again. (R44B6V0.) The current reclaim covers
   only leases with no credential grant: an expired **granted** `LEASED`
-  attempt is not requeued and has no authoritative recovery yet. That
-  recovery/sweep policy is a prerequisite before live provider execution
-  (section 36).
+  attempt is not requeued yet. (R44B6X0.) Its authoritative recovery is now
+  locked as an automatic requeue ("Granted-but-expired `LEASED` recovery"
+  below) but not yet implemented; it remains a prerequisite before live
+  provider execution (section 36).
 - An expired lease on a `SUBMITTING` attempt that has no durable provider
   execution ID moves the attempt to `OUTCOME_UNKNOWN`.
 - An expired lease on a `SUBMITTED` attempt permits only recovery of the
   same provider execution ID with the original credential version. It never
   permits a new submission for that attempt.
+
+### Granted-but-expired `LEASED` recovery (revision R44B6X0)
+
+**Locked decision (design only; not yet implemented).** An attempt whose
+lease received a credential grant and then expired before `SUBMITTING` is
+**automatically requeued** by the control plane. R44B6X discovery found the
+gap is worse than a stranded attempt: the expired lease still counts against
+`WORKER_MAX_CURRENT_LEASES`, so it can permanently stop its worker from
+receiving another lease.
+
+- **Eligibility (authoritative, on the locked row).** All of: `state =
+  'LEASED'`; `credential_granted_at IS NOT NULL`; `lease_expires_at <=` the
+  database's server time. The row must still be `LEASED` when locked. A row
+  that is `SUBMITTING` or any later state is never handled here: the existing
+  `SUBMITTING` sweep owns it.
+- **Authority principle.** Whether automatic requeue is safe is decided by
+  control-plane database state, never by whether the worker may have opened
+  the credential. A locked row that is still `LEASED` and expired proves that
+  `SUBMITTING` did not commit under that lease and, because the barrier
+  refuses an expired lease by server time (section 15), can no longer commit
+  under that proof. BusyBookie therefore never granted provider-call
+  authority. A worker's uncertainty about whether its `SUBMITTING` request
+  committed never overrides the row.
+- **Trusted-worker assumption.** Current BYO credentials are long-lived user
+  API keys that BusyBookie cannot cryptographically revoke once disclosed; a
+  stale worker may still hold plaintext in memory. Fencing protects
+  control-plane authority only and never makes a disclosed provider key
+  unusable. Automatic requeue therefore relies on the existing invariant that
+  a BusyBookie worker never invokes a provider without committed
+  `SUBMITTING` authority and the later pre-provider gates (section 15), which
+  a worker whose lease expired can neither obtain nor keep. This is an
+  accepted assumption of the current worker trust model. A future threat
+  model that treats worker hosts as hostile or compromised needs a different
+  credential architecture before that stronger claim can be made.
+- **Owner and trigger.** The control plane recovers inside the
+  lease-acquisition transaction, alongside the existing expired-lease reclaim
+  (as an extension of it or a narrowly named sibling). No worker cooperation,
+  worker route or admin action is needed for the ordinary case.
+- **Capacity ordering.** Recovery runs before the requesting worker's
+  current-lease capacity is evaluated. After recovery processing and before
+  any capacity refusal, an eligible expired granted lease owned by the
+  requesting worker no longer counts against its capacity, and it can never
+  be starved behind the global reclaim batch limit: if the shared batch could
+  omit it, the requesting principal's own candidate is recovered separately,
+  or its inclusion is otherwise guaranteed, before the capacity check. The
+  existing `SKIP LOCKED` semantics are kept, and batch sizes are not raised
+  to approximate this guarantee. The global capacity rule is not weakened.
+- **Attempt mutation.** `LEASED -> QUEUED`; `credential_granted_at` cleared
+  to `NULL`; the complete live lease ownership and proof cleared exactly as
+  the ordinary expired-lease reclaim clears it (worker principal, token
+  verifier, lease and heartbeat times), so no old proof stays usable. The
+  fencing counter is **kept**; the next successful lease increments it under
+  the existing acquisition rule. Migration 0004's guard already permits
+  clearing the grant on exactly this transition.
+- **Job mutation.** `RUNNING -> QUEUED` with the existing reclaim semantics,
+  atomic with the attempt, lease and grant changes. No `NEEDS_ATTENTION`.
+- **Grant marker.** `credential_granted_at` belongs to the abandoned
+  pre-submission lease and is cleared, closing the attempt's pre-submission
+  grant marker. A later worker needs a new valid live lease before any grant;
+  the old grant's replay semantics never carry over to a new lease.
+- **Credential version.** Recovery changes no provider credential version:
+  it never destroys a version, changes its `ACTIVE`, `SUPERSEDED`,
+  `RETAINED_FOR_RECOVERY` or `DESTROYED` status, or replaces a binding.
+  Clearing the grant closes this attempt's retention obligation, which is
+  derived from attempt state (section 23). A version a disconnect already
+  marked `RETAINED_FOR_RECOVERY` stays so: its destruction on obligation
+  close belongs to the lifecycle service of section 24, which does not exist
+  yet. That is a separate, explicitly tracked lifecycle gap, not something
+  R44B6X guesses at. Such a requeued attempt is simply not leased again while
+  its version or connection is ineligible for new work.
+- **Stale workers.** After recovery commits, the old proof is no longer
+  current: heartbeat, credential grant, `SUBMITTING`, `submission-failed` and
+  `submitted` are refused by the existing live-lease, state and fencing
+  checks. A new lease gets a strictly higher fencing counter and a new token.
+  None of this stops a stale process from using plaintext it already holds;
+  that is governed only by the trusted-worker invariant above.
+- **Races.** Recovery serialises on the attempt row lock with heartbeat,
+  credential grant, ordinary reclaim and `SUBMITTING`. A row whose lock is
+  held is skipped (`SKIP LOCKED`), as in the existing reclaim. If
+  `SUBMITTING` commits first, the row is `SUBMITTING` and not eligible; if
+  recovery commits first, the stale `SUBMITTING` fails. The server-time
+  barrier stays authoritative, and no worker-side ambiguity check is needed.
+  There is no optimistic recovery without the row lock.
+- **Audit and security.** Each recovery is audited with the existing
+  `execution_attempt.lease_expired` event; its metadata distinguishes a
+  granted pre-submission recovery from the ordinary ungranted reclaim with a
+  marker, alongside the existing safe fields (attempt number, fencing
+  counter, worker principal). Never the token, its verifier, the sealed
+  envelope, plaintext or the machine credential. No new security event: an
+  expired granted lease is an operational condition, not evidence of
+  hostility; stale-worker rejections keep their existing security events.
+- **No new vocabulary or path.** No failure code (not `GRANT_ABANDONED`,
+  `CREDENTIAL_GRANT_EXPIRED`, `PROVIDER_STATUS_UNKNOWN` or similar), no
+  quarantine, no `OUTCOME_UNKNOWN`, `FAILED_BEFORE_SUBMISSION`,
+  `NEEDS_ATTENTION` or `CANCELLED` for the ordinary case, and no operator
+  workflow: provider-call authority is proven absent, requeue is safe under
+  the current trust model, and quarantine would lose liveness for no safety
+  gain. Unexpected or inconsistent rows stay fail-closed under existing
+  integrity behaviour, outside this transition.
+- **Boundary.** No migration, attempt or job state, worker route, protocol
+  change, worker-side code or provider-adapter change. The implementation is
+  control-plane only: extend `reclaimExpiredLeases` or add a narrowly named
+  sibling in the same transaction, reusing the lease-clearing SQL and keeping
+  the ordinary ungranted reclaim unchanged, with focused database tests.
+- **Required capacity test.** A worker holding a granted, expired `LEASED`
+  attempt, which `WORKER_MAX_CURRENT_LEASES` would otherwise block, requests
+  another lease; recovery runs before the capacity decision; the old attempt
+  becomes `QUEUED` with its grant and lease cleared; the worker may then
+  acquire under the normal queue and eligibility rules.
+
+```text
+GRANTED_EXPIRED_LEASE_RECOVERY_IMPLEMENTED=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_POLICY=REQUEUE
+GRANTED_EXPIRED_LEASE_RECOVERY_OWNER=LEASE_ACQUISITION_TRANSACTION
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_STATE=LEASED
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_CREDENTIAL_GRANT=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_SERVER_EXPIRY=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_TARGET_ATTEMPT_STATE=QUEUED
+GRANTED_EXPIRED_LEASE_RECOVERY_TARGET_JOB_STATE=QUEUED
+GRANTED_EXPIRED_LEASE_RECOVERY_CLEARS_CREDENTIAL_GRANTED_AT=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_CLEARS_LEASE_PROOF=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_INCREMENTS_FENCE=NO
+GRANTED_EXPIRED_LEASE_NEXT_LEASE_INCREMENTS_FENCE=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_RUNS_BEFORE_CAPACITY_CHECK=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUESTING_WORKER_CANNOT_BE_BATCH_STARVED=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_CALLS_PROVIDER=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_TARGETS_SUBMITTING=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_MIGRATION=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_AUDIT_EVENT=execution_attempt.lease_expired
+GRANTED_EXPIRED_LEASE_RECOVERY_EMITS_SECURITY_EVENT=NO
+```
 
 ### Lease during SUBMITTING and SUBMITTED
 
@@ -3555,7 +3700,7 @@ execution ID or a filesystem path.
 |---|---|---|
 | Before lease | job `QUEUED` | No side effect. |
 | Leased, before credential grant | `LEASED` | The lease may expire or be released normally. |
-| Credential granted, before `SUBMITTING` | `LEASED`, grant audited | A credential-retention obligation exists. If the lease is definitively revoked and no provider call occurred, the obligation can close. |
+| Credential granted, before `SUBMITTING` | `LEASED`, grant audited | A credential-retention obligation exists. If the lease is definitively revoked and no provider call occurred, the obligation can close. (R44B6X0.) Once the lease expires by server time while the row is still `LEASED`, provider-call authority provably never committed: the control plane requeues it (`LEASED -> QUEUED`, grant and lease cleared, job `QUEUED`; section 12). Not `OUTCOME_UNKNOWN`. Locked, not yet implemented. |
 | `SUBMITTING`, provider call in flight | `SUBMITTING` | A provider-recovery obligation exists. A crash or ambiguous network outcome becomes `OUTCOME_UNKNOWN`. Never auto-resubmit. |
 | Provider accepted, local journal durable | journal entry | On restart, report the same provider ID upstream. No resubmission. |
 | `SUBMITTED`, polling or recovery | `SUBMITTED` with provider ID | Resume the same provider execution ID with the exact original credential version. |
@@ -3783,9 +3928,15 @@ then the `SUBMITTING` acknowledgement, then the mandatory heartbeat, then the
 permit) are implemented (section 15); neither is used by live execution, and
 neither touches a provider.
 
-- an authoritative recovery/sweep policy for granted-but-expired `LEASED`
-  attempts, which the current reclaim does not requeue (section 12); R44B6V
-  does not close this gap, and it is now the next major lifecycle blocker;
+- the implementation of granted-but-expired `LEASED` recovery, which the
+  current reclaim does not requeue and which also permanently consumes the
+  worker's lease capacity (policy locked by R44B6X0 as an automatic requeue,
+  section 12). This item may be removed only once attempt and job recovery
+  works, stale control-plane proofs are refused, the requesting worker's
+  capacity is released, the races are covered, the audit is recorded, and any
+  separate credential-version retention gap found is tracked explicitly.
+  Until then live provider execution, fake or real, stays disabled; an
+  unwired fake or test provider slice may still be developed;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
 - the in-flight provider heartbeat schedule, retry and failure policy
@@ -3998,6 +4149,25 @@ PRE_PROVIDER_HEARTBEAT_RETRY_JITTER=NONE
 PRE_PROVIDER_HEARTBEAT_REQUEST_DEADLINE_MS=10000
 PRE_PROVIDER_HEARTBEAT_ABORT_OWNER=PRE_PROVIDER_ORCHESTRATION
 PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_IMPLEMENTED=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_POLICY=REQUEUE
+GRANTED_EXPIRED_LEASE_RECOVERY_OWNER=LEASE_ACQUISITION_TRANSACTION
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_STATE=LEASED
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_CREDENTIAL_GRANT=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_SERVER_EXPIRY=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_TARGET_ATTEMPT_STATE=QUEUED
+GRANTED_EXPIRED_LEASE_RECOVERY_TARGET_JOB_STATE=QUEUED
+GRANTED_EXPIRED_LEASE_RECOVERY_CLEARS_CREDENTIAL_GRANTED_AT=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_CLEARS_LEASE_PROOF=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_INCREMENTS_FENCE=NO
+GRANTED_EXPIRED_LEASE_NEXT_LEASE_INCREMENTS_FENCE=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_RUNS_BEFORE_CAPACITY_CHECK=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUESTING_WORKER_CANNOT_BE_BATCH_STARVED=YES
+GRANTED_EXPIRED_LEASE_RECOVERY_CALLS_PROVIDER=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_TARGETS_SUBMITTING=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_REQUIRES_MIGRATION=NO
+GRANTED_EXPIRED_LEASE_RECOVERY_AUDIT_EVENT=execution_attempt.lease_expired
+GRANTED_EXPIRED_LEASE_RECOVERY_EMITS_SECURITY_EVENT=NO
 ACCEPTANCE_JOURNAL_FORMAT=v1
 ACCEPTANCE_JOURNAL_RETRY_REUSES_EXACT_RECORD=YES
 STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES

@@ -21,7 +21,8 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   R44B6M2 (`SUBMITTED` heartbeat lease-epoch authority: sections 10, 12, 18,
   36 and 37); R44B6N (migration 0006 lease-epoch provenance implemented and
   `SUBMITTED` heartbeat enabled for the exact live-route epoch only: sections
-  10, 12, 18, 36 and 37).
+  10, 12, 18, 36 and 37); R44B6O1 (live `submitted` route implemented by
+  R44B6O, with no worker flow calling it yet: sections 10, 18, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -391,7 +392,7 @@ under `/worker-control/v1`, all with exact closed JSON bodies:
 | `attempts/:attemptId/release` | `{fencingCounter, leaseToken}` | Implemented; `LEASED` without a grant only. |
 | `attempts/:attemptId/credential-grant` | `{fencingCounter, leaseToken}` | Implemented (R44B6H). |
 | `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
-| `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Future (section 18). |
+| `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Implemented (R44B6O, section 18). No worker flow calls it yet. |
 | `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Future (section 18). |
 | `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18). |
 
@@ -1393,31 +1394,85 @@ ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
 - **Provider accepted.** After step 4, `SUBMITTING -> SUBMITTED` with exactly
   the journalled ID.
 
-### Future `submitted` route (live lease)
+### `submitted` route (live lease)
 
-**Locked decision (design only).**
+**Locked decision (implemented, R44B6O).**
 `POST /worker-control/v1/attempts/:attemptId/submitted` with exactly
-`{fencingCounter, leaseToken, providerExecutionId}`.
+`{fencingCounter, leaseToken, providerExecutionId}`. It exists only in the
+explicitly composed worker-control router; the default process answers 404.
 
-- Authority is the same proof as `submitting`: an ACTIVE principal re-checked
-  `FOR SHARE`, the attempt locked `FOR UPDATE`, the same worker, exact
-  fencing, a matching token and an unexpired lease. The state must be
-  `SUBMITTING`, or `SUBMITTED` for replay.
-- Connection eligibility is **not** checked. Submission was already
-  authorised (section 24). The exact version must not be `DESTROYED`; if it
-  is, the request fails closed as an invariant failure.
-- The first transition writes:
+**Status.** The route exists, but the worker submission flow does not. No
+worker code calls it. The acceptance journal (section 17), worker provider
+execution, `acceptance-recovery` and `submission-failed` are not
+implemented. The required worker ordering still stands:
+
+```text
+provider accepts
+-> durable acceptance journal (section 17)
+-> submission-accepted handler resolves
+-> worker reports submitted
+```
+
+The route's existence does not mean the crash-safe submission path is
+complete.
+
+- **Authority.** The route requires the same live proof as `submitting`:
+  - an authenticated worker, re-checked ACTIVE `FOR SHARE`;
+  - the attempt locked `FOR UPDATE`;
+  - the exact current worker principal, fencing counter and lease token
+    (compared in constant time), with an unexpired lease.
+
+  In addition it requires the exact live-route lease epoch (migrations 0005
+  and 0006):
+  - `lease_fencing_counter = submitting_fencing_counter`;
+  - `submitting_worker_principal_id` equal to the caller and current lease
+    principal.
+
+  A replacement or recovery lease never acknowledges a submission, whatever
+  its principal. Lock order: principal, attempt, connection `FOR SHARE`,
+  exact version `FOR SHARE`.
+- **States.** The route performs only `SUBMITTING -> SUBMITTED`. It also
+  replays an identical acknowledgement on an attempt that is already
+  `SUBMITTED`. It never performs `LEASED -> SUBMITTED`, and never
+  `OUTCOME_UNKNOWN -> SUBMITTED`; the latter belongs to the future
+  `acceptance-recovery` route. Any other state is refused with
+  `INCOMPATIBLE_ATTEMPT_STATE`.
+- **Credential.** Connection eligibility is **not** checked, because
+  submission was already authorised (section 24). The exact version must not
+  be `DESTROYED`. If it is, the request fails closed as an invariant failure
+  (`SUBMITTING_VERSION_DESTROYED`).
+- **Provider execution ID.** Validated exactly as the migration 0004
+  constraint: 1 to 256 visible ASCII characters (`0x21`-`0x7e`), never
+  containing `://`, with no normalisation. Any other request member,
+  provider response, URL, path or client timestamp is a 400. Uniqueness is
+  the database's `(account_id, provider, provider_execution_id)` unique
+  index (section 26). An ID already adopted by another attempt of the same
+  Account and provider is refused. Another Account may use the same opaque
+  ID.
+- **The first transition writes only:**
   - `state = 'SUBMITTED'`;
   - `provider_execution_id`;
   - `submitted_at = now()`;
   - `updated_at = now()`.
 
-  The lease is **kept**: the same worker continues polling under fencing
-  (section 12). The job stays `RUNNING`. The route audits
-  `execution_attempt.submitted`. That kept lease is renewable by heartbeat
-  only while it is still the exact live-route epoch (section 12, R44B6N). A
-  kept lease that is not renewed runs to its normal expiry. Recovery
-  afterwards follows section 12, "Re-lease after expiry".
+  `recovery_expires_at` stays `NULL` until a provider-specific policy exists
+  (section 23).
+
+  The lease is **kept**: worker, token verifier, fencing counter,
+  `leased_at`, `lease_expires_at` and `heartbeat_at`. So is the immutable
+  submission provenance: `credential_granted_at`, `submitting_at`, the
+  submitting principal and the submitting fencing counter.
+
+  The same worker continues polling under fencing (section 12), and the job
+  stays `RUNNING`. The route audits `execution_attempt.submitted` once. Its
+  metadata is `attemptNumber`, `fencingCounter`, `workerPrincipalId`,
+  `provider` and `credentialVersion`, never the provider execution ID, a
+  token or a secret.
+
+  That kept lease is renewable by heartbeat only while it is still the exact
+  live-route epoch (section 12, R44B6N). A kept lease that is not renewed
+  runs to its normal expiry. Recovery afterwards follows section 12,
+  "Re-lease after expiry".
 - Timestamps come from server time. There is no client-supplied acceptance
   timestamp. The journal's `providerAcceptedAt` stays local and
   informational. Recovery horizons, once defined, are measured
@@ -1425,14 +1480,20 @@ ACCEPTANCE_HANDLER_RESOLVES_BEFORE_DURABLE_JOURNAL=NO
 - The response is
   `{executionAttemptId, fencingCounter, state: "SUBMITTED", providerExecutionId, submittedAt}`.
 - **Idempotency.** For the same attempt, proof and provider execution ID on
-  an already `SUBMITTED` attempt, the route returns the committed result. It
-  writes no new audit and does not change `submitted_at`.
-- **Conflicts.** The following are refused with the uniform
-  `409 LEASE_REJECTED` and logged as security events (section 30):
-  - a different provider execution ID on a `SUBMITTED` attempt is an
-    invariant violation;
+  an already `SUBMITTED` attempt, the route returns the committed result,
+  including for concurrent identical requests. It writes no new audit and
+  does not change `submitted_at`.
+- **Refusals.** All of the following are refused with the uniform
+  `409 LEASE_REJECTED` and logged as `WORKER_SUBMITTED_REJECTED` (section
+  30):
+  - a different provider execution ID on a `SUBMITTED` attempt
+    (`PROVIDER_EXECUTION_CONFLICT`), an invariant violation that never
+    rewrites the stored ID;
   - an ID already adopted by another attempt of the same Account and
-    provider is also refused, through the unique index.
+    provider, through the unique index (`PROVIDER_EXECUTION_ID_IN_USE`);
+  - a wrong worker, token or fence, or an expired lease, including a replay
+    after the live lease has expired;
+  - a replacement or recovery lease (`SUBMITTED_LEASE_EPOCH_MISMATCH`).
 - **Lost response.** The journal is durable, the control plane commits, the
   response is lost and the worker retries. The retry hits the idempotent
   replay. If the lease has expired meanwhile, the attempt is already
@@ -1445,6 +1506,15 @@ SUBMITTED_REPORT_IDEMPOTENT=YES
 SUBMITTED_DIFFERENT_PROVIDER_EXECUTION_ID=INVARIANT_VIOLATION
 SUBMITTED_TIMESTAMP_AUTHORITY=SERVER
 LEASE_KEPT_ON_LIVE_SUBMITTED=YES
+LIVE_SUBMITTED_ROUTE_IMPLEMENTED=YES
+LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMITTING=YES
+LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMISSION_EPOCH_MATCH=YES
+LIVE_SUBMITTED_LEASE_PRESERVED=YES
+OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
+ACCEPTANCE_RECOVERY_IMPLEMENTED=NO
+SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
+ACCEPTANCE_JOURNAL_IMPLEMENTED=NO
+WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 ```
 
 ### Future `acceptance-recovery` route (journal evidence without a lease token)
@@ -2524,8 +2594,10 @@ each slice under its own authorised gate:
     `submitting_fencing_counter`, and `SUBMITTED` heartbeat for the exact
     live-route lease epoch only (section 12, R44B6N).
 4. The `submitted`, `acceptance-recovery` and `submission-failed` routes
-   (section 18). Neither this step nor any recovery-lease step may grant
-   `SUBMITTED` heartbeat authority to any lease other than the exact
+   (section 18). The live `submitted` route is implemented (R44B6O); no
+   worker flow calls it yet. `acceptance-recovery` and `submission-failed`
+   remain to be built. Neither this step nor any recovery-lease step may
+   grant `SUBMITTED` heartbeat authority to any lease other than the exact
    live-route epoch.
 5. The worker acceptance journal: state-root validation, write algorithm,
    read validation and corruption handling (section 17).
@@ -2640,6 +2712,15 @@ SUBMITTED_REPORT_IDEMPOTENT=YES
 SUBMITTED_DIFFERENT_PROVIDER_EXECUTION_ID=INVARIANT_VIOLATION
 SUBMITTED_TIMESTAMP_AUTHORITY=SERVER
 LEASE_KEPT_ON_LIVE_SUBMITTED=YES
+LIVE_SUBMITTED_ROUTE_IMPLEMENTED=YES
+LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMITTING=YES
+LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMISSION_EPOCH_MATCH=YES
+LIVE_SUBMITTED_LEASE_PRESERVED=YES
+OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
+ACCEPTANCE_RECOVERY_IMPLEMENTED=NO
+SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
+ACCEPTANCE_JOURNAL_IMPLEMENTED=NO
+WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 SUBMITTED_CAN_CALL_PROVIDER_CREATE_AGAIN=NO
 UNRESOLVED_ACCEPTANCE_JOURNAL_BLOCKS_NEW_SUBMISSION_WORK=YES
 DISCONNECT_REVOKES_AUTHORISED_SUBMISSION_RECOVERY=NO

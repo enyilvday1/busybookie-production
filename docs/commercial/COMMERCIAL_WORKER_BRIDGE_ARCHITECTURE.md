@@ -27,8 +27,11 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   implemented by R44B6P, not yet invoked by execution code, plus the
   exact-record retry rule: sections 17, 18, 36 and 37); R44B6Q1 (R44B6Q
   local startup journal reconciliation and the fail-closed new-work gate
-  implemented, with acceptance recovery still deferred: introduction,
-  sections 17, 18, 31, 36 and 37).
+  implemented, with acceptance recovery then deferred: introduction,
+  sections 17, 18, 31, 36 and 37); R44B6R1 (R44B6R control-plane
+  acceptance-recovery route implemented, preserving the original submission
+  epoch and two-transaction expiry handoff; worker recovery wiring still
+  deferred: introduction, sections 10, 17, 18, 30, 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -399,7 +402,7 @@ under `/worker-control/v1`, all with exact closed JSON bodies:
 | `attempts/:attemptId/credential-grant` | `{fencingCounter, leaseToken}` | Implemented (R44B6H). |
 | `attempts/:attemptId/submitting` | `{fencingCounter, leaseToken}` | Implemented (R44B6J). |
 | `attempts/:attemptId/submitted` | `{fencingCounter, leaseToken, providerExecutionId}` | Implemented (R44B6O, section 18). No worker flow calls it yet. |
-| `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Future (section 18). |
+| `attempts/:attemptId/acceptance-recovery` | `{fencingCounter, providerExecutionId}` | Implemented (R44B6R, section 18). Worker client and startup wiring remain unimplemented. |
 | `attempts/:attemptId/submission-failed` | `{fencingCounter, leaseToken, outcome, failureCode}` | Future (section 18). |
 
 No route accepts a client-supplied timestamp, Account, connection,
@@ -1009,9 +1012,11 @@ provider definitively accepts
 -> worker may report submitted (section 18)
 ```
 
-`acceptance-recovery`, `submission-failed` and provider execution of any
-kind (fake or real) remain unimplemented. R44B6Q makes no provider call and
-does not resolve valid published acceptance evidence.
+The control-plane `acceptance-recovery` route is implemented (R44B6R,
+section 18). Its worker client and startup wiring, `submission-failed` and
+provider execution of any kind (fake or real) remain unimplemented.
+R44B6Q still makes no provider call and does not automatically resolve
+valid published acceptance evidence.
 
 **State root.** R44B6P takes the state root as explicit worker composition
 input. No environment variable is read or locked here. The deployment
@@ -1421,7 +1426,7 @@ inspection, startup blocks without completing temporary publication.
 | Local condition | Implemented startup behavior |
 |---|---|
 | No unresolved evidence or other blocking condition | `CLEAR`; fresh lease acquisition may proceed. |
-| Valid published final | Durable provider-acceptance evidence; retain unchanged as `UNRESOLVED_ACCEPTANCE`. Do not delete, overwrite or regenerate it. Fresh work stays blocked until later acceptance recovery resolves it. |
+| Valid published final | Durable provider-acceptance evidence; retain unchanged as `UNRESOLVED_ACCEPTANCE`. Do not delete, overwrite or regenerate it. Fresh work stays blocked until later worker recovery wiring reconciles it through the implemented control-plane route. |
 | Valid complete temporary | Not yet published acceptance evidence. Complete publication through `publish(record)` using the exact existing record, preserving its original `recordedAt`, `recordSha256` and canonical bytes. Never regenerate it through `write(input)`. Remove the source temporary only after verifying the same exact final is published. The resulting final remains unresolved and blocks fresh work. |
 | Invalid or partial temporary | Never provider-acceptance evidence. Preserve its bytes through the existing exclusive-link quarantine mechanism and log the safe corruption code. After successful quarantine it does not by itself represent unresolved acceptance; startup may become `CLEAR` if nothing else blocks it. |
 | Quarantine, publication or temporary-cleanup failure | Fail closed. Quarantine failure is never `CLEAR`; conflicting quarantine evidence is `CONFLICT`, and other unsafe I/O failures are `CORRUPT`. |
@@ -1468,17 +1473,18 @@ VALID_TEMP_REUSES_EXACT_RECORD=YES
 VALID_TEMP_REGENERATES_RECORDED_AT=NO
 ```
 
-### Future acceptance recovery after local startup checks
+### Future worker acceptance-recovery integration after local startup checks
 
 **Boundary.** R44B6Q does not call `acceptance-recovery`, transition
 `OUTCOME_UNKNOWN -> SUBMITTED`, create recovery leases or resolve valid
-published acceptance. All such acceptance remains blocking. The following
-full recovery lifecycle remains a locked future contract, separate from the
-implemented local phase.
+published acceptance. All such acceptance remains blocking in the worker.
+R44B6R implements the control-plane route (section 18), but no worker client
+or startup call to it exists yet. The following worker integration remains
+a locked future contract, separate from the implemented local phase.
 
-**Locked decision (revision R44B6K).** Once acceptance recovery is
-implemented, startup extends the local checks as follows, still before
-requesting any lease:
+**Locked decision (revision R44B6K).** Once the worker acceptance-recovery
+client and startup wiring are implemented, startup extends the local checks
+as follows, still before requesting any lease:
 
 1. validates the state root (absolute, local, link-capable, owner-only, and
    directory-fsync-capable in production);
@@ -1487,9 +1493,11 @@ requesting any lease:
    with the record's fencing counter and provider execution ID, and then:
    - a response showing the same provider execution ID in `SUBMITTED` or a
      later state -> reconciled; delete it if terminal, keep it otherwise;
-   - `ATTEMPT_STILL_SUBMITTING` (revision R44B6K1) means the attempt's lease
-     is still live by server time. The restarted worker cannot prove that
-     lease's token. It therefore stays blocked and makes no provider create.
+   - `ATTEMPT_STILL_SUBMITTING` (revisions R44B6K1 and R44B6R1) means the
+     attempt is still `SUBMITTING` after the scoped sweep transaction. This
+     includes expiry between that transaction and the recovery transaction.
+     The restarted worker cannot prove the lost lease token. It therefore
+     stays blocked and makes no provider create.
      It retries `acceptance-recovery` with bounded backoff, never longer than
      the server lease duration, until the authoritative expiry has moved the
      attempt to `OUTCOME_UNKNOWN` and the same ID is recovered. Nothing in
@@ -1604,10 +1612,13 @@ explicitly composed worker-control router; the default process answers 404.
   worker client for this route.
 - **Implemented (R44B6Q):** local startup journal reconciliation and the
   fail-closed new-work gate before lease acquisition (section 17).
+- **Implemented (R44B6R):** the separate control-plane acceptance-recovery
+  route below; its worker client and startup wiring remain unimplemented.
 - **Not wired:** no provider submission flow writes new acceptance records
   or calls the `submitted` client.
-- **Not implemented:** worker provider execution, `acceptance-recovery`
-  and `submission-failed`. Valid published acceptance remains unresolved.
+- **Not implemented:** worker provider execution and `submission-failed`.
+  Valid published acceptance remains unresolved in the worker until its
+  acceptance-recovery client and startup wiring exist.
 
 The required worker ordering still stands:
 
@@ -1716,7 +1727,10 @@ LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMITTING=YES
 LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMISSION_EPOCH_MATCH=YES
 LIVE_SUBMITTED_LEASE_PRESERVED=YES
 OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
-ACCEPTANCE_RECOVERY_IMPLEMENTED=NO
+ACCEPTANCE_RECOVERY_IMPLEMENTED=YES
+ACCEPTANCE_RECOVERY_ROUTE_IMPLEMENTED=YES
+WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=NO
+STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=NO
 SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES
@@ -1725,14 +1739,45 @@ STARTUP_JOURNAL_RECONCILIATION_IMPLEMENTED=YES
 WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO
 ```
 
-### Future `acceptance-recovery` route (journal evidence without a lease token)
+### `acceptance-recovery` route (journal evidence without a lease token)
 
-**Locked decision (design only; revised R44B6K1).** A restarted worker no
-longer holds its lease token: the token lives only in memory, and the
+**Locked decision (implemented, R44B6R; recorded by R44B6R1).** Acceptance
+recovery reconciles a provider execution that was definitively accepted and
+durably journaled by the worker, but whose live submission lease was lost
+before the control plane durably recorded `/submitted`. It performs
+`OUTCOME_UNKNOWN -> SUBMITTED` for that same acceptance without another
+provider create. The live `/submitted` route remains unable to perform that
+transition.
+
+A restarted worker no longer holds its lease token: the token lives only
+in memory, and the
 journal never stores it. A swept attempt has no lease at all. Journal
 evidence is therefore reported through
 `POST /worker-control/v1/attempts/:attemptId/acceptance-recovery` with
 exactly `{fencingCounter, providerExecutionId}`.
+
+The route exists only on the explicitly composed worker-control router;
+the default commercial-api process answers 404. It uses the existing strict
+worker authentication, ACTIVE-principal checks, Origin rejection,
+POST-only handling, canonical lowercase UUID route parameter and JSON
+content-type validation. Security-sink failure fails the request closed.
+
+**Closed request.** `fencingCounter` is a positive safe integer representing
+the immutable original submission epoch. No lease token, arbitrary journal
+JSON, journal digest, Account ID, job ID, provider field, provider payload or
+credential field is accepted. `recordSha256` is neither accepted nor
+persisted. The provider execution ID uses the existing shared contract:
+1 to 256 visible ASCII characters, no `://`, and no normalization.
+
+**Exact success response (200).**
+
+```text
+{executionAttemptId, fencingCounter, state, providerExecutionId}
+```
+
+The first transition returns state `SUBMITTED`; an idempotent replay returns
+the stored replayable state listed below. No timestamp, lease authority or
+internal recovery metadata is added to this response.
 
 A token-less request **never bypasses a live `SUBMITTING` lease**:
 
@@ -1751,38 +1796,74 @@ OUTCOME_UNKNOWN + valid durable acceptance journal
   -> acceptance-recovery may commit SUBMITTED
 ```
 
-- **Step 1: expiry, in its own transaction.** The section 12 sweep runs,
-  scoped to the named attempt, and commits. If the attempt is `SUBMITTING`
+- **Step 1: expiry, in its own READ COMMITTED transaction (TX1).** After
+  request authentication, the ACTIVE worker is re-checked `FOR SHARE`.
+  The existing section 12 sweep runs, scoped to the named attempt, and
+  commits. The named scan waits for its row lock rather than skipping it;
+  the acquisition batch keeps its existing `SKIP LOCKED` behavior. If the
+  attempt is `SUBMITTING`
   and `lease_expires_at <= now()` by the server clock, it becomes
   `OUTCOME_UNKNOWN` with its normal audit. A live lease is untouched; the
-  caller's claim of a restart changes nothing.
-- **Step 2: recovery, in a fresh READ COMMITTED transaction.** The principal
+  caller's claim of a restart changes nothing. This committed lifecycle
+  expiry remains durable even if the later recovery refuses or rolls back.
+- **Step 2: recovery, in a fresh READ COMMITTED transaction (TX2).** The principal
   is re-checked `FOR SHARE` and the attempt locked `FOR UPDATE`. Then:
   - **Authority.** The caller must be an ACTIVE authenticated principal
     equal to the attempt's immutable `submitting_worker_principal_id`
-    (section 26). `fencingCounter` must equal the attempt's retained
-    `lease_fencing_counter`. The counter cannot advance after `SUBMITTING`:
-    migration 0004 forbids re-leasing a `SUBMITTING` attempt, and
-    `OUTCOME_UNKNOWN` has no lease. These checks run before any state is
-    disclosed.
+    (section 26). `submitting_at` must be present. `fencingCounter` must
+    equal both the immutable `submitting_fencing_counter` and the retained
+    `lease_fencing_counter`. Schema version 6 preserves this epoch while
+    `SUBMITTING`; `OUTCOME_UNKNOWN` has no lease. Same worker principal
+    alone, or a newer same-principal lease fence, is insufficient. These
+    checks run before any state is disclosed. Recovery never rewrites the
+    submitting timestamp, principal or fencing counter.
   - **`OUTCOME_UNKNOWN`** is the only state this route newly transitions.
-    It becomes `SUBMITTED` with the reported ID and `submitted_at = now()`.
+    First recovery from `LEASED` or `SUBMITTING` is forbidden. Authoritative
+    DB checks bind the attempt, Account, job, claimed generation
+    authorization, production, billing mode, provider, ProviderConnection
+    and exact credential version. The immutable authorization retains
+    request-digest authority; the request supplies no generation digest.
+    The connection and exact version are locked `FOR SHARE` in that order.
+    An original version destroyed while recovery is required is refused;
+    a disconnected connection or retained original version is not replaced
+    by another credential.
+    The first valid recovery writes exactly these attempt fields:
+
+    ```text
+    state = SUBMITTED
+    provider_execution_id = requested providerExecutionId
+    submitted_at = now()
+    failure_code = NULL
+    updated_at = now()
+    ```
+
+    Clearing the unknown-outcome failure code satisfies schema version 6's
+    failure-state contract. Lease fields, credential grant evidence and
+    immutable submitting provenance are preserved.
     No lease is created; recovery polling needs a future recovery lease
-    (section 36). The job moves from `NEEDS_ATTENTION` to `RUNNING`. The
+    (section 36). The job moves from `NEEDS_ATTENTION` to `RUNNING`, with its
+    `updated_at` set by server time. The
     route audits `execution_attempt.submitted` with
     `recoveredFromJournal: true`. `OUTCOME_UNKNOWN -> SUBMITTED` is already
     a permitted migration 0004 transition ("provider identity later
     proven").
-  - **`SUBMITTING`**, whose lease is still live after step 1: no write, no
-    audit and no security event. The route answers `409` with code
-    `ATTEMPT_STILL_SUBMITTING`, and only to the authenticated submitting
-    principal. The worker stays blocked and retries later (section 17). The
-    live-lease holder, if one is still running, reports through
-    `submitted`.
+  - **Still `SUBMITTING` after TX1:** no recovery write, audit or security
+    rejection event. The route answers `409 ATTEMPT_STILL_SUBMITTING` only
+    after proving the original submitting principal and epoch. This also
+    applies when the lease expires between TX1 and TX2: TX2 never
+    independently manufactures `OUTCOME_UNKNOWN` or forces
+    `SUBMITTING -> SUBMITTED`. A later retry can sweep authoritatively in
+    TX1 and then recover. No client clock assertion is used. The worker
+    remains blocked; a still-authorized live holder reports through
+    `/submitted`.
 - **Replay and reconciliation.** If the attempt is already `SUBMITTED`,
   `SUCCEEDED`, `SUBMITTED_FAILED` or `ABANDONED` with the **same** ID, the
   route returns `{executionAttemptId, fencingCounter, state,
-  providerExecutionId}` with no write.
+  providerExecutionId}` with no write, after the same original-epoch proof.
+  Replay does not change `submitted_at`, rewrite provider identity,
+  duplicate audit, repeatedly mutate the job or recreate lease authority.
+  Terminal same-ID replay remains possible after its credential-retention
+  obligation has closed. A different ID is always rejected.
 - **Refusals.** These are refused with the uniform `409 LEASE_REJECTED` and
   a security event:
   - a different ID;
@@ -1795,10 +1876,60 @@ OUTCOME_UNKNOWN + valid durable acceptance journal
   to verify the ID with the provider, using the exact original credential
   (section 32).
 
+**Uniqueness and concurrency.** The existing database index remains final
+authority for `(account_id, provider, provider_execution_id)`. Only SQLSTATE
+`23505` naming `execution_attempts_provider_execution_uq` is mapped to
+`PROVIDER_EXECUTION_ID_IN_USE`; unrelated unique violations remain database
+failures. Attempt row locking serializes concurrent identical recovery into
+one first transition and one audit, followed by idempotent replay of the
+same stored identity and timestamp. Concurrent conflicting IDs cannot both
+succeed. No process-local mutex supplies authority.
+
+**Retention and horizon.** The exact original version remains retained
+while `OUTCOME_UNKNOWN`; successful recovery to `SUBMITTED` continues both
+existing retention and provider-recovery obligations (sections 22 to 24).
+Disconnect cannot destroy that material while obligations remain. Recovery
+does not destroy credentials or invent a timeout: `recovery_expires_at`
+remains `NULL` until a provider-specific horizon policy exists. Recognizing
+live-lease expiry is separate from that undefined provider horizon.
+
+**Audit and security.** First recovery writes `execution_attempt.submitted`
+exactly once with `recoveredFromJournal: true`. Section 30's safe metadata
+policy applies: no provider execution ID, tokens, credentials or provider
+payload. Refusals use `WORKER_ACCEPTANCE_RECOVERY_REJECTED` with the closed
+reasons recorded in section 30. Success emits no rejection event;
+`ATTEMPT_STILL_SUBMITTING` is an expected lifecycle wait, not a rejection
+event. An audit failure rolls back recovery and job restoration together,
+while TX1's already-committed expiry remains intact.
+
+**Heartbeat and worker boundary.** Recovery creates no lease, revives no
+expired live token and rewrites neither submitting principal nor submitting
+fencing counter. It manufactures no live-route `SUBMITTED` heartbeat
+authority; replacement/recovery contexts do not inherit that original
+live-route epoch (section 12). R44B6R implements only this control-plane
+route. The worker acceptance-recovery client and startup wiring remain
+unimplemented, so R44B6Q continues to discover and block unresolved durable
+acceptance without automatically resolving it.
+
 ```text
 SUBMITTING_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
 OUTCOME_UNKNOWN_WITH_VALID_JOURNAL_CAN_REPORT_SAME_PROVIDER_EXECUTION=YES
 ACCEPTANCE_RECOVERY_AUTHORITY=SUBMITTING_PRINCIPAL_AND_RETAINED_FENCING_COUNTER
+ACCEPTANCE_RECOVERY_IMPLEMENTED=YES
+ACCEPTANCE_RECOVERY_ROUTE_IMPLEMENTED=YES
+ACCEPTANCE_RECOVERY_REQUIRES_OUTCOME_UNKNOWN=YES
+ACCEPTANCE_RECOVERY_PROVIDER_RESUBMISSION_ALLOWED=NO
+ACCEPTANCE_RECOVERY_USES_EXPIRED_LIVE_TOKEN=NO
+ACCEPTANCE_RECOVERY_REQUIRES_ORIGINAL_SUBMISSION_EPOCH=YES
+ACCEPTANCE_RECOVERY_DIFFERENT_PROVIDER_EXECUTION_ID_ALLOWED=NO
+OUTCOME_UNKNOWN_TO_SUBMITTED_BY_ACCEPTANCE_RECOVERY_ALLOWED=YES
+RECOVERY_REWRITES_SUBMITTING_PRINCIPAL=NO
+RECOVERY_REWRITES_SUBMITTING_FENCING_COUNTER=NO
+RECOVERY_MANUFACTURES_SUBMITTED_HEARTBEAT_AUTHORITY=NO
+ACCEPTANCE_RECOVERY_FIRST_TRANSITION_AUDIT_WRITTEN_ONCE=YES
+ACCEPTANCE_RECOVERY_REPLAY_DUPLICATES_AUDIT=NO
+WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=NO
+STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=NO
 TOKENLESS_ACCEPTANCE_RECOVERY_FROM_LIVE_SUBMITTING=NO
 TOKENLESS_ACCEPTANCE_RECOVERY_FROM_OUTCOME_UNKNOWN=YES
 SUBMITTING_RESTART_WITH_JOURNAL_CAN_RESUBMIT_PROVIDER=NO
@@ -2609,12 +2740,18 @@ Control-plane security events (the worker security sink):
 | Type | Reasons |
 |---|---|
 | `WORKER_SUBMITTED_REJECTED` | The existing lease reasons, plus `PROVIDER_EXECUTION_CONFLICT` (a different ID on `SUBMITTED`), `PROVIDER_EXECUTION_ID_IN_USE` (adopted by another attempt) and `INCOMPATIBLE_ATTEMPT_STATE`. |
-| `WORKER_ACCEPTANCE_RECOVERY_REJECTED` | `SUBMITTING_PRINCIPAL_MISMATCH`, `FENCING_MISMATCH`, `UNKNOWN_ATTEMPT`, `INCOMPATIBLE_ATTEMPT_STATE`, `PROVIDER_EXECUTION_CONFLICT`, `PROVIDER_EXECUTION_ID_IN_USE`, `SUBMITTING_VERSION_DESTROYED`. `ATTEMPT_STILL_SUBMITTING` (a live lease, for the proven submitting principal) is an expected wait signal, not a security event (R44B6K1). |
+| `WORKER_ACCEPTANCE_RECOVERY_REJECTED` | `SUBMITTING_PRINCIPAL_MISMATCH`, `FENCING_MISMATCH`, `UNKNOWN_ATTEMPT`, `INCOMPATIBLE_ATTEMPT_STATE`, `PROVIDER_EXECUTION_CONFLICT`, `PROVIDER_EXECUTION_ID_IN_USE`, `SUBMITTING_VERSION_DESTROYED`; the shared transaction-local ACTIVE re-check also uses `WORKER_NOT_ACTIVE`. `ATTEMPT_STILL_SUBMITTING` (still `SUBMITTING` after TX1, for the proven original principal and epoch) is an expected wait signal, not a security event (R44B6R1). |
 | `WORKER_SUBMISSION_FAILURE_REJECTED` | The existing lease reasons, plus `INCOMPATIBLE_ATTEMPT_STATE` and `FAILURE_CODE_OUTCOME_MISMATCH`. |
 | `WORKER_LEASE_REJECTED` | Existing. A stale worker's heartbeat after its `SUBMITTING` lease was swept (`NOT_LEASED` or `LEASE_EXPIRED`). |
 
 A `SUBMITTING` expiry is a lifecycle fact. It is audited as
 `execution_attempt.outcome_unknown`, not logged as a security event.
+
+For acceptance recovery, loss of ACTIVE status at the transaction-local
+re-check is the shared 401 refusal with `WORKER_NOT_ACTIVE`. Authentication
+and Origin failures retain their existing event types. Successful recovery
+and the conservative `ATTEMPT_STILL_SUBMITTING` wait emit no rejection
+event; the latter also covers lease expiry between TX1 and TX2 (section 18).
 
 Worker-local security events are written to the worker log in the closed
 vocabulary of section 29:
@@ -2656,14 +2793,15 @@ phase: empty state may be `CLEAR`; valid finals remain unresolved and block
 leasing; case G completes exact publication but then remains blocked; case H
 quarantines invalid bytes and may become `CLEAR` if no other condition
 blocks startup. Case F remains fail-closed. Conflicts and invalid filesystem
-state also block. The control-plane comparisons and acceptance-recovery
-actions in B, B', C and E below remain future work; R44B6Q does not perform
-them or create a recovery lease.
+state also block. R44B6R now implements the control-plane acceptance-recovery
+behavior used by B, B', C and E below. The worker client and startup calls
+remain future work: R44B6Q does not invoke the route, resolve this evidence
+automatically or create a recovery lease.
 
 | Case | Control plane | Local journal | Rule |
 |---|---|---|---|
 | A | `SUBMITTING`, or `OUTCOME_UNKNOWN` after the sweep | none | Acceptance cannot be proven. No resubmission. The attempt becomes or stays `OUTCOME_UNKNOWN` (section 12 sweep) for operator resolution. |
-| B | `SUBMITTING`, lease still live by server time | valid record | (Revised R44B6K1.) Block new work. No provider create and no token-less transition: `acceptance-recovery` answers `ATTEMPT_STILL_SUBMITTING`. Retry with bounded backoff until the authoritative expiry moves the attempt to `OUTCOME_UNKNOWN`, then apply B'. The lease is never shortened. |
+| B | Still `SUBMITTING` after TX1, including expiry between TX1 and TX2 | valid record | (Revised R44B6R1.) Block new work. No provider create and no token-less transition: `acceptance-recovery` answers `ATTEMPT_STILL_SUBMITTING` after original-epoch proof. Retry with bounded backoff until a later authoritative sweep moves the attempt to `OUTCOME_UNKNOWN`, then apply B'. The lease is never shortened and TX2 never manufactures expiry. |
 | B' | `OUTCOME_UNKNOWN` (expired and swept, including by step 1 of `acceptance-recovery`) | valid record | `acceptance-recovery`: `OUTCOME_UNKNOWN -> SUBMITTED` with the same ID, authorised by the immutable submitting principal and the retained fencing counter. No provider create. |
 | C | `SUBMITTED`, same ID | valid record | Reconciled. Recovery of that ID resumes under a recovery lease. |
 | D | `SUBMITTED` | none | The control-plane ID is authoritative. Recovery uses it. |
@@ -2812,8 +2950,10 @@ each slice under its own authorised gate:
     live-route lease epoch only (section 12, R44B6N).
 4. The `submitted`, `acceptance-recovery` and `submission-failed` routes
    (section 18). The live `submitted` route is implemented (R44B6O); no
-   worker flow calls it yet. `acceptance-recovery` and `submission-failed`
-   remain to be built. Neither this step nor any recovery-lease step may
+   worker flow calls it yet. The control-plane `acceptance-recovery` route
+   is implemented (R44B6R); its worker client and startup wiring remain
+   unimplemented. `submission-failed` remains to be built.
+   Neither this step nor any recovery-lease step may
    grant `SUBMITTED` heartbeat authority to any lease other than the exact
    live-route epoch.
 5. The worker acceptance journal: state-root validation, write algorithm,
@@ -2824,7 +2964,8 @@ each slice under its own authorised gate:
 6. Worker startup reconciliation and the unresolved-journal new-work block
    (section 17). Implemented (R44B6Q): prepare and reconcile before leasing;
    only `CLEAR` permits fresh work. Valid published acceptance remains
-   blocking because acceptance recovery is not implemented.
+   blocking because the worker acceptance-recovery client and startup
+   wiring are not implemented; the control-plane route now exists (R44B6R).
 7. Crash-point tests covering every row of the section 31 matrices.
    Faults are injected:
    - before and after each journal step;
@@ -2837,13 +2978,16 @@ each slice under its own authorised gate:
      refused (R44B6K1).
 
 R44B6Q adds focused local startup crash/restart tests, including exact
-temporary publication and interrupted quarantine. These do not complete the
-whole-chain crash-point coverage required by slice 7.
+temporary publication and interrupted quarantine. R44B6R adds control-plane
+recovery, replay, concurrency, expiry-handoff and rollback coverage. These
+do not complete the whole-chain crash-point coverage required by slice 7.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6Q, the following are still missing:
+of R44B6R, the following are still missing:
 
-- `acceptance-recovery` and `submission-failed` (slice 4);
+- the worker acceptance-recovery client and startup wiring (the control-plane
+  route is implemented);
+- `submission-failed` (slice 4);
 - a worker client for the `SUBMITTING` acknowledgement;
 - the acceptance-handler adapter that wires provider acceptance to the
   journal, then the handler, then `submitted` (section 18);
@@ -2953,7 +3097,21 @@ LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMITTING=YES
 LIVE_SUBMITTED_ROUTE_REQUIRES_SUBMISSION_EPOCH_MATCH=YES
 LIVE_SUBMITTED_LEASE_PRESERVED=YES
 OUTCOME_UNKNOWN_TO_SUBMITTED_BY_LIVE_ROUTE_ALLOWED=NO
-ACCEPTANCE_RECOVERY_IMPLEMENTED=NO
+ACCEPTANCE_RECOVERY_IMPLEMENTED=YES
+ACCEPTANCE_RECOVERY_ROUTE_IMPLEMENTED=YES
+ACCEPTANCE_RECOVERY_REQUIRES_OUTCOME_UNKNOWN=YES
+ACCEPTANCE_RECOVERY_PROVIDER_RESUBMISSION_ALLOWED=NO
+ACCEPTANCE_RECOVERY_USES_EXPIRED_LIVE_TOKEN=NO
+ACCEPTANCE_RECOVERY_REQUIRES_ORIGINAL_SUBMISSION_EPOCH=YES
+ACCEPTANCE_RECOVERY_DIFFERENT_PROVIDER_EXECUTION_ID_ALLOWED=NO
+OUTCOME_UNKNOWN_TO_SUBMITTED_BY_ACCEPTANCE_RECOVERY_ALLOWED=YES
+RECOVERY_REWRITES_SUBMITTING_PRINCIPAL=NO
+RECOVERY_REWRITES_SUBMITTING_FENCING_COUNTER=NO
+RECOVERY_MANUFACTURES_SUBMITTED_HEARTBEAT_AUTHORITY=NO
+ACCEPTANCE_RECOVERY_FIRST_TRANSITION_AUDIT_WRITTEN_ONCE=YES
+ACCEPTANCE_RECOVERY_REPLAY_DUPLICATES_AUDIT=NO
+WORKER_ACCEPTANCE_RECOVERY_CLIENT_IMPLEMENTED=NO
+STARTUP_RECONCILIATION_CALLS_ACCEPTANCE_RECOVERY=NO
 SUBMISSION_FAILED_ROUTE_IMPLEMENTED=NO
 ACCEPTANCE_JOURNAL_IMPLEMENTED=YES
 WORKER_SUBMITTED_CLIENT_IMPLEMENTED=YES

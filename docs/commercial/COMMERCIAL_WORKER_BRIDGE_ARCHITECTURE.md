@@ -90,7 +90,15 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   at most two attempts, retrying only `CONTROL_API_UNAVAILABLE`, each with a
   10000 ms orchestration-owned deadline; no successful heartbeat means no
   permit and no provider call; in-flight heartbeat scheduling stays
-  deferred; no runtime change: introduction, sections 15, 36 and 37).
+  deferred; no runtime change: introduction, sections 15, 36 and 37);
+  R44B6W1 (R44B6W published in commit
+  d4f3923d2bf265b0413add63820c797a994276d1: the worker heartbeat client is
+  implemented, with `HEARTBEAT_REJECTED`; it is single-shot, owns no retry,
+  timeout, cadence or lease-expiry policy, and stays client-only with no
+  production caller and unused by live execution; no pre-provider
+  orchestration was implemented; no API, protocol, migration or
+  provider-adapter change; provider execution remains disabled and the
+  fake-provider gate remains unmet: introduction, sections 15, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -1147,14 +1155,13 @@ credential grant
   the server lease duration (currently 40 seconds of 120), and a heartbeat
   failure never abandons a create call already in flight.
 
-**Prerequisites and sequence.** The worker has no heartbeat client yet, so
-R44B6V cannot be completed as orchestration now. The expected sequence: a
-client-only worker heartbeat client for the existing route (no provider
-execution); its publication and docs-sync; the R44B6V orchestration that
-stops at the permit; then keeping that orchestration unused by live
-execution until the later provider-composition prerequisites (section 36)
-are met. No production path moves real attempts into `SUBMITTING` only to
-prove the orchestration.
+**Prerequisites and sequence.** The expected sequence: a client-only worker
+heartbeat client for the existing route (no provider execution); its
+publication and docs-sync (both done: R44B6W, R44B6W1); the R44B6V
+orchestration that stops at the permit (not yet implemented); then keeping
+that orchestration unused by live execution until the later
+provider-composition prerequisites (section 36) are met. No production path
+moves real attempts into `SUBMITTING` only to prove the orchestration.
 
 ```text
 SUBMITTING_ORCHESTRATION_MAX_ATTEMPTS=2
@@ -1172,12 +1179,22 @@ PRE_PROVIDER_PERMIT_REQUIRES_SUBMITTING_AND_HEARTBEAT=YES
 PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
 PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
 PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
-WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=NO
+WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=YES
 ```
 
 ### Worker heartbeat client and pre-provider heartbeat (revision R44B6W0)
 
-**Locked decision (design only; R44B6W implements the client).** The
+**Status (R44B6W; recorded by R44B6W1).** The client is implemented in
+commit d4f3923d2bf265b0413add63820c797a994276d1 as `heartbeat` on the
+existing `WorkerControlClient`, returning a `WorkerHeartbeatAcknowledgement`
+through its strict response parser, with the closed worker code
+`HEARTBEAT_REJECTED` and optional pass-through of an externally supplied
+`AbortSignal`. It is a client-only transport with no production caller. The
+pre-provider heartbeat policy below stays locked but unwired: it belongs to
+the R44B6V orchestration, which is not implemented. The contract below is
+unchanged.
+
+**Locked decision (R44B6W0; client implemented by R44B6W).** The
 control-plane route is already implemented (section 10; section 12):
 `POST /worker-control/v1/attempts/:attemptId/heartbeat`, body exactly
 `{fencingCounter, leaseToken}`, success (200) exactly:
@@ -1261,7 +1278,7 @@ sweep or `submission-failed`; the orchestration interprets its result.
   provider execution.
 
 **Mandatory pre-provider heartbeat policy (owned by the R44B6V
-orchestration).**
+orchestration; locked, not yet implemented or wired).**
 
 - **Attempts.** At most two in total, the first immediate. The second only
   after `CONTROL_API_UNAVAILABLE`; `HEARTBEAT_REJECTED`,
@@ -3727,13 +3744,14 @@ The worker client for the `SUBMITTING` acknowledgement is implemented
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6W0, the following are still missing:
+of R44B6W1, the following are still missing (the worker heartbeat client is
+implemented by R44B6W, section 15: single-shot and client-only, with no
+production caller):
 
-- the implementation of the worker heartbeat client for the existing
-  heartbeat route (client-only; contract locked by R44B6W0, section 15);
 - the implementation of the pre-provider orchestration locked by R44B6V0
-  (section 15), including the pre-provider heartbeat policy locked by
-  R44B6W0, stopping at the pre-provider permit;
+  (section 15): `journal.prepare()`, then the `SUBMITTING` acknowledgement,
+  then the mandatory heartbeat under the policy locked by R44B6W0, then the
+  pre-provider permit;
 - an authoritative recovery/sweep policy for granted-but-expired `LEASED`
   attempts, which the current reclaim does not requeue (section 12);
 - the acceptance-handler adapter that wires provider acceptance to the
@@ -3933,7 +3951,7 @@ PRE_PROVIDER_PERMIT_REQUIRES_SUBMITTING_AND_HEARTBEAT=YES
 PROVIDER_CONSTRUCTION_REQUIRES_PRE_PROVIDER_PERMIT=YES
 PER_ATTEMPT_JOURNAL_PREPARE_REQUIRED_BEFORE_SUBMITTING=YES
 PRE_PROVIDER_ORCHESTRATION_IMPLEMENTED=NO
-WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=NO
+WORKER_HEARTBEAT_CLIENT_IMPLEMENTED=YES
 WORKER_HEARTBEAT_CLIENT_USED_BY_LIVE_EXECUTION=NO
 HEARTBEAT_CLIENT_INTERNAL_RETRY_ENABLED=NO
 HEARTBEAT_CLIENT_OWNS_REQUEST_TIMEOUT=NO

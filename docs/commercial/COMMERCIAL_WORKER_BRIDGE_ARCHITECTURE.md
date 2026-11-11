@@ -225,7 +225,24 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   terminal cleanup through a labelled fixture are included; provider-failure
   composition stays separate, the provider flags stay NO and the state-root
   binding stays independent; no tests implemented: introduction, sections
-  16, 31, 36 and 37).
+  16, 31, 36 and 37); R44B7B (R44B7 whole-chain tests published in commit
+  d76128011804013c1d40877bbe66f435b4f78c03: one test-only integration file
+  and no production change; tier 3 composition over real HTTP, the real
+  commercial-api, the real test database and the real journal; 15/15
+  whole-chain cases passed on three consecutive runs, with 34/34 worker
+  integration, 538/538 worker unit and 558/558 commercial-api DB tests;
+  provider dispatch is never repeated across a restart; pre-durable
+  uncertainty ends `OUTCOME_UNKNOWN` and durable acceptance ends
+  `SUBMITTED`; valid and invalid temporary journal crashes, live and
+  expired lease restarts, the live report and recovery lost-response
+  replays, heartbeat authority loss with late acceptance, `SUBMITTED`
+  retention and replay, and terminal cleanup through a labelled fixture are
+  proven; no provider network or SDK; the whole-chain gate item is
+  satisfied; a retained live-route `SUBMITTED` lease that keeps holding the
+  worker's capacity after a restart was found and deferred to later
+  post-`SUBMITTED` lifecycle work; only the production/deployment state-root
+  binding remains in the fake-provider gate; provider execution flags
+  remain NO: introduction, sections 31, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -4972,8 +4989,9 @@ each slice under its own authorised gate:
    The polling, output, completion and recovery-lease rows are deferred to
    their own slices. The negative test for a create client whose retry is
    not disabled (R44B6K1) moves to the future provider-create adapter slice
-   (section 16). R44B7A is a contract lock only; the tests are not
-   implemented.
+   (section 16). Implemented by R44B7 (commit
+   d76128011804013c1d40877bbe66f435b4f78c03; recorded by R44B7B) in
+   `apps/commercial-worker/tests/integration/wholeChainCrashRecovery.test.ts`.
 
 R44B6Q adds focused local startup crash/restart tests, including exact
 temporary publication and interrupted quarantine. R44B6R adds control-plane
@@ -4984,13 +5002,17 @@ adds control-plane `submission-failed` coverage: both outcomes, every
 failure-code pair, exact replay, replay conflicts, sweep evidence, audit
 rollback and concurrency. These
 do not complete the whole-chain crash-point coverage required by slice 7.
+R44B7 completes it ("Whole-chain crash-point test contract" below).
 
 The worker client for the `SUBMITTING` acknowledgement is implemented
 (R44B6U, section 15: single-shot and client-only); no execution path calls
 it yet.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
-of R44B6Z1, the following two are still missing. (R44B6Z.) The in-flight
+of R44B7B, only the one item below is still missing. (R44B7.) The
+whole-chain crash-point prerequisite (slice 7) is satisfied by the tier-3
+tests of "Whole-chain crash-point test contract" below. They use test-only
+composition; no production provider orchestrator exists. (R44B6Z.) The in-flight
 heartbeat prerequisite is satisfied at component level: the generic
 keeper `runWithInFlightHeartbeat` is implemented (section 15), unused by
 live execution. Its component tests do not satisfy the whole-chain
@@ -5013,16 +5035,12 @@ R44B6X did not implement. Its classification is unchanged: section 24's
 "launch-blocking invariant" before commercial generation, not an item of
 this fake-provider gate.
 
-- whole-chain crash-point tests (slice 7), exercising the composed
-  execution chain and its crash boundaries across components. Their
-  narrowed contract is locked by R44B7A and not implemented. Once they are
-  implemented and documented, only the state-root binding remains;
 - the production/deployment state-root binding.
 
 The gate is therefore not met.
-Every one of them protects the window between `SUBMITTING` and a durable
-`SUBMITTED`, which is the first thing a fake provider exercises. None can be
-safely deferred.
+The remaining item protects the window between `SUBMITTING` and a durable
+`SUBMITTED`, which is the first thing a fake provider exercises. It cannot
+be safely deferred.
 
 The following may come after the first fake-provider slice, which stops at
 `SUBMITTED`, because they act only after a durable provider identity exists
@@ -5032,6 +5050,17 @@ or before any provider authority exists:
   recovery lease never inherits live-route `SUBMITTED` heartbeat authority
   (section 12, R44B6M2);
 - polling, output persistence and completion (steps 9 and 10);
+- (R44B7B) release of a retained live-route `SUBMITTED` lease. The live
+  `submitted` route keeps its lease (section 18), and that lease keeps
+  counting against the worker's capacity. Automatic reclaim today covers
+  only expired `SUBMITTING` attempts (the sweep) and expired granted
+  `LEASED` attempts (section 12); it does not reclaim an expired live-route
+  `SUBMITTED` lease. So after a restart, a single-slot worker can stay
+  unable to lease further work until the post-`SUBMITTED` lifecycle
+  (polling, completion or recovery leases) handles that attempt. R44B7 case
+  5 shows this as current behaviour. It is not an R44B7 failure: the slice
+  7 endpoint is `SUBMITTED`, and acceptance recovery succeeded. This item
+  belongs with that later lifecycle work, outside the current gate;
 - resolution of an expired `LEASED` attempt that holds a credential grant.
   This is a liveness gap with no provider side effect.
 
@@ -5043,7 +5072,117 @@ REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
 
 ### Whole-chain crash-point test contract (revision R44B7A)
 
-**Locked decision (R44B7A; not implemented).** R44B7 discovery was blocked
+**Status (R44B7; recorded by R44B7B).** Implemented in commit
+d76128011804013c1d40877bbe66f435b4f78c03 as one new test-only integration
+file, `apps/commercial-worker/tests/integration/wholeChainCrashRecovery.test.ts`.
+
+- There is no shared-helper extraction, no production source change and
+  no change to `workerCredentialOpening.test.ts`.
+- The contract below is unchanged, and this is not merely more component
+  testing. It proves the previously missing cross-component property: a
+  real database commit, a lost response, a durable journal, discarded
+  process-local state, a restart, authoritative convergence and no provider
+  resubmission.
+
+**Harness.** Tier 3, composed in test code:
+
+- the worker's production components;
+- the real `WorkerControlClient` over HTTP;
+- the real commercial-api router and services;
+- the real guarded PostgreSQL test database;
+- the real temporary-directory acceptance journal.
+
+The only stand-ins are:
+
+- the test-only controlled provider-event thunk, which is not fake-provider
+  execution;
+- injected deterministic timing;
+- lost-response injection in the transport;
+- journal `JournalFileSystem` fault injection.
+
+No production provider orchestrator exists. Production still does not
+compose runner → permit → create → keeper → adapter, and the later composer
+must keep the order tested here. No live-use or provider flag changes.
+
+**Results.**
+
+| Suite | Result |
+|---|---|
+| Whole-chain file | 15/15, on three consecutive runs |
+| Existing worker integration file | 19/19 |
+| Full worker integration | 34/34 across 2 files |
+| Worker unit | 538/538 across 13 files |
+| commercial-api DB | 558/558 across 19 files |
+| Typecheck, `git diff --check` | clean |
+
+There were no unhandled errors and no provider call.
+
+**Restart and dispatch safety.**
+
+- Where dispatch occurs, the thunk is dispatched exactly once, and
+  restarted processes add zero dispatches. Startup recovery never
+  resubmits.
+- A restart keeps PostgreSQL and the journal state root. It recreates the
+  client, transport, journal object, latch, timing and other process-local
+  objects. The old process's I/O is frozen, so abandoned work cannot touch
+  the restarted scenario. There is no real OS kill.
+
+**Cases.**
+
+| Case | Result |
+|---|---|
+| 1 | One dispatch with no durable record, then crash and expiry; restart runs the real sweep. Attempt `OUTCOME_UNKNOWN` (`WORKER_LEASE_EXPIRED_DURING_SUBMISSION`), job `NEEDS_ATTENTION`, journal absent, dispatch count 1; one `outcome_unknown` audit and no `submitted` audit. This is an accepted residual, not a defect. |
+| 2 | The complete temporary bytes survived and no `submitted` report was sent. Restart published exactly those bytes, removed the temporary, and reached `SUBMITTED` through real TX1/TX2. Job `RUNNING`, lease cleared under the recovery path, record retained; one recovered `submitted` audit and one `outcome_unknown` audit. |
+| 3 | The torn temporary was quarantined unchanged, with the startup quarantine event. No acceptance was fabricated and nothing was reported. Attempt `OUTCOME_UNKNOWN`, `provider_execution_id` null, job `NEEDS_ATTENTION`. |
+| 4A | With the lease live, the attempt stays `SUBMITTING`. Startup recovery sees `ATTEMPT_STILL_SUBMITTING` over 18 requests, with backoffs 1000, 2000, 4000, 8000 and 13 × 10000 (145000 ms of fake time), then fails closed with `ACCEPTANCE_RECONCILIATION_FAILED`. Record bytes unchanged, no `submitted` audit. This is correct fail-closed behaviour. |
+| 7 (folded into 4A) | Restart 1 saw `ATTEMPT_STILL_SUBMITTING` and crashed during its first backoff; restart 2 ran a completely fresh 18-request budget. No local recovery counter survives a restart. |
+| 4B | With the lease expired, restart made exactly two requests, recovery then leases. Attempt `SUBMITTED`, failure code null, job `RUNNING`, record bytes unchanged; one recovered `submitted` audit and one `outcome_unknown` audit. |
+| 5 | The live `/submitted` commit is proven from the database: `SUBMITTED`, with the live lease kept by the worker, and the response was lost. On restart, acceptance recovery replays `SUBMITTED` (200). The following lease request is refused with `LEASE_REJECTED`, because the kept live-route lease still holds the worker's only slot; this is current behaviour, deferred in section 36. One live-route `submitted` audit (not recovered), no expiry audit, record retained. |
+| 6 | Two variants: (A) two unavailable live reports, crash before recovery, expiry, restart; (B) a real live-report 409 after database expiry, crash before recovery, restart. Each reaches `SUBMITTED` with one recovered `submitted` audit, and no `submission-failed` request occurs. |
+| 8 | The live report gets a real 409; acceptance recovery commits `SUBMITTED` and its response is lost. The database shows `SUBMITTED` before the restart. Restart replay returns 200 with no duplicate transition; one `submitted` audit and one `outcome_unknown` audit. |
+| 9 | Two variants, no crash: (A) one renewal succeeds, the database expires the lease, the next heartbeat gets 409, the keeper stops and the operation stays pending; (B) both attempts of a tick are unavailable, the cadence continues, and the database expires the lease. In both, the late acceptance is journaled, the live report gets 409, recovery TX1/TX2 reach `SUBMITTED`, the operation resolves, the latch stays clear, the keeper joins and the dispatch count stays 1. Loss of heartbeat authority never abandons a later acceptance. |
+| 10 | Two consecutive restarts replay the retained `SUBMITTED` record (recovery-path `SUBMITTED`, lease cleared); each new process starts with a clear latch; record bytes and audit trail are identical; no resubmission. This is distinct from case 5's live-route capacity condition. |
+| 11 | **TEST TERMINAL FIXTURE — NOT PROVIDER POLLING**: a guarded fixture moves `SUBMITTED` to `ABANDONED` (`RECOVERY_ABANDONED`). On restart, recovery replays `ABANDONED`, the exact record is removed and the attempt stays `ABANDONED`. This proves journal cleanup only, not polling or terminal provider execution. |
+| Optional | **HARNESS-LEVEL CONTROL-PLANE ASSERTION — NOT PRODUCTION PROVIDER-FAILURE COMPOSITION**: after lease loss and `OUTCOME_UNKNOWN`, `reportSubmissionFailed` returns `SUBMISSION_FAILED_REJECTED` and the unknown state is unchanged. Production provider-failure composition stays missing. |
+
+**Replay of a live-route `SUBMITTED`.** Both source and runtime prove that
+the same principal, the same epoch fence and the same provider execution ID
+replay an already live-route `SUBMITTED` attempt with 200, writing no
+duplicate transition or audit. This confirms the lock.
+
+**Assertions.**
+
+- **Audit:** `submitted` and `outcome_unknown` cardinalities, and
+  `recoveredFromJournal` identity where applicable. No heartbeat audit is
+  invented, and no duplicate transition audit appears after a lost-response
+  replay.
+- **Journal:** retained bytes compared before and after each replay, exact
+  record-directory contents, quarantine file names, and exact terminal
+  removal. Journal identity is preserved across simulated restarts.
+- **Secrets:** journal files and audit text are scanned for the lease
+  token, worker credential and plaintext, and failure messages and stacks
+  are scanned too. Fixture credentials only, with no authentication bypass.
+- **No provider network:** every recorded request starts with the test
+  server's `/worker-control/v1/` family. The file has no provider SDK or
+  execution-layer import, no provider environment read and no Runway, Veo
+  or Google construction. Startup runs with `environment: {}`.
+- **Determinism:** heartbeat sleeps, request deadlines and recovery time
+  are injected, and expiry uses SQL. The only real waits are short polls
+  for real HTTP and filesystem completion. Abandoned continuations are
+  frozen and observed, so nothing is left unhandled.
+
+**Unchanged obligations.**
+
+- The future provider-create adapter must still prove that create retry is
+  disabled, failing closed otherwise (section 16). R44B7 does not satisfy
+  that.
+- Production composition from definitive or ambiguous create outcomes to
+  the right reporting or recovery path stays missing.
+- Polling, output and completion were not tested.
+- The provider flags stay NO, the production/deployment state-root binding
+  stays unmet as the sole remaining gate item, and section 24 is unchanged.
+
+**Locked decision (R44B7A; implemented by R44B7).** R44B7 discovery was blocked
 by slice 7's wording, which conflicted with the architecture in two places:
 
 - "every row of the section 31 matrices" included the polling, output,
@@ -5315,7 +5454,7 @@ Component tests alone never satisfy the gate.
 - Section 24 is unchanged and separately launch-blocking.
 
 ```text
-WHOLE_CHAIN_CRASH_TESTS_IMPLEMENTED=NO
+WHOLE_CHAIN_CRASH_TESTS_IMPLEMENTED=YES
 WHOLE_CHAIN_CRASH_TESTS_TEST_ONLY_COMPOSITION=YES
 WHOLE_CHAIN_CRASH_TESTS_PRODUCTION_ORCHESTRATOR_REQUIRED=NO
 WHOLE_CHAIN_CRASH_TESTS_REAL_CONTROL_API_REQUIRED=YES
@@ -5648,7 +5787,7 @@ IN_FLIGHT_HEARTBEAT_KEEPER_STOP_ABORT_IS_FAILURE=NO
 IN_FLIGHT_HEARTBEAT_FAILURE_OVERRIDES_OPERATION_OUTCOME=NO
 IN_FLIGHT_HEARTBEAT_ACCEPTANCE_RECONCILIATION_INCLUDED=YES
 IN_FLIGHT_HEARTBEAT_POLLING_PHASE_INCLUDED=NO
-WHOLE_CHAIN_CRASH_TESTS_IMPLEMENTED=NO
+WHOLE_CHAIN_CRASH_TESTS_IMPLEMENTED=YES
 WHOLE_CHAIN_CRASH_TESTS_TEST_ONLY_COMPOSITION=YES
 WHOLE_CHAIN_CRASH_TESTS_PRODUCTION_ORCHESTRATOR_REQUIRED=NO
 WHOLE_CHAIN_CRASH_TESTS_REAL_CONTROL_API_REQUIRED=YES

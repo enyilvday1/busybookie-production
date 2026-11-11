@@ -85,13 +85,57 @@ export type WorkerAcceptanceRecoveryResult =
   | Readonly<{ status: "ACKNOWLEDGED"; acknowledgement: WorkerAcceptanceRecoveryAcknowledgement }>
   | Readonly<{ status: "ATTEMPT_STILL_SUBMITTING" }>;
 
+// The closed submission-failure report (R44B6T0 contract; client locked by
+// R44B6Y0, architecture section 18). Each outcome admits only its own codes
+// and commits exactly one state.
+export type SubmissionFailureOutcome = "DEFINITIVELY_REJECTED" | "OUTCOME_UNKNOWN";
+export type SubmissionFailureCode =
+  | "PROVIDER_REJECTED_DEFINITIVELY"
+  | "PROVIDER_SUBMISSION_AMBIGUOUS"
+  | "ACCEPTANCE_JOURNAL_WRITE_FAILED"
+  | "PROVIDER_EXECUTION_ID_INVALID";
+export type SubmissionFailureState = "FAILED_BEFORE_SUBMISSION" | "OUTCOME_UNKNOWN";
+export type SubmissionFailureReport = Readonly<{ outcome: SubmissionFailureOutcome; failureCode: SubmissionFailureCode }>;
+export type WorkerSubmissionFailedAcknowledgement = Readonly<{
+  executionAttemptId: string;
+  fencingCounter: number;
+  state: SubmissionFailureState;
+  failureCode: SubmissionFailureCode;
+}>;
+
+const SUBMISSION_FAILURE_OUTCOMES: Readonly<Record<SubmissionFailureOutcome, Readonly<{ state: SubmissionFailureState; codes: readonly SubmissionFailureCode[] }>>> =
+  Object.freeze({
+    DEFINITIVELY_REJECTED: Object.freeze({ state: "FAILED_BEFORE_SUBMISSION", codes: Object.freeze(["PROVIDER_REJECTED_DEFINITIVELY"] as const) }),
+    OUTCOME_UNKNOWN: Object.freeze({
+      state: "OUTCOME_UNKNOWN",
+      codes: Object.freeze(["PROVIDER_SUBMISSION_AMBIGUOUS", "ACCEPTANCE_JOURNAL_WRITE_FAILED", "PROVIDER_EXECUTION_ID_INVALID"] as const),
+    }),
+  });
+
+const isSubmissionFailureReport = (report: unknown): report is SubmissionFailureReport => {
+  if (!isPlainObject(report) || typeof report.outcome !== "string" || !Object.hasOwn(SUBMISSION_FAILURE_OUTCOMES, report.outcome)) return false;
+  const codes: readonly string[] = SUBMISSION_FAILURE_OUTCOMES[report.outcome as SubmissionFailureOutcome].codes;
+  return typeof report.failureCode === "string" && codes.includes(report.failureCode);
+};
+
 export type WorkerControlClient = Readonly<{
   leaseNextAttempt: () => Promise<WorkerLease | null>;
   requestCredentialGrant: (executionAttemptId: string, proof: LeaseProof) => Promise<WorkerCredentialGrant>;
   // R44B6P: capability only. Section 18 requires the durable acceptance
   // journal record to exist before this is called; no execution path calls
   // it yet.
-  reportSubmitted: (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => Promise<WorkerSubmittedAcknowledgement>;
+  // R44B6Y: an externally supplied `signal` may abort it, which is a
+  // transport failure; the caller owns any retry and deadline.
+  reportSubmitted: (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string, signal?: AbortSignal) => Promise<WorkerSubmittedAcknowledgement>;
+  // R44B6Y: single-shot report of a failure before any durable acceptance
+  // (R44B6Y0). No retry, timeout or lease clock of its own; an externally
+  // supplied `signal` may abort it, which is a transport failure.
+  reportSubmissionFailed: (
+    executionAttemptId: string,
+    proof: LeaseProof,
+    report: SubmissionFailureReport,
+    signal?: AbortSignal,
+  ) => Promise<WorkerSubmissionFailedAcknowledgement>;
   // R44B6U: capability only; no worker path calls it yet (R44B6U0). One
   // request per call: no retry, no timeout of its own and no lease clock. An
   // externally supplied `signal` may abort it, which is a transport failure.
@@ -296,6 +340,27 @@ export function parseAcceptanceRecoveryConflict(body: unknown): "ATTEMPT_STILL_S
   return conflict.code;
 }
 
+// The acknowledgement must answer exactly the attempt and fencing counter
+// presented, in the one state the outcome commits, with the code reported.
+export function parseSubmissionFailedResponse(
+  body: unknown,
+  expected: Readonly<{ executionAttemptId: string; fencingCounter: number; report: SubmissionFailureReport }>,
+): WorkerSubmissionFailedAcknowledgement {
+  const acknowledgement = exactKeys(body, ["executionAttemptId", "fencingCounter", "state", "failureCode"]);
+  const executionAttemptId = text(acknowledgement.executionAttemptId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  const state = SUBMISSION_FAILURE_OUTCOMES[expected.report.outcome].state;
+  if (
+    executionAttemptId !== expected.executionAttemptId ||
+    fencingCounter !== expected.fencingCounter ||
+    acknowledgement.state !== state ||
+    acknowledgement.failureCode !== expected.report.failureCode
+  ) {
+    throw malformed();
+  }
+  return Object.freeze({ executionAttemptId, fencingCounter, state, failureCode: expected.report.failureCode });
+}
+
 function controlUrl(options: WorkerControlClientOptions): URL {
   let base: URL;
   try {
@@ -426,7 +491,7 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
       );
       return parseHeartbeatResponse(body, { fencingCounter: proof.fencingCounter });
     },
-    reportSubmitted: async (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => {
+    reportSubmitted: async (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string, signal?: AbortSignal) => {
       // Nothing malformed is sent: the request is exactly the published contract.
       if (
         !UUID.test(executionAttemptId) ||
@@ -442,8 +507,34 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
         `/worker-control/v1/attempts/${executionAttemptId}/submitted`,
         { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken, providerExecutionId },
         "SUBMITTED_REPORT_REJECTED",
+        signal,
       );
       return parseSubmittedResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter, providerExecutionId });
+    },
+    // Exactly one request (R44B6Y0): the caller owns any retry and deadline,
+    // and only the control plane decides lease expiry. A 409 is the route's
+    // uniform refusal and never proves anything about the lease.
+    reportSubmissionFailed: async (executionAttemptId: string, proof: LeaseProof, report: SubmissionFailureReport, signal?: AbortSignal) => {
+      // Nothing outside the published contract is sent.
+      if (
+        !UUID.test(executionAttemptId) ||
+        typeof proof.fencingCounter !== "number" ||
+        !Number.isSafeInteger(proof.fencingCounter) ||
+        proof.fencingCounter < 1 ||
+        typeof proof.leaseToken !== "string" ||
+        !LEASE_TOKEN.test(proof.leaseToken) ||
+        !isSubmissionFailureReport(report)
+      ) {
+        throw new WorkerError("MALFORMED_CONTROL_RESPONSE");
+      }
+      const fixed: SubmissionFailureReport = Object.freeze({ outcome: report.outcome, failureCode: report.failureCode });
+      const body = await post(
+        `/worker-control/v1/attempts/${executionAttemptId}/submission-failed`,
+        { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken, outcome: fixed.outcome, failureCode: fixed.failureCode },
+        "SUBMISSION_FAILED_REJECTED",
+        signal,
+      );
+      return parseSubmissionFailedResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter, report: fixed });
     },
     // The one route whose 409 body is read: it separates the expected
     // ATTEMPT_STILL_SUBMITTING wait from the uniform refusal. Every other

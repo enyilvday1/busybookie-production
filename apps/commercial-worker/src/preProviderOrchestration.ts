@@ -40,6 +40,9 @@ export const realDeadlineTimer: DeadlineTimer = (ms, onExpiry) => {
 export type PreProviderPermit = Readonly<{
   executionAttemptId: string;
   fencingCounter: number;
+  // R44B6Y0: the server timestamp of the exact acknowledgement, copied
+  // unchanged; never local time and never the heartbeat.
+  submittingAt: Date;
 }>;
 
 export type PreProviderOrchestrationDependencies = Readonly<{
@@ -91,5 +94,9 @@ export async function obtainPreProviderPermit(
   const renewal = await atMostTwoAttempts(timer, (signal) => dependencies.client.heartbeat(executionAttemptId, fixedProof, signal));
 
   // Both responses were already checked against this attempt and proof.
-  return Object.freeze({ executionAttemptId: acknowledgement.executionAttemptId, fencingCounter: renewal.fencingCounter });
+  return Object.freeze({
+    executionAttemptId: acknowledgement.executionAttemptId,
+    fencingCounter: renewal.fencingCounter,
+    submittingAt: acknowledgement.submittingAt,
+  });
 }

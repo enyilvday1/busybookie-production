@@ -38,7 +38,14 @@ export type WorkerErrorCode =
   | "HEARTBEAT_REJECTED"
   // The control plane refused a submitted report (stale or foreign lease,
   // replacement epoch, conflicting or already-adopted provider execution ID).
-  | "SUBMITTED_REPORT_REJECTED";
+  | "SUBMITTED_REPORT_REJECTED"
+  // The control plane refused a submission failure report (R44B6Y0).
+  | "SUBMISSION_FAILED_REJECTED"
+  // A provider acceptance was invalid, mismatched or repeated (R44B6Y0); no
+  // durable acceptance was recorded for it.
+  | "PROVIDER_ACCEPTANCE_INVALID"
+  // The acceptance record could not be made durable (R44B6Y0).
+  | "ACCEPTANCE_JOURNAL_WRITE_FAILED";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   STATE_ROOT_UNSUITABLE: "The worker state root is unsuitable for the acceptance journal.",
@@ -59,6 +66,9 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   HEARTBEAT_REJECTED: "The worker-control API rejected the lease heartbeat.",
   SUBMITTED_REPORT_INVALID: "The submitted report is invalid and was not sent.",
   SUBMITTED_REPORT_REJECTED: "The worker-control API rejected the submitted report.",
+  SUBMISSION_FAILED_REJECTED: "The worker-control API rejected the submission failure report.",
+  PROVIDER_ACCEPTANCE_INVALID: "The provider acceptance is invalid; new work is blocked.",
+  ACCEPTANCE_JOURNAL_WRITE_FAILED: "The acceptance record could not be made durable; new work is blocked.",
 };
 
 export class WorkerError extends Error {

@@ -109,10 +109,26 @@ describe("successful path", () => {
     const run = harness({ submitting: [ACK], heartbeat: [RENEWAL] });
     const permit = await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF);
     expect(run.kinds()).toEqual(["prepare", "submitting", "heartbeat"]);
-    expect(permit).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7 });
+    expect(permit).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7, submittingAt: ACK.submittingAt });
     expect(Object.isFrozen(permit)).toBe(true);
     expect(JSON.stringify(permit).includes(TOKEN)).toBe(false);
-    expect(Object.keys(permit)).toEqual(["executionAttemptId", "fencingCounter"]);
+    expect(Object.keys(permit)).toEqual(["executionAttemptId", "fencingCounter", "submittingAt"]);
+  });
+
+  it("carries exactly the acknowledged submittingAt, never the heartbeat expiry or local time (R44B6Y0)", async () => {
+    const acknowledgedAt = new Date("2020-01-02T03:04:05.678Z");
+    const run = harness({ submitting: [{ ...ACK, submittingAt: acknowledgedAt }], heartbeat: [RENEWAL] });
+    const permit = await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF);
+    expect(permit.submittingAt).toBe(acknowledgedAt);
+    expect(permit.submittingAt.toISOString()).toBe("2020-01-02T03:04:05.678Z");
+    expect(permit.submittingAt.getTime()).not.toBe(RENEWAL.leaseExpiresAt.getTime());
+    expect(JSON.stringify(permit)).not.toMatch(/leaseExpiresAt|leaseToken/);
+  });
+
+  it("takes submittingAt from the acknowledgement that succeeded after an unavailable first attempt", async () => {
+    const acknowledgedAt = new Date("2026-11-11T10:00:01.000Z");
+    const run = harness({ submitting: ["CONTROL_API_UNAVAILABLE", { ...ACK, submittingAt: acknowledgedAt }], heartbeat: [RENEWAL] });
+    expect((await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF)).submittingAt).toBe(acknowledgedAt);
   });
 
   it("uses one unchanged proof on every request, never the caller's object or the renewal", async () => {
@@ -152,7 +168,7 @@ describe("journal preparation", () => {
 describe("SUBMITTING acknowledgement attempts", () => {
   it("retries CONTROL_API_UNAVAILABLE once, immediately, then continues", async () => {
     const run = harness({ submitting: ["CONTROL_API_UNAVAILABLE", ACK], heartbeat: [RENEWAL] });
-    expect(await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF)).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7 });
+    expect(await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF)).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7, submittingAt: ACK.submittingAt });
     expect(run.kinds()).toEqual(["prepare", "submitting", "submitting", "heartbeat"]);
   });
 
@@ -187,7 +203,7 @@ describe("SUBMITTING acknowledgement attempts", () => {
 describe("mandatory heartbeat attempts", () => {
   it("retries CONTROL_API_UNAVAILABLE once, immediately, then returns the permit", async () => {
     const run = harness({ submitting: [ACK], heartbeat: ["CONTROL_API_UNAVAILABLE", RENEWAL] });
-    expect(await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF)).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7 });
+    expect(await obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF)).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7, submittingAt: ACK.submittingAt });
     expect(run.kinds()).toEqual(["prepare", "submitting", "heartbeat", "heartbeat"]);
   });
 
@@ -242,7 +258,7 @@ describe("request deadlines", () => {
     const pending = obtainPreProviderPermit(run.dependencies, ATTEMPT, PROOF);
     await vi_waitFor(() => run.time.deadlines.length === 2);
     run.time.deadlines[1]!.fire();
-    expect(await pending).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7 });
+    expect(await pending).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7, submittingAt: ACK.submittingAt });
     const heartbeats = run.calls.filter((call) => call.kind === "heartbeat").map((call) => call.signal!);
     expect(heartbeats[0]!.aborted).toBe(true);
     expect(heartbeats[1]!.aborted).toBe(false);
@@ -268,7 +284,7 @@ describe("request deadlines", () => {
     const pending = obtainPreProviderPermit({ journal, client, deadlineTimer: time.timer }, ATTEMPT, PROOF);
     await vi_waitFor(() => time.deadlines.length === 1);
     time.deadlines[0]!.fire();
-    expect(await pending).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7 });
+    expect(await pending).toEqual({ executionAttemptId: ATTEMPT, fencingCounter: 7, submittingAt: ACK.submittingAt });
     expect(urls.map((url) => url.slice(url.lastIndexOf("/") + 1))).toEqual(["submitting", "submitting", "heartbeat"]);
   });
 

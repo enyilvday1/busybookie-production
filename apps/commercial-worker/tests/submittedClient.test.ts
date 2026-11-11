@@ -112,6 +112,28 @@ describe("submitted report client", () => {
     expect(await codeOf(client.reportSubmitted(ATTEMPT, PROOF, EXECUTION))).toBe("CONTROL_API_UNAVAILABLE");
   });
 
+  it("sends no signal unless the caller supplies one (R44B6Y: no timeout of its own)", async () => {
+    const { client, captured } = clientAnswering(200, OK_BODY);
+    await client.reportSubmitted(ATTEMPT, PROOF, EXECUTION);
+    expect("signal" in captured[0]!.init).toBe(false);
+  });
+
+  it("passes an externally supplied signal through, and its abort is a transport failure", async () => {
+    let seen: AbortSignal | undefined;
+    const fetchImpl = ((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException(`aborted ${PROOF.leaseToken}`, "AbortError")));
+      });
+    }) as typeof fetch;
+    const client = createHttpWorkerControlClient({ baseUrl: "http://127.0.0.1:9", machineCredential: MACHINE, fetchImpl });
+    const controller = new AbortController();
+    const pending = client.reportSubmitted(ATTEMPT, PROOF, EXECUTION, controller.signal);
+    controller.abort();
+    expect(await codeOf(pending)).toBe("CONTROL_API_UNAVAILABLE");
+    expect(seen).toBe(controller.signal);
+  });
+
   it("parses through the exported strict parser identically", () => {
     expect(parseSubmittedResponse(OK_BODY, { executionAttemptId: ATTEMPT, fencingCounter: 3, providerExecutionId: EXECUTION }).state).toBe("SUBMITTED");
     expect(() => parseSubmittedResponse({ ...OK_BODY, state: "SUCCEEDED" }, { executionAttemptId: ATTEMPT, fencingCounter: 3, providerExecutionId: EXECUTION })).toThrow(

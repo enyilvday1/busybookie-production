@@ -66,6 +66,10 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
   "src/providerExecutionContract.ts": ["provider execution identity"],
   // R44B6S: startup recovery passes the record's own identity (checked below).
   "src/startupJournalReconciliation.ts": ["provider execution identity"],
+  // R44B6Y: the acceptance handler validates and records the provider
+  // execution ID; the adapter passes the record's own ID through unchanged.
+  "src/acceptanceHandler.ts": ["provider execution identity"],
+  "src/acceptanceAdapter.ts": ["provider execution identity"],
 };
 // R44B6S: the exact acceptance-recovery vocabulary a file may name. Only these
 // tokens are removed before the rules run, so /submitting, submission-failed,
@@ -85,11 +89,15 @@ const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
     "parseSubmittingResponse",
     "acknowledgeSubmitting",
     "submittingAt",
+    // R44B6Y: the exact submission-failed route path of its client.
+    "/submission-failed`",
   ],
   "src/acceptanceRecoveryPolicy.ts": ["ATTEMPT_STILL_SUBMITTING", "STILL_SUBMITTING"],
   "src/workerError.ts": ["SUBMITTING_REJECTED", '"The worker-control API rejected the SUBMITTING acknowledgement."'],
   // R44B6V: the orchestration names only the client method it calls.
-  "src/preProviderOrchestration.ts": ["acknowledgeSubmitting"],
+  "src/preProviderOrchestration.ts": ["acknowledgeSubmitting", "submittingAt"],
+  // R44B6Y: the record member copied from the permit.
+  "src/acceptanceHandler.ts": ["submittingAt"],
 };
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
@@ -99,10 +107,13 @@ const PROTOCOL_IMPORTERS = new Set(["src/credentialContracts.ts", "src/providerE
 describe("commercial-worker source boundary", () => {
   it("scans the worker source", () => {
     expect(sources.map(({ path }) => path).sort()).toEqual([
+      "src/acceptanceAdapter.ts",
+      "src/acceptanceHandler.ts",
       "src/acceptanceJournal.ts",
       "src/acceptanceRecoveryPolicy.ts",
       "src/credentialContracts.ts",
       "src/credentialOpeningRun.ts",
+      "src/hostFaultLatch.ts",
       "src/preProviderOrchestration.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
@@ -203,7 +214,13 @@ describe("commercial-worker source boundary", () => {
     expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/acceptance-recovery`")).toEqual([]);
     expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submitting`")).toEqual([]);
     expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submitting/replay`")).toContain("SUBMITTING acknowledgement or recovery routes");
-    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submission-failed`")).toContain("SUBMITTING acknowledgement or recovery routes");
+    // R44B6Y: only the client's own exact submission-failed route is allowed.
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submission-failed`")).toEqual([]);
+    expect(allowed("src/workerControlClient.ts", "`/worker-control/v1/attempts/${id}/submission-failed/replay`")).toContain(
+      "SUBMITTING acknowledgement or recovery routes",
+    );
+    expect(allowed("src/acceptanceAdapter.ts", "`/worker-control/v1/attempts/${id}/submission-failed`")).toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(allowed("src/acceptanceHandler.ts", "acknowledgeSubmitting()")).toContain("SUBMITTING vocabulary");
     expect(allowed("src/workerControlClient.ts", 'state === "SUBMITTING"')).toContain("SUBMITTING vocabulary");
     expect(allowed("src/workerControlClient.ts", "submittingDeadlineMs")).toContain("SUBMITTING vocabulary");
     expect(allowed("src/workerError.ts", '"SUBMITTING"')).toContain("SUBMITTING vocabulary");
@@ -294,7 +311,12 @@ describe("pre-provider orchestration boundary", () => {
   const orchestration = code(read(join(SRC_ROOT, "preProviderOrchestration.ts")));
 
   it("has no caller anywhere in worker source, including credential opening", () => {
-    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration|obtainPreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit|PreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // R44B6Y: the unused acceptance adapter reuses only the injectable deadline-timer seam.
+    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/acceptanceAdapter.ts",
+    ]);
+    expect(code(read(join(SRC_ROOT, "acceptanceAdapter.ts")))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
     expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/PreProvider|permit/i);
   });
 
@@ -319,7 +341,12 @@ describe("pre-provider orchestration boundary", () => {
     // The permit carries no secret.
     const permitType = orchestration.slice(orchestration.indexOf("export type PreProviderPermit"), orchestration.indexOf("export type PreProviderOrchestrationDependencies"));
     expect(permitType.length).toBeGreaterThan(0);
-    expect(/leaseToken|credential|machine|token/i.test(permitType)).toBe(false);
+    expect(/leaseToken|credential|machine|token|leaseExpiresAt|callback|providerExecution|ProviderPort|=>/i.test(permitType)).toBe(false);
+    // R44B6Y0: the permit carries the acknowledged submittingAt, copied unchanged.
+    expect(permitType).toMatch(/submittingAt: Date;/);
+    expect(orchestration).toMatch(/submittingAt: acknowledgement\.submittingAt,/);
+    // Only the type member and the copy: no second source of the value.
+    expect(orchestration.match(/submittingAt/g)).toHaveLength(3);
   });
 });
 
@@ -337,13 +364,20 @@ describe("acceptance journal boundary", () => {
     expect(FALLBACK.test("await rename(temporary, target);")).toBe(true);
   });
 
-  it("is used only for startup checks, and the submitted report is called by nothing in worker source", () => {
+  it("is used only for startup checks and the unused acceptance components, and only the adapter reports submitted", () => {
     const importers = sources.filter(({ path, text }) => path !== JOURNAL && /acceptanceJournal/.test(text)).map(({ path }) => path);
     // R44B6V: the orchestration needs only the journal's prepare() type.
-    expect(importers.sort()).toEqual(["src/credentialOpeningRun.ts", "src/preProviderOrchestration.ts", "src/startupJournalReconciliation.ts"]);
+    expect(importers.sort()).toEqual([
+      "src/acceptanceAdapter.ts",
+      "src/acceptanceHandler.ts",
+      "src/credentialOpeningRun.ts",
+      "src/preProviderOrchestration.ts",
+      "src/startupJournalReconciliation.ts",
+    ]);
     expect(read(join(SRC_ROOT, "preProviderOrchestration.ts"))).toMatch(/import type \{ AcceptanceJournal \} from "\.\/acceptanceJournal\.js";/);
+    // R44B6Y: the outer acceptance adapter, itself unused, is the only caller.
     const callers = sources.filter(({ text }) => /\.reportSubmitted\s*\(/.test(code(text))).map(({ path }) => path);
-    expect(callers).toEqual([]);
+    expect(callers).toEqual(["src/acceptanceAdapter.ts"]);
     // R44B6S: startup reaches the control plane only through the injected
     // client's recoverAcceptance, never by direct HTTP, and never constructs,
     // re-hashes or rewrites a record.
@@ -363,6 +397,131 @@ describe("acceptance journal boundary", () => {
     expect(policy).not.toMatch(/\bfetch\s*\(|Date\.now|new Date|leaseToken|leaseNextAttempt|journal|providerExecutionId/);
     expect(policy).toMatch(/time\.monotonicNow\(\)/);
     expect(policy).toMatch(/time\.sleep\(/);
+  });
+});
+
+// R44B6Y0/R44B6Y: the inner durable acceptance handler, the outer acceptance
+// adapter and the host-fault latch. Nothing calls them yet; they hold no
+// provider abstraction, polling, journal preparation or local lease clock.
+describe("acceptance handler, adapter and host-fault latch boundary", () => {
+  const HANDLER = "src/acceptanceHandler.ts";
+  const ADAPTER = "src/acceptanceAdapter.ts";
+  const LATCH = "src/hostFaultLatch.ts";
+  const handler = code(read(join(SRC_ROOT, "acceptanceHandler.ts")));
+  const adapter = code(read(join(SRC_ROOT, "acceptanceAdapter.ts")));
+  const latch = code(read(join(SRC_ROOT, "hostFaultLatch.ts")));
+  const users = (pattern: RegExp, except: readonly string[]) =>
+    sources.filter(({ path, text }) => !except.includes(path) && pattern.test(code(text))).map(({ path }) => path).sort();
+
+  it("has no production caller: only the adapter uses the handler, nothing uses the adapter, only they use the latch", () => {
+    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual([]);
+    expect(users(/acceptanceHandler|createDurableAcceptanceHandler|AcceptanceNotDurableError/, [HANDLER])).toEqual([ADAPTER]);
+    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER]);
+    for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
+    }
+  });
+
+  it("imports no engine, provider or provider-handler type and builds no provider abstraction or poller", () => {
+    for (const text of [handler, adapter, latch]) {
+      expect(importsOf(text).every((specifier) => specifier.startsWith("./"))).toBe(true);
+      expect(
+        /src\/execution|SingleShotSubmissionAcceptedHandler|GoogleGenAiSubmissionAcceptedHandler|recoveryMetadata|providerEstimatedCredits|ProviderPort|providerFactory|providerSelector|sdk|\bpoll|fake/i.test(text),
+      ).toBe(false);
+    }
+    expect(importsOf(latch)).toEqual([]);
+  });
+
+  it("never prepares the journal", () => {
+    expect(/\.prepare\s*\(/.test(handler) || /\.prepare\s*\(/.test(adapter)).toBe(false);
+  });
+
+  it("keeps the inner handler free of every control-plane request, retry and deletion", () => {
+    expect(/reportSubmitted|reportSubmissionFailed|recoverAcceptance|runAcceptanceRecoveryWithRetry|removeAcknowledgedRecord|\.write\s*\(|fetch\s*\(|\bfor\s*\(|\bwhile\s*\(/.test(handler)).toBe(false);
+    expect(handler.match(/buildAcceptanceRecord\(/g)).toHaveLength(1);
+    expect(handler.match(/\.publish\(/g)).toHaveLength(1);
+    expect(handler).toMatch(/await journal\.publish\(record\);/);
+    // Single use is claimed synchronously, before the first await.
+    const claim = handler.indexOf("claimed = true;");
+    expect(claim).toBeGreaterThan(0);
+    expect(handler.slice(handler.indexOf("return async (acceptance) => {"), claim)).not.toMatch(/await/);
+    // No normalisation of the provider execution ID.
+    expect(/\.trim\(|toLowerCase|toUpperCase|normali[sz]e\(|replace\(/.test(handler)).toBe(false);
+  });
+
+  it("makes the failure report impossible once the record is durable", () => {
+    // reportSubmissionFailed appears only in reportNotDurable, which runs only
+    // in the catch around the inner handler, before reconcile.
+    expect(adapter.match(/\.reportSubmissionFailed\(/g)).toHaveLength(1);
+    expect(adapter.match(/reportNotDurable\(/g)).toHaveLength(2);
+    const reconcile = adapter.slice(adapter.indexOf("async function reconcile"), adapter.indexOf("return async (acceptance) => {"));
+    expect(reconcile.length).toBeGreaterThan(0);
+    expect(/reportSubmissionFailed|reportNotDurable/.test(reconcile)).toBe(false);
+    const callback = adapter.slice(adapter.indexOf("return async (acceptance) => {"));
+    expect(callback.indexOf("await reportNotDurable(")).toBeLessThan(callback.indexOf("await reconcile(record);"));
+    expect(callback.match(/reconcile\(/g)).toHaveLength(1);
+  });
+
+  it("locks two attempts, 10000 ms deadlines and retry only on CONTROL_API_UNAVAILABLE for both loops", () => {
+    expect(adapter).toMatch(/export const LIVE_SUBMITTED_MAX_ATTEMPTS = 2;/);
+    expect(adapter).toMatch(/export const LIVE_SUBMITTED_REQUEST_DEADLINE_MS = 10000;/);
+    expect(adapter).toMatch(/export const ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS = 2;/);
+    expect(adapter).toMatch(/export const ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS = 10000;/);
+    expect(adapter.match(/atMostTwoAttempts\(timer, LIVE_SUBMITTED_REQUEST_DEADLINE_MS,/g)).toHaveLength(1);
+    expect(adapter.match(/atMostTwoAttempts\(timer, ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS,/g)).toHaveLength(1);
+    expect(adapter.match(/new AbortController\(\)/g)).toHaveLength(1);
+    expect(adapter).toMatch(/error\.code !== "CONTROL_API_UNAVAILABLE"/);
+    expect(/\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|backoff|jitter/i.test(adapter)).toBe(false);
+  });
+
+  it("uses no local lease clock and reuses the shared acceptance-recovery step without copying it", () => {
+    expect(/Date\.now|new Date|performance\.now|getTime\(\)|leaseExpiresAt|LEASE_EXPIRED|\.heartbeat\(/.test(adapter)).toBe(false);
+    expect(adapter).toMatch(/import \{ recoverAcceptanceRecord \} from "\.\/startupJournalReconciliation\.js";/);
+    expect(adapter.match(/recoverAcceptanceRecord\(/g)).toHaveLength(1);
+    expect(/runAcceptanceRecoveryWithRetry|ACCEPTANCE_RECOVERY_RETRY|\.recoverAcceptance\(/.test(adapter)).toBe(false);
+    // Only a refusal or exhausted unavailability hands over to recovery.
+    expect(adapter).toMatch(/error\.code === "SUBMITTED_REPORT_REJECTED" \|\| error\.code === "CONTROL_API_UNAVAILABLE"/);
+  });
+
+  it("never deletes the record on a SUBMITTED acknowledgement", () => {
+    expect(/removeAcknowledgedRecord\s*\(/.test(adapter)).toBe(false);
+    const startup = code(read(join(SRC_ROOT, "startupJournalReconciliation.ts")));
+    const shared = startup.slice(startup.indexOf("export async function recoverAcceptanceRecord"));
+    expect(shared.indexOf('if (acknowledgement.state === "SUBMITTED") return;')).toBeGreaterThan(0);
+    expect(shared.indexOf('if (acknowledgement.state === "SUBMITTED") return;')).toBeLessThan(shared.indexOf("removeAcknowledgedRecord("));
+  });
+
+  it("gives the latch no way back to clear and no stored reason", () => {
+    expect(/reset|clear|untrip|restore|tripped\s*=\s*false\s*;[\s\S]*tripped\s*=\s*false/i.test(latch)).toBe(false);
+    expect(latch.match(/tripped = false;/g)).toHaveLength(1);
+    expect(latch.match(/tripped = true;/g)).toHaveLength(1);
+    expect(/reason|message|string|token|credential/i.test(latch)).toBe(false);
+  });
+
+  it("names no secret in the handler or adapter beyond passing the fixed proof", () => {
+    expect(/leaseToken|machineCredential|apiKey|plaintext|console\.|log\(/i.test(handler)).toBe(false);
+    expect(/machineCredential|apiKey|plaintext|console\.|log\(/i.test(adapter)).toBe(false);
+    expect(adapter.match(/leaseToken/g)).toHaveLength(2);
+    expect(adapter).toMatch(/Object\.freeze\(\{ fencingCounter: proof\.fencingCounter, leaseToken: proof\.leaseToken \}\)/);
+  });
+});
+
+// R44B6Y: the submission-failed client and the submitted client's optional
+// signal stay single-shot transport primitives.
+describe("submission-failed and submitted client boundary", () => {
+  it("sends one request each, with no retry, timer, lease clock or secret logging", () => {
+    const failed = methodSource("reportSubmissionFailed");
+    const submitted = methodSource("reportSubmitted");
+    expect(failed.length).toBeGreaterThan(0);
+    expect(submitted.length).toBeGreaterThan(0);
+    expect(failed).toMatch(/await post\(\s*`\/worker-control\/v1\/attempts\/\$\{executionAttemptId\}\/submission-failed`/);
+    expect(failed).toMatch(/"SUBMISSION_FAILED_REJECTED"/);
+    for (const method of [failed, submitted]) {
+      expect(method.match(/\bpost\(/g)).toHaveLength(1);
+      expect(FORBIDDEN_IN_PRIMITIVE.test(method.split("/submission-failed`").join(""))).toBe(false);
+    }
+    // Only the adapter, itself unused, calls the failure report.
+    expect(sources.filter(({ text }) => /\.reportSubmissionFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/acceptanceAdapter.ts"]);
   });
 });
 

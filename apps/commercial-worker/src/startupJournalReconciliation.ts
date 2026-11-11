@@ -79,20 +79,29 @@ export type StartupAcceptanceRecovery = AcceptanceRecoveryTime & Readonly<{ clie
 // a terminal acknowledgement removes the exact record. Any failure stops at
 // that record, retains it, and blocks new work.
 async function recoverUnresolvedAcceptance(journal: AcceptanceJournal, unresolved: readonly AcceptanceRecord[], recovery: StartupAcceptanceRecovery): Promise<void> {
-  for (const record of unresolved) {
-    const { executionAttemptId, fencingCounter, providerExecutionId } = record;
-    const acknowledgement = await runAcceptanceRecoveryWithRetry(
-      (signal) => recovery.client.recoverAcceptance(executionAttemptId, fencingCounter, providerExecutionId, signal),
-      recovery,
+  for (const record of unresolved) await recoverAcceptanceRecord(journal, record, recovery);
+}
+
+// One exact record under a fresh bounded budget. R44B6Y0: this is also the
+// live acceptance adapter's fallback, so both paths share one policy and one
+// terminal-retention rule. Resolves only on an exact acknowledgement.
+export async function recoverAcceptanceRecord(
+  journal: Pick<AcceptanceJournal, "removeAcknowledgedRecord">,
+  record: AcceptanceRecord,
+  recovery: StartupAcceptanceRecovery,
+): Promise<void> {
+  const { executionAttemptId, fencingCounter, providerExecutionId } = record;
+  const acknowledgement = await runAcceptanceRecoveryWithRetry(
+    (signal) => recovery.client.recoverAcceptance(executionAttemptId, fencingCounter, providerExecutionId, signal),
+    recovery,
+  );
+  if (acknowledgement.state === "SUBMITTED") return;
+  try {
+    await journal.removeAcknowledgedRecord(record);
+  } catch (error) {
+    throw new WorkerError(
+      error instanceof AcceptanceJournalError && error.code === "ACCEPTANCE_JOURNAL_CONFLICT" ? "ACCEPTANCE_JOURNAL_CONFLICT" : "ACCEPTANCE_JOURNAL_CORRUPT",
     );
-    if (acknowledgement.state === "SUBMITTED") continue;
-    try {
-      await journal.removeAcknowledgedRecord(record);
-    } catch (error) {
-      throw new WorkerError(
-        error instanceof AcceptanceJournalError && error.code === "ACCEPTANCE_JOURNAL_CONFLICT" ? "ACCEPTANCE_JOURNAL_CONFLICT" : "ACCEPTANCE_JOURNAL_CORRUPT",
-      );
-    }
   }
 }
 

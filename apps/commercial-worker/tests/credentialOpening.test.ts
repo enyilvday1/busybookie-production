@@ -3,13 +3,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import type { CredentialOpener } from "../src/credentialContracts.js";
-import { runCredentialOpeningOnce, type WorkerLogEvent } from "../src/credentialOpeningRun.js";
+import { runCredentialOpeningOnce, type CredentialOpeningClient, type WorkerLogEvent } from "../src/credentialOpeningRun.js";
 import { assertNoProviderEnvironment, FORBIDDEN_PROVIDER_ENVIRONMENT_VARIABLES } from "../src/providerEnvironment.js";
 import {
   createHttpWorkerControlClient,
   parseCredentialGrantResponse,
   parseLeaseResponse,
-  type WorkerControlClient,
   type WorkerCredentialGrant,
   type WorkerLease,
 } from "../src/workerControlClient.js";
@@ -61,7 +60,7 @@ const grant = (overrides: Partial<WorkerCredentialGrant> = {}): WorkerCredential
 
 function fakeClient(options: { lease?: () => Promise<WorkerLease | null>; grant?: () => Promise<WorkerCredentialGrant> } = {}) {
   const calls = { lease: 0, grant: 0 };
-  const client: WorkerControlClient = {
+  const client: CredentialOpeningClient = {
     leaseNextAttempt: async () => {
       calls.lease += 1;
       return (options.lease ?? (async () => lease()))();

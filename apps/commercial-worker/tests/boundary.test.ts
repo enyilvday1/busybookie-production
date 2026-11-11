@@ -48,15 +48,34 @@ const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   { label: "local persistence", pattern: /node:fs|writeFile|appendFile|createWriteStream|mkdir/ },
   { label: "decryption primitive", pattern: /createDecipheriv|setAuthTag|kms/i },
   { label: "test fixture", pattern: /tests\/|testCredentialCrypto|createTest/ },
-  { label: "submission or provider execution", pattern: /submitting|providerExecutionId|outcome-unknown|\/submission/i },
+  // R44B6P narrows the former single submission rule into three, each exempting only named files.
+  { label: "SUBMITTING acknowledgement or recovery routes", pattern: /\/submitting\b|outcome-unknown|\/submission|acceptance-recovery|submission-failed/i },
+  { label: "SUBMITTING vocabulary", pattern: /submitting/i },
+  { label: "provider execution identity", pattern: /providerExecutionId/ },
+  { label: "provider create or polling", pattern: /providerCreate|createGeneration|imageToVideo|generateVideos|interactions\.create|pollOperation/i },
 ];
+
+// R44B6P: the acceptance journal is the only local persistence, and the only
+// worker module (with the submitted client and the shared-rule re-export) that
+// names a provider execution identity. Its record member submittingAt is the
+// only SUBMITTING vocabulary allowed in worker source.
+const JOURNAL = "src/acceptanceJournal.ts";
+const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
+  [JOURNAL]: ["local persistence", "SUBMITTING vocabulary", "provider execution identity"],
+  "src/workerControlClient.ts": ["provider execution identity"],
+  "src/providerExecutionContract.ts": ["provider execution identity"],
+};
+// The two worker files that import the shared protocol package.
+const PROTOCOL_IMPORTERS = new Set(["src/credentialContracts.ts", "src/providerExecutionContract.ts"]);
 
 describe("commercial-worker source boundary", () => {
   it("scans the worker source", () => {
     expect(sources.map(({ path }) => path).sort()).toEqual([
+      "src/acceptanceJournal.ts",
       "src/credentialContracts.ts",
       "src/credentialOpeningRun.ts",
       "src/providerEnvironment.ts",
+      "src/providerExecutionContract.ts",
       "src/workerControlClient.ts",
       "src/workerError.ts",
     ]);
@@ -69,7 +88,7 @@ describe("commercial-worker source boundary", () => {
         expect(resolve(dirname(join(APP_ROOT, path)), specifier).startsWith(SRC_ROOT + sep)).toBe(true);
         continue;
       }
-      expect({ path, specifier, shared: path === "src/credentialContracts.ts" && specifier === PROTOCOL_PACKAGE }).toEqual({ path, specifier, shared: true });
+      expect({ path, specifier, shared: PROTOCOL_IMPORTERS.has(path) && specifier === PROTOCOL_PACKAGE }).toEqual({ path, specifier, shared: true });
     }
   });
 
@@ -80,7 +99,8 @@ describe("commercial-worker source boundary", () => {
   it.each(sources.map(({ path, text }) => [path, text] as const))("%s contains no forbidden dependency", (path, text) => {
     // The forbidden-environment module must name the provider variables it
     // refuses; it is exempt from the brand pattern only (checked below).
-    const rules = path === "src/providerEnvironment.ts" ? FORBIDDEN.filter(({ label: name }) => name !== "provider SDK or brand") : FORBIDDEN;
+    const exempt = new Set([...(EXEMPTIONS[path] ?? []), ...(path === "src/providerEnvironment.ts" ? ["provider SDK or brand"] : [])]);
+    const rules = FORBIDDEN.filter(({ label: name }) => !exempt.has(name));
     const violations = rules.filter(({ pattern }) => pattern.test(code(text))).map(({ label: name }) => name);
     expect({ path, violations }).toEqual({ path, violations: [] });
   });
@@ -112,11 +132,14 @@ describe("commercial-worker source boundary", () => {
       "src/credentialCryptoError.ts",
       "src/credentialInput.ts",
       "src/index.ts",
+      "src/providerExecutionId.ts",
       "src/sealedEnvelope.ts",
     ]);
     for (const file of visited) {
       const body = code(read(file));
-      const rules = FORBIDDEN.filter(({ label: name }) => name !== "submission or provider execution");
+      const rules = FORBIDDEN.filter(
+        ({ label: name }) => !["SUBMITTING acknowledgement or recovery routes", "SUBMITTING vocabulary", "provider execution identity"].includes(name),
+      );
       expect({ file: relative(PROTOCOL_ROOT, file), violations: rules.filter(({ pattern }) => pattern.test(body)).map(({ label: name }) => name) }).toEqual({
         file: relative(PROTOCOL_ROOT, file),
         violations: [],
@@ -137,9 +160,35 @@ describe("commercial-worker source boundary", () => {
     expect(hit('import { RunwayML } from "@runwayml/sdk";')).toContain("provider SDK or brand");
     expect(hit("const key = process.env.X;")).toContain("process environment read");
     expect(hit('await writeFile("journal.json", token);')).toContain("local persistence");
-    expect(hit('fetch(`${base}/worker-control/v1/attempts/${id}/submitting`)')).toContain("submission or provider execution");
+    expect(hit('fetch(`${base}/worker-control/v1/attempts/${id}/submitting`)')).toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(hit("`/worker-control/v1/attempts/${id}/acceptance-recovery`")).toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(hit("`/worker-control/v1/attempts/${id}/submitted`")).not.toContain("SUBMITTING acknowledgement or recovery routes");
+    expect(hit("const providerExecutionId = acceptance.id;")).toContain("provider execution identity");
+    expect(hit("await client.imageToVideo.create(request);")).toContain("provider create or polling");
     expect(hit('import "../../commercial-api/src/workerControl/workerLeaseService.js";')).toContain("commercial-api worker or connection services");
     expect(hit('import { parseSealedEnvelope } from "../../commercial-api/src/providerCredentials/sealedEnvelope.js";')).toContain("commercial-api module");
+  });
+});
+
+// R44B6P: the acceptance journal persists only the closed acceptance record.
+describe("acceptance journal boundary", () => {
+  const journal = code(read(join(APP_ROOT, JOURNAL)));
+
+  it("names no secret-bearing, payload or path field, and never renames, copies or writes the final record directly", () => {
+    const SECRET = /leaseToken|lease_token|machineCredential|sealedEnvelope|sealed_credential|openingContext|fingerprint|apiKey|api_key|bearer|Authorization|password|plaintext|prompt|responseBody|outputUrl|outputPath/i;
+    expect(SECRET.test(journal)).toBe(false);
+    const FALLBACK = /\brename\s*\(|copyFile|\bcp\s*\(|writeFile\s*\(\s*target|appendFile/;
+    expect(FALLBACK.test(journal)).toBe(false);
+    // Guard the guards.
+    expect(SECRET.test("leaseToken: lease.leaseToken")).toBe(true);
+    expect(FALLBACK.test("await rename(temporary, target);")).toBe(true);
+  });
+
+  it("is used by no execution path yet, and the submitted report is called by nothing in worker source", () => {
+    const importers = sources.filter(({ path, text }) => path !== JOURNAL && /acceptanceJournal/.test(text)).map(({ path }) => path);
+    expect(importers).toEqual([]);
+    const callers = sources.filter(({ text }) => /\.reportSubmitted\s*\(/.test(code(text))).map(({ path }) => path);
+    expect(callers).toEqual([]);
   });
 });
 

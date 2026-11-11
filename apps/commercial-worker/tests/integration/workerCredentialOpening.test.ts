@@ -1,4 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -10,9 +13,10 @@ import { createWorkerControlApplication } from "../../../commercial-api/src/work
 import { insertAccountWithFreeGrant, openGuardedClients, prepareSchemaV1, type GuardedClients } from "../../../commercial-api/tests/db/support/testDatabase.js";
 import { createTestWorkerAuthenticationAdapter } from "../../../commercial-api/tests/support/testWorkerAuthentication.js";
 import { createRecordingWorkerSecurityEventSink } from "../../../commercial-api/tests/support/testWorkerSecurityEvents.js";
+import { createAcceptanceJournal } from "../../src/acceptanceJournal.js";
 import type { CredentialOpener } from "../../src/credentialContracts.js";
-import { runCredentialOpeningOnce, type WorkerLogEvent } from "../../src/credentialOpeningRun.js";
-import { createHttpWorkerControlClient, type WorkerControlClient } from "../../src/workerControlClient.js";
+import { runCredentialOpeningOnce, type CredentialOpeningClient, type WorkerLogEvent } from "../../src/credentialOpeningRun.js";
+import { createHttpWorkerControlClient } from "../../src/workerControlClient.js";
 import { WorkerError } from "../../src/workerError.js";
 import { createTestCredentialFingerprinter, createTestCredentialOpener, createTestCredentialSealer, generateTestKey } from "../support/testCredentialOpening.js";
 
@@ -241,7 +245,7 @@ describe("private worker credential opening, end to end", () => {
       const item = await work();
       const { baseUrl } = await controlPlane([worker]);
       const real = workerClient(baseUrl, worker).client;
-      const client: WorkerControlClient = {
+      const client: CredentialOpeningClient = {
         leaseNextAttempt: real.leaseNextAttempt,
         requestCredentialGrant: async (attemptId, proof) => {
           const grant = await real.requestCredentialGrant(attemptId, proof);
@@ -264,7 +268,7 @@ describe("private worker credential opening, end to end", () => {
     const { baseUrl } = await controlPlane([worker]);
     const real = workerClient(baseUrl, worker);
     let grants = 0;
-    const client: WorkerControlClient = {
+    const client: CredentialOpeningClient = {
       leaseNextAttempt: real.client.leaseNextAttempt,
       requestCredentialGrant: async (attemptId, proof) => {
         grants += 1;
@@ -292,7 +296,7 @@ describe("private worker credential opening, end to end", () => {
     const item = await work();
     const { baseUrl } = await controlPlane([worker]);
     const real = workerClient(baseUrl, worker).client;
-    const client: WorkerControlClient = {
+    const client: CredentialOpeningClient = {
       leaseNextAttempt: real.leaseNextAttempt,
       requestCredentialGrant: async (attemptId, proof) => {
         await disconnect(item);
@@ -311,7 +315,7 @@ describe("private worker credential opening, end to end", () => {
     const item = await work();
     const { baseUrl } = await controlPlane([worker]);
     const real = workerClient(baseUrl, worker).client;
-    const client: WorkerControlClient = {
+    const client: CredentialOpeningClient = {
       leaseNextAttempt: real.leaseNextAttempt,
       requestCredentialGrant: async (attemptId, proof) => {
         await clients.migrator.query("UPDATE worker_principals SET status = 'DISABLED', disabled_at = now() WHERE id = $1", [worker.id]);
@@ -330,7 +334,7 @@ describe("private worker credential opening, end to end", () => {
     const item = await work();
     const { baseUrl } = await controlPlane([worker]);
     const real = workerClient(baseUrl, worker).client;
-    const client: WorkerControlClient = {
+    const client: CredentialOpeningClient = {
       leaseNextAttempt: real.leaseNextAttempt,
       requestCredentialGrant: async (attemptId, proof) => {
         await clients.migrator.query(
@@ -377,5 +381,94 @@ describe("private worker credential opening, end to end", () => {
       expect(error.code).toBe("FORBIDDEN_PROVIDER_ENVIRONMENT");
     }
     expect(urls).toEqual([]);
+  });
+});
+
+// R44B6P: the section 18 ordering, end to end against the real control plane.
+// The acceptance is synthetic (no provider exists); the test itself performs
+// the steps no worker execution path performs yet: SUBMITTING, then the
+// durable journal record, then the submitted report.
+describe("durable acceptance journal, then the submitted report, end to end", () => {
+  let stateRoot: string;
+  beforeEach(async () => {
+    stateRoot = await mkdtemp(join(tmpdir(), "busybookie-worker-state-"));
+  });
+  afterEach(async () => {
+    await rm(stateRoot, { recursive: true, force: true });
+  });
+
+  // The SUBMITTING barrier, called directly: the worker has no client for it yet.
+  async function enterSubmitting(baseUrl: string, worker: Machine, attemptId: string, proof: Readonly<{ fencingCounter: number; leaseToken: string }>) {
+    const response = await fetch(`${baseUrl}/worker-control/v1/attempts/${attemptId}/submitting`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${worker.credential}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken }),
+    });
+    expect(response.status).toBe(200);
+    return new Date(((await response.json()) as { submittingAt: string }).submittingAt);
+  }
+
+  it("journals the acceptance durably before reporting the same provider execution ID, which the control plane records", async () => {
+    const worker = await machine();
+    const item = await work();
+    const { baseUrl, recording } = await controlPlane([worker]);
+    const { client, urls } = workerClient(baseUrl, worker);
+    const lease = (await client.leaseNextAttempt())!;
+    const proof = { fencingCounter: lease.fencingCounter, leaseToken: lease.leaseToken };
+    await client.requestCredentialGrant(lease.executionAttemptId, proof);
+    const submittingAt = await enterSubmitting(baseUrl, worker, lease.executionAttemptId, proof);
+
+    // 1. Durable journal record first (section 17).
+    const journal = createAcceptanceJournal({
+      stateRoot,
+      directorySync: process.platform === "win32" ? "DEVELOPMENT_BEST_EFFORT" : "REQUIRED",
+    });
+    await journal.prepare();
+    const written = await journal.write({
+      executionAttemptId: lease.executionAttemptId,
+      executionJobId: lease.executionJobId,
+      accountId: item.accountId,
+      attemptNumber: lease.attemptNumber,
+      fencingCounter: lease.fencingCounter,
+      provider: lease.provider,
+      generationRequestSha256: lease.generationRequestSha256,
+      submittingAt,
+      providerExecutionId: "synthetic/operations/op-1",
+      providerAcceptedAt: new Date(),
+    });
+    expect(written.outcome).toBe("PUBLISHED");
+    const stored = await journal.read(lease.executionAttemptId, { provider: lease.provider, fencingCounter: lease.fencingCounter });
+    expect(stored.status).toBe("VALID_RECORD");
+
+    // 2. Only then the report, with exactly the journalled ID.
+    const acknowledgement = await client.reportSubmitted(lease.executionAttemptId, proof, written.record.providerExecutionId);
+    expect(acknowledgement).toMatchObject({ executionAttemptId: lease.executionAttemptId, state: "SUBMITTED", providerExecutionId: "synthetic/operations/op-1" });
+    const row = await attemptRow(lease.executionAttemptId);
+    expect(row).toMatchObject({ state: "SUBMITTED", provider_execution_id: "synthetic/operations/op-1" });
+
+    // Idempotent replay of the same report; a different ID is refused and nothing changes.
+    expect(await client.reportSubmitted(lease.executionAttemptId, proof, "synthetic/operations/op-1")).toEqual(acknowledgement);
+    const refused = await workerFailure(client.reportSubmitted(lease.executionAttemptId, proof, "synthetic/operations/op-2"), [lease.leaseToken, worker.credential]);
+    expect(refused.code).toBe("SUBMITTED_REPORT_REJECTED");
+    expect((await attemptRow(lease.executionAttemptId)).provider_execution_id).toBe("synthetic/operations/op-1");
+    expect(recording.events.at(-1)).toMatchObject({ type: "WORKER_SUBMITTED_REJECTED", reason: "PROVIDER_EXECUTION_CONFLICT" });
+
+    // Only worker-control calls left the worker (SUBMITTING was sent directly by the test); no provider was reached.
+    expect(urls.every((url) => url.startsWith(`${baseUrl}/worker-control/v1/`))).toBe(true);
+    // The journal file holds no lease token, machine credential or plaintext.
+    const file = await readFile(join(stateRoot, "acceptance-journal", "v1", `${lease.executionAttemptId}.json`), "latin1");
+    expect(file.includes(lease.leaseToken) || file.includes(worker.credential) || file.includes(item.plaintext)).toBe(false);
+  });
+
+  it("is refused by the control plane when reported before SUBMITTING, so the journal never stands in for the barrier", async () => {
+    const worker = await machine();
+    await work();
+    const { baseUrl } = await controlPlane([worker]);
+    const { client } = workerClient(baseUrl, worker);
+    const lease = (await client.leaseNextAttempt())!;
+    const proof = { fencingCounter: lease.fencingCounter, leaseToken: lease.leaseToken };
+    const refused = await workerFailure(client.reportSubmitted(lease.executionAttemptId, proof, "synthetic/operations/op-early"), [lease.leaseToken]);
+    expect(refused.code).toBe("SUBMITTED_REPORT_REJECTED");
+    expect((await attemptRow(lease.executionAttemptId)).state).toBe("LEASED");
   });
 });

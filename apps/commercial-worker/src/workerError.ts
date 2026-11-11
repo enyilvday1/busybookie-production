@@ -23,7 +23,12 @@ export type WorkerErrorCode =
   // The granted sealed envelope or opening context is not the supported format.
   | "ENVELOPE_INVALID"
   // The opener refused the envelope under the granted context.
-  | "CREDENTIAL_OPEN_FAILED";
+  | "CREDENTIAL_OPEN_FAILED"
+  // A submitted report was not sent because its input is not the contract.
+  | "SUBMITTED_REPORT_INVALID"
+  // The control plane refused a submitted report (stale or foreign lease,
+  // replacement epoch, conflicting or already-adopted provider execution ID).
+  | "SUBMITTED_REPORT_REJECTED";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   FORBIDDEN_PROVIDER_ENVIRONMENT: "Provider credential or provider configuration variables must not be present in the commercial worker environment.",
@@ -36,6 +41,8 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   CREDENTIAL_GRANT_REJECTED: "The worker-control API rejected the credential grant.",
   ENVELOPE_INVALID: "The granted credential envelope is invalid.",
   CREDENTIAL_OPEN_FAILED: "The granted credential could not be opened.",
+  SUBMITTED_REPORT_INVALID: "The submitted report is invalid and was not sent.",
+  SUBMITTED_REPORT_REJECTED: "The worker-control API rejected the submitted report.",
 };
 
 export class WorkerError extends Error {

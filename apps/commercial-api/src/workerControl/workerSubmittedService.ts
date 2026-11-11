@@ -1,4 +1,5 @@
 import type { TransactionalPool } from "../database/runtimePool.js";
+import { isProviderExecutionId } from "commercial-worker-protocol";
 import {
   audit,
   lockCurrentLease,
@@ -39,11 +40,10 @@ import type { WorkerLeaseRejectionReason } from "./workerSecurityEvents.js";
 // provenance and recovery_expires_at (NULL until a provider policy exists)
 // are untouched; the job stays RUNNING.
 
-// The migration 0004 provider-execution-ID check, exactly: 1 to 256 visible
-// ASCII characters and never a URL. No normalisation.
-const PROVIDER_EXECUTION_ID = /^[\x21-\x7e]{1,256}$/;
-export const isProviderExecutionId = (value: unknown): value is string =>
-  typeof value === "string" && PROVIDER_EXECUTION_ID.test(value) && !value.includes("://");
+// The migration 0004 provider-execution-ID check, exactly (1 to 256 visible
+// ASCII characters, never a URL, no normalisation). It lives in the shared
+// protocol package so the worker's journal applies the identical rule (R44B6P).
+export { isProviderExecutionId };
 
 // The Account + provider + provider execution ID unique index (migration 0004).
 const PROVIDER_EXECUTION_UNIQUE = Object.freeze({ code: "23505", constraint: "execution_attempts_provider_execution_uq" });

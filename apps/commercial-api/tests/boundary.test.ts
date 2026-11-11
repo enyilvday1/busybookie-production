@@ -487,6 +487,8 @@ describe("shared commercial-worker protocol package", () => {
       "credentialCryptoError.ts",
       "credentialInput.ts",
       "index.ts",
+      // R44B6P: the provider execution ID rule shared by the submitted route and the worker journal.
+      "providerExecutionId.ts",
       "sealedEnvelope.ts",
     ]);
     for (const path of protocolFiles) {

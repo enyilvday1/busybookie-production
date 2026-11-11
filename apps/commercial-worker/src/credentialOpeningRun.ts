@@ -24,9 +24,13 @@ export type WorkerLogEvent = Readonly<{
   provider?: string;
 }>;
 
+// The opening run needs only leasing and the credential grant; it never
+// reports a submission (R44B6P).
+export type CredentialOpeningClient = Pick<WorkerControlClient, "leaseNextAttempt" | "requestCredentialGrant">;
+
 export type CredentialOpeningRunDependencies = Readonly<{
   environment: WorkerEnvironment;
-  client: WorkerControlClient;
+  client: CredentialOpeningClient;
   // Injected; only a test implementation exists in this slice.
   opener: CredentialOpener;
   now?: () => Date;

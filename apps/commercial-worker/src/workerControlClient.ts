@@ -1,3 +1,4 @@
+import { isProviderExecutionId } from "./providerExecutionContract.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
 
 // Outbound-only HTTP client for the commercial-api worker-control routes
@@ -37,9 +38,23 @@ export type WorkerCredentialGrant = Readonly<{
   openingContext: unknown;
 }>;
 
+// The live SUBMITTING -> SUBMITTED acknowledgement as received (R44B6O
+// contract, architecture section 18).
+export type WorkerSubmittedAcknowledgement = Readonly<{
+  executionAttemptId: string;
+  fencingCounter: number;
+  state: "SUBMITTED";
+  providerExecutionId: string;
+  submittedAt: Date;
+}>;
+
 export type WorkerControlClient = Readonly<{
   leaseNextAttempt: () => Promise<WorkerLease | null>;
   requestCredentialGrant: (executionAttemptId: string, proof: LeaseProof) => Promise<WorkerCredentialGrant>;
+  // R44B6P: capability only. Section 18 requires the durable acceptance
+  // journal record to exist before this is called; no execution path calls
+  // it yet.
+  reportSubmitted: (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => Promise<WorkerSubmittedAcknowledgement>;
 }>;
 
 export type WorkerControlClientOptions = Readonly<{
@@ -140,6 +155,32 @@ export function parseCredentialGrantResponse(body: unknown, expected: Readonly<{
   });
 }
 
+// The acknowledgement must answer exactly the attempt, fencing generation and
+// provider execution ID reported, in state SUBMITTED.
+export function parseSubmittedResponse(
+  body: unknown,
+  expected: Readonly<{ executionAttemptId: string; fencingCounter: number; providerExecutionId: string }>,
+): WorkerSubmittedAcknowledgement {
+  const acknowledgement = exactKeys(body, ["executionAttemptId", "fencingCounter", "state", "providerExecutionId", "submittedAt"]);
+  const executionAttemptId = text(acknowledgement.executionAttemptId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (
+    executionAttemptId !== expected.executionAttemptId ||
+    fencingCounter !== expected.fencingCounter ||
+    acknowledgement.state !== "SUBMITTED" ||
+    acknowledgement.providerExecutionId !== expected.providerExecutionId
+  ) {
+    throw malformed();
+  }
+  return Object.freeze({
+    executionAttemptId,
+    fencingCounter,
+    state: "SUBMITTED",
+    providerExecutionId: expected.providerExecutionId,
+    submittedAt: instant(acknowledgement.submittedAt),
+  });
+}
+
 function controlUrl(options: WorkerControlClientOptions): URL {
   let base: URL;
   try {
@@ -209,6 +250,25 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
         "CREDENTIAL_GRANT_REJECTED",
       );
       return parseCredentialGrantResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter });
+    },
+    reportSubmitted: async (executionAttemptId: string, proof: LeaseProof, providerExecutionId: string) => {
+      // Nothing malformed is sent: the request is exactly the published contract.
+      if (
+        !UUID.test(executionAttemptId) ||
+        !Number.isSafeInteger(proof.fencingCounter) ||
+        proof.fencingCounter < 1 ||
+        typeof proof.leaseToken !== "string" ||
+        !LEASE_TOKEN.test(proof.leaseToken) ||
+        !isProviderExecutionId(providerExecutionId)
+      ) {
+        throw new WorkerError("SUBMITTED_REPORT_INVALID");
+      }
+      const body = await post(
+        `/worker-control/v1/attempts/${executionAttemptId}/submitted`,
+        { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken, providerExecutionId },
+        "SUBMITTED_REPORT_REJECTED",
+      );
+      return parseSubmittedResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter, providerExecutionId });
     },
   });
 }

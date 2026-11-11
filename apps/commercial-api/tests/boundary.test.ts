@@ -491,12 +491,24 @@ describe("worker-control boundary (lease foundation only)", () => {
   });
 
   it("confines the grant timestamp write and the sealed-envelope read to the credential-grant service", () => {
-    const offenders = workerControl.filter(({ path, text }) => path !== GRANT_SERVICE && GRANT_ONLY.test(code(text))).map(({ path }) => path);
+    // R44B6X0: the lease service may only clear the grant marker, when it
+    // requeues an expired LEASED attempt; it never sets or reads a grant.
+    const CLEAR_GRANT = "credential_granted_at = NULL";
+    const withoutAllowedClear = (path: string, text: string) => (path === SWEEP_SERVICE ? text.split(CLEAR_GRANT).join("") : text);
+    const offenders = workerControl
+      .filter(({ path, text }) => path !== GRANT_SERVICE && GRANT_ONLY.test(withoutAllowedClear(path, code(text))))
+      .map(({ path }) => path);
     expect(offenders).toEqual([]);
     expect(GRANT_ONLY.test(code(read(join(APP_ROOT, GRANT_SERVICE))))).toBe(true);
+    const leaseService = code(read(join(APP_ROOT, SWEEP_SERVICE)));
+    expect(leaseService.split(CLEAR_GRANT).length - 1).toBe(1);
+    expect(/SET state = 'QUEUED', credential_granted_at = NULL,/.test(leaseService)).toBe(true);
+    expect(/provider_credential_versions/.test(leaseService.slice(leaseService.indexOf("async function reclaimExpiredLeases"), leaseService.indexOf("export async function sweepExpiredSubmittingAttempts")))).toBe(false);
     // Guard the guards.
     expect("SET state = 'LEASED', credential_granted_at = now()").toMatch(GRANT_ONLY);
     expect("credential_granted_at IS NULL").not.toMatch(GRANT_ONLY);
+    expect(withoutAllowedClear(SWEEP_SERVICE, "SET state = 'QUEUED', credential_granted_at = now()")).toMatch(GRANT_ONLY);
+    expect(withoutAllowedClear(GRANT_SERVICE, "SET state = 'QUEUED', credential_granted_at = NULL")).toMatch(GRANT_ONLY);
   });
 
   it("enables no CORS and reads no cookie or session", () => {

@@ -120,6 +120,8 @@ export async function audit(
     credentialVersion?: number;
     failureCode?: string;
     recoveredFromJournal?: true;
+    // R44B6X0: marks lease_expired for a granted pre-submission lease.
+    grantedLeaseRecovered?: true;
   }>,
 ): Promise<void> {
   await client.query(INSERT_AUDIT, [attempt.accountId, eventType, attempt.id, correlationId, JSON.stringify(metadata)]);
@@ -132,10 +134,23 @@ const CLEAR_LEASE = `lease_worker_principal_id = NULL, lease_token_sha256 = NULL
 // fact that the lease expired after the barrier, nothing about the provider.
 export const SUBMITTING_LEASE_EXPIRED_FAILURE_CODE = "WORKER_LEASE_EXPIRED_DURING_SUBMISSION";
 
-// Returns expired pre-grant leases to the queue. A lease that ever received a
-// credential grant is left alone: it carries an open retention obligation and
-// is a later recovery/sweep concern, never silently requeued here.
-async function reclaimExpiredLeases(client: RuntimeClient, correlationId: string): Promise<void> {
+// Returns expired LEASED attempts to the queue (architecture section 12).
+//
+// An ungranted lease is simply reclaimed. A lease that received a credential
+// grant is recovered the same way (R44B6X0): a row that is still LEASED with
+// a lease expired by server time proves SUBMITTING never committed under that
+// lease and, because the barrier refuses an expired lease, never can, so
+// BusyBookie never granted provider-call authority. Its grant marker is
+// cleared with the lease, closing that pre-submission grant; the next lease
+// needs a new grant. The fencing counter is kept: the next lease increments
+// it. No provider credential version, failure code or security event is
+// involved. A stale worker's already-disclosed plaintext is outside fencing
+// and governed only by the trusted-worker invariant (section 15).
+//
+// With `workerPrincipalId`, only that worker's own expired leases are
+// considered, so a requesting worker is never starved behind the shared batch
+// by its own stale lease before its capacity is counted.
+async function reclaimExpiredLeases(client: RuntimeClient, correlationId: string, workerPrincipalId?: string): Promise<void> {
   const reclaimed = await client.query<{
     id: string;
     account_id: string;
@@ -143,19 +158,22 @@ async function reclaimExpiredLeases(client: RuntimeClient, correlationId: string
     attempt_number: number;
     lease_fencing_counter: string;
     lease_worker_principal_id: string;
+    granted: boolean;
   }>(
     `WITH expired AS (
-       SELECT id, lease_worker_principal_id FROM execution_attempts
-        WHERE state = 'LEASED' AND credential_granted_at IS NULL AND lease_expires_at <= now()
+       SELECT id, lease_worker_principal_id, credential_granted_at IS NOT NULL AS granted FROM execution_attempts
+        WHERE state = 'LEASED' AND lease_expires_at <= now()
+          ${workerPrincipalId === undefined ? "" : "AND lease_worker_principal_id = $1"}
         ORDER BY lease_expires_at, id
         LIMIT ${WORKER_EXPIRED_LEASE_RECLAIM_LIMIT}
           FOR UPDATE SKIP LOCKED
      )
      UPDATE execution_attempts a
-        SET state = 'QUEUED', ${CLEAR_LEASE}, updated_at = now()
+        SET state = 'QUEUED', credential_granted_at = NULL, ${CLEAR_LEASE}, updated_at = now()
        FROM expired
-      WHERE a.id = expired.id
-     RETURNING a.id, a.account_id, a.execution_job_id, a.attempt_number, a.lease_fencing_counter, expired.lease_worker_principal_id`,
+      WHERE a.id = expired.id AND a.state = 'LEASED'
+     RETURNING a.id, a.account_id, a.execution_job_id, a.attempt_number, a.lease_fencing_counter, expired.lease_worker_principal_id, expired.granted`,
+    workerPrincipalId === undefined ? undefined : [workerPrincipalId],
   );
   for (const row of reclaimed.rows) {
     await client.query("UPDATE execution_jobs SET status = 'QUEUED', updated_at = now() WHERE id = $1 AND status = 'RUNNING'", [row.execution_job_id]);
@@ -163,6 +181,7 @@ async function reclaimExpiredLeases(client: RuntimeClient, correlationId: string
       attemptNumber: row.attempt_number,
       fencingCounter: Number(row.lease_fencing_counter),
       workerPrincipalId: row.lease_worker_principal_id,
+      ...(row.granted ? { grantedLeaseRecovered: true as const } : {}),
     });
   }
 }
@@ -244,6 +263,9 @@ SELECT a.id, a.account_id, a.execution_job_id, a.generation_authorization_id, a.
 export async function acquireWorkerLease(pool: TransactionalPool, context: WorkerControlContext): Promise<WorkerLease | null> {
   return withTransaction(pool, async (client) => {
     await requireActiveWorker(client, context.workerPrincipalId, "FOR UPDATE");
+    // The requesting worker's own expired leases first, so the capacity check
+    // below never counts a stale lease the shared batch happened to omit.
+    await reclaimExpiredLeases(client, context.correlationId, context.workerPrincipalId);
     await reclaimExpiredLeases(client, context.correlationId);
     // Before the capacity check: a swept attempt no longer holds a lease, and
     // it is never a candidate (only QUEUED attempts are).

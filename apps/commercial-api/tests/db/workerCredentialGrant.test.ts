@@ -412,7 +412,7 @@ describe("exact credential grant", () => {
 });
 
 describe("after a grant", () => {
-  it("forbids release, survives expiry untouched by reclaim, and refuses a retry once the lease has expired", async () => {
+  it("forbids release, refuses a retry once the lease has expired, and is then recovered for the next lease (R44B6X0)", async () => {
     const list = await workers(2);
     const item = await work();
     const port = await compose(list);
@@ -429,11 +429,17 @@ describe("after a grant", () => {
     expect((await call(port, list[0]!, "heartbeat", item.attemptId, proof)).status).toBe(409);
     expect((await call(port, list[0]!, "credential-grant", item.attemptId, proof)).status).toBe(409);
     expect(events.at(-1)).toMatchObject({ type: "WORKER_CREDENTIAL_GRANT_REJECTED", reason: "LEASE_EXPIRED" });
-    // Another worker's acquisition never reclaims a granted lease.
-    expect(json(await send(port, "POST", "/worker-control/v1/leases", undefined, auth(list[1]!)))).toEqual({ lease: null });
+    // R44B6X0: another worker's acquisition recovers the expired granted lease
+    // (it never reached SUBMITTING) and may then lease it at a higher fence
+    // with a new token; the old grant does not carry over.
+    const next = json(await send(port, "POST", "/worker-control/v1/leases", undefined, auth(list[1]!))).lease;
+    expect(next).toMatchObject({ executionAttemptId: item.attemptId, fencingCounter: 2 });
+    expect(next.leaseToken).not.toBe(proof.leaseToken);
     const row = await attempt(item.attemptId);
-    expect(row).toMatchObject({ state: "LEASED", lease_worker_principal_id: list[0]!.id, lease_fencing_counter: "1" });
-    expect(row.credential_granted_at).not.toBeNull();
+    expect(row).toMatchObject({ state: "LEASED", lease_worker_principal_id: list[1]!.id, lease_fencing_counter: "2", credential_granted_at: null });
+    // The old proof is dead for every lease-scoped call.
+    expect((await call(port, list[0]!, "heartbeat", item.attemptId, proof)).status).toBe(409);
+    expect((await call(port, list[0]!, "credential-grant", item.attemptId, proof)).status).toBe(409);
   });
 
   it("replays a grant committed before a disconnect, under the same valid lease, without a new grant", async () => {

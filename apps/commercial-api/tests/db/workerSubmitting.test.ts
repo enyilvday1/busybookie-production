@@ -537,7 +537,7 @@ describe("first SUBMITTING transition", () => {
     expect((await call(port, list[0]!, "submitting", item.attemptId, second)).status).toBe(200);
   });
 
-  it("refuses an expired lease, and an expired granted lease is never reclaimed", async () => {
+  it("refuses an expired lease; the expired granted lease is then recovered, never entering SUBMITTING (R44B6X0)", async () => {
     const list = await workers(2);
     const item = await work();
     const port = await compose(list);
@@ -550,7 +550,12 @@ describe("first SUBMITTING transition", () => {
     expect(response.status).toBe(409);
     expect(response.body).toBe(REJECTED);
     expect(eventSummary()).toEqual([["WORKER_SUBMITTING_REJECTED", "LEASE_EXPIRED"]]);
-    expect(json(await send(port, "POST", "/worker-control/v1/leases", undefined, auth(list[1]!)))).toEqual({ lease: null });
+    // The next acquisition requeues it (grant cleared) and leases it afresh.
+    const next = json(await send(port, "POST", "/worker-control/v1/leases", undefined, auth(list[1]!))).lease;
+    expect(next).toMatchObject({ executionAttemptId: item.attemptId, fencingCounter: 2 });
+    expect(await attempt(item.attemptId)).toMatchObject({ state: "LEASED", submitting_at: null, credential_granted_at: null, lease_worker_principal_id: list[1]!.id });
+    // The stale proof still cannot cross the barrier.
+    expect((await call(port, list[0]!, "submitting", item.attemptId, proof)).status).toBe(409);
     expect((await attempt(item.attemptId)).state).toBe("LEASED");
   });
 

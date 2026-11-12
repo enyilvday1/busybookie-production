@@ -349,13 +349,19 @@ describe("lease admission in the shared opening path", () => {
     expect(Object.isFrozen(outcome.context)).toBe(true);
     expect(outcome.context.accountId).toBe(ACCOUNT);
     expect(outcome.context.proof).toEqual({ fencingCounter: 1, leaseToken: LEASE_TOKEN });
+    // R44B10A: the non-secret lease data a real-provider composer needs.
     expect(outcome.context.lease).toEqual({
       executionJobId: JOB,
       executionAttemptId: ATTEMPT,
       attemptNumber: 1,
       provider: FAKE_PROVIDER_ID,
+      model: "example-model-1",
+      generationRequest: { prompt: "fixture" },
       generationRequestSha256: "c".repeat(64),
+      expectedCostCap: { unit: "MICRO_USD", amount: 1000 },
     });
+    // No sealed capability unless the caller asks for one (the fake never does).
+    expect("sealedCredential" in outcome).toBe(false);
     expect(JSON.stringify(outcome).includes(PLAINTEXT)).toBe(false);
     expect(calls).toEqual(["lease", "grant"]);
   });

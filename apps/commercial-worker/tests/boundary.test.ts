@@ -76,6 +76,12 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
   // R44B9: the production fake mints its attempt-bound execution ID and hands
   // it to the acceptance callback (checked below).
   "src/fakeProvider.ts": ["provider execution identity"],
+  // R44B10A: the closed first real-provider contract names its provider
+  // identifier and model; only the adapter imports the SDK, calls
+  // interactions.create and hands the raw Interaction.id to the callback
+  // (all checked below).
+  "src/googleProviderContract.ts": ["provider SDK or brand"],
+  "src/googleProviderAdapter.ts": ["provider SDK or brand", "provider create or polling", "provider execution identity"],
 };
 // R44B6S: the exact acceptance-recovery vocabulary a file may name. Only these
 // tokens are removed before the rules run, so /submitting, submission-failed,
@@ -107,7 +113,37 @@ const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
   // R44B9A: the one dedicated fake provider identifier, declared once. Any
   // other BUSYBOOKIE_ text (an environment key, a mode switch) still fails.
   "src/fakeProvider.ts": ['export const FAKE_PROVIDER_ID = "BUSYBOOKIE_FAKE";'],
+  // R44B10A: the single process-environment access, which only checks the
+  // names the provider SDK reads (checked below). Any other process.env text
+  // still fails.
+  "src/providerEnvironment.ts": ["assertNoProviderEnvironment(process.env);"],
 };
+// R44B10A: the one worker module allowed to import the provider SDK, and the
+// exact package it may import.
+const SDK_IMPORTERS: Readonly<Record<string, string>> = { "src/googleProviderAdapter.ts": "@google/genai" };
+// R44B10A: the closed worker constants of the first real-provider contract.
+// They are code identifiers, not environment variables; only these exact
+// names are removed before the provider-variable rule runs.
+const GOOGLE_CONTRACT_IDENTIFIERS = Object.freeze([
+  "GOOGLE_PROVIDER_ID",
+  "GOOGLE_MODEL",
+  "GOOGLE_PROMPT_MAX_CODE_UNITS",
+  "GOOGLE_RESOLUTION",
+  "GOOGLE_MAX_REFERENCE_IMAGE_BYTES",
+  "GOOGLE_CREATE_TIMEOUT_MS",
+  "GOOGLE_CREATE_MAX_RETRIES",
+  "GOOGLE_API_BASE_URL",
+  "GOOGLE_API_VERSION",
+  "GOOGLE_RESPONSE_FORMAT",
+  "GOOGLE_INTERACTION_FLAGS",
+  "GOOGLE_EXPECTED_COST_CAP_UNIT",
+  "GOOGLE_DEFINITIVE_ERROR_CODES",
+  "GOOGLE_GENAI",
+]);
+// Whole identifiers only, so a longer name that merely contains one (for
+// example GOOGLE_GENAI_USE_VERTEXAI) is never hidden.
+const withoutGoogleContractIdentifiers = (text: string) =>
+  GOOGLE_CONTRACT_IDENTIFIERS.reduce((remaining, token) => remaining.replace(new RegExp(`\\b${token}\\b`, "g"), ""), text);
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
 // The two worker files that import the shared protocol package.
@@ -125,6 +161,9 @@ describe("commercial-worker source boundary", () => {
       "src/credentialOpeningRun.ts",
       "src/failureReportPolicy.ts",
       "src/fakeProvider.ts",
+      "src/googleAttemptExecution.ts",
+      "src/googleProviderAdapter.ts",
+      "src/googleProviderContract.ts",
       "src/hostFaultLatch.ts",
       "src/inFlightHeartbeat.ts",
       "src/inputMediaFailurePolicy.ts",
@@ -148,6 +187,8 @@ describe("commercial-worker source boundary", () => {
         expect(resolve(dirname(join(APP_ROOT, path)), specifier).startsWith(SRC_ROOT + sep)).toBe(true);
         continue;
       }
+      // R44B10A: exactly one SDK, in exactly one module.
+      if (SDK_IMPORTERS[path] === specifier) continue;
       expect({ path, specifier, shared: PROTOCOL_IMPORTERS.has(path) && specifier === PROTOCOL_PACKAGE }).toEqual({ path, specifier, shared: true });
     }
   });
@@ -167,7 +208,39 @@ describe("commercial-worker source boundary", () => {
 
   it("names provider-global variables only in the forbidden-environment module", () => {
     const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
-    expect(sources.filter(({ text }) => PROVIDER_VARIABLE.test(text)).map(({ path }) => path)).toEqual(["src/providerEnvironment.ts"]);
+    // R44B10A: only the exact closed contract identifiers are removed first.
+    expect(sources.filter(({ text }) => PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(text))).map(({ path }) => path)).toEqual([
+      "src/providerEnvironment.ts",
+    ]);
+    // Guard the guard: environment names and unapproved or near-miss GOOGLE_ names still fail.
+    for (const text of [
+      'const key = env["GOOGLE_API_KEY"];',
+      "GOOGLE_GEMINI_BASE_URL",
+      "GOOGLE_GENAI_USE_VERTEXAI",
+      "GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_MODEL_OVERRIDE",
+      "GOOGLE_PROVIDER_IDS",
+      "XGOOGLE_API_VERSION_2",
+      "GEMINI_API_KEY",
+    ]) {
+      expect(PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(text)), text).toBe(true);
+    }
+    expect(PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers("const id = GOOGLE_PROVIDER_ID; const m = GOOGLE_MODEL;"))).toBe(false);
+  });
+
+  it("allows @google/genai in exactly one module, and no other third-party runtime import", () => {
+    const sdkImporters = sources.filter(({ text }) => importsOf(text).some((specifier) => specifier.startsWith("@google/"))).map(({ path }) => path);
+    expect(sdkImporters).toEqual(["src/googleProviderAdapter.ts"]);
+    expect(importsOf(read(join(SRC_ROOT, "googleProviderAdapter.ts"))).filter((specifier) => !specifier.startsWith("./"))).toEqual(["@google/genai"]);
+    expect(SDK_IMPORTERS).toEqual({ "src/googleProviderAdapter.ts": "@google/genai" });
+    // Guard the guard: the allowance is file- and package-exact.
+    const allowed = (path: string, specifier: string) => SDK_IMPORTERS[path] === specifier;
+    expect(allowed("src/googleAttemptExecution.ts", "@google/genai")).toBe(false);
+    expect(allowed("src/fakeProvider.ts", "@google/genai")).toBe(false);
+    expect(allowed("src/credentialOpeningRun.ts", "@google/genai")).toBe(false);
+    expect(allowed("src/googleProviderAdapter.ts", "@runwayml/sdk")).toBe(false);
+    expect(allowed("src/googleProviderAdapter.ts", "@google/genai/node")).toBe(false);
+    expect(sources.filter(({ text }) => importsOf(text).some((specifier) => /@runwayml/.test(specifier))).map(({ path }) => path)).toEqual([]);
   });
 
   it("depends through the protocol package only on pure modules with no further dependency", () => {
@@ -339,12 +412,15 @@ describe("pre-provider orchestration boundary", () => {
   const orchestration = code(read(join(SRC_ROOT, "preProviderOrchestration.ts")));
 
   it("is called only by the fake-provider composer, never by credential opening", () => {
-    // R44B9: the composer is the only caller.
+    // R44B9: the composer is the only caller. R44B10A: the real Google
+    // composer is the second.
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit\(/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit|PreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
     ]);
     // R44B6Y: the acceptance adapter reuses only the injectable deadline-timer seam.
     // R44B6Z: so does the in-flight keeper. R44B9: the shared failure-report
@@ -355,6 +431,7 @@ describe("pre-provider orchestration boundary", () => {
       "src/acceptanceAdapter.ts",
       "src/attemptExecution.ts",
       "src/failureReportPolicy.ts",
+      "src/googleAttemptExecution.ts",
       "src/inFlightHeartbeat.ts",
       "src/inputMediaFailurePolicy.ts",
       "src/inputMediaRetrieval.ts",
@@ -465,18 +542,29 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
     sources.filter(({ path, text }) => !except.includes(path) && pattern.test(code(text))).map(({ path }) => path).sort();
 
   it("is composed only by the fake-provider composer: only the adapter builds the handler, only the composer builds the adapter", () => {
-    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual(["src/attemptExecution.ts"]);
+    // R44B10A: the real Google composer builds the adapter the same way; the
+    // provider adapter itself never owns acceptance durability.
+    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual(["src/attemptExecution.ts", "src/googleAttemptExecution.ts"]);
     expect(users(/createDurableAcceptanceHandler|AcceptanceNotDurableError/, [HANDLER])).toEqual([ADAPTER]);
     // R44B9: the composer and the provider contract import only the acceptance type.
-    expect(users(/acceptanceHandler/, [HANDLER])).toEqual([ADAPTER, "src/attemptExecution.ts", "src/providerExecutionContract.ts"]);
-    for (const path of ["attemptExecution.ts", "providerExecutionContract.ts"]) {
+    expect(users(/acceptanceHandler/, [HANDLER])).toEqual([ADAPTER, "src/attemptExecution.ts", "src/googleAttemptExecution.ts", "src/providerExecutionContract.ts"]);
+    expect(code(read(join(SRC_ROOT, "googleProviderAdapter.ts")))).not.toMatch(/acceptanceAdapter|acceptanceHandler|acceptanceJournal|AcceptanceRecord|DurableAcceptance/);
+    for (const path of ["attemptExecution.ts", "googleAttemptExecution.ts", "providerExecutionContract.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ WorkerProviderAcceptance \} from "\.\/acceptanceHandler\.js";/);
     }
     // R44B6Z: the in-flight keeper also takes the injected latch; R44B9: the
     // composer holds it.
     // R44B10P2: retrieval no longer holds the latch; the caller-side
     // input-media failure policy owns the host-fault decision.
-    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/attemptExecution.ts", "src/inFlightHeartbeat.ts", "src/inputMediaFailurePolicy.ts"]);
+    // R44B10A: the real Google composer holds the latch, never its adapter.
+    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([
+      ADAPTER,
+      HANDLER,
+      "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
+      "src/inFlightHeartbeat.ts",
+      "src/inputMediaFailurePolicy.ts",
+    ]);
     for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
     }
@@ -600,10 +688,13 @@ describe("submission-failed and submitted client boundary", () => {
     // R44B9: only the shared failure-report policy calls the failure report;
     // the adapter and the composer reach it only through that policy.
     expect(sources.filter(({ text }) => /\.reportSubmissionFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/failureReportPolicy.ts"]);
+    // R44B10A: the real Google composer reports its typed provider failures
+    // through the same shared policy.
     expect(sources.filter(({ text }) => /reportSubmissionFailureWithPolicy\(/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/acceptanceAdapter.ts",
       "src/attemptExecution.ts",
       "src/failureReportPolicy.ts",
+      "src/googleAttemptExecution.ts",
     ]);
   });
 });
@@ -616,9 +707,10 @@ describe("in-flight heartbeat keeper boundary", () => {
   const KEEPER = "src/inFlightHeartbeat.ts";
   const keeper = code(read(join(SRC_ROOT, "inFlightHeartbeat.ts")));
 
-  it("is called only by the fake-provider composer", () => {
+  it("is called only by the fake-provider and real Google composers", () => {
     expect(sources.filter(({ path, text }) => path !== KEEPER && /inFlightHeartbeat|runWithInFlightHeartbeat|InFlightHeartbeat/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
     ]);
   });
 
@@ -686,8 +778,30 @@ describe("state-root binding boundary", () => {
   const config = code(read(join(SRC_ROOT, "workerConfig.ts")));
   const binding = code(read(join(SRC_ROOT, "workerStateRoot.ts")));
 
-  it("reads no process environment anywhere in worker production source", () => {
-    expect(sources.filter(({ text }) => /process\.env|process\[["']env["']\]/.test(text)).map(({ path }) => path)).toEqual([]);
+  it("reads no process environment anywhere in worker production source except the one provider-SDK refusal", () => {
+    // R44B10A: the single allowed access checks the names the provider SDK
+    // reads, in the forbidden-environment module only; every other form stays
+    // forbidden everywhere.
+    const PROCESS_ENV = /process\.env|process\[["']env["']\]/;
+    const ALLOWED_PROCESS_ENV = "assertNoProviderEnvironment(process.env);";
+    expect(sources.filter(({ path, text }) => PROCESS_ENV.test(path === "src/providerEnvironment.ts" ? text.split(ALLOWED_PROCESS_ENV).join("") : text)).map(({ path }) => path)).toEqual([]);
+    const environmentModule = read(join(SRC_ROOT, "providerEnvironment.ts"));
+    expect(environmentModule.split(ALLOWED_PROCESS_ENV).length - 1).toBe(1);
+    expect(environmentModule.match(/process\.[A-Za-z]+/g)).toEqual(["process.env"]);
+    expect(environmentModule).toMatch(/export function assertNoProviderProcessEnvironment\(\): void \{\n  assertNoProviderEnvironment\(process\.env\);\n\}/);
+    // The real composer calls it; the adapter and the configuration never read the environment.
+    expect(sources.filter(({ text }) => /assertNoProviderProcessEnvironment\(\)/.test(code(text))).map(({ path }) => path).sort()).toEqual([
+      "src/googleAttemptExecution.ts",
+      "src/providerEnvironment.ts",
+    ]);
+    for (const path of ["googleProviderAdapter.ts", "googleProviderContract.ts"]) {
+      expect(/process\.|environment/i.test(code(read(join(SRC_ROOT, path)))), path).toBe(false);
+    }
+    // The configuration still reads only its injected environment.
+    expect(/process\./.test(code(read(join(SRC_ROOT, "workerConfig.ts"))))).toBe(false);
+    // Guard the guard: any other access, even in the allowed module, still fails.
+    expect(PROCESS_ENV.test("const key = process.env.GEMINI_API_KEY;".split(ALLOWED_PROCESS_ENV).join(""))).toBe(true);
+    expect(PROCESS_ENV.test('const env = process["env"];')).toBe(true);
     expect(/process\./.test(config)).toBe(false);
     // The binding reads only the platform and the effective UID, as host facts.
     expect(binding.match(/process\.[A-Za-z]+/g)?.sort()).toEqual(["process.geteuid", "process.geteuid", "process.platform"]);
@@ -724,16 +838,21 @@ describe("state-root binding boundary", () => {
 
   it("is bound only by the fake-provider composer and has no process entry point", () => {
     // R44B9: the composer binds the state root; nothing calls the credential-only entry.
+    // R44B10A: the real Google composer uses the same startup binding.
     expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /workerStateRoot|runConfiguredCredentialOpeningOnce|bindWorkerStateRoot/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /runConfiguredCredentialOpeningOnce/.test(code(text))).map(({ path }) => path)).toEqual([]);
-    // The composer takes the parsed configuration as a type; nothing loads it.
+    // The composers take the parsed configuration as a type; nothing loads it.
     expect(sources.filter(({ path, text }) => !["src/workerConfig.ts", "src/workerStateRoot.ts"].includes(path) && /workerConfig|loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== "src/workerConfig.ts" && /loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([]);
-    expect(code(read(join(SRC_ROOT, "attemptExecution.ts")))).toMatch(/import type \{ WorkerConfig \} from "\.\/workerConfig\.js";/);
+    for (const path of ["attemptExecution.ts", "googleAttemptExecution.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ WorkerConfig \} from "\.\/workerConfig\.js";/);
+    }
   });
 });
 
@@ -840,12 +959,32 @@ describe("object-storage input boundary", () => {
   const policy = code(read(join(SRC_ROOT, "inputMediaFailurePolicy.ts")));
   const raw = (path: string) => read(join(APP_ROOT, path));
 
-  it("is unwired: no source module calls it, and only the failure policy imports its classified error", () => {
-    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /retrieveVerifiedReferenceImage|parseReferenceImage/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  it("is wired only into the real Google composer; the policy reads its classified error and the adapter its verified-image type", () => {
+    // R44B10A supersedes "unwired": the real Google composer is the one
+    // production execution caller of retrieval. Retrieval stays provider-neutral.
+    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /retrieveVerifiedReferenceImage\(/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/googleAttemptExecution.ts",
+    ]);
+    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /parseReferenceImage/.test(code(text))).map(({ path }) => path)).toEqual([]);
     // R44B10P2: the caller-side policy reads only the classification off the thrown error.
-    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /inputMediaRetrieval/.test(code(text))).map(({ path }) => path)).toEqual([POLICY]);
+    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /inputMediaRetrieval/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/googleAttemptExecution.ts",
+      "src/googleProviderAdapter.ts",
+      POLICY,
+    ]);
     expect(policy).toMatch(/import \{ InputMediaRetrievalError, type InputMediaFailure \} from "\.\/inputMediaRetrieval\.js";/);
-    expect(sources.filter(({ path, text }) => path !== CONTRACT && /objectStorageContract/.test(code(text))).map(({ path }) => path)).toEqual([RETRIEVAL]);
+    expect(code(read(join(SRC_ROOT, "googleAttemptExecution.ts")))).toMatch(
+      /import \{ retrieveVerifiedReferenceImage, type VerifiedReferenceImage \} from "\.\/inputMediaRetrieval\.js";/,
+    );
+    // The adapter takes the verified bytes as a type only; it never reads storage.
+    expect(code(read(join(SRC_ROOT, "googleProviderAdapter.ts")))).toMatch(/import type \{ VerifiedReferenceImage \} from "\.\/inputMediaRetrieval\.js";/);
+    expect(retrieval).not.toMatch(/google|GOOGLE|interactions/);
+    // R44B10A: the real composer takes the injected store as a type only.
+    expect(sources.filter(({ path, text }) => path !== CONTRACT && /objectStorageContract/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/googleAttemptExecution.ts",
+      RETRIEVAL,
+    ]);
+    expect(code(read(join(SRC_ROOT, "googleAttemptExecution.ts")))).toMatch(/import type \{ ObjectStore \} from "\.\/objectStorageContract\.js";/);
     // The fake composer, credential opening and the provider contract stay untouched by it.
     for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "providerExecutionContract.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/objectStorage|ObjectStore|referenceImage|ReferenceImage|inputMedia/i);
@@ -976,9 +1115,15 @@ describe("input-failed client and input-media failure policy boundary", () => {
     for (const text of [policy, code(read(join(SRC_ROOT, "inputMediaRetrieval.ts")))]) expect(text).not.toMatch(/commercial-worker-protocol/);
   });
 
-  it("is reported only through the two-attempt policy, and the policy has no caller yet", () => {
+  it("is reported only through the two-attempt policy, called only by the real Google composer", () => {
     expect(sources.filter(({ text }) => /\.reportInputFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([POLICY]);
-    expect(sources.filter(({ path, text }) => path !== POLICY && /inputMediaFailurePolicy|handleInputMediaFailure|reportInputFailureWithPolicy/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // R44B10A supersedes "no caller yet": the real Google composer is the one caller.
+    expect(sources.filter(({ path, text }) => path !== POLICY && /inputMediaFailurePolicy|handleInputMediaFailure|reportInputFailureWithPolicy/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/googleAttemptExecution.ts",
+    ]);
+    const realComposer = code(read(join(SRC_ROOT, "googleAttemptExecution.ts")));
+    expect(realComposer.match(/handleInputMediaFailure\(/g)).toHaveLength(1);
+    expect(/reportInputFailureWithPolicy|reportInputFailed/.test(realComposer)).toBe(false);
     for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "preProviderOrchestration.ts", "acceptanceAdapter.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/reportInputFailed|input-failed|InputFailure|inputMedia/i);
     }
@@ -1030,6 +1175,133 @@ describe("input-failed client and input-media failure policy boundary", () => {
   });
 });
 
+// R44B10A: the first real-provider slice (architecture section 36, "First
+// real-provider adapter: Google GenAI (revision R44B10A)"): a closed
+// contract, one SDK adapter and one library-only composer that ends at
+// SUBMITTED. The fake path never reaches any of them.
+describe("real Google provider boundary (R44B10A)", () => {
+  const CONTRACT = "src/googleProviderContract.ts";
+  const ADAPTER = "src/googleProviderAdapter.ts";
+  const COMPOSER = "src/googleAttemptExecution.ts";
+  const contract = code(read(join(SRC_ROOT, "googleProviderContract.ts")));
+  const adapter = code(read(join(SRC_ROOT, "googleProviderAdapter.ts")));
+  const composer = code(read(join(SRC_ROOT, "googleAttemptExecution.ts")));
+
+  it("keeps the fake path isolated: no fake or shared module reaches the real Google modules", () => {
+    expect(sources.filter(({ path, text }) => ![ADAPTER, COMPOSER].includes(path) && /googleProviderAdapter|prepareGoogleSubmission/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => ![ADAPTER, COMPOSER].includes(path) && /googleProviderContract/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // Library-only: nothing calls the real composer and there is no entry point.
+    expect(sources.filter(({ path, text }) => path !== COMPOSER && /googleAttemptExecution|runGoogleProviderAttemptOnce/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "providerExecutionContract.ts", "preProviderOrchestration.ts", "inFlightHeartbeat.ts"]) {
+      const text = code(read(join(SRC_ROOT, path)));
+      expect(/google|genai|gemini|interactions\./i.test(text), path).toBe(false);
+    }
+    const scripts = (JSON.parse(read(join(APP_ROOT, "package.json"))) as { scripts: Record<string, string> }).scripts;
+    expect(Object.values(scripts).some((command) => /google/i.test(command))).toBe(false);
+  });
+
+  it("keeps the contract pure: the locked constants, the closed request members, no I/O", () => {
+    expect(importsOf(contract).sort()).toEqual(["./workerControlClient.js", "./workerError.js"]);
+    expect(contract).toMatch(/export const GOOGLE_PROVIDER_ID = "GOOGLE_GENAI";/);
+    expect(contract).toMatch(/export const GOOGLE_MODEL = "gemini-omni-1\.1-flash";/);
+    expect(contract).toMatch(/export const GOOGLE_PROMPT_MAX_CODE_UNITS = 1000;/);
+    expect(contract).toMatch(/export const GOOGLE_RESOLUTION = "720p";/);
+    expect(contract).toMatch(/export const GOOGLE_MAX_REFERENCE_IMAGE_BYTES = 10_485_760;/);
+    expect(contract).toMatch(/export const GOOGLE_CREATE_TIMEOUT_MS = 60000;/);
+    expect(contract).toMatch(/export const GOOGLE_CREATE_MAX_RETRIES = 0;/);
+    expect(contract).toMatch(/export const GOOGLE_API_BASE_URL = "https:\/\/generativelanguage\.googleapis\.com\/";/);
+    expect(contract).toMatch(/export const GOOGLE_API_VERSION = "v1beta";/);
+    expect(contract).toMatch(/export const GOOGLE_RESPONSE_FORMAT = Object\.freeze\(\{ type: "video", delivery: "uri", resolution: GOOGLE_RESOLUTION \} as const\);/);
+    expect(contract).toMatch(/export const GOOGLE_INTERACTION_FLAGS = Object\.freeze\(\{ background: true, store: true, stream: false \} as const\);/);
+    expect(contract).toMatch(/const REQUEST_MEMBERS = Object\.freeze\(\["prompt", "referenceImage", "resolution"\]\);/);
+    // No normalisation, I/O, environment, credential, storage or provider call.
+    expect(/\.trim\(|toLowerCase|toUpperCase|normali[sz]e|replace\(|fetch\s*\(|process\.|node:|getObject|retrieveVerifiedReferenceImage|parseReferenceImage|opener|credential|journal|interactions|@google/i.test(contract)).toBe(false);
+  });
+
+  it("confines the SDK to one adapter that creates once with the pinned options and owns nothing else", () => {
+    expect(importsOf(adapter).sort()).toEqual([
+      "./credentialOpeningRun.js",
+      "./googleProviderContract.js",
+      "./inputMediaRetrieval.js",
+      "./providerExecutionContract.js",
+      "./workerError.js",
+      "@google/genai",
+    ]);
+    expect(adapter).toMatch(/import \{ GoogleGenAI \} from "@google\/genai";/);
+    expect(adapter).toMatch(/import type \{ SealedCredentialCapability \} from "\.\/credentialOpeningRun\.js";/);
+    // One client, explicitly the Gemini Developer API; one create with exactly zero retries and 60000 ms.
+    expect(adapter.match(/new Client\(\{/g)).toHaveLength(1);
+    expect(adapter).toMatch(/vertexai: false,\s*apiVersion: GOOGLE_API_VERSION,\s*httpOptions: \{ baseUrl: GOOGLE_API_BASE_URL, fetch: dependencies\.transport \},/);
+    expect(adapter.match(/\.interactions\.create\(/g)).toHaveLength(1);
+    expect(adapter).toMatch(/\{\s*maxRetries: GOOGLE_CREATE_MAX_RETRIES,\s*timeout: GOOGLE_CREATE_TIMEOUT_MS,\s*\}/);
+    expect(adapter.match(/maxRetries/g)).toHaveLength(1);
+    expect(adapter).toMatch(/if \(dispatched \|\| client === null \|\| body === null\) throw new WorkerError\("PROVIDER_CONTRACT_VIOLATION"\);/);
+    // The credential is opened once, through the sealed capability, only for construction.
+    expect(adapter.match(/\.openOnceFor\(/g)).toHaveLength(1);
+    // The raw Interaction.id, unchanged, handed to the awaited callback.
+    expect(adapter).toMatch(/await onAccepted\(\{ provider: GOOGLE_PROVIDER_ID, providerExecutionId: id \}\);\s*return Object\.freeze\(\{ kind: "ACCEPTED" \}\);/);
+    expect(adapter.match(/providerExecutionId/g)).toHaveLength(1);
+    // Never polling, output, completion, control plane, journal, storage, engine, environment, loop, retry or message text.
+    const FORBIDDEN_IN_ADAPTER =
+      /\bpoll|interactions\.get|operations\.|download|output|complet|reportSubmitted|reportSubmissionFailed|reportInputFailed|recoverAcceptance|WorkerControlClient|journal|getObject|ObjectStore|node:fs|readFile|mediaRoot|sourceImagePath|process\.|src\/execution|\.\.\/\.\.\/|\bfor\s*\(|\bwhile\s*\(|setTimeout|setInterval|retry\(|\.message\b|String\(error\)|console\.|log\(/i;
+    expect(FORBIDDEN_IN_ADAPTER.test(adapter)).toBe(false);
+    // Guard the guards.
+    expect(FORBIDDEN_IN_ADAPTER.test("await client.interactions.get(id);")).toBe(true);
+    expect(FORBIDDEN_IN_ADAPTER.test("if (error.message.includes('quota')) return DEFINITIVE;")).toBe(true);
+    // The locked definitive code set, exactly.
+    expect(adapter).toMatch(
+      /export const GOOGLE_DEFINITIVE_ERROR_CODES = Object\.freeze\(\[\s*"invalid_request",\s*"failed_precondition",\s*"parameter_unknown",\s*"authentication",\s*"payment_required",\s*"permission_denied",\s*"not_found",\s*"model_not_found",\s*"out_of_range",\s*"rate_limit_exceeded",\s*"quota_exceeded",\s*"too_many_requests",\s*"unimplemented",\s*\] as const\);/,
+    );
+  });
+
+  it("composes the locked order once, with no client before the permit and no direct control-plane request", () => {
+    const at = (needle: string) => {
+      const index = composer.indexOf(needle);
+      expect({ needle, found: index >= 0 }).toEqual({ needle, found: true });
+      return index;
+    };
+    const order = [
+      "assertNoProviderProcessEnvironment();",
+      "await bindWorkerStateRoot(config,",
+      "await openLeasedCredentialOnce(",
+      "admitted.request = admitGoogleLease(lease);",
+      "{ retainSealedCredential: true },",
+      "await retrieveVerifiedReferenceImage(",
+      "await handleInputMediaFailure(",
+      "await obtainPreProviderPermit({ journal, client, deadlineTimer: timer }, executionAttemptId, proof);",
+      "await prepareGoogleSubmission(",
+      "createAcceptanceAdapter({ lease: context.lease, accountId: context.accountId, permit }, proof,",
+      "await runWithInFlightHeartbeat(",
+      "() => operation.execute(onAccepted),",
+    ].map(at);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    for (const pattern of [
+      /bindWorkerStateRoot\(/g,
+      /openLeasedCredentialOnce\(/g,
+      /retrieveVerifiedReferenceImage\(/g,
+      /handleInputMediaFailure\(/g,
+      /obtainPreProviderPermit\(/g,
+      /prepareGoogleSubmission\(/g,
+      /createAcceptanceAdapter\(/g,
+      /runWithInFlightHeartbeat\(/g,
+      /\.execute\(/g,
+    ]) {
+      expect(composer.match(pattern), String(pattern)).toHaveLength(1);
+    }
+    expect(composer).toMatch(/maxBytes: GOOGLE_MAX_REFERENCE_IMAGE_BYTES/);
+    // Every control-plane request goes through an existing module; no SDK, client construction, loop, retry or polling.
+    expect(/client\.[A-Za-z]+\(/.test(composer)).toBe(false);
+    expect(/@google|new [A-Z][A-Za-z]*\(\{|GoogleGenAI|interactions|requestCredentialGrant|process\.env|\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|retry\(|backoff|\bpoll|download|output|fetch\s*\(|console\./i.test(composer)).toBe(false);
+    // Two typed provider-failure reports through the shared policy, never a direct one.
+    expect(composer.match(/reportSubmissionFailureWithPolicy\(/g)).toHaveLength(2);
+    expect(composer).toMatch(/outcome: "DEFINITIVELY_REJECTED", failureCode: "PROVIDER_REJECTED_DEFINITIVELY"/);
+    expect(composer).toMatch(/outcome: "OUTCOME_UNKNOWN", failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS"/);
+    // Host-fault trips: refused admission, a missing continuation, a pre-dispatch
+    // preparation failure, a contract violation, and an unacceptable success.
+    expect(composer.match(/latch\.trip\(\)/g)).toHaveLength(5);
+  });
+});
+
 describe("process and package boundary", () => {
   it("is not started by default and is not imported by commercial-api", () => {
     const WORKER_APP = /commercial-worker(?!-protocol)/;
@@ -1043,9 +1315,16 @@ describe("process and package boundary", () => {
     expect(Object.values(scripts).some((command) => /\bnode\b|start|dist\//.test(command))).toBe(false);
   });
 
-  it("depends at runtime only on the local protocol package, and on the commercial-api toolchain for development", () => {
+  it("depends at runtime only on the local protocol package and the exact provider SDK, and on the commercial-api toolchain for development", () => {
     const manifest = JSON.parse(read(join(APP_ROOT, "package.json"))) as Record<string, unknown>;
-    expect(manifest.dependencies).toEqual({ [PROTOCOL_PACKAGE]: "file:../../packages/commercial-worker-protocol" });
+    // R44B10A: exactly @google/genai 2.24.0 (no range), owned by the worker package.
+    expect(manifest.dependencies).toEqual({ "@google/genai": "2.24.0", [PROTOCOL_PACKAGE]: "file:../../packages/commercial-worker-protocol" });
+    const lock = JSON.parse(read(join(APP_ROOT, "package-lock.json"))) as { packages: Record<string, { version?: string; dependencies?: Record<string, string> }> };
+    expect(lock.packages[""]?.dependencies?.["@google/genai"]).toBe("2.24.0");
+    expect(lock.packages["node_modules/@google/genai"]?.version).toBe("2.24.0");
+    expect(Object.keys(lock.packages).some((name) => /node_modules\/@runwayml\//.test(name))).toBe(false);
+    // The worker's own installation, never the root's hoisted copy.
+    expect(existsSync(join(APP_ROOT, "node_modules", "@google", "genai", "package.json"))).toBe(true);
     const api = JSON.parse(read(join(API_ROOT, "package.json"))) as { devDependencies: Record<string, string> };
     expect(manifest.devDependencies).toEqual({ "@types/node": api.devDependencies["@types/node"], typescript: api.devDependencies.typescript, vitest: api.devDependencies.vitest });
   });

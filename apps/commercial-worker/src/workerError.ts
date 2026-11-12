@@ -52,6 +52,10 @@ export type WorkerErrorCode =
   // R44B9: a fake-only worker leased an attempt for another provider; it
   // stopped before any credential grant and left the lease to expire.
   | "LEASED_PROVIDER_INCOMPATIBLE"
+  // R44B10A: the leased attempt's authorized request (generationRequest or
+  // cost unit) is outside the locked real-provider contract; an issuer
+  // invariant violation refused before any credential grant.
+  | "LEASED_REQUEST_INVALID"
   // R44B9: a provider operation broke the submission-phase contract (an
   // untyped throw, ACCEPTED without durable acceptance, or a failure after it).
   | "PROVIDER_CONTRACT_VIOLATION"
@@ -89,6 +93,7 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   PROVIDER_ACCEPTANCE_INVALID: "The provider acceptance is invalid; new work is blocked.",
   ACCEPTANCE_JOURNAL_WRITE_FAILED: "The acceptance record could not be made durable; new work is blocked.",
   LEASED_PROVIDER_INCOMPATIBLE: "The leased attempt's provider is not supported by this worker; new work is blocked.",
+  LEASED_REQUEST_INVALID: "The leased attempt's authorized request is outside the supported contract; new work is blocked.",
   PROVIDER_CONTRACT_VIOLATION: "The provider operation broke its submission contract; new work is blocked.",
   OBJECT_REFERENCE_INVALID: "The input media reference is invalid.",
   OBJECT_NOT_FOUND: "The input media object was not found.",

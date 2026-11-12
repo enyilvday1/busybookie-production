@@ -1,4 +1,4 @@
-import { parseSealedEnvelope, validateSealingContext, type CredentialOpener } from "./credentialContracts.js";
+import { parseSealedEnvelope, validateSealingContext, type CredentialOpener, type CredentialSealingContext } from "./credentialContracts.js";
 import { assertNoProviderEnvironment, type WorkerEnvironment } from "./providerEnvironment.js";
 import type { LeaseProof, WorkerControlClient, WorkerLease } from "./workerControlClient.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
@@ -96,14 +96,79 @@ async function openAndDiscard(opener: CredentialOpener, envelope: unknown, conte
 // logged or persisted as a whole. It holds the lease proof the control-plane
 // requests need, and never the plaintext credential, envelope or opening
 // context.
+// R44B10A: it also carries the lease's authoritative model, generation
+// request and expected-cost cap, which a real-provider composer needs; all
+// are non-secret lease data.
 export type OpenedAttemptContext = Readonly<{
-  lease: Readonly<Pick<WorkerLease, "executionJobId" | "executionAttemptId" | "attemptNumber" | "provider" | "generationRequestSha256">>;
+  lease: Readonly<
+    Pick<
+      WorkerLease,
+      "executionJobId" | "executionAttemptId" | "attemptNumber" | "provider" | "model" | "generationRequest" | "generationRequestSha256" | "expectedCostCap"
+    >
+  >;
   // From the grant's validated opening context.
   accountId: string;
   proof: LeaseProof;
 }>;
 
-export type CredentialOpeningOutcome = Readonly<{ status: "NO_WORK" }> | Readonly<{ status: "CREDENTIAL_OPENED"; context: OpenedAttemptContext }>;
+// R44B10A: the scoped sealed-credential capability. It keeps only the
+// validated sealed envelope, the validated opening context and the opener,
+// bound to the exact granted attempt and provider, so the same single grant
+// can be opened once more after the pre-provider permit. It never holds
+// plaintext, makes no grant request, and serialises to a fixed marker; its
+// fields are private, so no log, audit or journal can carry them.
+export class SealedCredentialCapability {
+  readonly #opener: CredentialOpener;
+  readonly #envelope: unknown;
+  readonly #context: CredentialSealingContext;
+  readonly #executionAttemptId: string;
+  readonly #provider: string;
+  #used = false;
+
+  constructor(opener: CredentialOpener, envelope: unknown, context: CredentialSealingContext, binding: Readonly<{ executionAttemptId: string; provider: string }>) {
+    this.#opener = opener;
+    this.#envelope = envelope;
+    this.#context = context;
+    this.#executionAttemptId = binding.executionAttemptId;
+    this.#provider = binding.provider;
+  }
+
+  // Opens the exact granted credential at most once, for `use` only, and only
+  // for the bound attempt and provider. The plaintext reference is dropped as
+  // soon as `use` returns; JavaScript gives no zeroisation guarantee.
+  async openOnceFor<T>(binding: Readonly<{ executionAttemptId: string; provider: string }>, use: (credential: string) => T): Promise<T> {
+    if (this.#used || binding.executionAttemptId !== this.#executionAttemptId || binding.provider !== this.#provider) {
+      throw new WorkerError("CREDENTIAL_OPEN_FAILED");
+    }
+    this.#used = true;
+    let credential: string | null = null;
+    try {
+      credential = await this.#opener.open(this.#envelope, this.#context as Parameters<CredentialOpener["open"]>[1]);
+    } catch {
+      throw new WorkerError("CREDENTIAL_OPEN_FAILED");
+    }
+    try {
+      if (typeof credential !== "string" || credential.length === 0) throw new WorkerError("CREDENTIAL_OPEN_FAILED");
+      return use(credential);
+    } finally {
+      credential = null;
+    }
+  }
+
+  toJSON(): string {
+    return "[sealed credential capability]";
+  }
+}
+
+export type CredentialOpeningOutcome =
+  | Readonly<{ status: "NO_WORK" }>
+  // `sealedCredential` exists only when the caller asked to retain it.
+  | Readonly<{ status: "CREDENTIAL_OPENED"; context: OpenedAttemptContext; sealedCredential?: SealedCredentialCapability }>;
+
+export type CredentialOpeningOptions = Readonly<{
+  // R44B10A: keep the scoped sealed capability for one post-permit re-open.
+  retainSealedCredential?: boolean;
+}>;
 
 // Runs on the authoritative lease before any credential grant; a throw stops
 // the run there (the grant, opening and everything after never happen).
@@ -125,7 +190,11 @@ export async function runCredentialOpeningOnce(dependencies: CredentialOpeningRu
 
 // The one authoritative startup -> lease -> admission -> grant -> open path,
 // shared by runCredentialOpeningOnce and the fake-provider composer.
-export async function openLeasedCredentialOnce(dependencies: CredentialOpeningRunDependencies, admitLease?: LeaseAdmission): Promise<CredentialOpeningOutcome> {
+export async function openLeasedCredentialOnce(
+  dependencies: CredentialOpeningRunDependencies,
+  admitLease?: LeaseAdmission,
+  options: CredentialOpeningOptions = {},
+): Promise<CredentialOpeningOutcome> {
   const log = dependencies.log ?? (() => {});
   const now = dependencies.now ?? (() => new Date());
   const fail = (stage: WorkerLogEvent["stage"], error: unknown, context: Pick<WorkerLogEvent, "executionAttemptId" | "provider"> = {}): never => {
@@ -201,15 +270,23 @@ export async function openLeasedCredentialOnce(dependencies: CredentialOpeningRu
   if (!opened) return fail("OPEN", new WorkerError("CREDENTIAL_OPEN_FAILED"), safe);
 
   log({ stage: "DONE", outcome: "OK", ...safe });
+  const sealedCredential =
+    options.retainSealedCredential === true
+      ? new SealedCredentialCapability(dependencies.opener, envelope, context, { executionAttemptId: lease.executionAttemptId, provider: lease.provider })
+      : undefined;
   return Object.freeze({
     status: "CREDENTIAL_OPENED",
+    ...(sealedCredential === undefined ? {} : { sealedCredential }),
     context: Object.freeze({
       lease: Object.freeze({
         executionJobId: lease.executionJobId,
         executionAttemptId: lease.executionAttemptId,
         attemptNumber: lease.attemptNumber,
         provider: lease.provider,
+        model: lease.model,
+        generationRequest: lease.generationRequest,
         generationRequestSha256: lease.generationRequestSha256,
+        expectedCostCap: lease.expectedCostCap,
       }),
       accountId: context.accountId,
       // The grant already answered exactly this attempt and fencing generation.

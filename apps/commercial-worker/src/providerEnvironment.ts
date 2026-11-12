@@ -50,3 +50,11 @@ export function assertNoProviderEnvironment(environment: WorkerEnvironment): voi
     throw new WorkerError("FORBIDDEN_PROVIDER_ENVIRONMENT");
   }
 }
+
+// R44B10A: the same refusal applied to the environment a provider SDK itself
+// reads at client construction, not only to an injected copy. Only the
+// variable names are inspected; no value is read, compared or reported. This
+// is the worker's single process-environment access.
+export function assertNoProviderProcessEnvironment(): void {
+  assertNoProviderEnvironment(process.env);
+}

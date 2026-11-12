@@ -296,7 +296,28 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   `SUBMITTED`; definitive and ambiguous failure composition is required,
   through one shared submission-failure policy; tier-3 success and failure
   tests; no real network; provider flags remain NO: introduction, sections
-  36 and 37).
+  36 and 37); R44B9B (R44B9 published in commit
+  e57d2b77af6f61d8548e39c84f4741874806ea8f: `providerExecutionContract.ts`
+  extended with the create-phase contract rather than duplicated; the
+  production `BUSYBOOKIE_FAKE` provider `fakeProvider.ts` and the
+  production composer `runConfiguredFakeProviderAttemptOnce`
+  (`attemptExecution.ts`) added; `openLeasedCredentialOnce` added as the
+  shared opening primitive; the shared `failureReportPolicy.ts` added (a
+  naming-only deviation from the optional `submissionFailurePolicy.ts`),
+  and the acceptance adapter uses it; a development-only barrier; the
+  non-fake guard runs before the grant; the permit precedes construction;
+  exactly one dispatch; the fake receives no credential; the callback is
+  awaited and is the only provider-execution-ID authority; the keeper
+  wraps create plus acceptance; success reaches `SUBMITTED`; definitive
+  and ambiguous failure composition implemented; no provider retry, no
+  provider network and no real-provider import or SDK; 656/656 worker
+  unit, 40/40 worker integration and 558/558 commercial-api DB tests,
+  typecheck clean; all 18 R44B9A criteria satisfied;
+  `FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES` and
+  `PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=YES`;
+  `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO` and
+  `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`: introduction, sections 15,
+  17, 18, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -1450,6 +1471,18 @@ checks completed; holding it is not itself a security boundary. No provider
 abstraction, provider construction or invocation exists. The contract below
 is unchanged.
 
+**R44B9 reconciliation (R44B9B).** Since R44B9 (commit
+e57d2b77af6f61d8548e39c84f4741874806ea8f), the only production caller of
+`obtainPreProviderPermit` is the development-only fake-provider composer
+`runConfiguredFakeProviderAttemptOnce` (`attemptExecution.ts`), which
+constructs the provider operation only after the permit succeeds. The
+"no production path calls" wording above describes the state before R44B9;
+`runCredentialOpeningOnce` still does not call it. In this document "live
+execution" means real or live provider submission, which stays disabled
+(`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`), so the
+`*_USED_BY_LIVE_EXECUTION=NO` keys are unchanged. Section 36, "First
+fake-provider execution slice", records the implementation.
+
 **Locked decision (R44B6V0; implemented by R44B6V).** The orchestration
 boundary immediately before provider invocation. It covers the per-attempt
 journal preflight, the `SUBMITTING` acknowledgement sequence, its request
@@ -1580,7 +1613,10 @@ through its strict response parser, with the closed worker code
 only caller is the R44B6V orchestration, which itself has no production
 caller (R44B6V1). The pre-provider heartbeat policy below is implemented by
 that orchestration but not wired into live execution. The contract below is
-unchanged.
+unchanged. (R44B9B.) Since R44B9 the client is reached only through the
+orchestration and the in-flight keeper, and both are called in production
+only by the development-only fake-provider composer (section 36); no
+real-provider or live path calls it.
 
 **Locked decision (R44B6W0; client implemented by R44B6W).** The
 control-plane route is already implemented (section 10; section 12):
@@ -1731,6 +1767,18 @@ PRE_PROVIDER_HEARTBEAT_ABORT_SIGNAL_EXTENDS_TO_PROVIDER_CALL=NO
 there is no `workerError.ts`, acceptance-component, commercial-api,
 protocol, migration, engine, provider-adapter, manifest or lockfile change,
 and no provider is invoked. The contract below is unchanged.
+
+**R44B9 reconciliation (R44B9B).** R44B9 wires the keeper for the first
+time, as `runWithInFlightHeartbeat(() => operation.execute(onAccepted))` in
+the development-only fake-provider composer, which is its only production
+caller. Its lifetime is the provider create plus the awaited acceptance
+callback; polling is excluded, and heartbeat authority loss does not cancel
+the operation. The boundary statements below that the keeper has no
+production caller, and the "provider-failure composition gap" below,
+describe the state before R44B9. The keeper itself still contains no
+failure reporting; generic provider-failure composition now lives in the
+composer and the shared `failureReportPolicy.ts` (section 36). No
+real-provider or live path calls the keeper.
 
 - **API.** `runWithInFlightHeartbeat<T>(context, operation)`. The context
   holds only:
@@ -2217,8 +2265,8 @@ journal before the credential-opening run may request a lease. Only a
 `CLEAR` local startup result permits fresh work. The implemented local
 phase and its limits are recorded under "Startup reconciliation" below.
 
-**What is not implemented.** No provider submission flow writes a new
-acceptance record or calls the `submitted` client. (R44B6Y; recorded by
+**What was not implemented before R44B9.** No provider submission flow
+writes a new acceptance record or calls the `submitted` client. (R44B6Y; recorded by
 R44B6Y1.) The worker components that implement the chain exist (the inner
 durable handler and the outer acceptance adapter, section 18), but no
 provider path calls them. The required chain is still unwired to live
@@ -2231,15 +2279,26 @@ provider definitively accepts
 -> outer adapter resolves; only then may provider polling begin
 ```
 
+(R44B9B.) R44B9 wires this chain for the development-only fake provider
+only: the production composer `runConfiguredFakeProviderAttemptOnce` passes
+the acceptance adapter as the awaited callback of the `BUSYBOOKIE_FAKE`
+operation, which then writes the acceptance record and reports `submitted`
+(or hands over to recovery). The "no provider path" wording above describes
+the state before R44B9. No real-provider or live submission flow exists, and
+polling is still not wired (section 36, "First fake-provider execution
+slice").
+
 The control-plane `acceptance-recovery` route is implemented (R44B6R,
 section 18), and worker startup reconciliation now calls it through the
 worker acceptance-recovery client (R44B6S, "Startup reconciliation" below).
 The control-plane `submission-failed` route is implemented (R44B6T,
-section 18). Its worker client is called only by the unused acceptance
-adapter (R44B6Y). Provider execution of any kind
-(fake or real) remains unimplemented. Startup makes no provider call; it resolves valid
-published acceptance evidence only through an exact control-plane
-acknowledgement.
+section 18). Its worker client was first called only by the acceptance
+adapter (R44B6Y); since R44B9 its only caller is the shared
+`failureReportPolicy.ts`, used by the acceptance adapter and the
+development-only fake composer. Development-only fake-provider execution is
+implemented (R44B9); real-provider execution remains unimplemented. Startup
+makes no provider call; it resolves valid published acceptance evidence only
+through an exact control-plane acknowledgement.
 
 **State root.** R44B6P takes the state root as explicit worker composition
 input. (R44B8A.) The configuration key `COMMERCIAL_WORKER_STATE_ROOT`, its
@@ -2247,7 +2306,11 @@ validation and the deployment binding to
 `/var/lib/busybookie/commercial-worker` are now locked ("State-root binding"
 below). R44B8 implements them (recorded by R44B8B) as library code with no
 production caller: `loadWorkerConfig` reads the key from an injected
-object, and `bindWorkerStateRoot` binds the journal to it.
+object, and `bindWorkerStateRoot` binds the journal to it. (R44B9B.) Since
+R44B9 the development-only fake-provider composer calls
+`bindWorkerStateRoot` (with an already parsed `WorkerConfig`); nothing calls
+`loadWorkerConfig` or `runConfiguredCredentialOpeningOnce` in production,
+and no alternate state-root mechanism exists.
 
 **Temporary files and evidence:**
 
@@ -3469,6 +3532,28 @@ only. There is no engine, provider, commercial-api, protocol, migration,
 manifest or lockfile change, and no provider is invoked. The contract below
 is unchanged.
 
+**R44B9 reconciliation (R44B9B).** Since R44B9 (commit
+e57d2b77af6f61d8548e39c84f4741874806ea8f):
+
+- the development-only fake-provider composer is the only production
+  caller of `createAcceptanceAdapter`, and holds the host-fault latch;
+- the adapter's best-effort failure report goes through the shared
+  `failureReportPolicy.ts` (`reportSubmissionFailureWithPolicy`), the only
+  caller of `client.reportSubmissionFailed`. The exported
+  `ACCEPTANCE_FAILURE_REPORT_*` names keep identical values, and the
+  adapter's behaviour is unchanged;
+- the composer tracks the callback locally (`NONE`, `INVOKED`, `COMPLETED`,
+  `REJECTED`) only to check the provider operation's contract; the adapter
+  and journal stay the durable authority, and a callback rejection rethrows
+  the adapter's own error with no second report.
+
+Statements below that the adapter is unused, or that no provider path calls
+it, describe the state before R44B9. No real-provider or live path calls it,
+so `WORKER_ACCEPTANCE_HANDLER_USED_BY_LIVE_EXECUTION=NO` is unchanged. The
+one-attempt composer starts no further attempt; a future multi-attempt
+runner must still consult the latch before starting another provider
+attempt.
+
 - **Inner durable handler.** `createDurableAcceptanceHandler` accepts the
   worker-local `{provider, providerExecutionId}` shape.
   - Provider equality is exact.
@@ -3997,7 +4082,8 @@ ACCEPTANCE_HOST_FAULT_LATCH_RUNTIME_CLEAR_ALLOWED=NO
 `{fencingCounter, leaseToken, providerExecutionId}`. It exists only in the
 explicitly composed worker-control router; the default process answers 404.
 
-**Status.** The route exists, but the worker submission flow does not.
+**Status.** The route exists. A real-provider worker submission flow does
+not; since R44B9 only the development-only fake-provider flow uses it.
 - **Implemented (R44B6P):** the acceptance journal (section 17) and a strict
   worker client for this route.
 - **Implemented (R44B6Q):** local startup journal reconciliation and the
@@ -4012,11 +4098,19 @@ explicitly composed worker-control router; the default process answers 404.
   acceptance handler, the outer acceptance adapter, the worker
   `submission-failed` client and the host-fault latch ("Acceptance handler
   and adapter" above). The adapter is the only caller of the `submitted`
-  and `submission-failed` clients.
-- **Not wired:** no provider submission flow calls the adapter, so no live
-  execution writes new acceptance records or reports `submitted` or
-  `submission-failed`.
-- **Not implemented:** worker provider execution.
+  client; since R44B9 the `submission-failed` client is called only by the
+  shared `failureReportPolicy.ts`, which the adapter and the fake composer
+  use.
+- **Implemented (R44B9; recorded by R44B9B):** development-only
+  fake-provider execution. The production composer
+  `runConfiguredFakeProviderAttemptOnce` with the production
+  `BUSYBOOKIE_FAKE` provider reaches this route through the acceptance
+  adapter and ends at `SUBMITTED` (section 36, "First fake-provider
+  execution slice").
+- **Not wired:** no real-provider or live submission flow calls the
+  adapter, so no live execution writes new acceptance records or reports
+  `submitted` or `submission-failed`.
+- **Not implemented:** real-provider worker execution.
   Valid published acceptance is resolved at startup only through an exact
   `acceptance-recovery` acknowledgement; otherwise it keeps blocking new work.
 
@@ -4360,7 +4454,11 @@ No live worker flow calls it. (R44B6Y0 locks its worker client and restricts
 its acceptance-path use to failures before an exact durable acceptance
 record exists; R44B6Y implements that client, `reportSubmissionFailed`,
 called only by the unused acceptance adapter; section 18, "Acceptance
-handler and adapter".) The implementation follows the contract below
+handler and adapter". Since R44B9 its only caller is the shared
+`failureReportPolicy.ts`, used by the acceptance adapter and the
+development-only fake-provider composer, which reports typed fake
+definitive and ambiguous failures through it; no real-provider or live
+flow calls it.) The implementation follows the contract below
 exactly: the first transition requires the live submission epoch; replay is
 authorised by the immutable original-submission provenance, with
 `leaseToken` syntactically required but never replay authority; an exact
@@ -5519,7 +5617,8 @@ each slice under its own authorised gate:
    control-plane `submission-failed` route is implemented (R44B6T). Its
    worker client and the acceptance adapter that alone calls `submitted`
    and `submission-failed` are implemented (R44B6Y); no live worker flow
-   calls them.
+   calls them. (R44B9.) The development-only fake-provider composer is
+   their only production caller.
    Neither this step nor any recovery-lease step may
    grant `SUBMITTED` heartbeat authority to any lease other than the exact
    live-route epoch.
@@ -5564,8 +5663,9 @@ do not complete the whole-chain crash-point coverage required by slice 7.
 R44B7 completes it ("Whole-chain crash-point test contract" below).
 
 The worker client for the `SUBMITTING` acknowledgement is implemented
-(R44B6U, section 15: single-shot and client-only); no execution path calls
-it yet.
+(R44B6U, section 15: single-shot and client-only). (R44B9.) It is called
+only through the pre-provider orchestration, whose only production caller
+is the development-only fake-provider composer.
 
 **A fake provider adapter may execute only after slices 1 to 7 exist.** As
 of R44B8B, **no item is missing: the pre-fake-provider gate is complete.**
@@ -5623,6 +5723,13 @@ starting a separate fake-provider execution slice are satisfied. That does
 The R44B7 controlled thunk was test-only composition, not a fake-provider
 implementation.
 
+(R44B9B.) Those bullets state what completing the gate meant on its own.
+Development-only fake-provider execution has since been implemented by
+R44B9 as a separate post-gate milestone ("First fake-provider execution
+slice" below). The remaining bullets still hold: there is no worker process
+runner, no real-provider adapter, no real-provider execution and no live
+provider submission. The R44B7 thunk remains test-only and does not count.
+
 **Next-slice boundary.** The next phase **may** begin a separate
 fake-provider execution slice. That slice must lock and address its own
 contract, including where applicable:
@@ -5637,18 +5744,24 @@ contract, including where applicable:
 
 R44B8B designs and implements none of it. (R44B9A.) That contract is now
 locked in "First fake-provider execution slice" below, as a new post-gate
-phase. The gate stays complete.
+phase. The gate stays complete. (R44B9.) That slice is implemented, in
+commit e57d2b77af6f61d8548e39c84f4741874806ea8f, recorded by R44B9B.
 
 **Separate items, still open.** These are separate readiness domains that
 neither block nor reopen this gate:
 
 - the live-route `SUBMITTED` lease and capacity lifecycle (below);
-- production provider-failure composition;
+- real-provider-specific failure classification in the future real
+  adapters. (R44B9.) The generic production provider-failure composition is
+  implemented;
 - the SDK create-retry obligation of the future provider-create adapter;
 - section 24's credential-version retention and destruction lifecycle,
   which stays launch-blocking.
 
-The provider flags stay NO.
+`REAL_PROVIDER_EXECUTION_IMPLEMENTED` and
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED` stay NO. (R44B9B.)
+`FAKE_PROVIDER_EXECUTION_IMPLEMENTED` and
+`PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED` are YES.
 
 The following may come after the first fake-provider slice, which stops at
 `SUBMITTED`, because they act only after a durable provider identity exists
@@ -5674,11 +5787,19 @@ or before any provider authority exists:
 
 ```text
 FAKE_PROVIDER_EXECUTION_GATE=SECTION_36_SLICES_1_TO_7
-FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
+FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES
 REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
 ```
 
 ### Whole-chain crash-point test contract (revision R44B7A)
+
+**R44B9 reconciliation (R44B9B).** This subsection records R44B7 and is
+unchanged. Its statements that no production provider orchestrator exists
+and that production provider-failure composition is missing describe the
+state at R44B7. R44B9 has since implemented both, for development-only
+fake-provider execution only ("First fake-provider execution slice"
+below), keeping the order tested here. The R44B7 `controlledProvider()`
+thunk remains test-only and is not the implementation.
 
 **Status (R44B7; recorded by R44B7B).** Implemented in commit
 d76128011804013c1d40877bbe66f435b4f78c03 as one new test-only integration
@@ -6086,9 +6207,321 @@ WHOLE_CHAIN_CRASH_TESTS_STATE_ROOT_BINDING_INCLUDED=NO
 
 ### First fake-provider execution slice (revision R44B9A)
 
-**Locked decision (R44B9A; not implemented).** This is a new post-gate
-execution phase; `PRE_FAKE_PROVIDER_GATE` stays **COMPLETE** and is not
-reopened. The first lock attempt was blocked because the proposed identifier
+**Status (R44B9; recorded by R44B9B).** Implemented in commit
+e57d2b77af6f61d8548e39c84f4741874806ea8f, in `apps/commercial-worker` only
+(10 files, 1678 insertions, 74 deletions):
+
+- modified: `src/acceptanceAdapter.ts`, `src/credentialOpeningRun.ts`,
+  `src/providerExecutionContract.ts`, `src/workerError.ts`,
+  `tests/boundary.test.ts`;
+- added: `src/attemptExecution.ts`, `src/failureReportPolicy.ts`,
+  `src/fakeProvider.ts`, `tests/attemptExecution.test.ts`,
+  `tests/integration/fakeProviderExecution.test.ts`.
+
+There is no change to commercial-api, the protocol package, migrations,
+database constraints, this architecture (during implementation), the
+runbook, the engine provider executors, provider SDK or client code, the
+state-root implementation, the acceptance-journal format, manifests or
+lockfiles, and no dependency was added. The locked contract below is
+unchanged, and the implementation satisfies it.
+
+**Create-phase contract.** The existing `providerExecutionContract.ts` is
+extended, not duplicated. It keeps the shared `isProviderExecutionId`
+re-export and adds:
+
+- `ProviderSubmissionOutcome`: exactly `ACCEPTED`, `DEFINITIVE_FAILURE` and
+  `AMBIGUOUS_FAILURE`. No outcome carries a `providerExecutionId`.
+- `ProviderAcceptanceCallback`: the awaited acceptance callback, the sole
+  authority for the provider execution ID. An operation may settle
+  `ACCEPTED` only after awaiting it.
+- `ProviderSubmissionOperation` (one `execute(onAccepted)`) and
+  `ProviderSubmissionOperationFactory`: the production create-phase
+  abstractions.
+- `ProviderSubmissionRequest`: exactly `executionAttemptId` and `provider`,
+  with no credential, lease token or proof.
+
+**Production fake provider.** `src/fakeProvider.ts` is a production worker
+module for provider identifier `BUSYBOOKIE_FAKE`, create phase only:
+
+- execution ID `BUSYBOOKIE_FAKE-${executionAttemptId}`, validated with the
+  shared `isProviderExecutionId` rule;
+- default behaviour: accept, awaiting the callback before settling
+  `ACCEPTED`;
+- deterministic typed `DEFINITIVE_FAILURE` and `AMBIGUOUS_FAILURE`
+  behaviours, selectable only through an explicit dependency option, never
+  an environment variable;
+- construction refused for any other provider
+  (`LEASED_PROVIDER_INCOMPATIBLE`);
+- one `execute` only: a second raises `PROVIDER_CONTRACT_VIOLATION`, and no
+  retry path exists;
+- zero provider network, zero provider SDK, zero credential input and zero
+  create retry.
+
+The R44B7 `controlledProvider()` thunk remains test-only and does not count.
+
+**Credential opening.** `credentialOpeningRun.ts` adds
+`openLeasedCredentialOnce(deps, admitLease?)`, the shared opening primitive:
+
+- It runs the one production path: forbidden-environment check, startup
+  journal reconciliation, lease, admission, expiry check, grant, open and
+  verify, then discard.
+- The optional admission runs on the authoritative lease after the `LEASE`
+  `OK` log and before the credential grant.
+- `runCredentialOpeningOnce` delegates to it and keeps its existing public
+  result contract unchanged.
+- It returns a frozen `OpenedAttemptContext`. That holds only the lease
+  identity (`executionJobId`, `executionAttemptId`, `attemptNumber`,
+  `provider`, `generationRequestSha256`), `accountId` from the validated
+  opening context, and the `LeaseProof`. It holds no plaintext credential,
+  no envelope and no opening context. Plaintext stays confined to the
+  `openAndDiscard` verifier.
+
+**Composer.** `runConfiguredFakeProviderAttemptOnce(config, deps)` in
+`src/attemptExecution.ts`: library-only and one attempt. There is no daemon,
+loop, scheduler, process entry point or package start script.
+
+- A non-`development` `WorkerConfig` is refused with
+  `WORKER_CONFIGURATION_INVALID` before any control-plane request,
+  state-root access or log.
+- It calls the existing `bindWorkerStateRoot` (an unsuitable root logs only
+  the closed `STATE_ROOT_UNSUITABLE` startup event) and reuses the real
+  startup journal reconciliation and credential-opening path. No alternate
+  state-root mechanism exists; R44B8 stays authoritative.
+- Implemented order:
+
+  ```text
+  development guard -> bindWorkerStateRoot -> startup reconciliation -> lease
+  -> BUSYBOOKIE_FAKE admission -> grant -> open/verify/discard
+  -> obtainPreProviderPermit (per-attempt journal prepare, SUBMITTING, mandatory heartbeat)
+  -> only now construct the provider operation -> acceptance adapter
+  -> runWithInFlightHeartbeat(() => operation.execute(onAccepted))
+  -> submitted report or acceptance recovery -> SUBMITTED
+  ```
+
+- The permit keeps owning per-attempt journal preparation, the `SUBMITTING`
+  acknowledgement and the mandatory heartbeat. Tests prove that a
+  `SUBMITTING`, heartbeat or permit failure leaves construction 0 and
+  dispatch 0.
+- The keeper's lifetime is the provider create plus the awaited acceptance
+  callback. Polling is excluded, and heartbeat authority loss does not
+  cancel the operation.
+- The real production acceptance adapter is used. The composer tracks the
+  callback locally (`NONE`, `INVOKED`, `COMPLETED`, `REJECTED`) only to
+  check the operation's contract; the adapter and journal stay the durable
+  authority.
+- There is one provider-operation invocation site and no automatic
+  resubmission. Zero worker production modules read `process.env`. No
+  `COMMERCIAL_WORKER_PROVIDER_MODE` or other provider-mode key exists.
+- Fake execution contains no Runway, Veo or Google import, no provider SDK,
+  no engine execution import, no provider HTTP client and no provider
+  credential.
+
+**Non-fake lease.** A lease for any provider other than `BUSYBOOKIE_FAKE`
+gets:
+
+- a host-fault latch trip and `LEASED_PROVIDER_INCOMPATIBLE`;
+- no credential grant, opening, `SUBMITTING`, provider construction or
+  dispatch, and no `submission-failed` report;
+- the authoritative lease left to expiry and reclaim.
+
+It is not a provider rejection.
+
+**Outcome composition.**
+
+| Case | Composer behaviour | Host fault |
+|---|---|---|
+| `ACCEPTED` after the callback completed | `SUBMITTED`; the journal record is retained for recovery semantics; no polling, output, completion or recovery lease | no |
+| `DEFINITIVE_FAILURE` before acceptance | report `DEFINITIVELY_REJECTED` / `PROVIDER_REJECTED_DEFINITIVELY`; when the report is accepted, attempt `FAILED_BEFORE_SUBMISSION` and job `FAILED`; no journal record; no resubmission | no |
+| `AMBIGUOUS_FAILURE` before acceptance | report `OUTCOME_UNKNOWN` / `PROVIDER_SUBMISSION_AMBIGUOUS`; when the report is accepted, attempt `OUTCOME_UNKNOWN` and job `NEEDS_ATTENTION`; no fabricated acceptance; no resubmission | no |
+| typed failure, report not established | `PROVIDER_FAILURE_UNREPORTED`; the existing expiry and sweep own the eventual authoritative transition, and no unknown outcome is claimed before it happens | no |
+| `ACCEPTED` without a completed callback | provider contract violation; ambiguous report when authority permits; no fabricated acceptance; no retry | yes |
+| callback rejection | rethrows the acceptance adapter's own failure; no duplicate `submission-failed` report; the adapter's latch and report behaviour stay authoritative | adapter's existing |
+| non-`ACCEPTED` outcome after durable acceptance, or an un-awaited callback | provider contract violation; no `submission-failed` report; accepted authority and journal preserved; no retry | yes |
+| untyped throw (before or after acceptance) or unknown outcome | provider contract violation; no fabricated acceptance; no `submission-failed` report from the composer; no resubmission; after durable acceptance the accepted authority stays preserved. Programming faults are never reinterpreted as provider ambiguity | yes |
+
+The composer's host-fault classes are only:
+
+- an incompatible leased provider;
+- a provider contract violation;
+- the existing acceptance-adapter and keeper durability faults.
+
+Ordinary `DEFINITIVE_FAILURE` and `AMBIGUOUS_FAILURE` do not trip it, and
+there is no second latch policy.
+
+**Shared failure-report policy.** `src/failureReportPolicy.ts` is the sole
+production caller of `client.reportSubmissionFailed`. Its policy is
+unchanged from the adapter's:
+
+- at most two report attempts;
+- a fresh `AbortController` and request for each attempt;
+- a 10000 ms deadline per request;
+- only `CONTROL_API_UNAVAILABLE` earns the second attempt;
+- no provider retry.
+
+`reportSubmissionFailureWithPolicy` never throws and returns `REPORTED`
+(with the acknowledgement) or `UNREPORTED`. `acceptanceAdapter.ts` now
+consumes it, and the exported `ACCEPTANCE_FAILURE_REPORT_*` names keep
+identical values. No acceptance behaviour change was intended, and the
+existing acceptance tests and regressions pass.
+
+**Naming deviation.** The module is `failureReportPolicy.ts`, not the
+optional `submissionFailurePolicy.ts` named under "Expected scope" below.
+An import path containing `/submission` collides with the boundary test's
+`SUBMITTING`-route rule. This is naming only and changes no R44B9A
+semantics. Likewise, the contract extends `providerExecutionContract.ts`
+instead of adding `providerExecution.ts`.
+
+**Boundary tests.** `tests/boundary.test.ts` is expanded for R44B9:
+
+- The permit, keeper, acceptance-adapter and state-root caller lists now
+  admit the fake-provider composer as the only production caller.
+- Failure-report calls are centralised through `failureReportPolicy.ts`.
+- A new "fake-provider execution boundary" block checks the locked order,
+  the fake's locality, the secret-free contract, the absence of callers and
+  the single-attempt shape.
+- One narrow exact-token allowance, `export const FAKE_PROVIDER_ID =
+  "BUSYBOOKIE_FAKE";`, is admitted in `fakeProvider.ts` only. Without it,
+  the existing `BUSYBOOKIE_` engine-environment-loader screen catches the
+  constant. This is **not** a broad `BUSYBOOKIE_` exemption: guard tests
+  prove that any other `BUSYBOOKIE_` source text, including a
+  `BUSYBOOKIE_FAKE_*` key or the literal elsewhere, is still rejected.
+
+The suite has 85 tests: 74 before R44B9, plus 6 parametric cases for the
+three new source files and 5 in the new block.
+
+**Unit evidence.** `tests/attemptExecution.test.ts` has 37 tests:
+
+- the fake: its ID, callback awaiting, typed failures, construction
+  refusal and second-dispatch refusal;
+- the shared failure-report policy;
+- credential admission and the opened context;
+- the development and production barriers and state-root failure;
+- the non-fake lease and the permit barriers;
+- the composer contract cases: `ACCEPTED` without the callback, callback
+  failure, recovery handover, failure after acceptance, unexpected throws
+  and an unknown outcome;
+- keeper heartbeat while the dispatch is pending.
+
+Duplicate acceptance stays governed by the existing single-use claim and its
+handler tests; no second mechanism was added.
+
+**Tier-3 evidence.** `tests/integration/fakeProviderExecution.test.ts` has
+6 tests, each running the real production composer and the real production
+fake provider over the real `WorkerControlClient` HTTP, the real
+commercial-api router and services, PostgreSQL and the real filesystem
+journal:
+
+- **Success:** `SUBMITTED` with provider execution ID
+  `BUSYBOOKIE_FAKE-${executionAttemptId}`; job `RUNNING`; one `submitting`
+  and one `submitted` audit; journal record retained; construction 1 and
+  dispatch 1.
+- **Definitive:** `FAILED_BEFORE_SUBMISSION`, job `FAILED`, the
+  `failed_before_submission` audit, no journal record, no host fault.
+- **Ambiguous:** `OUTCOME_UNKNOWN`, job `NEEDS_ATTENTION`, the
+  `outcome_unknown` audit, no journal record, no host fault.
+- **Keeper:** a pending operation receives a real second heartbeat (200)
+  while `SUBMITTING`, then completes to `SUBMITTED`.
+- **Non-fake lease:** only the lease request is made, the attempt stays
+  `LEASED`, there is no opening and the latch trips.
+- **Production refusal:** zero requests, and the attempt stays `QUEUED`.
+
+**No real network.** Tier-3 tests origin-check every outbound request:
+zero off-origin requests were observed, and only local worker-control
+traffic occurred. The fake contacts no provider.
+
+**Secret safety.** `ProviderSubmissionRequest` carries only
+`executionAttemptId` and `provider`. Tests prove the fake operation receives
+no plaintext credential, machine or worker credential, lease token or
+provider API key. Logs, errors, audit text and journal files were scanned
+for those values, and no leakage was found.
+
+**Validation.**
+
+- worker unit: 656/656 across 16 files (previous baseline 608/608 across
+  15);
+- worker integration: 40/40 across 3 files (whole-chain 15/15, credential
+  opening 19/19, fake provider 6/6);
+- commercial-api DB: 558/558 across 19 files;
+- typecheck clean and `git diff --check` clean;
+- no provider call.
+
+**Criterion reconciliation.** All 18 "Fake flag criteria" below are
+satisfied:
+
+1. Production fake provider: `fakeProvider.ts`.
+2. Production fake-only composer: `runConfiguredFakeProviderAttemptOnce`.
+3. Development-only barrier: refusal before any request.
+4. `BUSYBOOKIE_FAKE` barrier: refusal before the grant.
+5. Create-phase contract: `providerExecutionContract.ts`.
+6. Permit before construction: construction and dispatch stay 0 on permit
+   failure.
+7. Keeper wiring: `runWithInFlightHeartbeat` around create plus the awaited
+   callback.
+8. Durable acceptance: the production acceptance adapter and journal.
+9. Definitive composition.
+10. Ambiguous composition.
+11. Shared failure policy: `failureReportPolicy.ts`.
+12. Tier-3 success test.
+13. Tier-3 definitive-failure test.
+14. Tier-3 ambiguous-failure test.
+15. Keeper wiring test (unit and tier-3).
+16. No-real-network proof: boundary tests and the tier-3 origin check.
+17. Secret-safety proof: unit and tier-3 scans.
+18. No test-thunk substitution: the production fake is imported from `src/`.
+
+Accordingly `FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES`. Because both typed
+definitive and ambiguous outcomes are production-composed through the
+shared policy, `PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=YES`. That flag
+means the generic worker failure composition exists; it does not mean
+real-provider-specific classification or adapters exist.
+
+**What stays unchanged and open.**
+
+- `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO`: no production real-provider
+  adapter or composition exists. The engine executors are not
+  commercial-worker real-provider adapters.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`: fake execution authorises
+  no provider credential use, provider network or live submission.
+- The real-SDK create-retry obligation stays unresolved: a real adapter
+  must verify, or refuse, unless create retry is deterministically
+  disabled. The fake has zero retries by construction, which does not
+  satisfy it.
+- The live-route `SUBMITTED` capacity condition stays deferred. Successful
+  fake execution ends at `SUBMITTED`, and a later lease may receive
+  `WORKER_AT_CAPACITY` while that lease and its capacity slot are retained.
+  R44B9 does not change the post-`SUBMITTED` lifecycle and is not reopened
+  for it.
+- Section 24 stays separately launch-blocking. The fake receives no
+  credential, and opening and discarding a fake attempt's credential
+  material does not solve the real-provider credential-lifetime obligation.
+- R44B8 stays closed and authoritative; there was no state-root redesign.
+- `PRE_FAKE_PROVIDER_GATE` stays **COMPLETE** and is not reopened; R44B9 is
+  a post-gate execution milestone.
+
+**Milestone.** R44B9 fake-provider execution is complete: a real production
+worker fake-provider composition exists and is proven end to end through
+the control plane and the database. It does **not** mean that:
+
+- a real provider adapter or real provider network exists;
+- live provider submission is enabled;
+- a process daemon exists;
+- polling, output or completion exists.
+
+**Next-phase boundary.** Later work must separately address real and live
+provider readiness, including:
+
+- the real provider adapter boundary;
+- the real provider create-retry assertion;
+- real-provider credential lifetime;
+- the engine's create-versus-polling boundary incompatibility;
+- the live `SUBMITTED` lifecycle and capacity issue, where applicable;
+- section 24.
+
+None of these is complete, and this record designs none of them.
+
+**Locked decision (R44B9A; implemented by R44B9, recorded by R44B9B).**
+This is a new post-gate execution phase; `PRE_FAKE_PROVIDER_GATE` stays
+**COMPLETE** and is not reopened. The first lock attempt was blocked because the proposed identifier
 `busybookie-fake` broke the authoritative provider-identifier grammar
 `^[A-Z][A-Z0-9_]{0,31}$`. That grammar is enforced by:
 
@@ -6104,7 +6537,8 @@ migration, protocol change or API validation change is needed, and
 provider-identifier validation is not widened. This lock changes no source,
 test, runbook, API, protocol, migration or engine code.
 
-**Evidence (R44B9 discovery, revalidated).**
+**Evidence (R44B9 discovery, revalidated; the state before R44B9, now
+historical).**
 
 - `runCredentialOpeningOnce` stops after opening. Its summary discards the
   lease token and proof and the plaintext credential, so execution cannot
@@ -6397,7 +6831,9 @@ until a published implementation proves all of:
 17. the secret-safety proof;
 18. no test-thunk substitution.
 
-A module merely existing never qualifies.
+A module merely existing never qualifies. (R44B9B.) All 18 are satisfied
+by the published implementation ("Criterion reconciliation" in the status
+above), so the flag is YES.
 
 **Expected scope.** Worker only:
 
@@ -6446,9 +6882,9 @@ FAKE_PROVIDER_KEEPER_WIRING_REQUIRED=YES
 PROVIDER_CREATE_PHASE_CONTRACT_LOCKED=YES
 PROVIDER_CREATE_PHASE_ACCEPTANCE_CALLBACK_MUST_BE_AWAITED=YES
 PROVIDER_CREATE_PHASE_PROVIDER_ID_RETURN_AUTHORITY=CALLBACK_ONLY
-PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=NO
+PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=YES
 PROVIDER_REAL_ADAPTER_CREATE_RETRY_ASSERTION_REQUIRED=YES
-FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
+FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES
 ```
 
 ---
@@ -6673,7 +7109,7 @@ PROVIDER_EXECUTION_ID_IN_ROUTINE_WORKER_LOGS=NO
 PROVIDER_EXACTLY_ONCE_CLAIMED=NO
 BUSYBOOKIE_AUTOMATIC_PROVIDER_CREATE_AT_MOST_ONCE_PER_ATTEMPT=YES
 FAKE_PROVIDER_EXECUTION_GATE=SECTION_36_SLICES_1_TO_7
-FAKE_PROVIDER_EXECUTION_IMPLEMENTED=NO
+FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES
 REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
 MIGRATION_0005_REQUIRED_FOR_IMPLEMENTATION=YES
 MIGRATION_0005_SCOPE=IMMUTABLE_SUBMITTING_WORKER_PRINCIPAL
@@ -6828,7 +7264,7 @@ FAKE_PROVIDER_KEEPER_WIRING_REQUIRED=YES
 PROVIDER_CREATE_PHASE_CONTRACT_LOCKED=YES
 PROVIDER_CREATE_PHASE_ACCEPTANCE_CALLBACK_MUST_BE_AWAITED=YES
 PROVIDER_CREATE_PHASE_PROVIDER_ID_RETURN_AUTHORITY=CALLBACK_ONLY
-PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=NO
+PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=YES
 PROVIDER_REAL_ADAPTER_CREATE_RETRY_ASSERTION_REQUIRED=YES
 ```
 

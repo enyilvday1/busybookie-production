@@ -51,7 +51,16 @@ export type WorkerErrorCode =
   | "LEASED_PROVIDER_INCOMPATIBLE"
   // R44B9: a provider operation broke the submission-phase contract (an
   // untyped throw, ACCEPTED without durable acceptance, or a failure after it).
-  | "PROVIDER_CONTRACT_VIOLATION";
+  | "PROVIDER_CONTRACT_VIOLATION"
+  // R44B10P1: commercial input media (section 28, "Object-storage input
+  // contract"). None of them is a provider outcome.
+  | "OBJECT_REFERENCE_INVALID"
+  | "OBJECT_NOT_FOUND"
+  | "OBJECT_STORAGE_UNAVAILABLE"
+  | "OBJECT_STORAGE_ACCESS_DENIED"
+  | "OBJECT_TOO_LARGE"
+  | "OBJECT_INTEGRITY_MISMATCH"
+  | "OBJECT_MEDIA_TYPE_INVALID";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   STATE_ROOT_UNSUITABLE: "The worker state root is unsuitable for the acceptance journal.",
@@ -77,6 +86,13 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   ACCEPTANCE_JOURNAL_WRITE_FAILED: "The acceptance record could not be made durable; new work is blocked.",
   LEASED_PROVIDER_INCOMPATIBLE: "The leased attempt's provider is not supported by this worker; new work is blocked.",
   PROVIDER_CONTRACT_VIOLATION: "The provider operation broke its submission contract; new work is blocked.",
+  OBJECT_REFERENCE_INVALID: "The input media reference is invalid.",
+  OBJECT_NOT_FOUND: "The input media object was not found.",
+  OBJECT_STORAGE_UNAVAILABLE: "Object storage is unavailable.",
+  OBJECT_STORAGE_ACCESS_DENIED: "Object storage denied access to the input media; new work is blocked.",
+  OBJECT_TOO_LARGE: "The input media object exceeds the permitted size.",
+  OBJECT_INTEGRITY_MISMATCH: "The input media object does not match its reference.",
+  OBJECT_MEDIA_TYPE_INVALID: "The input media content does not match its declared type.",
 };
 
 export class WorkerError extends Error {

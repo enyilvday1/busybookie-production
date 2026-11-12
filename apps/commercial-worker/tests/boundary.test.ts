@@ -127,6 +127,8 @@ describe("commercial-worker source boundary", () => {
       "src/fakeProvider.ts",
       "src/hostFaultLatch.ts",
       "src/inFlightHeartbeat.ts",
+      "src/inputMediaRetrieval.ts",
+      "src/objectStorageContract.ts",
       "src/preProviderOrchestration.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
@@ -345,14 +347,16 @@ describe("pre-provider orchestration boundary", () => {
     ]);
     // R44B6Y: the acceptance adapter reuses only the injectable deadline-timer seam.
     // R44B6Z: so does the in-flight keeper. R44B9: the shared failure-report
-    // policy takes only the timer type.
+    // policy takes only the timer type. R44B10P1: input-media retrieval reuses
+    // the same deadline-timer seam.
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/acceptanceAdapter.ts",
       "src/attemptExecution.ts",
       "src/failureReportPolicy.ts",
       "src/inFlightHeartbeat.ts",
+      "src/inputMediaRetrieval.ts",
     ]);
-    for (const path of ["acceptanceAdapter.ts", "inFlightHeartbeat.ts"]) {
+    for (const path of ["acceptanceAdapter.ts", "inFlightHeartbeat.ts", "inputMediaRetrieval.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
     }
     expect(code(read(join(SRC_ROOT, "failureReportPolicy.ts")))).toMatch(/import type \{ DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
@@ -465,7 +469,8 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
     }
     // R44B6Z: the in-flight keeper also takes the injected latch; R44B9: the
     // composer holds it.
-    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/attemptExecution.ts", "src/inFlightHeartbeat.ts"]);
+    // R44B10P1: the unwired input-media retrieval takes the injected latch.
+    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/attemptExecution.ts", "src/inFlightHeartbeat.ts", "src/inputMediaRetrieval.ts"]);
     for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
     }
@@ -813,6 +818,95 @@ describe("fake-provider execution boundary", () => {
     // Host-fault trips: incompatible lease, contract violation, ACCEPTED without acceptance.
     expect(composer.match(/latch\.trip\(\)/g)).toHaveLength(3);
     expect(composer.match(/new WorkerError\("PROVIDER_CONTRACT_VIOLATION"\)/g)).toHaveLength(3);
+  });
+});
+
+// R44B10P1: the unwired object-storage and reference-image library. The key
+// is an opaque object-store key resolved only by the injected store: no
+// filesystem, network, environment, provider or test-store reach, and no
+// production caller yet.
+describe("object-storage input boundary", () => {
+  const CONTRACT = "src/objectStorageContract.ts";
+  const RETRIEVAL = "src/inputMediaRetrieval.ts";
+  const contract = code(read(join(SRC_ROOT, "objectStorageContract.ts")));
+  const retrieval = code(read(join(SRC_ROOT, "inputMediaRetrieval.ts")));
+  const raw = (path: string) => read(join(APP_ROOT, path));
+
+  it("is unwired: no source module imports it except retrieval importing the contract", () => {
+    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /inputMediaRetrieval|retrieveVerifiedReferenceImage|parseReferenceImage/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => path !== CONTRACT && /objectStorageContract/.test(code(text))).map(({ path }) => path)).toEqual([RETRIEVAL]);
+    // The fake composer, credential opening and the provider contract stay untouched by it.
+    for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "providerExecutionContract.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/objectStorage|ObjectStore|referenceImage|ReferenceImage|inputMedia/i);
+    }
+  });
+
+  it("imports only the timer seam, latch type, contract, worker errors and node:crypto", () => {
+    expect(importsOf(contract)).toEqual([]);
+    expect(importsOf(retrieval).sort()).toEqual(["./hostFaultLatch.js", "./objectStorageContract.js", "./preProviderOrchestration.js", "./workerError.js", "node:crypto"]);
+    expect(retrieval).toMatch(/import \{ createHash \} from "node:crypto";/);
+  });
+
+  it("has no filesystem, path, environment, network, vendor, provider or engine reach", () => {
+    const FORBIDDEN_REACH =
+      /process\.|BUSYBOOKIE_MEDIA_ROOT|node:fs|readFile|createReadStream|node:path|path\.resolve|resolve\(|cwd|tmpdir|homedir|file:|https?:|fetch\s*\(|axios|undici|node:https?\b|amazonaws|storage\.googleapis|\bs3\b|\bgcs\b|\br2\b|supabase|minio|runway|\bveo\b|google|gemini|genai|src\/execution|\.\.\/\.\.\/|tests\/|inMemoryObjectStore|console\.|log\(/i;
+    for (const text of [contract, retrieval]) expect(FORBIDDEN_REACH.test(text)).toBe(false);
+    // Guard the guards.
+    expect(FORBIDDEN_REACH.test('await readFile(join(mediaRoot, key))')).toBe(true);
+    expect(FORBIDDEN_REACH.test("await fetch(`https://${host}/${key}`)")).toBe(true);
+    expect(FORBIDDEN_REACH.test('import { createInMemoryObjectStore } from "../tests/support/inMemoryObjectStore.js";')).toBe(true);
+    expect(FORBIDDEN_REACH.test("const root = process.env.BUSYBOOKIE_MEDIA_ROOT;")).toBe(true);
+  });
+
+  it("has no provider, permit, keeper, acceptance or failure-report semantics", () => {
+    expect(
+      /reportSubmissionFailed|reportSubmissionFailureWithPolicy|createAcceptanceAdapter|obtainPreProviderPermit|runWithInFlightHeartbeat|reportSubmitted|recoverAcceptance|ProviderSubmission|PROVIDER_REJECTED_DEFINITIVELY|DEFINITIVELY_REJECTED|OUTCOME_UNKNOWN|\.execute\(/.test(
+        retrieval,
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps the contract read-only and vendor-neutral, and the store single-shot", () => {
+    expect(contract).toMatch(/getObject: \(request: ObjectStoreGetRequest\) => Promise<ObjectStoreGetResult>;/);
+    expect(/put|write|delete|copy|upload|bucket|url|signed|credential|provider|retry|path\b|mediaRoot/i.test(contract)).toBe(false);
+    const request = contract.slice(contract.indexOf("export type ObjectStoreGetRequest"), contract.indexOf("export type ObjectStoreFailure"));
+    expect(request.match(/^\s+[a-zA-Z]+:/gm)?.map((member) => member.trim()).sort()).toEqual(["accountId:", "key:", "maxBytes:", "signal:"]);
+    // One store call site, reached at most twice through two explicit calls.
+    expect(retrieval.match(/\.getObject\(/g)).toHaveLength(1);
+    expect(retrieval.match(/await readOnce\(\)/g)).toHaveLength(2);
+    expect(retrieval).toMatch(/if \(attempt\.status === "UNAVAILABLE"\) attempt = await readOnce\(\);/);
+    expect(/\bfor\s*\(|\bwhile\s*\(|setTimeout|setInterval|backoff|jitter|Math\.random/i.test(retrieval)).toBe(false);
+  });
+
+  it("locks two attempts, a fresh 10000 ms deadline per attempt and the 0004 key grammar", () => {
+    expect(retrieval).toMatch(/export const OBJECT_STORAGE_INPUT_MAX_READ_ATTEMPTS = 2;/);
+    expect(retrieval).toMatch(/export const OBJECT_STORAGE_INPUT_READ_DEADLINE_MS = 10000;/);
+    expect(retrieval.match(/new AbortController\(\)/g)).toHaveLength(1);
+    expect(retrieval).toMatch(/const KEY_PATTERN = \/\^\[A-Za-z0-9\]\[A-Za-z0-9\._\\\/-\]\*\$\/;/);
+    expect(retrieval).toMatch(/const DOT_SEGMENT = \/\(\^\|\\\/\)\\\.\\\.\?\(\\\/\|\$\)\/;/);
+    expect(retrieval).toMatch(/value\.length <= 512/);
+    expect(retrieval).toMatch(/const SHA256_PATTERN = \/\^\[0-9a-f\]\{64\}\$\/;/);
+    // The source grammar it mirrors.
+    const migration = read(join(API_ROOT, "migrations", "0004_worker_bridge_persistence.sql"));
+    expect(migration).toMatch(/output_object_key ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9\._\/-\]\*\$'/);
+    expect(migration).toMatch(/char_length\(output_object_key\) BETWEEN 1 AND 512/);
+  });
+
+  it("keeps the in-memory store test-only and gives production no default store", () => {
+    expect(existsSync(join(APP_ROOT, "tests", "support", "inMemoryObjectStore.ts"))).toBe(true);
+    expect(existsSync(join(SRC_ROOT, "inMemoryObjectStore.ts"))).toBe(false);
+    expect(sources.filter(({ text }) => /inMemoryObjectStore|createInMemoryObjectStore/.test(text)).map(({ path }) => path)).toEqual([]);
+    // The store is required, with no default or fallback.
+    expect(retrieval).toMatch(/store: ObjectStore;/);
+    expect(/store\s*\?\?|store\s*\|\||defaultStore|store\?:/.test(retrieval)).toBe(false);
+    expect(retrieval).toMatch(/return fail\("WORKER_CONFIGURATION_INVALID", true\);/);
+    // The test store reaches nothing beyond memory.
+    expect(/node:fs|node:path|node:https?|fetch\s*\(|setTimeout|process\./.test(code(raw("tests/support/inMemoryObjectStore.ts")))).toBe(false);
+  });
+
+  it("trips the latch for every failure except a transient outage", () => {
+    expect(retrieval.match(/fail\("[A-Z_]+", false\)/g)).toEqual(['fail("OBJECT_STORAGE_UNAVAILABLE", false)']);
+    expect(retrieval.match(/latch\.trip\(\)/g)).toHaveLength(1);
   });
 });
 

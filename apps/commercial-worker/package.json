@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@google/genai": "2.24.0",
+    "@runwayml/sdk": "4.20.0",
     "commercial-worker-protocol": "file:../../packages/commercial-worker-protocol"
   }
 }

@@ -82,6 +82,13 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
   // (all checked below).
   "src/googleProviderContract.ts": ["provider SDK or brand"],
   "src/googleProviderAdapter.ts": ["provider SDK or brand", "provider create or polling", "provider execution identity"],
+  // R44B10B: the closed second real-provider contract names its provider
+  // identifier, model and API origin; only the Runway adapter imports the
+  // SDK, calls imageToVideo.create and hands the raw task.id to the callback
+  // (all checked below). The Runway composer has no exemption: only its
+  // exact Runway module and symbol names are removed (RUNWAY_COMPOSER_IDENTIFIERS).
+  "src/runwayProviderContract.ts": ["provider SDK or brand"],
+  "src/runwayProviderAdapter.ts": ["provider SDK or brand", "provider create or polling", "provider execution identity"],
 };
 // R44B6S: the exact acceptance-recovery vocabulary a file may name. Only these
 // tokens are removed before the rules run, so /submitting, submission-failed,
@@ -119,8 +126,29 @@ const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
   "src/providerEnvironment.ts": ["assertNoProviderEnvironment(process.env);"],
 };
 // R44B10A: the one worker module allowed to import the provider SDK, and the
-// exact package it may import.
-const SDK_IMPORTERS: Readonly<Record<string, string>> = { "src/googleProviderAdapter.ts": "@google/genai" };
+// exact package it may import. R44B10B: one more module, one more package.
+const SDK_IMPORTERS: Readonly<Record<string, string>> = { "src/googleProviderAdapter.ts": "@google/genai", "src/runwayProviderAdapter.ts": "@runwayml/sdk" };
+// R44B10B: the Runway composer's own module paths and symbols, which carry the
+// brand word. Only these exact whole identifiers, only in this one file, are
+// removed before the brand rule runs; an SDK import, a bare "runway" literal,
+// an engine path or any other Runway name in the composer still fails.
+const RUNWAY_COMPOSER = "src/runwayAttemptExecution.ts";
+const RUNWAY_COMPOSER_IDENTIFIERS = Object.freeze([
+  "runwayProviderAdapter",
+  "runwayProviderContract",
+  "prepareRunwaySubmission",
+  "RunwaySubmissionDependencies",
+  "RunwaySubmissionOperation",
+  "RunwaySubmissionOutcome",
+  "admitRunwayLease",
+  "RUNWAY_MAX_REFERENCE_IMAGE_BYTES",
+  "RunwayGenerationRequest",
+  "RunwayProviderAttemptDependencies",
+  "RunwayProviderAttemptResult",
+  "runRunwayProviderAttemptOnce",
+]);
+const withoutRunwayComposerIdentifiers = (path: string, text: string) =>
+  path !== RUNWAY_COMPOSER ? text : RUNWAY_COMPOSER_IDENTIFIERS.reduce((remaining, token) => remaining.replace(new RegExp(`\\b${token}\\b`, "g"), ""), text);
 // R44B10A: the closed worker constants of the first real-provider contract.
 // They are code identifiers, not environment variables; only these exact
 // names are removed before the provider-variable rule runs.
@@ -172,6 +200,9 @@ describe("commercial-worker source boundary", () => {
       "src/preProviderOrchestration.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
+      "src/runwayAttemptExecution.ts",
+      "src/runwayProviderAdapter.ts",
+      "src/runwayProviderContract.ts",
       "src/startupJournalReconciliation.ts",
       "src/workerConfig.ts",
       "src/workerControlClient.ts",
@@ -202,7 +233,7 @@ describe("commercial-worker source boundary", () => {
     // refuses; it is exempt from the brand pattern only (checked below).
     const exempt = new Set([...(EXEMPTIONS[path] ?? []), ...(path === "src/providerEnvironment.ts" ? ["provider SDK or brand"] : [])]);
     const rules = FORBIDDEN.filter(({ label: name }) => !exempt.has(name));
-    const violations = rules.filter(({ pattern }) => pattern.test(withoutAllowedTokens(path, code(text)))).map(({ label: name }) => name);
+    const violations = rules.filter(({ pattern }) => pattern.test(withoutRunwayComposerIdentifiers(path, withoutAllowedTokens(path, code(text))))).map(({ label: name }) => name);
     expect({ path, violations }).toEqual({ path, violations: [] });
   });
 
@@ -228,11 +259,14 @@ describe("commercial-worker source boundary", () => {
     expect(PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers("const id = GOOGLE_PROVIDER_ID; const m = GOOGLE_MODEL;"))).toBe(false);
   });
 
-  it("allows @google/genai in exactly one module, and no other third-party runtime import", () => {
+  it("allows @google/genai and @runwayml/sdk each in exactly one module, and no other third-party runtime import", () => {
     const sdkImporters = sources.filter(({ text }) => importsOf(text).some((specifier) => specifier.startsWith("@google/"))).map(({ path }) => path);
     expect(sdkImporters).toEqual(["src/googleProviderAdapter.ts"]);
     expect(importsOf(read(join(SRC_ROOT, "googleProviderAdapter.ts"))).filter((specifier) => !specifier.startsWith("./"))).toEqual(["@google/genai"]);
-    expect(SDK_IMPORTERS).toEqual({ "src/googleProviderAdapter.ts": "@google/genai" });
+    // R44B10B: the Runway SDK, exactly, in the Runway adapter only.
+    expect(sources.filter(({ text }) => importsOf(text).some((specifier) => /@runwayml/.test(specifier))).map(({ path }) => path)).toEqual(["src/runwayProviderAdapter.ts"]);
+    expect(importsOf(read(join(SRC_ROOT, "runwayProviderAdapter.ts"))).filter((specifier) => !specifier.startsWith("./"))).toEqual(["@runwayml/sdk"]);
+    expect(SDK_IMPORTERS).toEqual({ "src/googleProviderAdapter.ts": "@google/genai", "src/runwayProviderAdapter.ts": "@runwayml/sdk" });
     // Guard the guard: the allowance is file- and package-exact.
     const allowed = (path: string, specifier: string) => SDK_IMPORTERS[path] === specifier;
     expect(allowed("src/googleAttemptExecution.ts", "@google/genai")).toBe(false);
@@ -240,7 +274,34 @@ describe("commercial-worker source boundary", () => {
     expect(allowed("src/credentialOpeningRun.ts", "@google/genai")).toBe(false);
     expect(allowed("src/googleProviderAdapter.ts", "@runwayml/sdk")).toBe(false);
     expect(allowed("src/googleProviderAdapter.ts", "@google/genai/node")).toBe(false);
-    expect(sources.filter(({ text }) => importsOf(text).some((specifier) => /@runwayml/.test(specifier))).map(({ path }) => path)).toEqual([]);
+    expect(allowed("src/runwayAttemptExecution.ts", "@runwayml/sdk")).toBe(false);
+    expect(allowed("src/runwayProviderContract.ts", "@runwayml/sdk")).toBe(false);
+    expect(allowed("src/runwayProviderAdapter.ts", "@google/genai")).toBe(false);
+    expect(allowed("src/runwayProviderAdapter.ts", "@runwayml/sdk/lib/polling")).toBe(false);
+    expect(allowed("src/runwayProviderAdapter.ts", "@runwayml/sdk/resources/uploads")).toBe(false);
+  });
+
+  it("removes only the exact Runway composer identifiers, only in the composer, before the brand rule", () => {
+    const brand = FORBIDDEN.find(({ label: name }) => name === "provider SDK or brand")!.pattern;
+    const composerText = code(read(join(SRC_ROOT, "runwayAttemptExecution.ts")));
+    expect(brand.test(composerText)).toBe(true);
+    expect(brand.test(withoutRunwayComposerIdentifiers(RUNWAY_COMPOSER, composerText))).toBe(false);
+    // Guard the guard: planted violations in the composer still fail.
+    for (const planted of [
+      'import RunwayML from "@runwayml/sdk";',
+      'import { createRunwayClient } from "../../src/runway/createRunwayClient.js";',
+      'const provider = "RUNWAY";',
+      "await runwayClient.tasks.retrieve(id);",
+      "prepareRunwaySubmissionWithRetry(input);",
+      "const RUNWAY_MAX_REFERENCE_IMAGE_BYTES_OVERRIDE = 1;",
+      "import { x } from './runwayProviderAdapterV2.js';",
+      "resumeRunwayGen45Task(id);",
+    ]) {
+      expect(brand.test(withoutRunwayComposerIdentifiers(RUNWAY_COMPOSER, planted)), planted).toBe(true);
+    }
+    // The removal applies to no other file.
+    expect(brand.test(withoutRunwayComposerIdentifiers("src/attemptExecution.ts", "import { runRunwayProviderAttemptOnce } from './runwayAttemptExecution.js';"))).toBe(true);
+    expect(brand.test(withoutRunwayComposerIdentifiers("src/googleAttemptExecution.ts", "prepareRunwaySubmission();"))).toBe(true);
   });
 
   it("depends through the protocol package only on pure modules with no further dependency", () => {
@@ -413,14 +474,16 @@ describe("pre-provider orchestration boundary", () => {
 
   it("is called only by the fake-provider composer, never by credential opening", () => {
     // R44B9: the composer is the only caller. R44B10A: the real Google
-    // composer is the second.
+    // composer is the second. R44B10B: the real Runway composer is the third.
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit\(/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit|PreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     // R44B6Y: the acceptance adapter reuses only the injectable deadline-timer seam.
     // R44B6Z: so does the in-flight keeper. R44B9: the shared failure-report
@@ -435,6 +498,7 @@ describe("pre-provider orchestration boundary", () => {
       "src/inFlightHeartbeat.ts",
       "src/inputMediaFailurePolicy.ts",
       "src/inputMediaRetrieval.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     for (const path of ["acceptanceAdapter.ts", "inFlightHeartbeat.ts", "inputMediaRetrieval.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
@@ -543,13 +607,26 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
 
   it("is composed only by the fake-provider composer: only the adapter builds the handler, only the composer builds the adapter", () => {
     // R44B10A: the real Google composer builds the adapter the same way; the
-    // provider adapter itself never owns acceptance durability.
-    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual(["src/attemptExecution.ts", "src/googleAttemptExecution.ts"]);
+    // provider adapter itself never owns acceptance durability. R44B10B: so
+    // does the real Runway composer.
+    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual([
+      "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
+    ]);
     expect(users(/createDurableAcceptanceHandler|AcceptanceNotDurableError/, [HANDLER])).toEqual([ADAPTER]);
     // R44B9: the composer and the provider contract import only the acceptance type.
-    expect(users(/acceptanceHandler/, [HANDLER])).toEqual([ADAPTER, "src/attemptExecution.ts", "src/googleAttemptExecution.ts", "src/providerExecutionContract.ts"]);
-    expect(code(read(join(SRC_ROOT, "googleProviderAdapter.ts")))).not.toMatch(/acceptanceAdapter|acceptanceHandler|acceptanceJournal|AcceptanceRecord|DurableAcceptance/);
-    for (const path of ["attemptExecution.ts", "googleAttemptExecution.ts", "providerExecutionContract.ts"]) {
+    expect(users(/acceptanceHandler/, [HANDLER])).toEqual([
+      ADAPTER,
+      "src/attemptExecution.ts",
+      "src/googleAttemptExecution.ts",
+      "src/providerExecutionContract.ts",
+      "src/runwayAttemptExecution.ts",
+    ]);
+    for (const path of ["googleProviderAdapter.ts", "runwayProviderAdapter.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|acceptanceJournal|AcceptanceRecord|DurableAcceptance/);
+    }
+    for (const path of ["attemptExecution.ts", "googleAttemptExecution.ts", "providerExecutionContract.ts", "runwayAttemptExecution.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ WorkerProviderAcceptance \} from "\.\/acceptanceHandler\.js";/);
     }
     // R44B6Z: the in-flight keeper also takes the injected latch; R44B9: the
@@ -557,6 +634,7 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
     // R44B10P2: retrieval no longer holds the latch; the caller-side
     // input-media failure policy owns the host-fault decision.
     // R44B10A: the real Google composer holds the latch, never its adapter.
+    // R44B10B: likewise the real Runway composer.
     expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([
       ADAPTER,
       HANDLER,
@@ -564,6 +642,7 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
       "src/googleAttemptExecution.ts",
       "src/inFlightHeartbeat.ts",
       "src/inputMediaFailurePolicy.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
@@ -689,12 +768,13 @@ describe("submission-failed and submitted client boundary", () => {
     // the adapter and the composer reach it only through that policy.
     expect(sources.filter(({ text }) => /\.reportSubmissionFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/failureReportPolicy.ts"]);
     // R44B10A: the real Google composer reports its typed provider failures
-    // through the same shared policy.
+    // through the same shared policy. R44B10B: so does the real Runway composer.
     expect(sources.filter(({ text }) => /reportSubmissionFailureWithPolicy\(/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/acceptanceAdapter.ts",
       "src/attemptExecution.ts",
       "src/failureReportPolicy.ts",
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
   });
 });
@@ -707,10 +787,11 @@ describe("in-flight heartbeat keeper boundary", () => {
   const KEEPER = "src/inFlightHeartbeat.ts";
   const keeper = code(read(join(SRC_ROOT, "inFlightHeartbeat.ts")));
 
-  it("is called only by the fake-provider and real Google composers", () => {
+  it("is called only by the fake-provider and real Google and Runway composers", () => {
     expect(sources.filter(({ path, text }) => path !== KEEPER && /inFlightHeartbeat|runWithInFlightHeartbeat|InFlightHeartbeat/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
   });
 
@@ -789,12 +870,13 @@ describe("state-root binding boundary", () => {
     expect(environmentModule.split(ALLOWED_PROCESS_ENV).length - 1).toBe(1);
     expect(environmentModule.match(/process\.[A-Za-z]+/g)).toEqual(["process.env"]);
     expect(environmentModule).toMatch(/export function assertNoProviderProcessEnvironment\(\): void \{\n  assertNoProviderEnvironment\(process\.env\);\n\}/);
-    // The real composer calls it; the adapter and the configuration never read the environment.
+    // The real composers call it; the adapters, contracts and the configuration never read the environment.
     expect(sources.filter(({ text }) => /assertNoProviderProcessEnvironment\(\)/.test(code(text))).map(({ path }) => path).sort()).toEqual([
       "src/googleAttemptExecution.ts",
       "src/providerEnvironment.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
-    for (const path of ["googleProviderAdapter.ts", "googleProviderContract.ts"]) {
+    for (const path of ["googleProviderAdapter.ts", "googleProviderContract.ts", "runwayProviderAdapter.ts", "runwayProviderContract.ts"]) {
       expect(/process\.|environment/i.test(code(read(join(SRC_ROOT, path)))), path).toBe(false);
     }
     // The configuration still reads only its injected environment.
@@ -839,18 +921,21 @@ describe("state-root binding boundary", () => {
   it("is bound only by the fake-provider composer and has no process entry point", () => {
     // R44B9: the composer binds the state root; nothing calls the credential-only entry.
     // R44B10A: the real Google composer uses the same startup binding.
+    // R44B10B: so does the real Runway composer.
     expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /workerStateRoot|runConfiguredCredentialOpeningOnce|bindWorkerStateRoot/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /runConfiguredCredentialOpeningOnce/.test(code(text))).map(({ path }) => path)).toEqual([]);
     // The composers take the parsed configuration as a type; nothing loads it.
     expect(sources.filter(({ path, text }) => !["src/workerConfig.ts", "src/workerStateRoot.ts"].includes(path) && /workerConfig|loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/attemptExecution.ts",
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== "src/workerConfig.ts" && /loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([]);
-    for (const path of ["attemptExecution.ts", "googleAttemptExecution.ts"]) {
+    for (const path of ["attemptExecution.ts", "googleAttemptExecution.ts", "runwayAttemptExecution.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ WorkerConfig \} from "\.\/workerConfig\.js";/);
     }
   });
@@ -959,11 +1044,13 @@ describe("object-storage input boundary", () => {
   const policy = code(read(join(SRC_ROOT, "inputMediaFailurePolicy.ts")));
   const raw = (path: string) => read(join(APP_ROOT, path));
 
-  it("is wired only into the real Google composer; the policy reads its classified error and the adapter its verified-image type", () => {
-    // R44B10A supersedes "unwired": the real Google composer is the one
-    // production execution caller of retrieval. Retrieval stays provider-neutral.
+  it("is wired only into the real Google and Runway composers; the policy reads its classified error and the adapters their verified-image type", () => {
+    // R44B10A supersedes "unwired": the real Google composer is the first
+    // production execution caller of retrieval; R44B10B: the real Runway
+    // composer is the second. Retrieval stays provider-neutral.
     expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /retrieveVerifiedReferenceImage\(/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
     expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /parseReferenceImage/.test(code(text))).map(({ path }) => path)).toEqual([]);
     // R44B10P2: the caller-side policy reads only the classification off the thrown error.
@@ -971,20 +1058,30 @@ describe("object-storage input boundary", () => {
       "src/googleAttemptExecution.ts",
       "src/googleProviderAdapter.ts",
       POLICY,
+      "src/runwayAttemptExecution.ts",
+      "src/runwayProviderAdapter.ts",
     ]);
     expect(policy).toMatch(/import \{ InputMediaRetrievalError, type InputMediaFailure \} from "\.\/inputMediaRetrieval\.js";/);
-    expect(code(read(join(SRC_ROOT, "googleAttemptExecution.ts")))).toMatch(
-      /import \{ retrieveVerifiedReferenceImage, type VerifiedReferenceImage \} from "\.\/inputMediaRetrieval\.js";/,
-    );
-    // The adapter takes the verified bytes as a type only; it never reads storage.
+    for (const path of ["googleAttemptExecution.ts", "runwayAttemptExecution.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).toMatch(/import \{ retrieveVerifiedReferenceImage, type VerifiedReferenceImage \} from "\.\/inputMediaRetrieval\.js";/);
+    }
+    // The adapters take the verified bytes as a type only and never read storage;
+    // the Runway adapter also re-detects the media type from those bytes with
+    // the same pure signature check retrieval used.
     expect(code(read(join(SRC_ROOT, "googleProviderAdapter.ts")))).toMatch(/import type \{ VerifiedReferenceImage \} from "\.\/inputMediaRetrieval\.js";/);
-    expect(retrieval).not.toMatch(/google|GOOGLE|interactions/);
-    // R44B10A: the real composer takes the injected store as a type only.
+    const runwayAdapter = code(read(join(SRC_ROOT, "runwayProviderAdapter.ts")));
+    expect(runwayAdapter).toMatch(/import \{ detectReferenceImageType, type VerifiedReferenceImage \} from "\.\/inputMediaRetrieval\.js";/);
+    expect(/retrieveVerifiedReferenceImage|parseReferenceImage|getObject|ObjectStore|objectStorage|InputMediaRetrievalError/.test(runwayAdapter)).toBe(false);
+    expect(retrieval).not.toMatch(/google|GOOGLE|interactions|runway|RUNWAY|imageToVideo/);
+    // R44B10A: the real composers take the injected store as a type only.
     expect(sources.filter(({ path, text }) => path !== CONTRACT && /objectStorageContract/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/googleAttemptExecution.ts",
       RETRIEVAL,
+      "src/runwayAttemptExecution.ts",
     ]);
-    expect(code(read(join(SRC_ROOT, "googleAttemptExecution.ts")))).toMatch(/import type \{ ObjectStore \} from "\.\/objectStorageContract\.js";/);
+    for (const path of ["googleAttemptExecution.ts", "runwayAttemptExecution.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ ObjectStore \} from "\.\/objectStorageContract\.js";/);
+    }
     // The fake composer, credential opening and the provider contract stay untouched by it.
     for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "providerExecutionContract.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/objectStorage|ObjectStore|referenceImage|ReferenceImage|inputMedia/i);
@@ -1115,15 +1212,19 @@ describe("input-failed client and input-media failure policy boundary", () => {
     for (const text of [policy, code(read(join(SRC_ROOT, "inputMediaRetrieval.ts")))]) expect(text).not.toMatch(/commercial-worker-protocol/);
   });
 
-  it("is reported only through the two-attempt policy, called only by the real Google composer", () => {
+  it("is reported only through the two-attempt policy, called only by the real Google and Runway composers", () => {
     expect(sources.filter(({ text }) => /\.reportInputFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([POLICY]);
-    // R44B10A supersedes "no caller yet": the real Google composer is the one caller.
+    // R44B10A supersedes "no caller yet": the real Google composer is the first
+    // caller; R44B10B: the real Runway composer is the second.
     expect(sources.filter(({ path, text }) => path !== POLICY && /inputMediaFailurePolicy|handleInputMediaFailure|reportInputFailureWithPolicy/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/googleAttemptExecution.ts",
+      "src/runwayAttemptExecution.ts",
     ]);
-    const realComposer = code(read(join(SRC_ROOT, "googleAttemptExecution.ts")));
-    expect(realComposer.match(/handleInputMediaFailure\(/g)).toHaveLength(1);
-    expect(/reportInputFailureWithPolicy|reportInputFailed/.test(realComposer)).toBe(false);
+    for (const path of ["googleAttemptExecution.ts", "runwayAttemptExecution.ts"]) {
+      const realComposer = code(read(join(SRC_ROOT, path)));
+      expect(realComposer.match(/handleInputMediaFailure\(/g)).toHaveLength(1);
+      expect(/reportInputFailureWithPolicy|reportInputFailed/.test(realComposer)).toBe(false);
+    }
     for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "preProviderOrchestration.ts", "acceptanceAdapter.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/reportInputFailed|input-failed|InputFailure|inputMedia/i);
     }
@@ -1302,6 +1403,236 @@ describe("real Google provider boundary (R44B10A)", () => {
   });
 });
 
+// R44B10B: the second real-provider slice (architecture section 36, "Second
+// real-provider adapter: Runway Gen-4.5 (revision R44B10B)"): a closed
+// contract, one SDK adapter and one library-only composer that ends at
+// SUBMITTED. Neither the fake path nor the Google path reaches any of them,
+// and there is no provider selector.
+describe("real Runway provider boundary (R44B10B)", () => {
+  const CONTRACT = "src/runwayProviderContract.ts";
+  const ADAPTER = "src/runwayProviderAdapter.ts";
+  const COMPOSER = RUNWAY_COMPOSER;
+  const contract = code(read(join(SRC_ROOT, "runwayProviderContract.ts")));
+  const adapter = code(read(join(SRC_ROOT, "runwayProviderAdapter.ts")));
+  const composer = code(read(join(SRC_ROOT, "runwayAttemptExecution.ts")));
+  const runwayModules = [CONTRACT, ADAPTER, COMPOSER];
+
+  it("keeps the fake and Google paths isolated, with no selector, registry or production caller", () => {
+    expect(sources.filter(({ path, text }) => ![ADAPTER, COMPOSER].includes(path) && /runwayProviderAdapter|prepareRunwaySubmission/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => ![ADAPTER, COMPOSER].includes(path) && /runwayProviderContract/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // Library-only: nothing calls the real composer and there is no entry point.
+    expect(sources.filter(({ path, text }) => path !== COMPOSER && /runwayAttemptExecution|runRunwayProviderAttemptOnce/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    for (const path of [
+      "attemptExecution.ts",
+      "fakeProvider.ts",
+      "credentialOpeningRun.ts",
+      "providerExecutionContract.ts",
+      "preProviderOrchestration.ts",
+      "inFlightHeartbeat.ts",
+      "googleAttemptExecution.ts",
+      "googleProviderAdapter.ts",
+      "googleProviderContract.ts",
+      "providerEnvironment.ts",
+    ]) {
+      const text = code(read(join(SRC_ROOT, path)));
+      expect(/runwayProvider|runwayAttempt|RunwaySubmission|RUNWAY_PROVIDER_ID|imageToVideo/.test(text), path).toBe(false);
+    }
+    // The Runway modules never reach the Google modules: no generic selector or registry.
+    for (const text of [contract, adapter, composer]) {
+      expect(/google|genai|gemini|interactions\./i.test(text)).toBe(false);
+    }
+    const SELECTOR = /providerSelector|providerRegistry|selectProvider|providerFactory|ProviderPort|switch\s*\(\s*[A-Za-z.]*provider\b|REAL_PROVIDER_MODE|LIVE_PROVIDER/i;
+    for (const { path, text } of sources) expect(SELECTOR.test(code(text)), path).toBe(false);
+    expect(SELECTOR.test("switch (lease.provider) {")).toBe(true);
+    const scripts = (JSON.parse(read(join(APP_ROOT, "package.json"))) as { scripts: Record<string, string> }).scripts;
+    expect(Object.values(scripts).some((command) => /runway/i.test(command))).toBe(false);
+  });
+
+  it("keeps the contract pure: the locked constants, the closed request members, no I/O", () => {
+    expect(importsOf(contract).sort()).toEqual(["./workerControlClient.js", "./workerError.js"]);
+    expect(contract).toMatch(/export const RUNWAY_PROVIDER_ID = "RUNWAY";/);
+    expect(contract).toMatch(/export const RUNWAY_MODEL = "gen4\.5";/);
+    expect(contract).toMatch(/export const RUNWAY_PROMPT_MAX_CODE_UNITS = 1000;/);
+    expect(contract).toMatch(/export const RUNWAY_DURATION_MIN_SECONDS = 2;/);
+    expect(contract).toMatch(/export const RUNWAY_DURATION_MAX_SECONDS = 5;/);
+    expect(contract).toMatch(/export const RUNWAY_RATIO = "1280:720";/);
+    expect(contract).toMatch(/export const RUNWAY_OUTPUT_FORMAT = "mp4";/);
+    expect(contract).toMatch(/export const RUNWAY_DATA_URI_MAX_CHARS = 5_242_880;/);
+    expect(contract).toMatch(/export const RUNWAY_MAX_REFERENCE_IMAGE_BYTES = 3_932_142;/);
+    expect(contract).toMatch(/export const RUNWAY_CREATE_TIMEOUT_MS = 60000;/);
+    expect(contract).toMatch(/export const RUNWAY_CREATE_MAX_RETRIES = 0;/);
+    expect(contract).toMatch(/export const RUNWAY_API_BASE_URL = "https:\/\/api\.dev\.runwayml\.com";/);
+    expect(contract).toMatch(/export const RUNWAY_API_VERSION = "2024-11-06";/);
+    expect(contract).toMatch(/export const RUNWAY_EXPECTED_COST_CAP_UNIT = "PROVIDER_CREDITS";/);
+    expect(contract).toMatch(/const REQUEST_MEMBERS = Object\.freeze\(\["durationSeconds", "prompt", "referenceImage"\]\);/);
+    expect(contract).toMatch(/!Number\.isInteger\(durationSeconds\)/);
+    // No normalisation, rounding, pricing, I/O, environment, credential, storage or provider call.
+    expect(
+      /\.trim\(|toLowerCase|toUpperCase|normali[sz]e|replace\(|Math\.(round|floor|ceil|trunc)|parseInt|parseFloat|Number\(|credits\s*\*|\* *12\b|fetch\s*\(|process\.|node:|getObject|retrieveVerifiedReferenceImage|parseReferenceImage|opener|credential|journal|imageToVideo|@runwayml/i.test(
+        contract,
+      ),
+    ).toBe(false);
+  });
+
+  it("confines the SDK to one adapter that builds one explicit client and creates once with the pinned options", () => {
+    expect(importsOf(adapter).sort()).toEqual([
+      "./credentialOpeningRun.js",
+      "./inputMediaRetrieval.js",
+      "./providerExecutionContract.js",
+      "./runwayProviderContract.js",
+      "./workerError.js",
+      "@runwayml/sdk",
+    ]);
+    expect(adapter).toMatch(/import RunwayML, \{ APIError \} from "@runwayml\/sdk";/);
+    expect(adapter).toMatch(/import type \{ SealedCredentialCapability \} from "\.\/credentialOpeningRun\.js";/);
+    // One client, with every authority explicit: the granted key, origin, version, zero retries, 60000 ms, the injected fetch, logging off.
+    expect(adapter.match(/new Client\(\{/g)).toHaveLength(1);
+    expect(adapter).toMatch(
+      /new Client\(\{\s*apiKey,\s*baseURL: RUNWAY_API_BASE_URL,\s*runwayVersion: RUNWAY_API_VERSION,\s*maxRetries: RUNWAY_CREATE_MAX_RETRIES,\s*timeout: RUNWAY_CREATE_TIMEOUT_MS,\s*fetch: dependencies\.transport,\s*logLevel: "off",\s*\}\)/,
+    );
+    expect(/defaultHeaders|fetchOptions|logger\s*:|idempotency/i.test(adapter)).toBe(false);
+    // One create, with zero retries and 60000 ms on the request too.
+    expect(adapter.match(/\.imageToVideo\.create\(/g)).toHaveLength(1);
+    expect(adapter).toMatch(/\.imageToVideo\.create\(payload, \{\s*maxRetries: RUNWAY_CREATE_MAX_RETRIES,\s*timeout: RUNWAY_CREATE_TIMEOUT_MS,\s*\}\)/);
+    expect(adapter.match(/maxRetries/g)).toHaveLength(2);
+    expect(adapter.match(/maxRetries: RUNWAY_CREATE_MAX_RETRIES/g)).toHaveLength(2);
+    expect(adapter.match(/timeout: RUNWAY_CREATE_TIMEOUT_MS/g)).toHaveLength(2);
+    expect(adapter).toMatch(/if \(dispatched \|\| client === null \|\| body === null\) throw new WorkerError\("PROVIDER_CONTRACT_VIOLATION"\);/);
+    // The exact body: adapter-owned model, ratio and output format; nothing else.
+    expect(adapter).toMatch(
+      /Object\.freeze\(\{\s*model: RUNWAY_MODEL,\s*promptImage,\s*promptText: request\.prompt,\s*ratio: RUNWAY_RATIO,\s*duration: request\.durationSeconds,\s*outputFormat: RUNWAY_OUTPUT_FORMAT,\s*\}\)/,
+    );
+    expect(/seed|contentModeration|proresProfile|promptImage:\s*\[|position:/i.test(adapter)).toBe(false);
+    // The inline data URI from the verified bytes, with the exact final length guard.
+    expect(adapter).toMatch(/const uri = `data:\$\{detected\};base64,\$\{Buffer\.from\(image\.bytes\)\.toString\("base64"\)\}`;/);
+    expect(adapter).toMatch(/if \(uri\.length > RUNWAY_DATA_URI_MAX_CHARS\) throw new WorkerError\("PROVIDER_CONTRACT_VIOLATION"\);/);
+    // The credential is opened once, through the sealed capability, only for construction.
+    expect(adapter.match(/\.openOnceFor\(/g)).toHaveLength(1);
+    // The locked preparation order: re-open, then the data URI and body, then the one client.
+    const reopen = adapter.indexOf("await preparation.sealedCredential.openOnceFor(");
+    const dataUri = adapter.indexOf("buildRunwayCreateRequest(preparation.request, buildRunwayDataUri(preparation.image))");
+    const construct = adapter.indexOf("new Client({");
+    expect(reopen).toBeGreaterThan(0);
+    expect([reopen < dataUri, dataUri < construct]).toEqual([true, true]);
+    expect(adapter.match(/buildRunwayDataUri\(preparation\.image\)/g)).toHaveLength(1);
+    // The raw task.id, unchanged, handed to the awaited callback.
+    expect(adapter).toMatch(/const id = field\(task, "id"\);/);
+    expect(adapter).toMatch(/await onAccepted\(\{ provider: RUNWAY_PROVIDER_ID, providerExecutionId: id \}\);\s*return Object\.freeze\(\{ kind: "ACCEPTED" \}\);/);
+    expect(adapter.match(/providerExecutionId/g)).toHaveLength(1);
+    expect(/estimatedCost|credits/i.test(adapter)).toBe(false);
+    // Classification from the typed status only; the locked definitive set, exactly.
+    expect(adapter).toMatch(/export const RUNWAY_DEFINITIVE_STATUSES = Object\.freeze\(\[400, 401, 403, 404, 422, 429\] as const\);/);
+    expect(adapter).toMatch(/if \(!\(error instanceof APIError\)\) return "AMBIGUOUS_FAILURE";/);
+  });
+
+  // No task retrieval, waiting, resume, upload, polling, output, completion,
+  // engine, control plane, journal, storage, environment, loop, retry,
+  // ID transformation or provider text.
+  const FORBIDDEN_IN_RUNWAY =
+    /waitForTaskOutput|tasks\.|\.retrieve\(|resumeRunway|uploads\.|createEphemeral|runway:\/\/|\bpoll|download|outputUrl|outputPath|\.output\b|complet|SUCCEEDED|generationRecord|Transaction|reportSubmitted|reportSubmissionFailed|reportInputFailed|recoverAcceptance|WorkerControlClient|journal|getObject|ObjectStore|node:fs|readFile|mediaRoot|sourceImagePath|process\.|dotenv|loadEnvironment|RUNWAYML_|src\/execution|src\/runway|\.\.\/\.\.\/|commercial-api|\bfor\s*\(|\bwhile\s*\(|setTimeout|setInterval|retry\(|backoff|\.trim\(|toLowerCase|toUpperCase|encodeURI|\.message\b|\.headers\b|\.cause\b|\.body\b|String\(error\)|JSON\.stringify\(error|console\.|log\(/i;
+
+  it.each([
+    ["contract", "runwayProviderContract.ts"],
+    ["adapter", "runwayProviderAdapter.ts"],
+  ])("keeps the %s free of retrieval, upload, polling, output, engine, environment, retry, ID transformation and provider text", (_name, file) => {
+    // The contract's one control-plane reference is the lease type it admits.
+    const LEASE_TYPE_IMPORT = 'import type { WorkerLease } from "./workerControlClient.js";';
+    const text = code(read(join(SRC_ROOT, file)));
+    if (file === "runwayProviderContract.ts") expect(text.split(LEASE_TYPE_IMPORT).length - 1).toBe(1);
+    expect(FORBIDDEN_IN_RUNWAY.test(file === "runwayProviderContract.ts" ? text.split(LEASE_TYPE_IMPORT).join("") : text)).toBe(false);
+  });
+
+  it("detects every planted lifecycle, engine, environment, retry or provider-text violation", () => {
+    for (const planted of [
+      "await created.waitForTaskOutput();",
+      "await client.tasks.retrieve(id);",
+      "await resumeRunwayGen45Task(client, id);",
+      "await client.uploads.createEphemeral(file);",
+      'const uri = "runway://upload/1";',
+      "await pollUntilDone(id);",
+      "await downloadOutput(url);",
+      "const outputUrl = task.output[0];",
+      "await runRunwayGen45Transaction(input);",
+      'import { createRunwayClient } from "../../src/runway/createRunwayClient.js";',
+      'import { x } from "../../src/execution/providers/executeRunwaySingleShot.js";',
+      'import "dotenv/config";',
+      "const key = process.env.RUNWAYML_API_SECRET;",
+      'const base = env["RUNWAYML_BASE_URL"];',
+      "for (let attempt = 0; attempt < 3; attempt += 1) {}",
+      "return retry(() => create());",
+      "const id = task.id.trim();",
+      "const id = String(task.id).toLowerCase();",
+      "if (error.message.includes('rate')) return DEFINITIVE;",
+      "if (error.headers.get('x-should-retry')) return AMBIGUOUS;",
+      "throw new WorkerError(error.cause);",
+      "console.error(error);",
+    ]) {
+      expect(FORBIDDEN_IN_RUNWAY.test(planted), planted).toBe(true);
+    }
+  });
+
+  it("composes the locked order once, with no client before the permit and no direct control-plane request", () => {
+    const at = (needle: string) => {
+      const index = composer.indexOf(needle);
+      expect({ needle, found: index >= 0 }).toEqual({ needle, found: true });
+      return index;
+    };
+    const order = [
+      "assertNoProviderProcessEnvironment();",
+      "await bindWorkerStateRoot(config,",
+      "await openLeasedCredentialOnce(",
+      "admitted.request = admitRunwayLease(lease);",
+      "{ retainSealedCredential: true },",
+      "await retrieveVerifiedReferenceImage(",
+      "await handleInputMediaFailure(",
+      "await obtainPreProviderPermit({ journal, client, deadlineTimer: timer }, executionAttemptId, proof);",
+      "await prepareRunwaySubmission(",
+      "createAcceptanceAdapter({ lease: context.lease, accountId: context.accountId, permit }, proof,",
+      "await runWithInFlightHeartbeat(",
+      "() => operation.execute(onAccepted),",
+    ].map(at);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    for (const pattern of [
+      /bindWorkerStateRoot\(/g,
+      /openLeasedCredentialOnce\(/g,
+      /retrieveVerifiedReferenceImage\(/g,
+      /handleInputMediaFailure\(/g,
+      /obtainPreProviderPermit\(/g,
+      /prepareRunwaySubmission\(/g,
+      /createAcceptanceAdapter\(/g,
+      /runWithInFlightHeartbeat\(/g,
+      /\.execute\(/g,
+    ]) {
+      expect(composer.match(pattern), String(pattern)).toHaveLength(1);
+    }
+    expect(composer).toMatch(/maxBytes: RUNWAY_MAX_REFERENCE_IMAGE_BYTES/);
+    // Every control-plane request goes through an existing module; no SDK, client construction, loop, retry or polling.
+    expect(/client\.[A-Za-z]+\(/.test(composer)).toBe(false);
+    expect(
+      /@runwayml|new [A-Z][A-Za-z]*\(\{|RunwayML|imageToVideo|tasks\.|waitForTaskOutput|requestCredentialGrant|process\.env|\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|retry\(|backoff|\bpoll|download|output|fetch\s*\(|console\./i.test(
+        composer,
+      ),
+    ).toBe(false);
+    // Two typed provider-failure reports through the shared policy, never a direct one.
+    expect(composer.match(/reportSubmissionFailureWithPolicy\(/g)).toHaveLength(2);
+    expect(composer).toMatch(/outcome: "DEFINITIVELY_REJECTED", failureCode: "PROVIDER_REJECTED_DEFINITIVELY"/);
+    expect(composer).toMatch(/outcome: "OUTCOME_UNKNOWN", failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS"/);
+    // Host-fault trips: refused admission, a missing continuation, a pre-dispatch
+    // preparation failure (re-open, data URI, construction), a contract violation,
+    // and an unacceptable success.
+    expect(composer.match(/latch\.trip\(\)/g)).toHaveLength(5);
+  });
+
+  it("imports no root engine or commercial-api module from any Runway module", () => {
+    for (const path of runwayModules) {
+      const text = read(join(APP_ROOT, path));
+      for (const specifier of importsOf(text)) {
+        expect(specifier === "@runwayml/sdk" ? path === ADAPTER : specifier.startsWith("./") && !specifier.includes("..")).toBe(true);
+      }
+    }
+  });
+});
+
 describe("process and package boundary", () => {
   it("is not started by default and is not imported by commercial-api", () => {
     const WORKER_APP = /commercial-worker(?!-protocol)/;
@@ -1318,13 +1649,22 @@ describe("process and package boundary", () => {
   it("depends at runtime only on the local protocol package and the exact provider SDK, and on the commercial-api toolchain for development", () => {
     const manifest = JSON.parse(read(join(APP_ROOT, "package.json"))) as Record<string, unknown>;
     // R44B10A: exactly @google/genai 2.24.0 (no range), owned by the worker package.
-    expect(manifest.dependencies).toEqual({ "@google/genai": "2.24.0", [PROTOCOL_PACKAGE]: "file:../../packages/commercial-worker-protocol" });
+    // R44B10B: and exactly @runwayml/sdk 4.20.0 (no range).
+    expect(manifest.dependencies).toEqual({
+      "@google/genai": "2.24.0",
+      "@runwayml/sdk": "4.20.0",
+      [PROTOCOL_PACKAGE]: "file:../../packages/commercial-worker-protocol",
+    });
     const lock = JSON.parse(read(join(APP_ROOT, "package-lock.json"))) as { packages: Record<string, { version?: string; dependencies?: Record<string, string> }> };
     expect(lock.packages[""]?.dependencies?.["@google/genai"]).toBe("2.24.0");
     expect(lock.packages["node_modules/@google/genai"]?.version).toBe("2.24.0");
-    expect(Object.keys(lock.packages).some((name) => /node_modules\/@runwayml\//.test(name))).toBe(false);
-    // The worker's own installation, never the root's hoisted copy.
+    expect(lock.packages[""]?.dependencies?.["@runwayml/sdk"]).toBe("4.20.0");
+    expect(lock.packages["node_modules/@runwayml/sdk"]?.version).toBe("4.20.0");
+    expect(Object.keys(lock.packages).filter((name) => /node_modules\/@runwayml\//.test(name))).toEqual(["node_modules/@runwayml/sdk"]);
+    // The worker's own installations, never the root's hoisted copies.
     expect(existsSync(join(APP_ROOT, "node_modules", "@google", "genai", "package.json"))).toBe(true);
+    const runwayInstalled = JSON.parse(read(join(APP_ROOT, "node_modules", "@runwayml", "sdk", "package.json"))) as { version: string };
+    expect(runwayInstalled.version).toBe("4.20.0");
     const api = JSON.parse(read(join(API_ROOT, "package.json"))) as { devDependencies: Record<string, string> };
     expect(manifest.devDependencies).toEqual({ "@types/node": api.devDependencies["@types/node"], typescript: api.devDependencies.typescript, vitest: api.devDependencies.vitest });
   });

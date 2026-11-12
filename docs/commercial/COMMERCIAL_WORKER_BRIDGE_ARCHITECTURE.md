@@ -9096,7 +9096,7 @@ deployment, root `src/**`, root manifest/lockfile, Google adapter/composer,
 fake provider/composer, acceptance journal/handler/adapter and P1/P2
 semantics.
 
-**Status (R44B10B contract lock).**
+**Historical status (R44B10B contract lock).**
 
 - **R44B10B discovery:** PASS.
 - **R44B10B conflict screen:** PASS.
@@ -9106,6 +9106,44 @@ semantics.
 - `R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=NO`.
 - `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES` remains true because R44B10A
   is already implemented.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
+**Implementation result (R44B10B docs sync).** All 25 implementation
+criteria pass against the implementation published in
+`c15a1186ab072dc32602c707b05f93807a0e25ef`. Evidence: 1159/1159
+commercial-worker unit tests across 25 files and clean worker typecheck;
+67/67 worker PostgreSQL integration tests across 26 files after the
+ordering repair; 858/858 commercial-api non-DB tests across 21 files and
+clean commercial-api typecheck; 628/628 commercial-api PostgreSQL tests
+across 106 suites after the repair; 2289/2289 root Runway-and-Google
+regression tests across 77 files; and 131/131 worker boundary tests.
+
+The actual `@runwayml/sdk` 4.20.0 counting transport proves one provider
+request on the locked accepted and failure paths with provider retries
+disabled, while the deliberate retry-enabled guard proves the harness
+would detect multiple requests. The ordering regression tests prove the
+post-permit sequence is sealed-credential re-open, inline data-URI
+construction, then client construction; the prior reversed ordering fails
+the regression guards. The final implementation changed exactly the
+expected ten commercial-worker files. Commercial-api production source,
+migrations, shared protocol, deployment, root engine/source,
+root manifest/lockfile, Google semantics, fake-provider semantics,
+acceptance semantics and R44B10P1/P2 semantics were not changed by
+R44B10B. No real provider network call was made during automated
+validation.
+
+**Current status (R44B10B docs sync).**
+
+- **R44B10B discovery:** PASS.
+- **R44B10B conflict screen:** PASS.
+- **R44B10B prerequisite required:** NO.
+- **R44B10B contract lock:** published in
+  `26649355a9d8af8fda34e83ee8a6362e4c1882e8`.
+- **R44B10B implementation:** PASS; validated and published in
+  `c15a1186ab072dc32602c707b05f93807a0e25ef`.
+- **R44B10B implementation criteria:** 25/25 PASS.
+- `R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=YES`.
+- `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
 ---
@@ -9557,8 +9595,12 @@ R44B10B_DISCOVERY=PASS
 R44B10B_CONFLICT_SCREEN=PASS
 R44B10B_PREREQUISITE_REQUIRED=NO
 R44B10B_CONTRACT_LOCKED=YES
-R44B10B_IMPLEMENTATION_STARTED=NO
-R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=NO
+R44B10B_IMPLEMENTATION_STARTED=YES
+R44B10B_IMPLEMENTATION_VALIDATED=YES
+R44B10B_IMPLEMENTATION_PUBLISHED=YES
+R44B10B_IMPLEMENTATION_CRITERIA_PASSED=25/25
+R44B10B_IMPLEMENTATION_COMMIT=c15a1186ab072dc32602c707b05f93807a0e25ef
+R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=YES
 R44B10B_PROVIDER=RUNWAY
 R44B10B_PROVIDER_MODEL=gen4.5
 R44B10B_SDK_DEPENDENCY=@runwayml/sdk@4.20.0

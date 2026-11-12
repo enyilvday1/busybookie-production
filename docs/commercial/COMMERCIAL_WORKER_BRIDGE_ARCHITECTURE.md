@@ -362,7 +362,28 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   classification-aware latch; a single-shot worker report client under the
   two-attempt, unavailable-only report retry; no shared protocol-package
   change; P2 remains unimplemented, and R44B10A stays blocked until P2 is
-  implemented: introduction, sections 18, 28, 36 and 37).
+  implemented: introduction, sections 18, 28, 36 and 37); R44B10P2 docs sync
+  (R44B10P2 published in commit 395b4fd8958c9f7bdfd34a215c72cf450cb86de2,
+  22 files: migration 0007 adds guard-stamped, immutable
+  `input_failed_worker_principal_id` (restrictive worker foreign key) and
+  `input_failed_fencing_counter`, with no token hash, pairing, state, code
+  and epoch checks (the epoch check a strengthening in the 0006 discipline)
+  and a fail-closed refusal of unprovable pre-barrier failures; the
+  `input-failed` route and `workerInputFailedService.ts` (granted live
+  `LEASED` authority, `FAILED_BEFORE_SUBMISSION`, job `FAILED`, lease
+  cleared, capacity freed, one `execution_attempt.input_failed` audit,
+  exact replay on reporter and epoch, 409 on conflict) and
+  `WORKER_INPUT_FAILURE_REJECTED`; the worker client `reportInputFailed`,
+  `INPUT_FAILED_REJECTED` and the two-attempt, unavailable-only report
+  policy; the three-class retrieval classification with the latch moved to
+  the caller-side `inputMediaFailurePolicy.ts`; a test-only P1/P2
+  composition with crash and replay proofs; 628/628 commercial-api DB tests
+  (106 suites, including the 31/31 migration suite), 858/858 commercial-api
+  non-DB, 833/833 worker unit and 51/51 worker integration tests, both
+  typechecks clean; `OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES`;
+  no production storage backend or vendor; provider flags unchanged;
+  R44B10P2 fully closed and R44B10A eligible for its own sequence:
+  introduction, sections 18, 28, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -4677,7 +4698,186 @@ SUBMITTED_CAN_CALL_PROVIDER_CREATE_AGAIN=NO
 
 ### `input-failed` route (revision R44B10P2)
 
-**Locked decision (R44B10P2; not implemented).** An authoritative
+**Status (R44B10P2; recorded by the R44B10P2 docs sync).** Implemented in
+commit 395b4fd8958c9f7bdfd34a215c72cf450cb86de2 ("feat(commercial): add
+pre-provider input failure handling"; 22 files, 3142 insertions, 123
+deletions), committed only after every validation below passed.
+
+- added: `apps/commercial-api/migrations/0007_input_failure_provenance.sql`,
+  `apps/commercial-api/src/workerControl/workerInputFailedService.ts`,
+  `apps/commercial-worker/src/inputMediaFailurePolicy.ts`, and the tests
+  `apps/commercial-api/tests/db/workerInputFailed.test.ts`,
+  `apps/commercial-worker/tests/inputFailedClient.test.ts`,
+  `apps/commercial-worker/tests/inputMediaFailurePolicy.test.ts` and
+  `apps/commercial-worker/tests/integration/inputFailureComposition.test.ts`;
+- modified production files: `workerControlApplication.ts`,
+  `workerSecurityEvents.ts` (commercial-api), and `inputMediaRetrieval.ts`,
+  `workerControlClient.ts`, `workerError.ts` (commercial-worker); the
+  remaining changes are existing tests (boundary, migration, catalog,
+  privilege, runtime-version and fixture expectations).
+
+There is no change to this architecture (during implementation), the
+deployment runbook, the shared protocol package, package manifests,
+lockfiles, `runtimeGrants.ts`, `attemptExecution.ts`, `fakeProvider.ts`,
+the acceptance journal, the state root, real-provider code or provider SDK
+code. `OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES`; the contract
+below is implemented as locked, with one strengthening (the epoch check).
+
+- **Migration 0007.** Adds `input_failed_worker_principal_id uuid NULL`
+  (foreign key `execution_attempts_input_failed_worker_fk` to
+  `worker_principals (id) ON DELETE RESTRICT`) and
+  `input_failed_fencing_counter bigint NULL`. No lease-token verifier is
+  persisted. The `execution_attempts_guard` function is replaced in place
+  (its 0006 body is carried over unchanged, which a test pins line by
+  line). On `LEASED -> FAILED_BEFORE_SUBMISSION` the guard requires a lease
+  and an earlier grant (`OLD.credential_granted_at`), rejects a supplied
+  value that differs from the stamp, and stamps both values from
+  `OLD.lease_worker_principal_id` and `OLD.lease_fencing_counter`. It
+  rejects provenance on INSERT and any later change or clearing. The runtime
+  role has no UPDATE privilege on either column (`runtimeGrants.ts`
+  unchanged), and application SQL never names them.
+- **Checks.** `execution_attempts_input_failed_pair_ck` (both NULL or both
+  set), `execution_attempts_input_failed_state_ck` (set exactly when
+  `state = 'FAILED_BEFORE_SUBMISSION' AND submitting_at IS NULL`),
+  `execution_attempts_input_failed_code_ck` (one of the five `INPUT_*`
+  codes exactly when set) and
+  `execution_attempts_input_failed_epoch_ck`
+  (`input_failed_fencing_counter IS NULL OR input_failed_fencing_counter =
+  lease_fencing_counter`). The epoch check is an implementation
+  strengthening in the epoch discipline of migration 0006: the reporting
+  epoch always stays the retained fencing counter that replay compares.
+  A provider-caused `FAILED_BEFORE_SUBMISSION` structurally carries no
+  input-failure provenance or `INPUT_*` code, and a pre-barrier failure
+  cannot shed its provenance to pass as provider-caused.
+- **Fail closed.** No backfill. The migration aborts if any
+  `FAILED_BEFORE_SUBMISSION` row with a NULL `submitting_at` exists,
+  inferring nothing from the failure code, timestamps, the retained counter
+  or audit data; it applies cleanly to every provable row, including
+  provider-caused failures.
+- **Route.** `POST /worker-control/v1/attempts/:attemptId/input-failed` on
+  the existing worker-control wrapper (Origin refusal, worker
+  authentication, closed body). Exactly `{fencingCounter, leaseToken,
+  failureCode}`; any other member, a malformed proof and any code outside
+  the five (unknown `INPUT_*`, provider, storage or free-form) are 400 with
+  no state change. No provider or storage code crosses the route.
+- **First transition** (`workerInputFailedService.ts`).
+  `requireActiveWorker` (principal `FOR SHARE`), the attempt row `FOR
+  UPDATE`, then `lockCurrentLease(..., ["LEASED"])`: the same principal, the
+  exact fencing counter, the constant-time token match and an unexpired
+  lease. Then `credential_granted_at IS NOT NULL` (else
+  `CREDENTIAL_NOT_GRANTED`) and `submitting_at IS NULL`. The exact
+  credential version is read, never locked, only for the audit. One
+  transaction: `FAILED_BEFORE_SUBMISSION`, the `INPUT_*` code,
+  `completed_at = now()`, `submitting_at` left NULL, the lease cleared field
+  by field with the fencing counter and `credential_granted_at` kept, the
+  job `RUNNING -> FAILED`, and one audit row. Capacity is freed at once;
+  there is no replacement attempt, `NEEDS_ATTENTION` or `OUTCOME_UNKNOWN`,
+  and obligations close by state.
+- **Exact replay.** An attempt that is no longer `LEASED` is a replay
+  candidate. The caller must be `input_failed_worker_principal_id`
+  (`INPUT_FAILURE_PRINCIPAL_MISMATCH`), then `fencingCounter` must equal
+  `input_failed_fencing_counter` and the retained `lease_fencing_counter`
+  (`FENCING_MISMATCH`), and only then is the code compared with the
+  committed pre-barrier failure (`INCOMPATIBLE_ATTEMPT_STATE`). An exact
+  match returns the same 200 acknowledgement with no write and no audit. The
+  lease token stays syntactically required but is never replay authority.
+  A different code, principal or epoch, a provider-caused
+  `FAILED_BEFORE_SUBMISSION`, every other state, and a stale, expired,
+  foreign, ungranted or unknown first-time request get the uniform 409
+  `LEASE_REJECTED`; the first committed reason wins.
+- **Acknowledgement and audit.** `{executionAttemptId, fencingCounter,
+  state: "FAILED_BEFORE_SUBMISSION", failureCode}` for both. The
+  `execution_attempt.input_failed` audit carries `attemptNumber`,
+  `fencingCounter`, `workerPrincipalId`, `provider`, `credentialVersion` and
+  `failureCode`; never an object key, SHA-256, URL, bytes, a storage error,
+  a lease token or a credential.
+- **Security event.** `WORKER_INPUT_FAILURE_REJECTED` (plus the rejection
+  reason `INPUT_FAILURE_PRINCIPAL_MISMATCH`), TypeScript union members only;
+  no migration.
+- **Worker client.** `reportInputFailed(executionAttemptId, proof,
+  failureCode, signal?)` on the worker-control client, with the closed
+  `INPUT_FAILURE_CODES`. It sends nothing outside the contract, parses the
+  acknowledgement exactly (`parseInputFailedResponse`; anything else is the
+  existing `MALFORMED_CONTROL_RESPONSE`), maps 409 to the new closed
+  `INPUT_FAILED_REJECTED`, and never exposes a response body. One request
+  per call.
+- **Report policy** (`inputMediaFailurePolicy.ts`).
+  `reportInputFailureWithPolicy` wraps the client in the existing
+  `atMostTwoAttempts` (`failureReportPolicy.ts`):
+  `INPUT_FAILURE_REPORT_MAX_ATTEMPTS = 2`,
+  `INPUT_FAILURE_REPORT_REQUEST_DEADLINE_MS = 10000`, a fresh controller per
+  attempt, retrying only `CONTROL_API_UNAVAILABLE`; the result is
+  `REPORTED` (first transition or exact replay) or `UNREPORTED`. This is a
+  control-report retry, never a provider retry.
+- **Classification.** Retrieval throws `InputMediaRetrievalError` (a
+  `WorkerError`, codes unchanged) carrying `failure: InputMediaFailure`,
+  one of `{kind: "PERMANENT_INPUT", reason}` (exactly one `INPUT_*` code),
+  `{kind: "TRANSIENT_STORAGE"}` or `{kind: "HOST_FAULT"}`, decided once by
+  closed result and never from message text (mapping below).
+- **Latch ownership.** The R44B10P1 interim helper-side latch is replaced:
+  retrieval no longer takes a latch. `handleInputMediaFailure` (dependencies
+  `client`, `deadlineTimer`, `latch`) owns the decision and never throws:
+  `PERMANENT_INPUT` reports and never trips the latch; `TRANSIENT_STORAGE`
+  does nothing; `HOST_FAULT`, and any error that is not a classified
+  retrieval failure, trips the existing host-fault latch with no report.
+  Its closed outcomes are `PERMANENT_INPUT_REPORTED`,
+  `PERMANENT_INPUT_UNREPORTED`, `TRANSIENT_STORAGE` and `HOST_FAULT`; a 409
+  refusal is not retried and yields `PERMANENT_INPUT_UNREPORTED`. Every
+  outcome stops the attempt: no permit, `SUBMITTING`, provider
+  construction, dispatch, local `FAILED` or `OUTCOME_UNKNOWN`, and no latch
+  for control-plane unavailability alone. R44B10P1 is not reopened; only its
+  interim latch expectations changed.
+- **Unwired.** No production composer calls the policy yet; the fake
+  composer and `BUSYBOOKIE_FAKE` gained no input retrieval.
+
+| Retrieval condition | Worker error (unchanged) | Class and reason |
+|---|---|---|
+| malformed authorized reference, including an unsupported declared type | `OBJECT_REFERENCE_INVALID` | `PERMANENT_INPUT` / `INPUT_REFERENCE_INVALID` |
+| `NOT_FOUND` | `OBJECT_NOT_FOUND` | `PERMANENT_INPUT` / `INPUT_OBJECT_NOT_FOUND` |
+| declared `byteCount` above `maxBytes` (no store call) | `OBJECT_TOO_LARGE` | `PERMANENT_INPUT` / `INPUT_OBJECT_TOO_LARGE` |
+| store `TOO_LARGE` with the declared size within `maxBytes` | `OBJECT_TOO_LARGE` | `PERMANENT_INPUT` / `INPUT_OBJECT_INTEGRITY_MISMATCH` |
+| length or SHA-256 mismatch on valid `FOUND` bytes | `OBJECT_INTEGRITY_MISMATCH` | `PERMANENT_INPUT` / `INPUT_OBJECT_INTEGRITY_MISMATCH` |
+| allowed declared type contradicted by the bytes | `OBJECT_MEDIA_TYPE_INVALID` | `PERMANENT_INPUT` / `INPUT_MEDIA_TYPE_INVALID` |
+| `UNAVAILABLE` twice, or two read-deadline expiries | `OBJECT_STORAGE_UNAVAILABLE` | `TRANSIENT_STORAGE` |
+| `ACCESS_DENIED` | `OBJECT_STORAGE_ACCESS_DENIED` | `HOST_FAULT` |
+| `INVALID_OBJECT`, store throw or malformed result | `OBJECT_INTEGRITY_MISMATCH` | `HOST_FAULT` |
+| store returns more bytes than `maxBytes` | `OBJECT_TOO_LARGE` | `HOST_FAULT` |
+| missing or invalid store, invalid `accountId` or `maxBytes` | `WORKER_CONFIGURATION_INVALID` | `HOST_FAULT` |
+
+**Composition and crash evidence.** The test-only P1/P2 composition
+(`inputFailureComposition.test.ts`) drives a granted `LEASED` attempt
+through retrieval with the in-memory store, the classification, the policy
+and the real worker-control client over HTTP to the real router on
+PostgreSQL 16. For not found, SHA-256 mismatch, media mismatch and declared
+oversize it reaches `FAILED_BEFORE_SUBMISSION` with the job `FAILED`, the
+lease cleared and no latch, and the only outbound requests are the lease,
+the grant and the input-failed report: no permit, `SUBMITTING`, provider
+construction or dispatch. Access denied and store contract violations trip
+the latch and send no report; unavailable storage sends no report, trips no
+latch and leaves the lease to expiry. The API and composition tests also
+prove: a lost response after commit is recovered by the exact replay (one
+transition, one audit, never requeued); two unavailable reports leave the
+attempt `LEASED`, and after expiry granted-expired recovery requeues it and
+the next lease rediscovers and reports the same fault; a stale epoch is
+refused after recovery without touching the newer authority's attempt; a
+committed input failure is never requeued; `input-failed` and `SUBMITTING`
+race with exactly one winner. `OUTCOME_UNKNOWN` is never used on this path.
+
+**Validation.** Commercial-api PostgreSQL DB suite 628/628 tests in 106/106
+suites (exit 0), of which the migration suite 31/31 in 1/1 file (exit 0:
+empty database through 0007, upgrades from earlier versions, second-run
+no-op, checksum drift for 0001 to 0007, the migration lock, malformed
+migrations, 0007 on provable rows and its fail-closed refusal); commercial-api
+non-DB 858/858 in 21/21 files; commercial-worker unit 833/833 in 19/19
+files; commercial-worker integration 51/51 tests in 16/16 suites; both
+typechecks clean; `git diff --check` and the protected-scope screen passed.
+The first DB run exposed three stale schema-test expectations (the new 0007
+foreign key missing from a catalog expectation, the foreign-key count 25 to
+26, and the schema version 6 to 7); those test expectations were corrected
+and the whole suite then passed. They were not production defects.
+
+**Locked decision (R44B10P2; implemented by R44B10P2, recorded by the
+R44B10P2 docs sync).** An authoritative
 control-plane transition for a **permanent pre-provider input failure**:
 discovered after the credential grant and open, but before `SUBMITTING`,
 provider construction and provider dispatch. It never represents a provider
@@ -4861,12 +5061,13 @@ live in the API router and the worker client, as for `submitted` and
 `submission-failed`. This corrects the R44B10P1 expectation of a "protocol"
 change; the wire contract is additive.
 
-**API scope (later).** Additive only: `workerControlApplication.ts` (the
-action pattern, a member set and a handler), a new
+**API scope (implemented by R44B10P2).** Additive only:
+`workerControlApplication.ts` (the action pattern, a member set and a
+handler), a new
 `workerInputFailedService.ts`, `workerSecurityEvents.ts`, the migration and
 its tests, and worker-control DB tests. `runtimeGrants.ts` is unchanged.
 
-**Worker client and report policy (later).**
+**Worker client and report policy (implemented by R44B10P2).**
 
 - A single-shot `reportInputFailed(executionAttemptId, proof, failureCode,
   signal?)` on the worker-control client: worker authentication, the exact
@@ -4946,7 +5147,7 @@ store: tests use the R44B10P1 in-memory store.
 `OBJECT_STORAGE_PRODUCTION_IMPLEMENTED=NO` and `OBJECT_STORAGE_VENDOR`
 stays `UNDECIDED`.
 
-**Mandatory tests (later).**
+**Mandatory tests (implemented by R44B10P2).**
 
 - **API DB:**
   1. a valid granted live `LEASED` attempt with `INPUT_REFERENCE_INVALID`
@@ -5022,7 +5223,10 @@ stays `UNDECIDED`.
 `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO` and
 `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`. After P2 implementation and
 docs sync, `OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED` becomes eligible
-to flip.
+to flip. (R44B10P2 docs sync: flipped to
+`OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES`; the contract-lock and
+required-before-real-provider flags stay YES, and both provider flags stay
+NO.)
 
 **Real-provider unblock.** R44B10P2 implementation is the final known
 prerequisite before R44B10A. R44B10A still owns its own contract: the Google
@@ -5030,6 +5234,10 @@ request schema, credential re-open and lifetime, the engine-worker boundary
 revision, the SDK dependency, the retry assertion, real-adapter
 classification and the `REAL_PROVIDER_EXECUTION_IMPLEMENTED` criteria. None
 is solved here, and R44B10A stays blocked until R44B10P2 is implemented.
+(R44B10P2 docs sync: that prerequisite is now satisfied and R44B10P2 is
+fully closed. R44B10A is eligible to begin its own contract and
+implementation sequence; it is not implemented, and every R44B10A item
+above stays its own responsibility.)
 
 ```text
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_CONTRACT_LOCKED=YES
@@ -5766,6 +5974,17 @@ Account isolation is proven: account A retrieves its object, and account B
 gets `NOT_FOUND` for the same key, with no key-prefix parsing, so no
 existence is disclosed.
 
+(R44B10P2 docs sync.) The latch column and the single `latch.trip()` site
+above record R44B10P1 as published. R44B10P2 (commit
+395b4fd8958c9f7bdfd34a215c72cf450cb86de2) replaced that interim latch
+ownership: retrieval keeps these worker errors but no longer takes a latch,
+and classifies every failure as `PERMANENT_INPUT`, `TRANSIENT_STORAGE` or
+`HOST_FAULT`; the caller-side `inputMediaFailurePolicy.ts` reports permanent
+input failures and trips the latch only for host faults. The current
+mapping is in section 18, "`input-failed` route". The parser, key grammar,
+account isolation, `maxBytes`, SHA-256, byte-count and magic-byte checks,
+fresh read deadlines and the unavailable-only read retry are unchanged.
+
 **Errors.** Seven new closed codes in `workerError.ts`:
 `OBJECT_REFERENCE_INVALID`, `OBJECT_NOT_FOUND`,
 `OBJECT_STORAGE_UNAVAILABLE`, `OBJECT_STORAGE_ACCESS_DENIED`,
@@ -5875,6 +6094,16 @@ adapter or live provider submission exists.
 `OBJECT_STORAGE_INPUT_FAILURE_ROUTE_REQUIRED_BEFORE_REAL_PROVIDER=YES`. The
 interim permanent-failure handling is acceptable only while the library is
 unwired, and R44B10A stays blocked until R44B10P2 is implemented.
+
+**Gate satisfied (R44B10P2 docs sync).** R44B10P2 is implemented (commit
+395b4fd8958c9f7bdfd34a215c72cf450cb86de2) and fully closed:
+`OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES`, while
+`OBJECT_STORAGE_INPUT_FAILURE_ROUTE_REQUIRED_BEFORE_REAL_PROVIDER=YES`
+stays as the record that it was a prerequisite. The interim latch handling
+is superseded by the classification and caller-side policy (section 18,
+"`input-failed` route"). R44B10A may now begin its own sequence; no
+production storage backend, vendor, real provider or live submission
+exists.
 
 **Locked decision (R44B10P1; implemented by R44B10P1, recorded by the
 R44B10P1 docs sync).** This locks the input side
@@ -6041,6 +6270,10 @@ raw storage cause.
 closed and leaving the lease to expire avoids any dishonest transition, but
 granted-expired recovery requeues the attempt, so the same input fault
 would recur. This is **not** approved behaviour for a real-provider worker.
+(R44B10P2 docs sync: superseded. A permanent input failure is now reported
+through the `input-failed` route without a latch, a transient outage trips
+nothing, and only a host fault trips the latch; section 18, "`input-failed`
+route".)
 
 **Hard gate: R44B10P2.** Real-provider implementation (R44B10A) must not be
 wired or enabled until an honest pre-provider input-failure control-plane
@@ -6056,7 +6289,9 @@ expectations are superseded by R44B10P2 discovery: exact replay needs a
 reporter-provenance migration (the transition itself still needs none), and
 the shared protocol package does not change (route contracts live in the API
 router and worker client). The locked contract is section 18, "`input-failed`
-route (revision R44B10P2)".
+route (revision R44B10P2)". (R44B10P2 docs sync: the gate is satisfied; the
+route, migration 0007, the worker client and policy are implemented in
+commit 395b4fd8958c9f7bdfd34a215c72cf450cb86de2.)
 
 **Signed URLs and SSRF.** A signed URL is never durable identity, never in
 `generationRequest`, never journalled and never logged. If a production
@@ -6215,6 +6450,7 @@ implementation proves:
 
 Even then, R44B10A real-provider implementation stays **blocked** until
 R44B10P2 provides the honest pre-submission input-failure route.
+(R44B10P2 docs sync: provided; R44B10A is now eligible for its own sequence.)
 
 **Status and flags.** For R44B10P1 itself there is no new API endpoint, no
 lease response expansion, no protocol change, no migration and no new
@@ -6262,9 +6498,13 @@ OBJECT_STORAGE_INPUT_ALLOWED_CONTENT_TYPES=image/png,image/jpeg,image/webp
 OBJECT_STORAGE_INPUT_ACCOUNT_AUTHORITY=RELATIONAL_CONTEXT
 OBJECT_STORAGE_INPUT_TEST_STORE=IN_MEMORY_INJECTED_NO_DEFAULT
 OBJECT_STORAGE_INPUT_PROVIDER_DISPATCH_BEFORE_VERIFICATION=NO
-OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=NO
+OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_REQUIRED_BEFORE_REAL_PROVIDER=YES
 ```
+
+(R44B10P2 docs sync: `OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED` is YES
+since commit 395b4fd8958c9f7bdfd34a215c72cf450cb86de2; every other flag
+above is unchanged.)
 
 ### Filesystem privacy
 
@@ -6625,6 +6865,13 @@ implemented. The following are separate and none is implied:
 - a production storage backend (none; the vendor is undecided);
 - real-provider readiness (step 11 stays blocked on R44B10P2);
 - live provider submission (disabled).
+
+**Step 11 status (R44B10P2 docs sync).** The R44B10P2 prerequisite is
+satisfied (commit 395b4fd8958c9f7bdfd34a215c72cf450cb86de2; section 18,
+"`input-failed` route"), so step 11 is no longer blocked on it. Step 11 is
+**not started**: R44B10A must first lock and implement its own contract.
+Real-provider execution and live provider submission stay disabled, and
+step 9 still has no production storage backend.
 
 ### Status and fake-provider gate (revision R44B6K)
 
@@ -7971,6 +8218,22 @@ publication and docs sync, after which it is fully closed. Only then does
 the R44B10A Google real-provider adapter lock follow; R44B10A is not moved
 ahead of P2.
 
+**Status (R44B10P2 docs sync).**
+
+- **R44B10P1:** fully closed.
+- **R44B10P2 discovery:** PASS.
+- **R44B10P2 contract lock:** PASS (commit
+  d60fc0b25070a469ca21e8ceacd4e69d8f76fedb).
+- **R44B10P2 implementation:** PASS.
+- **R44B10P2 implementation publication:** PASS (commit
+  395b4fd8958c9f7bdfd34a215c72cf450cb86de2).
+- **R44B10P2 docs sync:** this revision. With its publication R44B10P2 is
+  **fully closed** and the real-provider prerequisite it represented is
+  satisfied.
+- **Next:** R44B10A, the Google real-provider adapter lock, now eligible
+  for its own contract and implementation sequence. It is not implemented,
+  and nothing about its adapter is locked here.
+
 Still open and separate: the production object-store backend, the storage
 vendor, storage credentials, ingest and upload, the retention and deletion
 lifecycle, the section 24 destruction service, the live `SUBMITTED`
@@ -8382,7 +8645,7 @@ OBJECT_STORAGE_INPUT_ALLOWED_CONTENT_TYPES=image/png,image/jpeg,image/webp
 OBJECT_STORAGE_INPUT_ACCOUNT_AUTHORITY=RELATIONAL_CONTEXT
 OBJECT_STORAGE_INPUT_TEST_STORE=IN_MEMORY_INJECTED_NO_DEFAULT
 OBJECT_STORAGE_INPUT_PROVIDER_DISPATCH_BEFORE_VERIFICATION=NO
-OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=NO
+OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_REQUIRED_BEFORE_REAL_PROVIDER=YES
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_CONTRACT_LOCKED=YES
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_PATH=/worker-control/v1/attempts/:attemptId/input-failed

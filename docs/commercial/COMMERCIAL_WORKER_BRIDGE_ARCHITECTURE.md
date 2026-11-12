@@ -335,7 +335,19 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   permanent input failure is not sufficient for real-provider wiring, so
   the R44B10P2 honest pre-submission input-failure route is mandatory
   before R44B10A implementation; provider flags unchanged: introduction,
-  sections 6, 28, 36 and 37).
+  sections 6, 28, 36 and 37); R44B10P1 docs sync (R44B10P1 published in
+  commit 192a97e7eca1c1c17378ccc10821e662eb96f77f: `objectStorageContract.ts`
+  and `inputMediaRetrieval.ts` added as an unwired production library;
+  seven closed worker errors; the test-only in-memory store; account-isolated
+  reads; a strict closed parser; relative-looking keys stay opaque store
+  keys; no filesystem, network or vendor; at most two read attempts,
+  retrying only unavailability, each with a 10000 ms deadline; SHA-256,
+  length and magic-byte checks; 752/752 worker unit, 40/40 worker
+  integration and 558/558 commercial-api DB tests, typecheck clean; all 22
+  criteria satisfied; the input library and test store are implemented, a
+  production storage backend is not, and the vendor stays undecided; step 9
+  is complete for its input scope only; R44B10P2 is still required before
+  R44B10A: introduction, sections 28, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -5269,7 +5281,217 @@ worker materialises inputs inside a server-generated safe namespace.
 
 ### Object-storage input contract (revision R44B10P1)
 
-**Locked decision (R44B10P1; not implemented).** This locks the input side
+**Status (R44B10P1; recorded by the R44B10P1 docs sync).** Implemented in
+commit 192a97e7eca1c1c17378ccc10821e662eb96f77f, in `apps/commercial-worker`
+only (6 files, 859 insertions, 4 deletions):
+
+- added: `src/objectStorageContract.ts`, `src/inputMediaRetrieval.ts`,
+  `tests/inputMediaRetrieval.test.ts`,
+  `tests/support/inMemoryObjectStore.ts`;
+- modified: `src/workerError.ts`, `tests/boundary.test.ts`.
+
+There is no change to this architecture (during implementation), the
+deployment runbook, commercial-api, the protocol package, migrations, the
+database schema, package manifests, lockfiles, the fake composer, the
+acceptance journal, the state root, real-provider code or provider SDK code.
+
+Three things are distinct:
+
+- **A. The production input library:** implemented
+  (`OBJECT_STORAGE_INPUT_LIBRARY_IMPLEMENTED=YES`).
+- **B. The in-memory test store:** implemented
+  (`OBJECT_STORAGE_TEST_IMPLEMENTATION_IMPLEMENTED=YES`).
+- **C. A production storage backend:** not implemented
+  (`OBJECT_STORAGE_PRODUCTION_IMPLEMENTED=NO`, which means a real
+  vendor-backed `ObjectStore`), with `OBJECT_STORAGE_VENDOR` still
+  `UNDECIDED`.
+
+The library stays **unwired**: no production module calls it.
+
+**Store contract.** `objectStorageContract.ts` defines `ObjectStore`, with
+one operation, `getObject({ accountId, key, maxBytes, signal })`. It is
+injected, read-only, single-shot (no retry inside the primitive),
+account-authoritative and bounded, with no default, vendor, URL or
+filesystem fallback. Its result is `FOUND` (with bytes) or one of
+`NOT_FOUND`, `UNAVAILABLE`, `ACCESS_DENIED`, `TOO_LARGE` and
+`INVALID_OBJECT`; raw vendor errors are never exposed. The contract file
+contains no code.
+
+**Parser.** `parseReferenceImage` validates the closed
+`{ key, sha256, byteCount, contentType }` member and returns it frozen.
+`parseGenerationRequestReferenceImage` reads only the optional
+`generationRequest.referenceImage` member (null when absent).
+
+- **Key:** the exact migration 0004 grammar, with no trimming,
+  normalisation or path resolution: no dot segments, no `//`, no trailing
+  `/`. A key such as `images/reference.webp` may look like a relative path,
+  but it is only an opaque store key. Safety comes from the grammar plus
+  store-only resolver confinement, not the grammar alone. A test uses
+  `package.json`, a syntactically valid key naming a real file in the test
+  working directory: the library receives `NOT_FOUND` from the store and
+  never touches the filesystem.
+- **SHA-256:** exact lowercase 64-hex. **Byte count:** a positive safe
+  integer. **Type:** exactly `image/png`, `image/jpeg` or `image/webp`, with
+  no aliases, parameters or video.
+- **Alternate members** (`url`, `signedUrl`, `localPath`, `path`,
+  `sourceImagePath`, `mediaRoot`, `file`, `uri` and others) are rejected
+  inside `referenceImage`.
+
+**Retrieval.** `retrieveVerifiedReferenceImage` runs, in order:
+configuration validation, then the reference, then declared size within
+`maxBytes` (no store call otherwise), then the store read, then the actual
+size within `maxBytes`, the exact byte count, the SHA-256 and the
+worker-local signature check (PNG `89 50 4E 47 0D 0A 1A 0A`; JPEG
+`FF D8 FF`; WebP `RIFF` at bytes 0 to 3 and `WEBP` at 8 to 11; no engine
+media reader and no decoder). It returns a frozen verified result, with no
+provider transformation, base64 or temporary file.
+
+- **TOCTOU:** verification runs on a private copy of the returned bytes,
+  and that copy is returned, so later changes to the store's buffer cannot
+  alter the verified result. No secure-memory or deep-immutability claim is
+  made.
+- **Retry and deadlines:** at most two read attempts, retrying only
+  `UNAVAILABLE`, each with a 10000 ms deadline under a fresh
+  `AbortController` (through the existing `DeadlineTimer` seam). A deadline
+  expiry counts as `UNAVAILABLE` and may take the one retry; two expiries
+  end in `OBJECT_STORAGE_UNAVAILABLE` with no latch.
+- **Store contract violations:** an unexpected throw or a malformed result
+  is an invalid-object invariant failure: `OBJECT_INTEGRITY_MISMATCH`, latch
+  tripped, with no thrown or vendor detail leaked.
+- **Invalid composition:** a missing or invalid store, an invalid
+  `accountId` or an invalid `maxBytes` fails closed with the existing
+  `WORKER_CONFIGURATION_INVALID` and trips the latch. That is a caller
+  failure, not a provider failure.
+
+| Outcome | Worker error | Latch |
+|---|---|---|
+| malformed reference (no store call) | `OBJECT_REFERENCE_INVALID` | trip (interim) |
+| declared size above `maxBytes` (no store call), `TOO_LARGE`, or more bytes returned | `OBJECT_TOO_LARGE` | trip (interim) |
+| `NOT_FOUND` (including another account's key) | `OBJECT_NOT_FOUND` | trip (interim) |
+| byte-count or SHA-256 mismatch, `INVALID_OBJECT`, store contract violation | `OBJECT_INTEGRITY_MISMATCH` | trip (interim) |
+| signature disagrees with type | `OBJECT_MEDIA_TYPE_INVALID` | trip (interim) |
+| `ACCESS_DENIED` | `OBJECT_STORAGE_ACCESS_DENIED` | trip |
+| `UNAVAILABLE` twice, or two deadline expiries | `OBJECT_STORAGE_UNAVAILABLE` | no trip |
+
+There is no provider classification and no control-plane transition. All
+failures go through one `latch.trip()` site, and a static test pins
+`OBJECT_STORAGE_UNAVAILABLE` as the only mapped error that does not trip.
+Account isolation is proven: account A retrieves its object, and account B
+gets `NOT_FOUND` for the same key, with no key-prefix parsing, so no
+existence is disclosed.
+
+**Errors.** Seven new closed codes in `workerError.ts`:
+`OBJECT_REFERENCE_INVALID`, `OBJECT_NOT_FOUND`,
+`OBJECT_STORAGE_UNAVAILABLE`, `OBJECT_STORAGE_ACCESS_DENIED`,
+`OBJECT_TOO_LARGE`, `OBJECT_INTEGRITY_MISMATCH` and
+`OBJECT_MEDIA_TYPE_INVALID`. Messages are fixed text with no key,
+`accountId`, digest, URL, bytes, storage cause or credential. A test throws
+vendor text containing a URL and proves it does not leak.
+
+**Test store.** `tests/support/inMemoryObjectStore.ts` is test-only:
+account-aware, deterministic, explicitly seeded and write-once, with a
+mutation seam, a forced-result seam, a read-until-abort seam and a call
+log. It uses no filesystem or network, and no `src` module imports it.
+There is no production default: no filesystem, media-root, working
+directory, temporary directory, fixture or in-memory fallback, and a
+missing store fails closed.
+
+**What did not change.**
+
+- `OpenedAttemptContext` is unchanged: the library is unwired, and no
+  runtime caller needs `generationRequest` after opening yet. The extension
+  stays deferred to R44B10P2 or R44B10A.
+- `providerExecutionContract.ts` is unchanged; storage contracts stay
+  separate from the provider create-phase contract.
+- The production modules have no dependency on `reportSubmissionFailed`,
+  `createAcceptanceAdapter`, `obtainPreProviderPermit`,
+  `runWithInFlightHeartbeat` or provider create. The library stops at
+  verified bytes, with no attempt transition and no provider state.
+- No API, protocol, migration or schema change; no new dependency or
+  lockfile change; no storage SDK or vendor. No `fetch`, HTTP, `axios`,
+  `undici`, S3, GCS, R2, Supabase or MinIO. No input filesystem resolver:
+  no `fs.readFile`, `fs.createReadStream`, path resolution to an input,
+  working-directory, temporary-directory or `BUSYBOOKIE_MEDIA_ROOT`
+  fallback, and no `file://` resolver.
+- `attemptExecution.ts` and `fakeProvider.ts` are byte-identical to R44B9.
+  `BUSYBOOKIE_FAKE` is not wired to retrieval, and
+  `FAKE_PROVIDER_EXECUTION_IMPLEMENTED` stays YES. Real-provider code is
+  unchanged, `REAL_PROVIDER_EXECUTION_IMPLEMENTED` and
+  `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED` stay NO, and no provider adapter
+  exists.
+
+**Boundary tests.** A new "object-storage input boundary" block proves:
+
+- the library is unwired;
+- imports are local and permitted;
+- there is no filesystem resolver, network implementation or provider
+  semantics;
+- the contract is read-only;
+- the store is used single-shot: one `.getObject(` call site, reached at
+  most twice by the caller-level retry;
+- the constants and key grammar match the migration source;
+- the store is test-only, and there is no production default;
+- the latch scope is pinned.
+
+**Validation.**
+
+- worker unit: 752/752 across 17 files (baseline 656/656 across 16): 84 new
+  library tests, and the boundary suite grows from 85 to 97;
+- worker integration: 40/40 across 3 files;
+- R44B9 regression: fake provider 6/6, whole chain 15/15,
+  `attemptExecution` 37/37;
+- credential opening: integration 19/19, unit 56/56;
+- commercial-api DB: 558/558 across 19 files;
+- typecheck clean and `git diff --check` clean.
+
+The tests cover the parser, valid PNG, JPEG and WebP, the key grammar, the
+relative-looking opaque key, alternate-member rejection, SHA-256, byte
+count, signatures, the zero-call declared-oversize case, actual oversize,
+mutation, unavailable retries, distinct deadline signals, deadline as
+unavailable, `NOT_FOUND`, `ACCESS_DENIED`, `TOO_LARGE`, store contract
+violations, account isolation, a missing store, no fallback, the latch
+mapping and the absence of provider semantics.
+
+**Criterion reconciliation.** All 22 R44B10P1 implementation criteria are
+satisfied:
+
+1. a stable key-only reference;
+2. the parser;
+3. the account-authoritative store;
+4. the in-memory test store;
+5. no production default;
+6. a bounded buffer read;
+7. the two-attempt, unavailable-only retry;
+8. a fresh 10000 ms deadline per attempt;
+9. byte-count verification;
+10. SHA-256 verification;
+11. PNG, JPEG and WebP signature verification;
+12. no URL;
+13. no filesystem or media-root resolution;
+14. cross-account isolation;
+15. closed worker errors;
+16. safe messages;
+17. no new package;
+18. no API, protocol or DB change;
+19. the fake composer unchanged;
+20. no real-provider code or network;
+21. the mandatory tests;
+22. boundary enforcement.
+
+**Milestone.** R44B10P1 is fully closed: a storage-neutral,
+account-authoritative, verified input-media abstraction and its test
+implementation exist. That does **not** mean a production storage backend,
+customer ingest, object lifecycle or retention, R44B10P2, a real-provider
+adapter or live provider submission exists.
+
+**R44B10P2 stays a hard gate.**
+`OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=NO` and
+`OBJECT_STORAGE_INPUT_FAILURE_ROUTE_REQUIRED_BEFORE_REAL_PROVIDER=YES`. The
+interim permanent-failure handling is acceptable only while the library is
+unwired, and R44B10A stays blocked until R44B10P2 is implemented.
+
+**Locked decision (R44B10P1; implemented by R44B10P1, recorded by the
+R44B10P1 docs sync).** This locks the input side
 of section 36 step 9 as an **unwired** production library in
 `apps/commercial-worker`, with an in-memory test implementation. It changes
 no commercial-api route, protocol, migration or database schema, selects no
@@ -5278,7 +5500,8 @@ and no upload product, and wires nothing into execution. Real-provider
 adapters, provider network, polling, output writes, object retention and
 signed-URL issuing are outside it.
 
-**Evidence (R44B10P0 discovery, revalidated).**
+**Evidence (R44B10P0 discovery, revalidated; the state before R44B10P1,
+now historical where the status above supersedes it).**
 
 - `generation_authorizations.generation_request` is immutable jsonb: a
   non-empty object of at most 16384 bytes (migration 0003). The lease
@@ -5605,7 +5828,12 @@ R44B10P2 provides the honest pre-submission input-failure route.
 **Status and flags.** For R44B10P1 itself there is no new API endpoint, no
 lease response expansion, no protocol change, no migration and no new
 dependency. R44B10P2 will need an API and protocol change, and current
-evidence indicates no migration. Completing this abstraction is not
+evidence indicates no migration. (R44B10P1 docs sync.)
+`OBJECT_STORAGE_PRODUCTION_IMPLEMENTED` means a real vendor-backed
+production `ObjectStore`, and stays NO;
+`OBJECT_STORAGE_INPUT_LIBRARY_IMPLEMENTED` and
+`OBJECT_STORAGE_TEST_IMPLEMENTATION_IMPLEMENTED` record the input library
+and the in-memory test store, both YES. Completing this abstraction is not
 real-provider implementation: `FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES`,
 `PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=YES`,
 `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO` and
@@ -5622,7 +5850,8 @@ signed-retrieval ownership, if one is used.
 ```text
 OBJECT_STORAGE_INPUT_CONTRACT_LOCKED=YES
 OBJECT_STORAGE_PRODUCTION_IMPLEMENTED=NO
-OBJECT_STORAGE_TEST_IMPLEMENTATION_IMPLEMENTED=NO
+OBJECT_STORAGE_TEST_IMPLEMENTATION_IMPLEMENTED=YES
+OBJECT_STORAGE_INPUT_LIBRARY_IMPLEMENTED=YES
 OBJECT_STORAGE_INPUT_REFERENCE_TYPE=KEY_PLUS_INTEGRITY
 OBJECT_STORAGE_INPUT_SIGNED_URL_DURABLE=NO
 OBJECT_STORAGE_INPUT_ARBITRARY_URL_ALLOWED=NO
@@ -5988,6 +6217,19 @@ the core engine must first demonstrate reliable execution and recovery.
 
 If implementation evidence requires reordering, this document is updated by
 a deliberate architecture revision rather than silently diverged from.
+
+**Step 9 status (R44B10P1 docs sync).** Step 9 is **complete for its input
+scope**: the object-storage input abstraction and its in-memory test
+implementation exist (R44B10P1, commit
+192a97e7eca1c1c17378ccc10821e662eb96f77f; section 28, "Object-storage input
+contract"). It is not recorded as wholly complete, because the R44B10P1 lock
+covers only the input side; the output-write side of the abstraction is not
+implemented. The following are separate and none is implied:
+
+- step 9 input scope complete;
+- a production storage backend (none; the vendor is undecided);
+- real-provider readiness (step 11 stays blocked on R44B10P2);
+- live provider submission (disabled).
 
 ### Status and fake-provider gate (revision R44B6K)
 
@@ -7315,6 +7557,20 @@ placement, the SDK dependency, the retry assertion, definitive
 classification and the real-provider flag criteria) stay with R44B10A or
 later slices.
 
+**Status (R44B10P1 docs sync).**
+
+- **R44B10P1:** lock and implementation complete (commit
+  192a97e7eca1c1c17378ccc10821e662eb96f77f); fully closed.
+- **Next:** R44B10P2, the honest pre-submission input-failure route. It is
+  not designed here.
+- **Then:** the R44B10A Google adapter lock.
+
+Still open for live readiness, none of them complete: the production
+storage backend and vendor; production storage credentials; ingest and
+upload; issuer validation; retention and pinning; the deletion lifecycle;
+the canonical request-hash recipe; and signed-retrieval ownership, if one
+is ever used.
+
 ---
 
 ## 37. Lock flags
@@ -7696,7 +7952,8 @@ PROVIDER_FAILURE_COMPOSITION_IMPLEMENTED=YES
 PROVIDER_REAL_ADAPTER_CREATE_RETRY_ASSERTION_REQUIRED=YES
 OBJECT_STORAGE_INPUT_CONTRACT_LOCKED=YES
 OBJECT_STORAGE_PRODUCTION_IMPLEMENTED=NO
-OBJECT_STORAGE_TEST_IMPLEMENTATION_IMPLEMENTED=NO
+OBJECT_STORAGE_TEST_IMPLEMENTATION_IMPLEMENTED=YES
+OBJECT_STORAGE_INPUT_LIBRARY_IMPLEMENTED=YES
 OBJECT_STORAGE_INPUT_REFERENCE_TYPE=KEY_PLUS_INTEGRITY
 OBJECT_STORAGE_INPUT_SIGNED_URL_DURABLE=NO
 OBJECT_STORAGE_INPUT_ARBITRARY_URL_ALLOWED=NO

@@ -529,6 +529,14 @@ owns its provider SDK directly inside the worker package, as an exact-pinned
 worker dependency (first: `@google/genai` 2.24.0); section 36, "First
 real-provider adapter: Google GenAI (revision R44B10A)".
 
+(R44B10B contract lock.) The same boundary applies to the second real
+provider: the Runway adapter owns `@runwayml/sdk` exactly 4.20.0 inside
+`apps/commercial-worker`. It imports no root Runway or engine module and
+does not modify or rely on the root package dependency. Only Runway's
+create phase is reimplemented; polling, output download, recovery and
+engine audit paths remain separate. Section 36, "Second real-provider
+adapter: Runway Gen-4.5 (revision R44B10B)".
+
 `apps/commercial-api` remains prohibited from importing:
 
 - root engine modules (`src/**`);
@@ -745,6 +753,14 @@ Gemini Developer API at `generativelanguage.googleapis.com`, and the
 forbidden-variable refusal above must cover the actual process environment
 the SDK reads, not only an injected copy. There is still no provider-key
 environment fallback and no `WorkerConfig` key field.
+
+(R44B10B contract lock.) `@runwayml/sdk` 4.20.0 defaults or consults
+`RUNWAYML_API_SECRET`, `RUNWAYML_BASE_URL`, `RUNWAYML_CUSTOM_HEADERS`
+and `RUNWAYML_LOG`. The existing commercial-worker process-environment
+refusal already names all four and remains mandatory. The adapter supplies
+the granted credential, API origin, API version, retry setting, timeout,
+transport and `logLevel: "off"` explicitly; it never reads a provider
+credential or transport override from the environment.
 
 ---
 
@@ -2371,6 +2387,14 @@ with an injected counting fetch, and pinned by a boundary test. Provider
 retry advice (for example on 429) never justifies an SDK or application
 retry. Section 36, "First real-provider adapter: Google GenAI (revision
 R44B10A)".
+
+(R44B10B contract lock.) The Runway obligation is equally concrete:
+`@runwayml/sdk` 4.20.0, public `client.imageToVideo.create`, with
+client-level and per-create `maxRetries: 0` and a 60000 ms timeout.
+Runway 4.20.0 otherwise retries connection failures, 408, 409, 429 and
+5xx responses. A real-SDK counting-fetch test must prove exactly one HTTP
+request for at least 408, 409, 429, 503, a connection failure and a
+timeout. No Runway retry recommendation permits automatic resubmission.
 
 ---
 
@@ -8861,6 +8885,229 @@ enablement.
 - `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`;
   `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
+### Second real-provider adapter: Runway Gen-4.5 (revision R44B10B)
+
+**Locked decision (R44B10B; discovery and conflict screen passed, contract
+locked, not implemented).** Discovery ran read-only against
+`4580959f36a1433d26da883fd173ed8cb72c8234`. R44B10A, R44B10P1 and
+R44B10P2 are fully closed, and no prerequisite slice is required before
+this adapter. R44B10B adds a second worker-local create-only real-provider
+adapter. It ends at durable `SUBMITTED`; it adds no polling, task retrieval,
+output download, output persistence or completion. Live provider submission
+stays disabled.
+
+**Provider, model and SDK.** Provider identifier exactly `RUNWAY`; model
+exactly `gen4.5`. The worker owns `@runwayml/sdk` exactly 4.20.0 as an
+exact runtime dependency. The root manifest currently declares
+`^4.20.0` but the root lock resolves 4.20.0; neither root file changes.
+The adapter imports no engine or root source module.
+
+**API authority.** API origin exactly `https://api.dev.runwayml.com`;
+Runway API version exactly `2024-11-06`. The client is constructed only
+after the provider permit with the re-opened granted credential, explicit
+origin and version, `maxRetries: 0`, timeout 60000, injected fetch, and
+`logLevel: "off"`. No custom headers, environment fallback, default
+credential or default transport override is authoritative.
+
+**Closed generation request.** The request is exactly
+`{ prompt, referenceImage, durationSeconds }`; unknown members are
+rejected before credential grant as issuer/control-plane invariant faults.
+
+- `prompt`: non-empty string, no leading or trailing whitespace, at most
+  1000 UTF-16 code units, never trimmed or rewritten.
+- `referenceImage`: the exact R44B10P1 reference object. PNG, JPEG and
+  WebP only.
+- `durationSeconds`: integer 2 through 5 inclusive. Runway Gen-4.5
+  supports a wider 2-to-10-second range, but this slice preserves
+  BusyBookie's existing five-second operational ceiling. Widening it needs
+  a later explicit policy lock.
+
+The adapter owns `ratio: "1280:720"` and `outputFormat: "mp4"`. The
+request cannot supply a seed, alternate ratio, professional/HDR format,
+content-moderation override, provider URL or provider-specific option.
+
+**Reference image transport.** The verified image bytes are converted
+directly to
+`data:<verified-content-type>;base64,<verified-bytes>` after the permit.
+There is no HTTPS input URL, `runway://` durable identity or Runway
+ephemeral-upload operation in R44B10B. The final data-URI string may not
+exceed 5,242,880 characters. A conservative uniform retrieval ceiling of
+3,932,142 raw bytes guarantees the limit for the allowed MIME prefixes;
+the final URI length is checked again before construction/dispatch. An
+oversized declared or retrieved object is handled through the existing
+R44B10P2 `INPUT_OBJECT_TOO_LARGE` path before the permit.
+
+**Cost authority.** The lease must use
+`expectedCostCap.unit=PROVIDER_CREDITS`. Pricing and entitlement remain
+issuer/control-plane authority; the worker neither invents nor refreshes a
+price. Current Runway Gen-4.5 pricing and the existing BusyBookie policy
+are 12 credits per second, but that fact is not a second worker billing
+authority. The create response's `estimatedCost` is not acceptance
+identity and is not used to override the authorised cap.
+
+**Ordering.**
+
+```text
+lease
+-> RUNWAY / gen4.5 / closed-request admission
+-> credential grant
+-> first credential open and validation; plaintext discarded
+-> verified R44B10P1 image retrieval
+-> R44B10P2 policy on input failure; stop
+-> pre-provider permit: journal preparation, SUBMITTING, renewal
+-> same-grant sealed credential re-open
+-> inline data-URI construction and Runway client construction
+-> runWithInFlightHeartbeat(
+     one imageToVideo.create
+     -> raw task.id
+     -> awaited durable acceptance
+   )
+-> SUBMITTED
+```
+
+No provider client exists before the permit. No second credential grant
+exists. Post-permit/pre-dispatch local failure is a host fault, makes no
+provider report and leaves authoritative expiry recovery unchanged.
+
+**Provider create.** Exactly one call:
+
+```text
+client.imageToVideo.create(
+  {
+    model: "gen4.5",
+    promptImage: <verified-data-uri>,
+    promptText: <authorised-prompt>,
+    ratio: "1280:720",
+    duration: <authorised-2-to-5>,
+    outputFormat: "mp4"
+  },
+  { maxRetries: 0, timeout: 60000 }
+)
+```
+
+Awaiting the create response is allowed. Calling `waitForTaskOutput`,
+`tasks.retrieve`, any resume helper, output downloader, generation-record
+writer or engine transaction is forbidden in this slice.
+
+**Provider execution ID.** Exactly the raw `task.id`; no trimming,
+prefixing, case change, encoding or fabrication. It must already satisfy
+the shared provider-execution-ID grammar. A valid ID is passed to the
+existing awaited durable acceptance callback, which remains the sole
+authority for entering `SUBMITTED`. `estimatedCost` is not part of the
+acceptance record.
+
+**Create failure classification.** Classification uses typed SDK fields
+only, never error message text, raw bodies, headers or causes.
+
+- **Definitive for this attempt:** typed Runway API response status 400,
+  401, 403, 404, 422 or 429, with no accepted task ID. A 429 is never
+  retried automatically.
+- **Ambiguous:** 408, 409, every 5xx, timeout, connection failure/reset,
+  unknown transport failure, an unknown or unlocked HTTP status, or any
+  condition where acceptance cannot safely be disproved.
+- **Malformed success:** missing, empty, transformed or invalid `task.id`
+  is ambiguous and a host fault. No ID is fabricated.
+- A later task failure after a valid task ID was accepted belongs to future
+  polling/completion work and cannot be reclassified as create rejection.
+
+**Provider retry and idempotency.** Client and request both use
+`maxRetries: 0`. Runway's SDK default retry machinery is never relied
+on. No application retry exists. No Runway idempotency key/header is
+relied on, and BusyBookie makes no provider exactly-once claim.
+
+**Secret and logging safety.** The Runway client uses
+`logLevel: "off"`. Raw SDK response bodies, messages, headers, causes,
+credential material, data URIs and image bytes never enter WorkerError,
+journal, audit, security events, routine logs or control-plane requests.
+
+**Default-off composition.** R44B10B is a worker library plus automated
+tests only. It adds no generic provider selector, registry, daemon, CLI,
+worker loop, deployment entrypoint or startup caller. Google remains
+unchanged. Normal production startup still cannot invoke either real
+provider.
+
+**Migration, API and protocol.** None. Existing
+`expectedCostCap` already supports `PROVIDER_CREDITS`; P1/P2,
+credential sealing, permit, heartbeat, acceptance, failure reporting and
+provider-ID grammar are reused unchanged.
+
+**Mandatory tests.**
+
+- request parser: exact members, prompt rules, duration 2..5, provider/model,
+  cost unit and all rejected variants;
+- data-URI construction for PNG/JPEG/WebP, the 3,932,142-byte ceiling and
+  exact final 5,242,880-character guard;
+- actual Runway 4.20.0 SDK with injected counting fetch: accepted create
+  and exactly one HTTP request on 408, 409, 429, 503, connection failure
+  and timeout;
+- a guard test proving the counting harness observes more than one request
+  when retries are intentionally enabled;
+- zero construction/dispatch for wrong provider/model/request/cost unit,
+  every P2 input failure, storage failure and permit refusal;
+- post-permit credential re-open/client-construction faults: latch, zero
+  dispatch and zero provider-failure report;
+- raw task-ID acceptance and malformed-ID ambiguity;
+- definitive and ambiguous failure composition;
+- tier-3 accepted, definitive and ambiguous paths using the real control
+  router, test PostgreSQL, journal and real SDK with no network;
+- lost response, acceptance failure, heartbeat authority loss and restart:
+  no automatic Runway create resubmission;
+- boundary, no-engine-import, no-polling, no-upload, no-environment,
+  secret-safety and default-off proofs.
+
+**Criteria for `R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=YES`.**
+
+1. The Runway adapter exists in commercial-worker.
+2. `@runwayml/sdk` 4.20.0 is exact-pinned in the worker.
+3. API origin and version are explicit.
+4. No root engine/source runtime import exists.
+5. The closed request parser exists.
+6. Prompt and duration rules are enforced without normalization.
+7. Model is exactly `gen4.5`.
+8. Ratio is exactly `1280:720` and output format exactly `mp4`.
+9. Runway input uses verified inline data URI only.
+10. Provider-specific data-URI size is rejected before the permit through
+    the existing P2 path.
+11. The expected-cost unit is exactly `PROVIDER_CREDITS`.
+12. The single granted sealed credential preserves authority.
+13. Plaintext does not survive across control-plane calls.
+14. Client construction occurs only after the permit.
+15. At most one Runway client and one create dispatch exist.
+16. Create uses `maxRetries: 0` and timeout 60000.
+17. Real-SDK transport tests prove one request on all locked retryable
+    cases.
+18. `runWithInFlightHeartbeat` wraps create plus acceptance.
+19. The durable acceptance callback is awaited and is the sole ID authority.
+20. The provider execution ID is raw validated `task.id`.
+21. Definitive and ambiguous failure composition passes.
+22. No duplicate report or automatic resubmission exists.
+23. Tier-3 accepted, definitive and ambiguous paths pass.
+24. Boundary, no-network, no-polling, no-upload and secret-safety proofs
+    pass.
+25. The adapter remains default-off and
+    `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
+**Expected implementation scope.** NEW in commercial-worker: Runway request
+contract, create adapter, Runway attempt composer and their unit/tier-3
+tests. MODIFIED: worker package manifest/lockfile and boundary tests;
+`workerError.ts` only if a genuinely missing local invariant requires it.
+Expected unchanged: commercial-api, migrations, shared protocol,
+deployment, root `src/**`, root manifest/lockfile, Google adapter/composer,
+fake provider/composer, acceptance journal/handler/adapter and P1/P2
+semantics.
+
+**Status (R44B10B contract lock).**
+
+- **R44B10B discovery:** PASS.
+- **R44B10B conflict screen:** PASS.
+- **R44B10B prerequisite required:** NO.
+- **R44B10B contract lock:** this revision.
+- **R44B10B implementation:** not started.
+- `R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=NO`.
+- `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES` remains true because R44B10A
+  is already implemented.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
 ---
 
 ## 37. Lock flags
@@ -9306,6 +9553,42 @@ R44B10A_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
 R44B10A_PROCESS_RUNNER_REQUIRED=NO
 R44B10A_PRODUCTION_OBJECT_STORE_REQUIRED_FOR_IMPLEMENTATION=NO
 R44B10A_PRODUCTION_OBJECT_STORE_REQUIRED_FOR_LIVE_ENABLEMENT=YES
+R44B10B_DISCOVERY=PASS
+R44B10B_CONFLICT_SCREEN=PASS
+R44B10B_PREREQUISITE_REQUIRED=NO
+R44B10B_CONTRACT_LOCKED=YES
+R44B10B_IMPLEMENTATION_STARTED=NO
+R44B10B_RUNWAY_PROVIDER_IMPLEMENTED=NO
+R44B10B_PROVIDER=RUNWAY
+R44B10B_PROVIDER_MODEL=gen4.5
+R44B10B_SDK_DEPENDENCY=@runwayml/sdk@4.20.0
+R44B10B_API_VERSION=2024-11-06
+R44B10B_API_BASE_URL=https://api.dev.runwayml.com
+R44B10B_REQUEST_MEMBERS=prompt,referenceImage,durationSeconds
+R44B10B_PROMPT_MAX_UTF16_CODE_UNITS=1000
+R44B10B_DURATION_MIN_SECONDS=2
+R44B10B_DURATION_MAX_SECONDS=5
+R44B10B_RATIO=1280:720
+R44B10B_OUTPUT_FORMAT=mp4
+R44B10B_REFERENCE_IMAGE_TRANSPORT=INLINE_DATA_URI
+R44B10B_DATA_URI_MAX_CHARS=5242880
+R44B10B_MAX_REFERENCE_IMAGE_BYTES=3932142
+R44B10B_EXPECTED_COST_CAP_UNIT=PROVIDER_CREDITS
+R44B10B_PROVIDER_CREATE_RETRY_MAX=0
+R44B10B_PROVIDER_CREATE_TIMEOUT_MS=60000
+R44B10B_PROVIDER_EXECUTION_ID_SOURCE=task.id
+R44B10B_PROVIDER_EXECUTION_ID_TRANSFORMATION=NONE
+R44B10B_CLIENT_CONSTRUCTION_BEFORE_PERMIT_ALLOWED=NO
+R44B10B_SECOND_CREDENTIAL_GRANT=NO
+R44B10B_ENDPOINT=SUBMITTED
+R44B10B_INCLUDES_PROVIDER_UPLOAD=NO
+R44B10B_INCLUDES_POLLING=NO
+R44B10B_INCLUDES_OUTPUT_PERSISTENCE=NO
+R44B10B_INCLUDES_COMPLETION=NO
+R44B10B_DATABASE_MIGRATION_REQUIRED=NO
+R44B10B_COMMERCIAL_API_CHANGE_REQUIRED=NO
+R44B10B_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
+R44B10B_PROCESS_RUNNER_REQUIRED=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

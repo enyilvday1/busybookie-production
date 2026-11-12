@@ -9146,6 +9146,336 @@ validation.
 - `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
+### BYO generation authority and usage-ledger prerequisite (revision R44B11P1)
+
+**Locked decision (R44B11P1; architecture and policy only, not
+implemented).** R44B10A and R44B10B complete the default-off real-provider
+create-to-`SUBMITTED` worker adapters. The next control-plane dependency is
+the historical implementation-sequence step 12: generation entitlement and
+usage authority. That step's old label, "Full R44B7 entitlement and usage
+authority", is stale because R44B7 was subsequently used for the whole-chain
+crash/restart proof. The continuation is R44B11. R44B11P1 locks the
+prerequisite contract before any issuance service, usage-ledger migration or
+customer generation route is implemented.
+
+**Discovery and conflict screen.** Discovery ran against
+`71df65f6ac2e379786fcb738c4fe21316dde2126`. The R44B11 discovery report
+SHA-256 is
+`44d4ec822e8b8edaddfdf2a7bb1f19bddbc0fb25d33ed5e0b271f156dc7575ab`.
+The R44B11P1 conflict-screen report SHA-256 is
+`60e85ceabb0a3df2ecb9838fb0873fedff68771d18789c88b8ba91a3727ee26a`.
+The existing `generation_authorizations` table is a persistence skeleton:
+there is no application issuance service and no usage reservation authority.
+The worker queue already requires `generation_authorizations.status =
+'CLAIMED'`. `free-byo-v1` currently defines Production cardinality only,
+and the persistence architecture explicitly deferred generation reservation,
+consumption and UsageLedger policy.
+
+**Scope.** R44B11P1 is `USER_BYO` only. `PLATFORM_HOSTED`,
+`HOSTED_TRIAL` and `CREATOR` remain outside this contract. No platform
+credential authority, hosted-trial reservation, checkout, billing, provider
+polling, output persistence, completion, production runner or live-provider
+enablement is introduced.
+
+**FREE_BYO semantics.** For USER_BYO generation the qualifying FREE_BYO grant
+is access and provenance authority, not a per-generation consumable token.
+Issuing, claiming, executing, retrying or recovering one USER_BYO generation
+does not change the grant from `AVAILABLE` to `RESERVED` or `CONSUMED`
+and does not write `reserved_at` or `consumed_at`. No numeric generation,
+runtime, shot or cost quota is invented by this slice. A future numeric usage
+limit requires an explicit policy-version and architecture revision rather
+than silently changing `free-byo-v1`.
+
+**Eligibility at issuance.** A new USER_BYO GenerationAuthorization requires
+all of the following server-side authority at the same account boundary:
+
+- active authenticated User and active Account;
+- an owned Production whose `archived_at` is NULL;
+- its qualifying FREE_BYO grant in `AVAILABLE` state under a supported
+  policy version;
+- a ProviderConnection of that Account whose status is `ACTIVE` and whose
+  verification status is `VERIFIED`;
+- the exact current credential version in `ACTIVE` state;
+- a provider and model explicitly enabled by the server's generation
+  capability policy;
+- an exact generation request accepted by the shared provider/model request
+  contract;
+- a server-authoritative expected-cost cap.
+
+The browser supplies no trusted Account, grant, billing mode, credential
+version, entitlement decision or expected-cost cap. There is no fallback from
+USER_BYO to a platform credential.
+
+**Production archival policy.** R44B11P1 deliberately resolves new-generation
+behaviour for the schema-v1 archival marker. A Production whose
+`archived_at` is non-NULL is ineligible for a new GenerationAuthorization.
+Archiving does not restore FREE_BYO Production capacity, does not roll back or
+cancel already-claimed work, and does not prevent recovery of an already
+authorised provider execution.
+
+**Provider-verification prerequisite.** The provider-connection architecture
+left the use of an unverified connection for generation as an open decision.
+R44B11P1 resolves that decision for USER_BYO generation: an unverified
+connection is not eligible for new generation. Issuance requires connection
+status `ACTIVE` and verification status `VERIFIED`, and the exact bound
+credential version must be `ACTIVE`.
+
+The current customer ProviderConnection flow has no implemented verification
+operation, so this requirement is not yet satisfiable through normal customer
+flow. A separate provider-specific, non-generating verification capability
+must be locked and implemented before customer generation is enabled. If no
+safe verification operation is available for a provider, that provider
+remains commercially disabled for issuance under this contract. A generation
+request must never be used as a credential-verification probe.
+
+**Post-issuance credential lifecycle.** Issuance-time eligibility and
+post-issuance provenance are distinct. Once an authorization is issued, its
+exact ProviderConnection and ProviderCredentialVersion are immutable. A
+rotation never rewrites the authorization to the new current credential.
+
+If the exact bound credential version later moves from `ACTIVE` to
+`SUPERSEDED` because of rotation, the authorization remains bound to that
+same version. A later claim may use that bound `SUPERSEDED` version if its
+sealed material still exists and the ProviderConnection has not become
+`INVALID`, `DISCONNECTED` or `DISABLED`. No lookup of a newer or
+"current" credential is allowed.
+
+Rotation resets the ProviderConnection to
+`PENDING_VERIFICATION`/`UNVERIFIED` for the new current credential. That
+reset alone does not invalidate an authorization issued earlier against the
+previous verified credential. In that narrow case, claim may proceed only
+when the authorization's bound version is `SUPERSEDED` and a distinct
+`ACTIVE` version exists on the same connection. This exception applies only
+to already-issued provenance; a `PENDING_VERIFICATION` connection remains
+ineligible for a new authorization.
+
+An `INVALID`, `DISCONNECTED` or `DISABLED` connection is not claimable.
+A bound version in `RETAINED_FOR_RECOVERY` or `DESTROYED` is not claimable
+for a new provider create. Claim never silently substitutes another
+credential version.
+
+**Disconnect before claim.** Disconnect stops new authorization use of the
+connection. Any still-`ISSUED` authorization bound to that connection is
+cancelled before it can become provider work. It moves
+`ISSUED -> CANCELLED` with `cancelled_at`, produces safe audit evidence
+and, where an AUTHORISED usage-ledger event already exists, appends the
+corresponding cancellation evidence. It creates no execution job or attempt
+and no provider call.
+
+Issuance, claim and disconnect must serialise on the ProviderConnection
+lifecycle so only one authoritative result can commit: either claim commits
+first, or disconnect makes the authorization unclaimable. An implementation
+must prove this race against PostgreSQL; process-local locking is
+insufficient.
+
+**Disconnect after claim but before provider submission.** The existing
+worker-bridge rule remains unchanged:
+`CREDENTIAL_RETENTION_OBLIGATION_OPENS_AT_GRANT=YES`. R44B11 does not move
+that boundary back to authorization issuance or claim.
+
+A claimed job that is still `QUEUED`, or a `LEASED` attempt that has not
+crossed the durable `SUBMITTING` barrier, may not become a new provider
+create after disconnect. R44B11 implementation therefore requires an
+authoritative pre-submission disconnect-convergence path. If the attempt is
+still safely pre-submission, it converges to `CANCELLED`, its job converges
+to `CANCELLED`, and no provider call occurs. The GenerationAuthorization
+remains `CLAIMED`, because that lifecycle state is terminal; cancellation
+is recorded additively in usage/audit evidence and never fabricates another
+authorization or usage identity.
+
+If a credential grant committed before disconnect, the existing
+credential-retention obligation protects the exact version until the
+pre-submission attempt is safely cancelled or advances to the existing
+submission/recovery lifecycle. If `SUBMITTING` committed first, disconnect
+does not cancel or replace the provider execution: the existing recovery-only
+retention and exact-version rules remain authoritative.
+
+**Disconnect convergence and credential cleanup.** The existing disconnect
+transaction deliberately locks Account -> ProviderConnection -> credential
+versions and does not then lock execution attempts, because the credential-
+grant path already locks an attempt before taking shared connection/version
+locks. R44B11 must not introduce the opposite lock order and create a
+deadlock.
+
+Accordingly, safe pre-submission attempt/job cancellation after disconnect is
+a post-disconnect authoritative convergence step, not an inversion of the
+existing version-gate transaction. The first disconnect transaction makes
+the connection ineligible and retains any exact credential whose current
+attempt state still opens an obligation. After that transaction commits, the
+convergence path may lock the pre-submission attempt/job under their existing
+ordering and cancel them when still safe.
+
+When such cancellation closes the final credential-retention obligation,
+credential destruction eligibility must be re-evaluated deterministically.
+A version retained only for that now-closed obligation is destroyed through
+the existing destruction gate or its narrowly factored equivalent. Cleanup
+must not depend on the customer issuing a second disconnect request, process
+restart, lease timeout alone or an operator remembering to retry the action.
+
+All claim/disconnect implementation must preserve the established relative
+locking rule that the ProviderConnection lifecycle lock is obtained before a
+new claim commits against that connection. A claim path must not hold a
+GenerationAuthorization lock and then wait for a connection lock while
+disconnect holds the connection and waits for the authorization.
+
+This deliberately reconciles the older provider-connection wording about
+already-authorised work with the later worker-bridge rule that retention opens
+at grant and disconnect permits no new create. R44B11 does not weaken the
+`SUBMITTING` barrier, recovery rules or credential-destruction gate.
+
+**Shared generation-request authority.** The issuer and worker must not keep
+two independent validators for the same provider/model generation contract.
+Before issuance implementation, one pure shared contract authority must own
+the locked provider/model constants, closed request grammar and cost-unit
+compatibility used at both boundaries. It imports no provider SDK, engine,
+network, credential or environment code. Exact package/module placement is
+resolved by the first implementation sub-slice after inspecting repository
+dependency boundaries.
+
+**Reference-image validation boundary.** R44B11 does not silently change the
+R44B10A/R44B10B input-media contract. At issuance and provider/model lease
+admission, `referenceImage` remains the closed request's present-but-opaque
+untrusted member. Its inner object-reference grammar is still owned by the
+R44B10P1 input-media contract and is validated by the worker after credential
+grant and before the pre-provider permit.
+
+A malformed reference therefore remains an R44B10P2 input failure; R44B11
+does not reclassify it as authorization failure merely because the request is
+also hashed at issuance. The canonical generation-request hash includes the
+exact JSON value stored for `referenceImage`; the issuer does not trim,
+normalise, rewrite or substitute that member. Moving its inner validation to
+an earlier boundary requires a deliberate later architecture revision.
+
+**Canonical generation-request bytes and hash.** The shared contract authority
+also owns the bytes hashed into
+`generation_authorizations.generation_request_sha256`. After the closed
+provider/model request has been validated, it is serialised using RFC 8785
+JSON Canonicalization Scheme and encoded as UTF-8. The stored hash is the
+lowercase hexadecimal SHA-256 of exactly those canonical UTF-8 bytes.
+
+The hash is never computed from caller-supplied raw HTTP JSON bytes, property
+insertion order, PostgreSQL `jsonb::text`, provider-SDK serialisation or any
+normalised provider request. Unknown or invalid request members are rejected
+before canonicalisation.
+
+The lease carries both the stored generation request and its stored SHA-256.
+Before credential grant, the worker-side shared admission contract recomputes
+the canonical hash from the validated closed request and requires exact
+equality with the lease hash. A mismatch is an issuer/control-plane invariant
+fault: no credential grant, provider construction or provider call is
+allowed. This future worker-side check is an R44B11 implementation obligation;
+R44B11P1 itself changes no runtime source.
+
+**Provider capability default.** Commercial generation capability is
+explicit allow-list authority. The production default is no enabled
+provider/model. Adding Google or Runway to the worker does not by itself
+commercially enable issuance. A capability entry supplies the exact
+provider/model, request contract and server-side expected-cost policy needed
+for issuance.
+
+**Issuance identity and idempotency.** One GenerationAuthorization represents
+one exact logical generation intent. Its immutable identity includes Account,
+Production, entitlement grant, `USER_BYO`, provider, model, exact
+ProviderConnection, exact ProviderCredentialVersion, canonical generation
+request/hash, expected-cost cap and expiry. A creation idempotency key replay
+for exactly the same trusted intent returns the existing authorization.
+Reusing that key for different trusted intent is an explicit conflict.
+Issuance never creates provider work directly.
+
+**Authorization expiry policy.** `expires_at` is server authority and is
+never accepted from the browser, worker or provider. R44B11P1 deliberately
+locks no numeric authorization lifetime: no TTL is invented here. Before an
+issuance implementation can be commercially enabled, a reviewed generation-
+authority policy must define the authorization claim lifetime and its versioned
+source.
+
+Issuance derives `expires_at` from database-server time plus that locked
+policy value. Claim eligibility is evaluated against database-server time,
+never a browser or worker clock. An idempotent issuance replay returns the
+original authorization including its original `expires_at`; replay never
+extends, refreshes or replaces the authorization lifetime.
+
+Until a claim-lifetime policy is locked, production generation capability
+remains disabled and no production issuer may create a GenerationAuthorization
+by inventing a convenient expiry value.
+
+**Usage-ledger authority.** R44B11 requires an append-only commercial usage
+ledger. For USER_BYO it is accounting/provenance evidence, not a quota
+counter and not provider billing authority. The stable logical usage identity
+is the GenerationAuthorization ID. Exactly one AUTHORISED usage entry may
+exist for one GenerationAuthorization. Worker attempt retries, provider
+recovery, acceptance recovery and process restart reuse that same logical
+usage identity and may not create a fresh AUTHORISED entry. Later terminal
+or accounting events may be additive, but cannot rewrite the original
+authority or fabricate another logical generation.
+
+**Claim boundary.** Provider work becomes queue-eligible only after a
+server-authoritative claim. Claiming an unexpired `ISSUED` authorization is
+one database transaction that:
+
+1. locks and revalidates the authorization, active User and Account, the
+   non-archived Production, qualifying AVAILABLE FREE_BYO grant and supported
+   policy version;
+2. revalidates the exact ProviderConnection and bound
+   ProviderCredentialVersion under the post-issuance credential-lifecycle
+   rules above, without selecting a replacement credential;
+3. transitions exactly that authorization `ISSUED -> CLAIMED` with
+   `claimed_at`;
+4. creates exactly one `execution_jobs` row for it;
+5. creates exactly one initial `execution_attempts` row in `QUEUED`;
+6. records the append-only CLAIMED usage event/evidence required by the usage
+   ledger;
+7. writes the corresponding safe audit evidence.
+
+The existing unique job-per-authorization rule remains authoritative.
+Idempotent claim replay returns the already-created job/attempt and adds no
+second usage entry or audit transition. A claim at or after expiry is
+refused; unclaimed expiry or cancellation creates no provider work.
+
+**Retries and recovery.** A new execution attempt for the same claimed job is
+not a new commercial generation and does not create a new entitlement
+reservation or AUTHORISED usage identity. Recovery of an already-created
+provider execution likewise consumes no fresh entitlement. Provider ambiguity
+never authorises replacement work automatically.
+
+**Failure and terminal semantics.** Claim is the commercial commitment point
+for this USER_BYO slice. A later definitive provider rejection,
+`OUTCOME_UNKNOWN`, recovery, output failure or completion failure does not
+roll the GenerationAuthorization back to `ISSUED` and does not create a
+fresh usage identity. Future policies may record additive terminal accounting
+events without changing the original authorization provenance.
+
+**Default-off boundary.** R44B11P1 adds no runtime code, migration, route,
+worker call, provider call or process runner. Customer generation remains
+unreachable from normal production startup. Production object storage,
+production KMS/sealing, a production issuer composition, process/deployment
+wiring and controlled live validation remain separate gates.
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
+
+**Implementation split after this lock.** Implementation must be discovered
+and reviewed as separate narrow slices rather than one broad rewrite. The
+expected decomposition is: shared issuer/worker generation-contract authority
+including canonical request hashing while preserving the R44B10P1
+reference-image boundary; usage-ledger persistence and database invariants;
+USER_BYO issuance and claim services with concurrency/idempotency and expiry-
+policy tests; ProviderConnection rotation/disconnect integration,
+deterministic pre-submission cancellation and post-cancellation credential
+cleanup; the separate provider-verification capability required before
+customer generation enablement; then any customer HTTP composition that is
+still justified by the production-storage and live-enablement gates. Exact revision
+suffixes and file scope are locked only after the next implementation
+discovery.
+
+**Status (R44B11P1 contract lock).**
+
+- **R44B11 discovery:** PASS.
+- **R44B11 conflict screen:** PASS.
+- **R44B11 prerequisite required:** YES.
+- **R44B11P1 contract:** this revision.
+- **R44B11P1 implementation:** not started.
+- **R44B11 parent implementation:** not started.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
 ---
 
 ## 37. Lock flags
@@ -9631,6 +9961,86 @@ R44B10B_DATABASE_MIGRATION_REQUIRED=NO
 R44B10B_COMMERCIAL_API_CHANGE_REQUIRED=NO
 R44B10B_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
 R44B10B_PROCESS_RUNNER_REQUIRED=NO
+R44B11_DISCOVERY=PASS
+R44B11_CONFLICT_SCREEN=PASS
+R44B11_PREREQUISITE_REQUIRED=YES
+R44B11_CONTRACT_LOCKED=NO
+R44B11_IMPLEMENTATION_STARTED=NO
+R44B11P1_CONTRACT_LOCKED=YES
+R44B11P1_IMPLEMENTATION_STARTED=NO
+R44B11P1_SCOPE=USER_BYO_GENERATION_AUTHORITY_AND_USAGE_LEDGER
+R44B11P1_PLATFORM_HOSTED_INCLUDED=NO
+R44B11P1_HOSTED_TRIAL_INCLUDED=NO
+R44B11P1_CREATOR_INCLUDED=NO
+R44B11P1_FREE_BYO_GENERATION_CONSUMES_GRANT=NO
+R44B11P1_NUMERIC_GENERATION_QUOTA_ENFORCED=NO
+R44B11P1_USAGE_LEDGER_REQUIRED=YES
+R44B11P1_USAGE_LEDGER_ROLE=ACCOUNTING_PROVENANCE
+R44B11P1_USAGE_LEDGER_QUOTA_AUTHORITY=NO
+R44B11P1_USAGE_IDENTITY=GENERATION_AUTHORIZATION_ID
+R44B11P1_AUTHORISED_USAGE_CARDINALITY=ONE_PER_GENERATION_AUTHORIZATION
+R44B11P1_WORKER_RETRY_CREATES_NEW_USAGE=NO
+R44B11P1_RECOVERY_CREATES_NEW_USAGE=NO
+R44B11P1_ISSUANCE_PROVIDER_CONNECTION_REQUIRED_STATUS=ACTIVE
+R44B11P1_ISSUANCE_PROVIDER_CONNECTION_REQUIRED_VERIFICATION=VERIFIED
+R44B11P1_ISSUANCE_CREDENTIAL_VERSION_REQUIRED_STATUS=ACTIVE
+R44B11P1_ROTATION_REBINDS_ISSUED_AUTHORIZATION=NO
+R44B11P1_CLAIM_BOUND_VERSION_ALLOWED_STATUS=ACTIVE_OR_SUPERSEDED
+R44B11P1_CLAIM_RETAINED_VERSION_FOR_NEW_CREATE_ALLOWED=NO
+R44B11P1_CLAIM_DESTROYED_VERSION_ALLOWED=NO
+R44B11P1_CLAIM_INVALID_CONNECTION_ALLOWED=NO
+R44B11P1_CLAIM_DISCONNECTED_CONNECTION_ALLOWED=NO
+R44B11P1_CLAIM_DISABLED_CONNECTION_ALLOWED=NO
+R44B11P1_PENDING_VERIFICATION_AFTER_ROTATION_INVALIDATES_ISSUED_AUTHORIZATION=NO
+R44B11P1_CLAIM_REBINDS_TO_CURRENT_CREDENTIAL=NO
+R44B11P1_DISCONNECT_BEFORE_CLAIM=CANCEL_ISSUED_AUTHORIZATION
+R44B11P1_DISCONNECT_AFTER_CLAIM_BEFORE_SUBMITTING=CANCEL_PRE_SUBMISSION_WORK
+R44B11P1_PRE_SUBMISSION_DISCONNECT_ATTEMPT_STATE=CANCELLED
+R44B11P1_PRE_SUBMISSION_DISCONNECT_JOB_STATE=CANCELLED
+R44B11P1_PRE_SUBMISSION_DISCONNECT_PROVIDER_CALL_ALLOWED=NO
+R44B11P1_RETENTION_OBLIGATION_OPENS_AT_GRANT=UNCHANGED
+R44B11P1_SUBMITTING_OR_LATER_DISCONNECT=EXISTING_RECOVERY_RULES
+R44B11P1_PROVIDER_CONNECTION_DISCONNECT_INTEGRATION_REQUIRED=YES
+R44B11P1_DISCONNECT_PRE_SUBMISSION_CONVERGENCE_REQUIRED=YES
+R44B11P1_DISCONNECT_CONVERGENCE_PRESERVES_EXISTING_LOCK_ORDER=YES
+R44B11P1_POST_CANCELLATION_CREDENTIAL_REEVALUATION_REQUIRED=YES
+R44B11P1_CREDENTIAL_CLEANUP_REQUIRES_SECOND_CUSTOMER_DISCONNECT=NO
+R44B11P1_CLAIM_MAY_LOCK_AUTHORIZATION_THEN_WAIT_CONNECTION=NO
+R44B11P1_ARCHIVED_PRODUCTION_NEW_AUTHORIZATION_ALLOWED=NO
+R44B11P1_UNVERIFIED_CONNECTION_GENERATION_ALLOWED=NO
+R44B11P1_PROVIDER_VERIFICATION_REQUIRED_FOR_ISSUANCE=YES
+R44B11P1_PROVIDER_VERIFICATION_IMPLEMENTED=NO
+R44B11P1_PROVIDER_VERIFICATION_BLOCKS_CUSTOMER_ENABLEMENT=YES
+R44B11P1_PROVIDER_MODEL_POLICY_SOURCE=SERVER_CAPABILITY_REGISTRY
+R44B11P1_PROVIDER_MODEL_DEFAULT_ENABLED=NO
+R44B11P1_SHARED_GENERATION_REQUEST_CONTRACT_REQUIRED=YES
+R44B11P1_DUPLICATED_ISSUER_WORKER_VALIDATORS_ALLOWED=NO
+R44B11P1_CANONICAL_REQUEST_SERIALIZATION=RFC8785_JCS
+R44B11P1_CANONICAL_REQUEST_ENCODING=UTF8
+R44B11P1_GENERATION_REQUEST_SHA256=LOWERCASE_SHA256_OF_CANONICAL_UTF8
+R44B11P1_WORKER_RECOMPUTES_GENERATION_REQUEST_SHA256=YES
+R44B11P1_REQUEST_HASH_CHECK_BEFORE_CREDENTIAL_GRANT=YES
+R44B11P1_REQUEST_HASH_MISMATCH_PROVIDER_CALL_ALLOWED=NO
+R44B11P1_REFERENCE_IMAGE_INNER_VALIDATION_AT_ISSUANCE=NO
+R44B11P1_REFERENCE_IMAGE_VALIDATION_AUTHORITY=R44B10P1_POST_GRANT
+R44B11P1_REFERENCE_IMAGE_MALFORMED_CLASSIFICATION=R44B10P2_INPUT_FAILURE
+R44B11P1_REFERENCE_IMAGE_EARLY_VALIDATION_REQUIRES_ARCHITECTURE_REVISION=YES
+R44B11P1_CLIENT_COST_CAP_AUTHORITY=NO
+R44B11P1_AUTHORIZATION_EXPIRY_CLIENT_AUTHORITY=NO
+R44B11P1_AUTHORIZATION_TTL_LOCKED=NO
+R44B11P1_AUTHORIZATION_TTL_REQUIRED_BEFORE_PRODUCTION_ISSUANCE=YES
+R44B11P1_AUTHORIZATION_EXPIRY_CLOCK=DATABASE_SERVER
+R44B11P1_IDEMPOTENT_REPLAY_EXTENDS_EXPIRY=NO
+R44B11P1_CLAIM_REQUIRED_BEFORE_WORKER_LEASE=YES
+R44B11P1_CLAIM_CREATES_EXACTLY_ONE_JOB=YES
+R44B11P1_CLAIM_CREATES_INITIAL_ATTEMPT=YES
+R44B11P1_PROVIDER_RETRY_CREATES_NEW_AUTHORIZATION=NO
+R44B11P1_DATABASE_MIGRATION_REQUIRED=NO
+R44B11P1_COMMERCIAL_API_CHANGE_REQUIRED=NO
+R44B11P1_WORKER_CHANGE_REQUIRED=NO
+R44B11_USAGE_LEDGER_MIGRATION_REQUIRED=YES
+R44B11P1_CUSTOMER_GENERATION_ROUTE_ENABLED=NO
+R44B11P1_LIVE_PROVIDER_ENABLEMENT=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

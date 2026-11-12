@@ -383,7 +383,25 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   typechecks clean; `OBJECT_STORAGE_INPUT_FAILURE_ROUTE_IMPLEMENTED=YES`;
   no production storage backend or vendor; provider flags unchanged;
   R44B10P2 fully closed and R44B10A eligible for its own sequence:
-  introduction, sections 18, 28, 36 and 37).
+  introduction, sections 18, 28, 36 and 37); R44B10A (first real-provider
+  adapter contract locked after a passing read-only discovery: Google GenAI
+  Interactions on the Gemini Developer API, `GOOGLE_GENAI` with
+  `gemini-omni-1.1-flash`, ending at `SUBMITTED` with no polling, output or
+  completion; a thin worker-local adapter owning `@google/genai` exactly
+  2.24.0 as a worker dependency, with no engine import (sections 2 and 5
+  superseded); the public `interactions.create` with `background`, `store`
+  and no stream, `{ maxRetries: 0, timeout: 60000 }` and a mandatory
+  transport-level single-request proof; raw `Interaction.id`; a closed
+  `{prompt, referenceImage, resolution}` request with a 1000-UTF-16 prompt
+  cap and `720p` only; malformed non-image requests refused before the
+  grant as issuer violations; R44B10P1/P2 retrieval before the permit; a
+  scoped sealed-credential capability re-opened after the permit with no
+  second grant; no client before the permit; one client and one dispatch;
+  acceptance reuse; a code-based definitive set (429 included, never
+  retried) with everything else ambiguous; sanitised errors; default-off
+  library composition; 25 flag criteria; no migration, API or protocol
+  change; provider flags unchanged; implementation not started:
+  introduction, sections 2, 5, 7, 16, 36 and 37).
 
 ```text
 ARCHITECTURE_STATUS=LOCKED
@@ -483,6 +501,12 @@ The worker may depend on:
 - narrowly selected engine provider-level modules (section 5);
 - worker-specific infrastructure (journal, opener, object-storage client,
   worker authentication client).
+
+(R44B10A contract lock, superseding the engine-module allowance above.) The
+worker imports no root engine or root source module. A real-provider adapter
+owns its provider SDK directly inside the worker package, as an exact-pinned
+worker dependency (first: `@google/genai` 2.24.0); section 36, "First
+real-provider adapter: Google GenAI (revision R44B10A)".
 
 `apps/commercial-api` remains prohibited from importing:
 
@@ -614,6 +638,18 @@ safety behaviour (single create, no SDK retry on create, the accepted
 checkpoint). Wrapping the episode orchestrator would import operator
 production concepts into every commercial job.
 
+**Superseded (R44B10A contract lock).** The worker does not integrate
+through engine provider-level functions. The engine Google submitter reads
+media-root files and carries EP/S reservation and cost machinery, its
+creator hides the provider status and error code needed for classification,
+and the worker package boundary forbids root imports. A commercial-worker
+real-provider adapter owns its provider SDK directly when that is required
+to preserve worker isolation and submission semantics; only the minimal
+create-phase contract is reimplemented, and engine polling and output paths
+stay separate. The still-valid parts above remain: no `executeSingleShot`,
+operator CLI, `.env`-driven execution or EP/S request files. Section 36,
+"First real-provider adapter: Google GenAI (revision R44B10A)".
+
 ---
 
 ## 6. Worker adapter input
@@ -680,6 +716,14 @@ COMMERCIAL_WORKER_PROVIDER_ENV_FALLBACK=FORBIDDEN
 **Rationale.** A commercial job whose bound credential is missing must fail.
 It must never silently run on an operator key, which would bill the wrong
 party and break credential provenance.
+
+(R44B10A contract lock.) `@google/genai` 2.24.0 reads backend, base-URL and
+project variables at client construction even when a key is supplied. The
+real Google adapter therefore constructs its client explicitly for the
+Gemini Developer API at `generativelanguage.googleapis.com`, and the
+forbidden-variable refusal above must cover the actual process environment
+the SDK reads, not only an injected copy. There is still no provider-key
+environment fallback and no `WorkerConfig` key field.
 
 ---
 
@@ -2296,6 +2340,16 @@ PROVIDER_CREATE_SDK_RETRY_DISABLED=YES
 AMBIGUOUS_PROVIDER_CREATE_RESULT=OUTCOME_UNKNOWN
 AMBIGUOUS_PROVIDER_CREATE_AUTO_RESUBMIT=NO
 ```
+
+(R44B10A contract lock.) For the first real adapter the obligation is
+concrete: `@google/genai` 2.24.0, the public
+`GoogleGenAI.interactions.create` with exactly `{ maxRetries: 0, timeout:
+60000 }`, which 2.24.0 translates into zero internal retries (its default
+for Interactions create is four retries), proven by a transport-level test
+with an injected counting fetch, and pinned by a boundary test. Provider
+retry advice (for example on 429) never justifies an SDK or application
+retry. Section 36, "First real-provider adapter: Google GenAI (revision
+R44B10A)".
 
 ---
 
@@ -6873,6 +6927,12 @@ satisfied (commit 395b4fd8958c9f7bdfd34a215c72cf450cb86de2; section 18,
 Real-provider execution and live provider submission stay disabled, and
 step 9 still has no production storage backend.
 
+**Step 11 status (R44B10A contract lock).** The step 11 contract is now
+locked: the first real provider is Google GenAI Interactions
+(`GOOGLE_GENAI`, `gemini-omni-1.1-flash`), ending at `SUBMITTED` (section 36,
+"First real-provider adapter: Google GenAI (revision R44B10A)"). Its
+implementation is **not started**; the provider flags stay NO.
+
 ### Status and fake-provider gate (revision R44B6K)
 
 **Repository fact.** Steps 1 to 7 are implemented, together with the worker
@@ -7768,7 +7828,9 @@ real-provider-specific classification or adapters exist.
 - The real-SDK create-retry obligation stays unresolved: a real adapter
   must verify, or refuse, unless create retry is deterministically
   disabled. The fake has zero retries by construction, which does not
-  satisfy it.
+  satisfy it. (R44B10A contract lock: the obligation is now specified for
+  the Google adapter, `maxRetries: 0` with a transport-level proof; it is
+  satisfied only when that adapter is implemented and tested.)
 - The live-route `SUBMITTED` capacity condition stays deferred. Successful
   fake execution ends at `SUBMITTED`, and a later lease may receive
   `WORKER_AT_CAPACITY` while that lease and its capacity slot are retained.
@@ -8193,7 +8255,9 @@ post-R44B9 sequence is:
    route".)
 3. **R44B10A:** the first real-provider adapter lock. Google GenAI
    Interactions remains the leading candidate (R44B10 discovery). Nothing
-   about its adapter is locked here.
+   about its adapter is locked here. (R44B10A contract lock: selected and
+   locked; see "First real-provider adapter: Google GenAI (revision
+   R44B10A)" below.)
 
 Locking R44B10P1 does not make step 11 ready, and R44B10A implementation
 stays blocked until R44B10P2 is implemented. The other R44B10 findings
@@ -8232,7 +8296,9 @@ ahead of P2.
   satisfied.
 - **Next:** R44B10A, the Google real-provider adapter lock, now eligible
   for its own contract and implementation sequence. It is not implemented,
-  and nothing about its adapter is locked here.
+  and nothing about its adapter is locked here. (R44B10A contract lock: its
+  discovery passed and its contract is now locked in the next subsection;
+  implementation not started.)
 
 Still open and separate: the production object-store backend, the storage
 vendor, storage credentials, ingest and upload, the retention and deletion
@@ -8246,6 +8312,489 @@ storage backend and vendor; production storage credentials; ingest and
 upload; issuer validation; retention and pinning; the deletion lifecycle;
 the canonical request-hash recipe; and signed-retrieval ownership, if one
 is ever used.
+
+### First real-provider adapter: Google GenAI (revision R44B10A)
+
+**Locked decision (R44B10A; contract locked, not implemented).** The R44B10A
+discovery passed (read-only, at commit
+7af042fb88997f9bd442635c52c916cad3106bad). This revision converts it into
+the contract for the first real-provider execution slice. Nothing is
+implemented, no package is installed and no provider is contacted.
+`REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO` and
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` are unchanged.
+
+**Basis.** The lock rests on: the repository-installed `@google/genai`
+2.24.0 source; the existing BusyBookie Google production creator
+(`createGoogleGenAiSingleShotProductionInteractionCreator`) and its
+activation and pricing policy; the published Gemini API error reference
+(<https://ai.google.dev/gemini-api/docs/api-errors>), which lists
+request-level codes such as `invalid_request` and `failed_precondition`
+(HTTP 400), `payment_required` (402), and `rate_limit_exceeded` and
+`quota_exceeded` (429); and the current Gemini model and pricing
+documentation. No provider documentation is read as guaranteeing delivery
+semantics beyond what it states: wherever acceptance cannot be disproved,
+the outcome is ambiguous.
+
+**Provider and model.** The first and only real provider of this slice is
+the Gemini Developer API (Google GenAI Interactions), provider identifier
+`GOOGLE_GENAI`, model exactly `gemini-omni-1.1-flash`. Runway and Veo are
+not locked into this slice: their engine paths fuse create and polling
+(`executeRunwayGen45` waits for task output; the Veo runner polls in the
+same helper) and would need extraction first. Google already has a
+create-only boundary that returns a stable `Interaction.id` before
+completion.
+
+**Endpoint.** The slice ends when the provider-assigned `Interaction.id` is
+durably accepted and the control plane reaches `SUBMITTED`. Polling,
+provider completion, download, output storage and final completion remain
+later slices.
+
+**Placement and engine boundary.** The adapter is a thin
+commercial-worker-local adapter in `apps/commercial-worker/src` that owns
+the provider SDK directly. The worker imports no root engine or root
+source module. The engine Google submission code is not reusable: it reads
+media-root files (`sourceImagePath`, `assertReferenceImageInsideRoot`),
+carries EP/S reservation and cost machinery, and its creator reduces every
+SDK error to one generic `Error`, hiding the status and code that
+classification needs. Rule: a commercial-worker real-provider adapter owns
+its provider SDK within the worker package when that is required to
+preserve worker isolation and submission semantics. This is not a licence
+to duplicate engine logic: only the minimal create-phase contract is
+reimplemented, and engine polling and output paths stay separate. This
+supersedes the section 2 and section 5 wording that the worker integrates
+through engine provider-level functions.
+
+**SDK dependency.** `@google/genai` exactly `2.24.0`, added as an exact
+runtime dependency of commercial-worker (`apps/commercial-worker/package.json`
+and `apps/commercial-worker/package-lock.json`; no caret or range). The root
+manifest and lockfile stay unchanged, and the worker never relies on the
+root `node_modules` installation. Any SDK upgrade reopens the retry, error
+and API-surface verification below.
+
+**Backend.** Gemini Developer API only, at
+`generativelanguage.googleapis.com`; no Vertex or Enterprise backend. The
+client receives the plaintext credential only through BusyBookie's
+credential-opening path (below); there is no `WorkerConfig` key field and no
+`GOOGLE_API_KEY` or `GEMINI_API_KEY` fallback. The installed SDK reads
+environment variables at construction even when a key is supplied
+(`GOOGLE_GENAI_USE_ENTERPRISE`, `GOOGLE_GENAI_USE_VERTEXAI`,
+`GOOGLE_GEMINI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, and the project and
+location variables), which can switch the backend, base URL or API version.
+The implementation must prevent that: it constructs the client explicitly
+for the Gemini Developer backend with the intended endpoint, and the
+section 7 forbidden-environment refusal must be applied to the actual
+process environment the SDK reads, not only to an injected copy.
+
+**Create call.** The provider create authority is
+`GoogleGenAI.interactions.create` (the public wrapper) with
+`background: true`, `store: true`, `stream: false`. It returns before
+generation completes; the returned `Interaction.id` is the provider
+execution identity. The adapter never polls.
+
+**Zero create retries.** For the locked 2.24.0 public wrapper, every create
+uses exactly the request options `{ maxRetries: 0, timeout: 60000 }`. In
+2.24.0 the wrapper (`toGoogleGenAIRequestOptions`) translates them into the
+SDK's internal `retries` (attempt-count strategy, zero retries) and
+`timeout_ms`. Without them, Interactions create defaults to an
+attempt-count backoff of four retries on 408, 409, 429, 5xx and connection
+or timeout errors, which is not acceptable. The adapter must use the public
+`GoogleGenAI.interactions` path whose translation was inspected, never the
+inner generated client. This is a 2.24.0 fact, not a version-independent
+claim.
+
+**Transport-level proof.** Source inspection does not satisfy the flag
+criterion. A mandatory implementation test drives the real 2.24.0 SDK with
+an injected counting fetch and no network, and proves exactly one HTTP
+request for at least HTTP 429, HTTP 503, a connection failure or reset, and
+a timeout: no SDK resend, no application retry, no resubmission. A boundary
+or source test also pins the `maxRetries: 0` option.
+
+**Timeout.** The create deadline is 60000 ms, the existing Google
+activation-policy create timeout. A timeout does not prove non-dispatch:
+`AMBIGUOUS_FAILURE`, never retried, redirected or resubmitted.
+
+**Provider execution ID.** Exactly the raw `Interaction.id`: no trimming,
+prefixing, encoding or fabrication. It must satisfy the existing
+`isProviderExecutionId` grammar, and the acceptance callback stays the only
+authority that brings it into the durable lifecycle. A missing, empty or
+non-conforming ID on a nominal success is handled below (malformed
+success).
+
+**Model authority.** The model comes from the authoritative lease and
+generation authorization; the worker checks that it exactly equals
+`gemini-omni-1.1-flash` and never substitutes another. A different model is
+a control-plane or issuer contract violation, refused before the credential
+grant and before any provider construction.
+
+**Closed generation request.** The first-slice `generationRequest` is
+exactly `{ prompt, referenceImage, resolution }`; any other member is
+rejected. There is no free-form options object, duration, aspect ratio,
+negative prompt, seed, audio, tool option or response-format object.
+
+- `prompt`: a non-empty string with no leading or trailing whitespace, at
+  most 1000 UTF-16 code units, never trimmed or rewritten by the worker;
+  the issuer owns the canonical prompt. BusyBookie's existing Google
+  single-shot prompt builder
+  (`src/execution/providers/buildGoogleGenAiSingleShotPrompt.ts`) already
+  enforces `GOOGLE_GENAI_PROMPT_MAX_CODE_UNITS = 1000`, refusing a prompt
+  whose `.length` exceeds it. That is a local BusyBookie Google operational
+  limit, not an official Google API or provider maximum. R44B10A preserves
+  that existing 1000-UTF-16-code-unit limit, and the commercial worker
+  validates the same limit itself, without importing the engine or root
+  implementation.
+- `referenceImage`: exactly the R44B10P1 reference object; content types
+  `image/png`, `image/jpeg` and `image/webp` only (no HEIC, GIF, TIFF, BMP
+  or local-path compatibility); at most 10,485,760 verified bytes; obtained
+  only through `retrieveVerifiedReferenceImage`, with failures handled by
+  `handleInputMediaFailure`. No filesystem, media-root or `sourceImagePath`
+  route, and no signed URL as durable identity.
+- `resolution`: exactly `"720p"`. Other resolutions are not exposed,
+  because the repository's expected-cost authority has an authoritative
+  local video-output price only for 720p (`googleGenAiExpectedCost.ts`);
+  the others fail pricing closed, and the provider-adapter slice does not
+  widen cost authority.
+
+**Provider request.** After verification and after the pre-provider permit,
+the adapter builds: `model: "gemini-omni-1.1-flash"`; `input`: first
+`{type: "text", text: prompt}`, then `{type: "image", data: <verified
+bytes, base64>, mime_type: <verified type>}`; `response_format: {type:
+"video", delivery: "uri", resolution: "720p"}`; `background: true`,
+`store: true`, `stream: false`. The response-format type, delivery,
+resolution and the three flags are adapter-owned constants that the
+`generationRequest` cannot override. Base64 conversion happens inside the
+adapter, only after the permit.
+
+**Request hash.** The worker does not invent or recompute a request-hash
+recipe; `generation_request_sha256` stays issuer and control-plane
+authority, and the canonical request-hash readiness item stays open. A
+future live issuer must guarantee that the closed request stored in
+`generationRequest` is the request whose hash it authorized.
+
+**Non-image request errors.** The five R44B10P2 `INPUT_*` codes stay
+image and input-object specific. A malformed `prompt`, `resolution` or
+model, or an unknown `generationRequest` member, is an issuer or
+control-plane contract violation: refused before the credential grant and
+any provider construction, through the host-fault and invariant path, never
+reported through `input-failed` and never reported as a provider rejection.
+This is acceptable only because live enablement stays blocked until a
+production issuer validates the same closed schema before authorizing work.
+Without that issuer the refused attempt is a poison authorization (each
+lease expiry requeues it and the next worker refuses it again); that is a
+recorded live-readiness issue.
+
+**Migration, API and protocol.** None: no database migration, no
+commercial-api change and no shared protocol change. This depends on
+keeping malformed non-image request data an issuer invariant violation. If
+implementation shows that to be dishonest, implementation stops and the
+architecture is reopened; R44B10P2 is never silently widened.
+
+**Ordering.**
+
+```text
+lease
+-> provider, model and closed-request admission (before any grant)
+-> credential grant
+-> first credential open and validation (plaintext discarded)
+-> verified reference-image retrieval (R44B10P1)
+-> R44B10P2 policy if retrieval fails (stop)
+-> pre-provider orchestration: journal preparation, SUBMITTING, mandatory renewal (the permit)
+-> credential re-open from the sealed capability
+-> provider-client construction (one)
+-> runWithInFlightHeartbeat( provider create (one) -> awaited durable acceptance )
+-> SUBMITTED, or a typed provider failure reported once
+```
+
+Retrieval stays after the grant and open (the authoritative account comes
+from the validated opening context) and before `SUBMITTING`, the permit and
+any construction. A permanent image fault, a transient storage failure and
+a host fault never create a Google client.
+
+**Production object store.** Not required for implementation: the injected
+`ObjectStore` and the existing in-memory store suffice for automated tests.
+Required for live enablement. `OBJECT_STORAGE_PRODUCTION_IMPLEMENTED=NO`
+and `OBJECT_STORAGE_VENDOR=UNDECIDED` stay; no live claim follows.
+
+**Credential authority.** No second credential grant exists (the grant
+route accepts only `LEASED`, so none is possible after `SUBMITTING`); the
+first grant stays the sole authority. R44B10A adds a scoped
+sealed-credential capability that keeps only the sealed envelope and the
+validated opening context, never plaintext across control-plane calls,
+never exposes the secret to logs, audit or the journal, and allows
+re-opening only for that same already-granted attempt. Before the permit
+the existing grant, open and validation run and the plaintext is discarded
+at once. After the permit the adapter re-opens from the capability,
+constructs one client, dispatches at most one create, and drops the
+plaintext and the client when the create settles (the SDK holds the key
+inside the client, which section 29's per-attempt client rule covers).
+
+**Permit before construction.** No `GoogleGenAI` instance exists before
+`obtainPreProviderPermit` succeeds. Construction performs no network in
+2.24.0, but a client holding the credential is submission-capable. Before
+the permit only non-secret configuration, the sealed capability, verified
+input bytes, the closed parsed request and provider-neutral context may
+exist. Tests count client construction and provider dispatch and prove
+both are 0 on every pre-permit refusal path.
+
+**One client, one dispatch.** Per leased attempt: at most one Google
+client construction and at most one `interactions.create` dispatch. No
+create retry, no second construction after a create attempt, no fallback
+provider, no resubmission after a process restart, and no control-plane
+retry ever invokes create again.
+
+**Acceptance.** `createAcceptanceAdapter` and
+`createDurableAcceptanceHandler` are reused unchanged; the create receives
+and awaits the existing acceptance callback. `ACCEPTED` is valid only when
+exactly one create was dispatched, a valid `Interaction.id` was returned,
+and the callback was invoked and completed successfully. Once a valid ID
+exists, acceptance may already exist: any failure to record it durably
+follows the existing acceptance-adapter and recovery contract, with no
+second `submission-failed` report, no create retry and no overwrite of
+accepted authority.
+
+**Failure classification.** Classification uses only the SDK's typed error
+class and HTTP status, the machine-readable Interactions error code, and
+dispatch and response facts; never message text. In 2.24.0 the error `code`
+is an open string (documented by the SDK as a URI identifying the error
+type), so the implementation pins its exact wire representation in tests;
+any code that does not exactly match the locked set is ambiguous. Raw
+response bodies and messages never cross the adapter boundary.
+
+- **Definitive** (`DEFINITIVE_FAILURE`), only for an explicit request-level
+  rejection returned synchronously with no `Interaction.id` and no
+  callback, with one of these codes: `invalid_request`,
+  `failed_precondition`, `parameter_unknown`, `authentication`,
+  `payment_required`, `permission_denied`, `not_found`, `model_not_found`,
+  `out_of_range`, `rate_limit_exceeded`, `quota_exceeded`,
+  `too_many_requests`, `unimplemented`. A synchronous request-level policy
+  or safety block before any ID is also definitive when the SDK exposes it
+  as such a request-level error code.
+- **429 decision.** `rate_limit_exceeded`, `quota_exceeded` and
+  `too_many_requests` are definitive for that single dispatched create when
+  the provider returned the explicit request-level error and no ID exists.
+  Google may recommend retrying such requests with backoff; BusyBookie
+  deliberately does not, because provider create cardinality is one and
+  automatic resubmission is prohibited. Provider retry advice is never a
+  reason to reintroduce SDK or application retry. A later fresh business
+  attempt is a matter for future control-plane policy, outside R44B10A.
+- **Ambiguous** (`AMBIGUOUS_FAILURE`): `aborted`, or a conflict where
+  acceptance cannot be disproved; HTTP 408 if observed; HTTP 409; HTTP 499
+  or cancelled; HTTP 500; HTTP 503; HTTP 504 or a deadline; a timeout; a
+  connection reset; a lost response; any network failure after dispatch
+  could have occurred; an abort or cancellation the provider contract does
+  not prove pre-dispatch; an unknown SDK transport exception; an unknown
+  HTTP status or error code. Never retried; no ID fabricated; reported
+  through the existing ambiguous composition when authority permits.
+- **Malformed success**: a nominal success with no ID, an empty ID, a
+  malformed result or an ID outside the provider-ID grammar is not a
+  definitive rejection. It is `AMBIGUOUS_FAILURE` plus a host fault, because
+  dispatch may have succeeded but accepted identity cannot be established.
+  No resubmission.
+- **Safety and content.** A synchronous request-level policy error before
+  any ID is a definitive provider rejection. A provider-generated terminal
+  state after an `Interaction.id` was assigned means the interaction was
+  already accepted; that later failure belongs to polling and completion,
+  not R44B10A. Provider safety rejection never maps to the R44B10P2
+  `INPUT_*` codes.
+
+**Sanitisation.** The SDK may expose `body`, `rawResponse`, provider
+messages, headers and causes. None of them reaches a `WorkerError`, audit
+event, journal record, security event, worker log or control-API request.
+The adapter edge reduces provider results to `ACCEPTED`,
+`DEFINITIVE_FAILURE` or `AMBIGUOUS_FAILURE`, plus an approved closed
+host-fault reason or stage. Safe log fields: `executionAttemptId`,
+`provider`, a closed stage, a closed classification, and
+`providerExecutionId` only once approved as durable identity.
+
+**Network boundary.** The Google SDK client and its create call are the
+only provider-network component. No provider network exists before the
+permit; automated tests inject the fetch transport explicitly and never
+call Google; no generic HTTP fallback exists outside the SDK.
+
+**Default-off composition.** No generic provider-mode environment variable
+and no default production factory. A separate library-only real-provider
+composer receives its dependencies (including the provider client factory
+and transport) by explicit injection; automated tests inject the real
+adapter with a non-network transport. R44B10A has no production process or
+runner caller, so provider network is structurally unreachable from normal
+production startup, without a permanent source boolean that would have to
+be edited for a controlled validation. `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED`
+stays NO.
+
+**Single real provider.** Exactly one real provider, `GOOGLE_GENAI`, with no
+generic multi-provider selector. A lease for any other provider is refused
+before the credential grant and any construction, as a host or
+configuration mismatch (as the fake composer's guard does). The fake
+provider and fake composer stay separate and unchanged.
+
+**In-flight heartbeat.** The provider create plus the awaited acceptance
+callback run inside `runWithInFlightHeartbeat`; polling never does.
+Heartbeat authority loss never causes resubmission, and no external
+cancellation signal is wired into create because heartbeat authority
+changed. A late accepted interaction stays recoverable through the existing
+journal and control-plane semantics.
+
+**Journal order.** The acceptance-journal contract is unchanged: startup
+reconciliation and per-attempt journal preparation run inside the
+pre-provider orchestration before any dispatch, in the reviewed order, and
+once an ID is returned durable acceptance handling is authoritative. There
+is no new unjournalled acceptance window and no competing journal format.
+
+**Host faults** (distinct from ordinary definitive rejection): provider
+mismatch; model mismatch; a malformed closed `generationRequest`; invalid
+local request conversion; credential re-open failure after the permit;
+SDK or client construction failure before dispatch; SDK retry
+configuration drift; malformed provider success; a missing or invalid
+provider ID; an untyped or unknown adapter contract exception; `ACCEPTED`
+without a completed callback; a typed failure after completed acceptance.
+
+**Post-permit, pre-dispatch faults.** If the credential re-open, request
+conversion or client construction fails after the attempt entered
+`SUBMITTING` but before any dispatch: trip the host-fault latch, fabricate
+no provider failure, call no provider, resubmit nothing, and leave the
+authoritative `SUBMITTING` expiry sweep to converge to `OUTCOME_UNKNOWN`.
+
+**Cost authority.** The worker creates no second billing authority.
+Provider `GOOGLE_GENAI`, model `gemini-omni-1.1-flash` and resolution
+`720p` are fixed; the expected cost stays issuer and control-plane
+authority. The adapter only checks that the execution is compatible with
+the existing expected-cost cap and unit, and never recomputes an
+entitlement decision. Cost policy is not widened.
+
+**Process runner.** None: R44B10A is library plus automated-test
+composition only. No daemon, CLI, worker loop, scheduler, start script or
+deployment change.
+
+**Separate blockers.**
+
+| Item | Adapter implementation | Automated tests | Controlled real-provider validation | Continuous or commercial live operation |
+|---|---|---|---|---|
+| Section 24 destruction lifecycle | no | no | **yes** (under the current architecture, section 35) | **yes** |
+| Live `SUBMITTED` capacity condition | no | no | no (a single test or mock-controlled execution) | **yes** |
+| Production object store | no | no | **yes** | **yes** |
+
+None of them is repaired or marked solved by R44B10A.
+
+**Live enablement.** `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED` stays NO
+after R44B10A implementation. Future enablement still needs at least: the
+production object store, its backend and credentials; production issuer
+validation of the closed request; production provider credential and KMS
+readiness; the section 24 destruction lifecycle; the live `SUBMITTED`
+capacity lifecycle; process, runner and deployment design; and controlled
+live validation. `REAL_PROVIDER_EXECUTION_IMPLEMENTED` means
+production-grade real adapter code and composition exist and pass the
+required tests; it never means provider keys, production storage,
+continuous operation or live submission.
+
+**Boundary rules (implementation tests).** `@google/genai` is imported only
+by the real Google adapter and factory files the implementation names in
+its boundary test; no root engine or root source import; no `process.env`
+credential fallback in the adapter; no arbitrary filesystem or media path;
+`fakeProvider.ts` and the fake composer neither import nor reach Google;
+the Google client is constructed only after the permit; the
+`maxRetries: 0` option and the 60000 ms timeout are pinned; exactly one
+real provider; the exact SDK dependency version is pinned. No existing
+boundary rule is weakened; any new allowance is a narrow, named exemption.
+
+**Mandatory tests.**
+
+- **Adapter unit**, with the actual `@google/genai` 2.24.0 and an injected
+  counting transport: a valid accepted create; the exact `Interaction.id`
+  handed to the callback; the exact Google request shape, model, `720p`
+  resolution and `background`/`store`/`stream` constants; exactly one HTTP
+  request; exactly one request on 429, 503, a connection failure and a
+  timeout; definitive and ambiguous mappings; malformed success; a missing
+  ID; an unknown error; no raw response or body leaked; no plaintext
+  credential leaked; the client dropped after create.
+- **Zero construction and zero dispatch** for: a wrong provider; a wrong
+  model; a malformed request; an unknown request member; a wrong
+  resolution; each R44B10P2 image fault (malformed reference, not found,
+  declared oversize, integrity mismatch, media mismatch); a transient
+  storage failure; an object-store host fault; a permit refusal; a
+  `SUBMITTING` acknowledgement failure; a mandatory heartbeat failure.
+- **Tier 3 accepted**, with real worker components, the real commercial-api
+  router, the real PostgreSQL test database, the real journal, the actual
+  SDK and an injected non-network counting fetch: lease, admission, grant
+  and open, input verification, journal and permit, re-open, one
+  construction, one dispatch, `Interaction.id`, awaited durable acceptance,
+  `SUBMITTED`; no real Google network and no polling.
+- **Tier 3 definitive**: one construction and one dispatch; an explicit
+  pre-ID provider rejection; no acceptance journal record; the definitive
+  `submission-failed` composition; `FAILED_BEFORE_SUBMISSION` when
+  authority permits and the job `FAILED`; no host fault for an ordinary
+  definitive rejection; no retry, second client or resubmission.
+- **Tier 3 ambiguous**: one construction and one dispatch; an ambiguous
+  transport or provider outcome; no fabricated ID and no acceptance record;
+  the ambiguous composition; `OUTCOME_UNKNOWN` when the report succeeds and
+  the job `NEEDS_ATTENTION`; no retry or resubmission.
+- **Lost response and crash**: a timed-out or lost create response;
+  heartbeat authority loss while the create is pending; a callback commit
+  with a lost response; a provider ID returned and then a callback failure;
+  a host fault after `SUBMITTING` and before dispatch; a restart proving no
+  automatic create resubmission. Existing journal and recovery semantics
+  only; no second recovery mechanism.
+
+**Criteria for `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`.** The flag stays
+NO until all 25 pass; a file merely existing is insufficient.
+
+1. The Google real adapter exists in commercial-worker.
+2. `@google/genai` 2.24.0 is exact-pinned as a worker dependency.
+3. No engine or root runtime import.
+4. Zero provider-create retries are configured.
+5. Zero retries are proven at the actual SDK HTTP transport level.
+6. The create timeout is 60000 ms and a timeout maps to ambiguous.
+7. The closed request parser exists.
+8. The prompt is capped at 1000 UTF-16 code units.
+9. The model is exactly `gemini-omni-1.1-flash`.
+10. The resolution is exactly `720p`.
+11. Verified R44B10P1/P2 input composition happens before the permit.
+12. The scoped sealed-credential capability preserves authority.
+13. Plaintext does not survive across control-plane calls.
+14. Client construction happens only after the permit.
+15. At most one client construction and one create dispatch.
+16. `runWithInFlightHeartbeat` wraps create plus acceptance.
+17. The durable acceptance callback is awaited and is the sole ID authority.
+18. The provider execution ID is the raw, validated `Interaction.id`.
+19. The definitive provider-failure composition passes.
+20. The ambiguous provider-failure composition passes.
+21. No duplicate report and no automatic resubmission exist.
+22. The adapter unit and transport-level test matrix passes.
+23. The tier 3 accepted, definitive and ambiguous paths pass.
+24. The boundary, no-network and secret-safety proofs pass.
+25. The real adapter stays default-off and
+    `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
+**Expected implementation scope (later).** NEW in commercial-worker: the
+Google create adapter, the real Google composer, the closed Google
+`generationRequest` parser, and their unit, composer and tier 3 tests.
+MODIFIED: `credentialOpeningRun.ts` (the sealed capability and the opened
+context's model and request), possibly `credentialContracts.ts`,
+`workerError.ts` only if genuinely needed, `tests/boundary.test.ts`,
+`apps/commercial-worker/package.json` and
+`apps/commercial-worker/package-lock.json`. UNCHANGED unless implementation
+discovery proves otherwise: commercial-api, migrations, the shared
+protocol, the deployment runbook, engine `src/**`, the root `package.json`
+and `package-lock.json`, `fakeProvider.ts`, the fake composer's semantics,
+the acceptance-journal format, the acceptance handler and adapter, and the
+R44B10P1/P2 semantics. Exact filenames follow repository convention at
+implementation.
+
+**Still open** (none solved here): the production object store, storage
+vendor and storage credentials; a production issuer; canonical
+request-hash readiness; the section 24 destruction lifecycle; the live
+`SUBMITTED` capacity condition; the process runner; production deployment;
+controlled live-provider validation; provider polling, output storage and
+provider completion; later provider adapters; and live provider
+enablement.
+
+**Status (R44B10A contract lock).**
+
+- **R44B10P1:** fully closed.
+- **R44B10P2:** fully closed.
+- **R44B10A discovery:** PASS.
+- **R44B10A contract lock:** this revision.
+- **R44B10A implementation:** not started.
+- `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO`;
+  `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
 ---
 
@@ -8659,6 +9208,35 @@ OBJECT_STORAGE_INPUT_FAILURE_ROUTE_JOB_STATE=FAILED
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_PROVIDER_SEMANTICS=NO
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_PROTOCOL_PACKAGE_CHANGE_REQUIRED=NO
 OBJECT_STORAGE_INPUT_FAILURE_CLASSIFICATION_EXTENSION_REQUIRED=YES
+R44B10A_CONTRACT_LOCKED=YES
+R44B10A_IMPLEMENTATION_STARTED=NO
+R44B10A_FIRST_PROVIDER=GOOGLE_GENAI
+R44B10A_REAL_PROVIDER_COUNT=1
+R44B10A_PROVIDER_MODEL=gemini-omni-1.1-flash
+R44B10A_PROVIDER_BACKEND=GEMINI_DEVELOPER_API
+R44B10A_ADAPTER_PLACEMENT=apps/commercial-worker/src
+R44B10A_ENGINE_IMPORT_REQUIRED=NO
+R44B10A_SDK_DEPENDENCY=@google/genai@2.24.0
+R44B10A_PROVIDER_CREATE_RETRY_MAX=0
+R44B10A_PROVIDER_CREATE_RETRY_TRANSPORT_PROOF_REQUIRED=YES
+R44B10A_PROVIDER_CREATE_TIMEOUT_MS=60000
+R44B10A_PROVIDER_EXECUTION_ID_SOURCE=Interaction.id
+R44B10A_PROVIDER_EXECUTION_ID_TRANSFORMATION=NONE
+R44B10A_REQUEST_MEMBERS=prompt,referenceImage,resolution
+R44B10A_PROMPT_MAX_UTF16_CODE_UNITS=1000
+R44B10A_RESOLUTION=720p
+R44B10A_CLIENT_CONSTRUCTION_BEFORE_PERMIT_ALLOWED=NO
+R44B10A_SECOND_CREDENTIAL_GRANT=NO
+R44B10A_ENDPOINT=SUBMITTED
+R44B10A_INCLUDES_POLLING=NO
+R44B10A_INCLUDES_OUTPUT_PERSISTENCE=NO
+R44B10A_INCLUDES_COMPLETION=NO
+R44B10A_DATABASE_MIGRATION_REQUIRED=NO
+R44B10A_COMMERCIAL_API_CHANGE_REQUIRED=NO
+R44B10A_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
+R44B10A_PROCESS_RUNNER_REQUIRED=NO
+R44B10A_PRODUCTION_OBJECT_STORE_REQUIRED_FOR_IMPLEMENTATION=NO
+R44B10A_PRODUCTION_OBJECT_STORE_REQUIRED_FOR_LIVE_ENABLEMENT=YES
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

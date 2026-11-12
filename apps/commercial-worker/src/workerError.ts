@@ -45,7 +45,13 @@ export type WorkerErrorCode =
   // durable acceptance was recorded for it.
   | "PROVIDER_ACCEPTANCE_INVALID"
   // The acceptance record could not be made durable (R44B6Y0).
-  | "ACCEPTANCE_JOURNAL_WRITE_FAILED";
+  | "ACCEPTANCE_JOURNAL_WRITE_FAILED"
+  // R44B9: a fake-only worker leased an attempt for another provider; it
+  // stopped before any credential grant and left the lease to expire.
+  | "LEASED_PROVIDER_INCOMPATIBLE"
+  // R44B9: a provider operation broke the submission-phase contract (an
+  // untyped throw, ACCEPTED without durable acceptance, or a failure after it).
+  | "PROVIDER_CONTRACT_VIOLATION";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   STATE_ROOT_UNSUITABLE: "The worker state root is unsuitable for the acceptance journal.",
@@ -69,6 +75,8 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   SUBMISSION_FAILED_REJECTED: "The worker-control API rejected the submission failure report.",
   PROVIDER_ACCEPTANCE_INVALID: "The provider acceptance is invalid; new work is blocked.",
   ACCEPTANCE_JOURNAL_WRITE_FAILED: "The acceptance record could not be made durable; new work is blocked.",
+  LEASED_PROVIDER_INCOMPATIBLE: "The leased attempt's provider is not supported by this worker; new work is blocked.",
+  PROVIDER_CONTRACT_VIOLATION: "The provider operation broke its submission contract; new work is blocked.",
 };
 
 export class WorkerError extends Error {

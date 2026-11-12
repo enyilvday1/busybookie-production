@@ -73,6 +73,9 @@ const EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
   // execution ID; the adapter passes the record's own ID through unchanged.
   "src/acceptanceHandler.ts": ["provider execution identity"],
   "src/acceptanceAdapter.ts": ["provider execution identity"],
+  // R44B9: the production fake mints its attempt-bound execution ID and hands
+  // it to the acceptance callback (checked below).
+  "src/fakeProvider.ts": ["provider execution identity"],
 };
 // R44B6S: the exact acceptance-recovery vocabulary a file may name. Only these
 // tokens are removed before the rules run, so /submitting, submission-failed,
@@ -101,6 +104,9 @@ const ALLOWED_TOKENS: Readonly<Record<string, readonly string[]>> = {
   "src/preProviderOrchestration.ts": ["acknowledgeSubmitting", "submittingAt"],
   // R44B6Y: the record member copied from the permit.
   "src/acceptanceHandler.ts": ["submittingAt"],
+  // R44B9A: the one dedicated fake provider identifier, declared once. Any
+  // other BUSYBOOKIE_ text (an environment key, a mode switch) still fails.
+  "src/fakeProvider.ts": ['export const FAKE_PROVIDER_ID = "BUSYBOOKIE_FAKE";'],
 };
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
@@ -114,8 +120,11 @@ describe("commercial-worker source boundary", () => {
       "src/acceptanceHandler.ts",
       "src/acceptanceJournal.ts",
       "src/acceptanceRecoveryPolicy.ts",
+      "src/attemptExecution.ts",
       "src/credentialContracts.ts",
       "src/credentialOpeningRun.ts",
+      "src/failureReportPolicy.ts",
+      "src/fakeProvider.ts",
       "src/hostFaultLatch.ts",
       "src/inFlightHeartbeat.ts",
       "src/preProviderOrchestration.ts",
@@ -232,6 +241,11 @@ describe("commercial-worker source boundary", () => {
     expect(allowed("src/workerError.ts", '"SUBMITTING"')).toContain("SUBMITTING vocabulary");
     expect(allowed("src/acceptanceRecoveryPolicy.ts", "acknowledgeSubmitting()")).toContain("SUBMITTING vocabulary");
     expect(allowed("src/acceptanceRecoveryPolicy.ts", "/acceptance-recovery")).toContain("SUBMITTING acknowledgement or recovery routes");
+    // R44B9: only the fake's own declaration is allowed; no environment key or mode.
+    expect(allowed("src/fakeProvider.ts", 'export const FAKE_PROVIDER_ID = "BUSYBOOKIE_FAKE";')).toEqual([]);
+    expect(allowed("src/fakeProvider.ts", "BUSYBOOKIE_FAKE_BEHAVIOR")).toContain("engine environment loader");
+    expect(allowed("src/fakeProvider.ts", 'const id = "BUSYBOOKIE_FAKE";')).toContain("engine environment loader");
+    expect(allowed("src/attemptExecution.ts", 'export const FAKE_PROVIDER_ID = "BUSYBOOKIE_FAKE";')).toContain("engine environment loader");
   });
 });
 
@@ -254,8 +268,9 @@ describe("SUBMITTING acknowledgement client boundary", () => {
   const client = clientSource;
   const method = methodSource("acknowledgeSubmitting");
 
-  it("is called only by the unused pre-provider orchestration and stays outside the credential-opening client", () => {
-    // R44B6V: the orchestration is the only caller, and nothing calls it (below).
+  it("is called only by the pre-provider orchestration and stays outside the credential-opening client", () => {
+    // R44B6V: the orchestration is the only caller; R44B9: only the
+    // fake-provider composer calls the orchestration (below).
     const callers = sources.filter(({ text }) => /\.acknowledgeSubmitting\s*\(/.test(code(text))).map(({ path }) => path);
     expect(callers).toEqual(["src/preProviderOrchestration.ts"]);
     expect(sources.filter(({ path, text }) => path !== "src/workerControlClient.ts" && /acknowledgeSubmitting/.test(code(text))).map(({ path }) => path)).toEqual([
@@ -284,9 +299,9 @@ describe("SUBMITTING acknowledgement client boundary", () => {
 describe("heartbeat client boundary", () => {
   const method = methodSource("heartbeat");
 
-  it("is called only by the unused pre-provider orchestration and the unused in-flight keeper", () => {
-    // R44B6V: the orchestration calls it, and nothing calls it (below).
-    // R44B6Z: the in-flight keeper calls it, and nothing calls the keeper.
+  it("is called only by the pre-provider orchestration and the in-flight keeper", () => {
+    // R44B6V: the orchestration calls it. R44B6Z: the in-flight keeper calls it.
+    // R44B9: the composer reaches both only through their own entry points.
     expect(sources.filter(({ text }) => /\.heartbeat\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/inFlightHeartbeat.ts",
       "src/preProviderOrchestration.ts",
@@ -320,17 +335,27 @@ describe("pre-provider orchestration boundary", () => {
   const ORCHESTRATION = "src/preProviderOrchestration.ts";
   const orchestration = code(read(join(SRC_ROOT, "preProviderOrchestration.ts")));
 
-  it("has no caller anywhere in worker source, including credential opening", () => {
-    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit|PreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([]);
-    // R44B6Y: the unused acceptance adapter reuses only the injectable deadline-timer seam.
-    // R44B6Z: so does the unused in-flight keeper.
+  it("is called only by the fake-provider composer, never by credential opening", () => {
+    // R44B9: the composer is the only caller.
+    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit\(/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/attemptExecution.ts",
+    ]);
+    expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /obtainPreProviderPermit|PreProviderPermit/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/attemptExecution.ts",
+    ]);
+    // R44B6Y: the acceptance adapter reuses only the injectable deadline-timer seam.
+    // R44B6Z: so does the in-flight keeper. R44B9: the shared failure-report
+    // policy takes only the timer type.
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/acceptanceAdapter.ts",
+      "src/attemptExecution.ts",
+      "src/failureReportPolicy.ts",
       "src/inFlightHeartbeat.ts",
     ]);
     for (const path of ["acceptanceAdapter.ts", "inFlightHeartbeat.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
     }
+    expect(code(read(join(SRC_ROOT, "failureReportPolicy.ts")))).toMatch(/import type \{ DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
     expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/PreProvider|permit/i);
   });
 
@@ -417,8 +442,9 @@ describe("acceptance journal boundary", () => {
 });
 
 // R44B6Y0/R44B6Y: the inner durable acceptance handler, the outer acceptance
-// adapter and the host-fault latch. Nothing calls them yet; they hold no
-// provider abstraction, polling, journal preparation or local lease clock.
+// adapter and the host-fault latch. Only the fake-provider composer (R44B9)
+// uses them; they hold no provider abstraction, polling, journal preparation
+// or local lease clock.
 describe("acceptance handler, adapter and host-fault latch boundary", () => {
   const HANDLER = "src/acceptanceHandler.ts";
   const ADAPTER = "src/acceptanceAdapter.ts";
@@ -429,11 +455,17 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
   const users = (pattern: RegExp, except: readonly string[]) =>
     sources.filter(({ path, text }) => !except.includes(path) && pattern.test(code(text))).map(({ path }) => path).sort();
 
-  it("has no production caller: only the adapter uses the handler, nothing uses the adapter, only they use the latch", () => {
-    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual([]);
-    expect(users(/acceptanceHandler|createDurableAcceptanceHandler|AcceptanceNotDurableError/, [HANDLER])).toEqual([ADAPTER]);
-    // R44B6Z: the unused in-flight keeper also takes the injected latch.
-    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/inFlightHeartbeat.ts"]);
+  it("is composed only by the fake-provider composer: only the adapter builds the handler, only the composer builds the adapter", () => {
+    expect(users(/acceptanceAdapter|createAcceptanceAdapter|AcceptanceAdapter\b/, [ADAPTER])).toEqual(["src/attemptExecution.ts"]);
+    expect(users(/createDurableAcceptanceHandler|AcceptanceNotDurableError/, [HANDLER])).toEqual([ADAPTER]);
+    // R44B9: the composer and the provider contract import only the acceptance type.
+    expect(users(/acceptanceHandler/, [HANDLER])).toEqual([ADAPTER, "src/attemptExecution.ts", "src/providerExecutionContract.ts"]);
+    for (const path of ["attemptExecution.ts", "providerExecutionContract.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ WorkerProviderAcceptance \} from "\.\/acceptanceHandler\.js";/);
+    }
+    // R44B6Z: the in-flight keeper also takes the injected latch; R44B9: the
+    // composer holds it.
+    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/attemptExecution.ts", "src/inFlightHeartbeat.ts"]);
     for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
     }
@@ -467,13 +499,16 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
   });
 
   it("makes the failure report impossible once the record is durable", () => {
-    // reportSubmissionFailed appears only in reportNotDurable, which runs only
-    // in the catch around the inner handler, before reconcile.
-    expect(adapter.match(/\.reportSubmissionFailed\(/g)).toHaveLength(1);
+    // The shared failure-report policy (R44B9) appears only in reportNotDurable,
+    // which runs only in the catch around the inner handler, before reconcile.
+    expect(adapter.match(/\.reportSubmissionFailed\(/g)).toBeNull();
+    expect(adapter.match(/reportSubmissionFailureWithPolicy\(/g)).toHaveLength(1);
+    const notDurable = adapter.slice(adapter.indexOf("async function reportNotDurable"), adapter.indexOf("async function reconcile"));
+    expect(notDurable).toMatch(/await reportSubmissionFailureWithPolicy\(\{ client, deadlineTimer: timer \}, executionAttemptId, fixedProof, report\);/);
     expect(adapter.match(/reportNotDurable\(/g)).toHaveLength(2);
     const reconcile = adapter.slice(adapter.indexOf("async function reconcile"), adapter.indexOf("return async (acceptance) => {"));
     expect(reconcile.length).toBeGreaterThan(0);
-    expect(/reportSubmissionFailed|reportNotDurable/.test(reconcile)).toBe(false);
+    expect(/reportSubmissionFailed|reportSubmissionFailureWithPolicy|reportNotDurable/.test(reconcile)).toBe(false);
     const callback = adapter.slice(adapter.indexOf("return async (acceptance) => {"));
     expect(callback.indexOf("await reportNotDurable(")).toBeLessThan(callback.indexOf("await reconcile(record);"));
     expect(callback.match(/reconcile\(/g)).toHaveLength(1);
@@ -482,13 +517,27 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
   it("locks two attempts, 10000 ms deadlines and retry only on CONTROL_API_UNAVAILABLE for both loops", () => {
     expect(adapter).toMatch(/export const LIVE_SUBMITTED_MAX_ATTEMPTS = 2;/);
     expect(adapter).toMatch(/export const LIVE_SUBMITTED_REQUEST_DEADLINE_MS = 10000;/);
-    expect(adapter).toMatch(/export const ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS = 2;/);
-    expect(adapter).toMatch(/export const ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS = 10000;/);
+    // R44B9: the failure-report constants and the attempt helper moved,
+    // unchanged, to the shared policy; the adapter re-exports the names.
+    const policy = code(read(join(SRC_ROOT, "failureReportPolicy.ts")));
+    expect(policy).toMatch(/export const SUBMISSION_FAILURE_REPORT_MAX_ATTEMPTS = 2;/);
+    expect(policy).toMatch(/export const SUBMISSION_FAILURE_REPORT_REQUEST_DEADLINE_MS = 10000;/);
+    expect(adapter).toMatch(/SUBMISSION_FAILURE_REPORT_MAX_ATTEMPTS as ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS,/);
+    expect(adapter).toMatch(/SUBMISSION_FAILURE_REPORT_REQUEST_DEADLINE_MS as ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS,/);
+    expect(adapter).toMatch(/import \{ atMostTwoAttempts, reportSubmissionFailureWithPolicy \} from "\.\/failureReportPolicy\.js";/);
     expect(adapter.match(/atMostTwoAttempts\(timer, LIVE_SUBMITTED_REQUEST_DEADLINE_MS,/g)).toHaveLength(1);
-    expect(adapter.match(/atMostTwoAttempts\(timer, ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS,/g)).toHaveLength(1);
-    expect(adapter.match(/new AbortController\(\)/g)).toHaveLength(1);
-    expect(adapter).toMatch(/error\.code !== "CONTROL_API_UNAVAILABLE"/);
-    expect(/\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|backoff|jitter/i.test(adapter)).toBe(false);
+    expect(adapter.match(/atMostTwoAttempts\(/g)).toHaveLength(1);
+    expect(policy.match(/atMostTwoAttempts\(dependencies\.deadlineTimer, SUBMISSION_FAILURE_REPORT_REQUEST_DEADLINE_MS,/g)).toHaveLength(1);
+    expect(adapter.match(/new AbortController\(\)/g)).toBeNull();
+    expect(policy.match(/new AbortController\(\)/g)).toHaveLength(1);
+    expect(policy).toMatch(/error\.code !== "CONTROL_API_UNAVAILABLE"/);
+    for (const text of [adapter, policy]) {
+      expect(/\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|backoff|jitter/i.test(text)).toBe(false);
+    }
+    // The policy is a reporting policy only: no provider, journal, latch or lease clock.
+    expect(importsOf(policy).sort()).toEqual(["./preProviderOrchestration.js", "./workerControlClient.js", "./workerError.js"]);
+    expect(/provider|journal|latch|reportSubmitted\(|recoverAcceptance|heartbeat|Date\.now|new Date|leaseExpiresAt|console\.|log\(/i.test(policy.split("./preProviderOrchestration.js").join(""))).toBe(false);
+    expect(policy.match(/\.reportSubmissionFailed\(/g)).toHaveLength(1);
   });
 
   it("uses no local lease clock and reuses the shared acceptance-recovery step without copying it", () => {
@@ -537,20 +586,29 @@ describe("submission-failed and submitted client boundary", () => {
       expect(method.match(/\bpost\(/g)).toHaveLength(1);
       expect(FORBIDDEN_IN_PRIMITIVE.test(method.split("/submission-failed`").join(""))).toBe(false);
     }
-    // Only the adapter, itself unused, calls the failure report.
-    expect(sources.filter(({ text }) => /\.reportSubmissionFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/acceptanceAdapter.ts"]);
+    // R44B9: only the shared failure-report policy calls the failure report;
+    // the adapter and the composer reach it only through that policy.
+    expect(sources.filter(({ text }) => /\.reportSubmissionFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual(["src/failureReportPolicy.ts"]);
+    expect(sources.filter(({ text }) => /reportSubmissionFailureWithPolicy\(/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/acceptanceAdapter.ts",
+      "src/attemptExecution.ts",
+      "src/failureReportPolicy.ts",
+    ]);
   });
 });
 
-// R44B6Z0/R44B6Z: the generic in-flight lease keeper. Nothing calls it yet. It
-// owns the operation promise and its own heartbeat signals, knows no provider,
-// acceptance record or journal, and makes no local lease-expiry decision.
+// R44B6Z0/R44B6Z: the generic in-flight lease keeper. Only the fake-provider
+// composer (R44B9) calls it. It owns the operation promise and its own
+// heartbeat signals, knows no provider, acceptance record or journal, and
+// makes no local lease-expiry decision.
 describe("in-flight heartbeat keeper boundary", () => {
   const KEEPER = "src/inFlightHeartbeat.ts";
   const keeper = code(read(join(SRC_ROOT, "inFlightHeartbeat.ts")));
 
-  it("has no production caller", () => {
-    expect(sources.filter(({ path, text }) => path !== KEEPER && /inFlightHeartbeat|runWithInFlightHeartbeat|InFlightHeartbeat/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  it("is called only by the fake-provider composer", () => {
+    expect(sources.filter(({ path, text }) => path !== KEEPER && /inFlightHeartbeat|runWithInFlightHeartbeat|InFlightHeartbeat/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/attemptExecution.ts",
+    ]);
   });
 
   it("imports only the timing seams, client types, latch type and worker errors", () => {
@@ -653,9 +711,108 @@ describe("state-root binding boundary", () => {
     expect(/provider|lock|marker|metadata|poll/i.test(binding.replace(/CredentialOpening/g, ""))).toBe(false);
   });
 
-  it("has no production caller and no process entry point", () => {
-    expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /workerStateRoot|runConfiguredCredentialOpeningOnce|bindWorkerStateRoot/.test(code(text))).map(({ path }) => path)).toEqual([]);
-    expect(sources.filter(({ path, text }) => !["src/workerConfig.ts", "src/workerStateRoot.ts"].includes(path) && /workerConfig|loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  it("is bound only by the fake-provider composer and has no process entry point", () => {
+    // R44B9: the composer binds the state root; nothing calls the credential-only entry.
+    expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /workerStateRoot|runConfiguredCredentialOpeningOnce|bindWorkerStateRoot/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/attemptExecution.ts",
+    ]);
+    expect(sources.filter(({ path, text }) => path !== "src/workerStateRoot.ts" && /runConfiguredCredentialOpeningOnce/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // The composer takes the parsed configuration as a type; nothing loads it.
+    expect(sources.filter(({ path, text }) => !["src/workerConfig.ts", "src/workerStateRoot.ts"].includes(path) && /workerConfig|loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/attemptExecution.ts",
+    ]);
+    expect(sources.filter(({ path, text }) => path !== "src/workerConfig.ts" && /loadWorkerConfig/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(code(read(join(SRC_ROOT, "attemptExecution.ts")))).toMatch(/import type \{ WorkerConfig \} from "\.\/workerConfig\.js";/);
+  });
+});
+
+// R44B9A/R44B9: the production fake provider and the one-attempt composer.
+// Fake-only by construction, development-only, library-only: no real provider,
+// SDK, network, environment mode, loop, retry, daemon or entry point.
+describe("fake-provider execution boundary", () => {
+  const COMPOSER = "src/attemptExecution.ts";
+  const FAKE = "src/fakeProvider.ts";
+  const composer = code(read(join(SRC_ROOT, "attemptExecution.ts")));
+  const fake = code(read(join(SRC_ROOT, "fakeProvider.ts")));
+  const contract = code(read(join(SRC_ROOT, "providerExecutionContract.ts")));
+  const opening = code(read(join(SRC_ROOT, "credentialOpeningRun.ts")));
+
+  it("has no caller and no process entry point; only the composer uses the fake", () => {
+    expect(sources.filter(({ path, text }) => path !== COMPOSER && /attemptExecution|runConfiguredFakeProviderAttemptOnce/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => path !== FAKE && /fakeProvider|createFakeProviderOperationFactory|FAKE_PROVIDER_ID/.test(code(text))).map(({ path }) => path)).toEqual([COMPOSER]);
+    // The identifier exists once, in the fake, and no source names it as text elsewhere.
+    expect(sources.filter(({ text }) => /BUSYBOOKIE_FAKE/.test(code(text))).map(({ path }) => path)).toEqual([FAKE]);
+    expect(fake.match(/"BUSYBOOKIE_FAKE"/g)).toHaveLength(1);
+  });
+
+  it("keeps the fake local: no network, SDK, timer, environment, credential or retry", () => {
+    expect(importsOf(fake).sort()).toEqual(["./providerExecutionContract.js", "./workerError.js"]);
+    expect(
+      /fetch|https?:|node:|require\(|process\.|setTimeout|setInterval|sleep|Math\.random|Date\.now|new Date|credential|leaseToken|apiKey|secret|retry|\bfor\s*\(|\bwhile\s*\(|console\.|log\(|poll|download|output/i.test(fake),
+    ).toBe(false);
+    // The ID is attempt-bound, validated by the shared rule, and handed only to the callback.
+    expect(fake).toMatch(/const id = `\$\{FAKE_PROVIDER_ID\}-\$\{executionAttemptId\}`;/);
+    expect(fake).toMatch(/if \(!isProviderExecutionId\(id\)\) throw new WorkerError\("PROVIDER_CONTRACT_VIOLATION"\);/);
+    expect(fake.match(/providerExecutionId/g)).toHaveLength(1);
+    expect(fake).toMatch(/await onAccepted\(\{ provider: FAKE_PROVIDER_ID, providerExecutionId: fakeProviderExecutionId\(executionAttemptId\) \}\);\s*return Object\.freeze\(\{ kind: "ACCEPTED" \}\);/);
+    // Default ACCEPT, failure behaviours only through the explicit seam, one dispatch.
+    expect(fake).toMatch(/const behavior = options\.behavior \?\? "ACCEPT";/);
+    expect(fake).toMatch(/if \(request\.provider !== FAKE_PROVIDER_ID\) throw new WorkerError\("LEASED_PROVIDER_INCOMPATIBLE"\);/);
+    expect(fake.match(/dispatched = true;/g)).toHaveLength(1);
+  });
+
+  it("keeps the submission contract provider-neutral and secret-free", () => {
+    expect(importsOf(contract).sort()).toEqual(["./acceptanceHandler.js", "commercial-worker-protocol"]);
+    const request = contract.slice(contract.indexOf("export type ProviderSubmissionRequest"), contract.indexOf("export type ProviderSubmissionOperationFactory"));
+    expect(request.length).toBeGreaterThan(0);
+    expect(/credential|leaseToken|token|apiKey|secret|proof|envelope|accountId/i.test(request)).toBe(false);
+    const outcome = contract.slice(contract.indexOf("export type ProviderSubmissionOutcome"), contract.indexOf("export type ProviderAcceptanceCallback"));
+    expect(/providerExecution|id:|Id\b/.test(outcome)).toBe(false);
+    expect(/poll|download|output|complet|retry/i.test(contract)).toBe(false);
+  });
+
+  it("composes in the locked order, with the operation constructed only after the permit", () => {
+    const at = (needle: string) => {
+      const index = composer.indexOf(needle);
+      expect({ needle, found: index >= 0 }).toEqual({ needle, found: true });
+      return index;
+    };
+    const order = [
+      'if (config.mode !== "development") throw new WorkerError("WORKER_CONFIGURATION_INVALID");',
+      "await bindWorkerStateRoot(config,",
+      "await openLeasedCredentialOnce({ ...opening, journal, client }, (lease) => {",
+      "if (lease.provider !== FAKE_PROVIDER_ID) {",
+      "await obtainPreProviderPermit({ journal, client, deadlineTimer: timer }, executionAttemptId, proof);",
+      "(operationFactory ?? createFakeProviderOperationFactory())({ executionAttemptId, provider: context.lease.provider });",
+      "createAcceptanceAdapter({ lease: context.lease, accountId: context.accountId, permit }, proof,",
+      "await runWithInFlightHeartbeat(",
+      "() => operation.execute(onAccepted),",
+    ].map(at);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // Exactly one of each: one binding, one lease path, one permit, one
+    // construction, one adapter, one keeper, one dispatch.
+    for (const pattern of [/bindWorkerStateRoot\(/g, /openLeasedCredentialOnce\(/g, /obtainPreProviderPermit\(/g, /createFakeProviderOperationFactory\(\)/g, /createAcceptanceAdapter\(/g, /runWithInFlightHeartbeat\(/g, /\.execute\(/g]) {
+      expect(composer.match(pattern)).toHaveLength(1);
+    }
+    // The admission runs on the lease before the grant inside the shared path.
+    expect(opening.indexOf("admitLease(lease);")).toBeGreaterThan(opening.indexOf('log({ stage: "LEASE", outcome: "OK", ...safe });'));
+    expect(opening.indexOf("admitLease(lease);")).toBeLessThan(opening.indexOf("requestCredentialGrant("));
+    expect(opening).toMatch(/opened = await openAndDiscard\(dependencies\.opener, envelope, context, \(credential\) => credential\.length > 0\);/);
+  });
+
+  it("is a library-only, single-attempt composer with no direct control-plane request, environment, loop or retry", () => {
+    expect(/process\.|\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|retry|backoff|jitter|Math\.random|console\.|fetch\s*\(|https?:/i.test(composer)).toBe(false);
+    // Every control-plane request goes through an existing policy module.
+    expect(/client\.[A-Za-z]+\(/.test(composer)).toBe(false);
+    // The operation factory sees no secret: only the attempt ID and provider.
+    expect(/credential|leaseToken|apiKey|plaintext|envelope|openingContext/i.test(composer.replace(/openLeasedCredentialOnce|[Cc]redentialOpening[A-Za-z]*/g, ""))).toBe(false);
+    // Two failure reports through the shared policy, never a direct one.
+    expect(composer.match(/reportSubmissionFailureWithPolicy\(/g)).toHaveLength(2);
+    expect(composer).toMatch(/outcome: "DEFINITIVELY_REJECTED", failureCode: "PROVIDER_REJECTED_DEFINITIVELY"/);
+    expect(composer).toMatch(/outcome: "OUTCOME_UNKNOWN", failureCode: "PROVIDER_SUBMISSION_AMBIGUOUS"/);
+    // Host-fault trips: incompatible lease, contract violation, ACCEPTED without acceptance.
+    expect(composer.match(/latch\.trip\(\)/g)).toHaveLength(3);
+    expect(composer.match(/new WorkerError\("PROVIDER_CONTRACT_VIOLATION"\)/g)).toHaveLength(3);
   });
 });
 

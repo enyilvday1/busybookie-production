@@ -1,6 +1,6 @@
 import { parseSealedEnvelope, validateSealingContext, type CredentialOpener } from "./credentialContracts.js";
 import { assertNoProviderEnvironment, type WorkerEnvironment } from "./providerEnvironment.js";
-import type { WorkerControlClient } from "./workerControlClient.js";
+import type { LeaseProof, WorkerControlClient, WorkerLease } from "./workerControlClient.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
 import type { AcceptanceJournal } from "./acceptanceJournal.js";
 import { defaultMonotonicNow, defaultRecoverySleep, type MonotonicClock, type RecoverySleep } from "./acceptanceRecoveryPolicy.js";
@@ -91,7 +91,41 @@ async function openAndDiscard(opener: CredentialOpener, envelope: unknown, conte
   }
 }
 
+// R44B9: the non-secret continuation of a completed opening, for the
+// fake-provider execution composer (R44B9A). In memory only, frozen, never
+// logged or persisted as a whole. It holds the lease proof the control-plane
+// requests need, and never the plaintext credential, envelope or opening
+// context.
+export type OpenedAttemptContext = Readonly<{
+  lease: Readonly<Pick<WorkerLease, "executionJobId" | "executionAttemptId" | "attemptNumber" | "provider" | "generationRequestSha256">>;
+  // From the grant's validated opening context.
+  accountId: string;
+  proof: LeaseProof;
+}>;
+
+export type CredentialOpeningOutcome = Readonly<{ status: "NO_WORK" }> | Readonly<{ status: "CREDENTIAL_OPENED"; context: OpenedAttemptContext }>;
+
+// Runs on the authoritative lease before any credential grant; a throw stops
+// the run there (the grant, opening and everything after never happen).
+export type LeaseAdmission = (lease: WorkerLease) => void;
+
 export async function runCredentialOpeningOnce(dependencies: CredentialOpeningRunDependencies): Promise<CredentialOpeningRunResult> {
+  const outcome = await openLeasedCredentialOnce(dependencies);
+  if (outcome.status === "NO_WORK") return outcome;
+  const { lease, proof } = outcome.context;
+  return Object.freeze({
+    status: "CREDENTIAL_OPENED",
+    executionJobId: lease.executionJobId,
+    executionAttemptId: lease.executionAttemptId,
+    provider: lease.provider,
+    fencingCounter: proof.fencingCounter,
+    credentialOpened: true,
+  });
+}
+
+// The one authoritative startup -> lease -> admission -> grant -> open path,
+// shared by runCredentialOpeningOnce and the fake-provider composer.
+export async function openLeasedCredentialOnce(dependencies: CredentialOpeningRunDependencies, admitLease?: LeaseAdmission): Promise<CredentialOpeningOutcome> {
   const log = dependencies.log ?? (() => {});
   const now = dependencies.now ?? (() => new Date());
   const fail = (stage: WorkerLogEvent["stage"], error: unknown, context: Pick<WorkerLogEvent, "executionAttemptId" | "provider"> = {}): never => {
@@ -124,6 +158,14 @@ export async function runCredentialOpeningOnce(dependencies: CredentialOpeningRu
   }
   const safe = { executionAttemptId: lease.executionAttemptId, provider: lease.provider };
   log({ stage: "LEASE", outcome: "OK", ...safe });
+
+  if (admitLease !== undefined) {
+    try {
+      admitLease(lease);
+    } catch (error) {
+      return fail("LEASE", error, safe);
+    }
+  }
 
   // Never continue on an expired lease; the control plane enforces this too.
   if (lease.leaseExpiresAt.getTime() <= now().getTime()) return fail("GRANT", new WorkerError("LEASE_EXPIRED"), safe);
@@ -161,10 +203,17 @@ export async function runCredentialOpeningOnce(dependencies: CredentialOpeningRu
   log({ stage: "DONE", outcome: "OK", ...safe });
   return Object.freeze({
     status: "CREDENTIAL_OPENED",
-    executionJobId: lease.executionJobId,
-    executionAttemptId: lease.executionAttemptId,
-    provider: lease.provider,
-    fencingCounter: grant.fencingCounter,
-    credentialOpened: true,
+    context: Object.freeze({
+      lease: Object.freeze({
+        executionJobId: lease.executionJobId,
+        executionAttemptId: lease.executionAttemptId,
+        attemptNumber: lease.attemptNumber,
+        provider: lease.provider,
+        generationRequestSha256: lease.generationRequestSha256,
+      }),
+      accountId: context.accountId,
+      // The grant already answered exactly this attempt and fencing generation.
+      proof: Object.freeze({ fencingCounter: grant.fencingCounter, leaseToken: lease.leaseToken }),
+    }),
   });
 }

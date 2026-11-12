@@ -4,6 +4,7 @@ import { defaultMonotonicNow, defaultRecoverySleep, type MonotonicClock, type Re
 import type { HostFaultLatch } from "./hostFaultLatch.js";
 import { realDeadlineTimer, type DeadlineTimer } from "./preProviderOrchestration.js";
 import { recoverAcceptanceRecord } from "./startupJournalReconciliation.js";
+import { atMostTwoAttempts, reportSubmissionFailureWithPolicy } from "./failureReportPolicy.js";
 import type { LeaseProof, WorkerControlClient } from "./workerControlClient.js";
 import { WorkerError } from "./workerError.js";
 
@@ -25,8 +26,12 @@ import { WorkerError } from "./workerError.js";
 
 export const LIVE_SUBMITTED_MAX_ATTEMPTS = 2;
 export const LIVE_SUBMITTED_REQUEST_DEADLINE_MS = 10000;
-export const ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS = 2;
-export const ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS = 10000;
+// R44B9: the failure-report policy now lives in failureReportPolicy.ts,
+// shared with the fake-provider composer; the values are unchanged.
+export {
+  SUBMISSION_FAILURE_REPORT_MAX_ATTEMPTS as ACCEPTANCE_FAILURE_REPORT_MAX_ATTEMPTS,
+  SUBMISSION_FAILURE_REPORT_REQUEST_DEADLINE_MS as ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS,
+} from "./failureReportPolicy.js";
 
 export type AcceptanceAdapterDependencies = Readonly<{
   journal: Pick<AcceptanceJournal, "publish" | "removeAcknowledgedRecord">;
@@ -40,28 +45,6 @@ export type AcceptanceAdapterDependencies = Readonly<{
 }>;
 
 export type AcceptanceAdapter = (acceptance: WorkerProviderAcceptance) => Promise<void>;
-
-// One request under a fresh controller and its own deadline; the timer is
-// cancelled as soon as the request settles, so it can never abort later work.
-async function withRequestDeadline<T>(timer: DeadlineTimer, deadlineMs: number, request: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const controller = new AbortController();
-  const cancel = timer(deadlineMs, () => controller.abort());
-  try {
-    return await request(controller.signal);
-  } finally {
-    cancel();
-  }
-}
-
-// At most two attempts, both immediate; only CONTROL_API_UNAVAILABLE earns the second.
-async function atMostTwoAttempts<T>(timer: DeadlineTimer, deadlineMs: number, request: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  try {
-    return await withRequestDeadline(timer, deadlineMs, request);
-  } catch (error) {
-    if (!(error instanceof WorkerError) || error.code !== "CONTROL_API_UNAVAILABLE") throw error;
-  }
-  return withRequestDeadline(timer, deadlineMs, request);
-}
 
 const asWorkerError = (error: unknown) => (error instanceof WorkerError ? error : new WorkerError("ACCEPTANCE_RECONCILIATION_FAILED"));
 
@@ -83,13 +66,9 @@ export function createAcceptanceAdapter(context: AcceptanceContext, proof: Lease
   // nothing: the latch is already tripped and the caller still fails closed.
   async function reportNotDurable(failure: AcceptanceNotDurableError): Promise<void> {
     const report = Object.freeze({ outcome: "OUTCOME_UNKNOWN" as const, failureCode: failure.failureCode });
-    try {
-      await atMostTwoAttempts(timer, ACCEPTANCE_FAILURE_REPORT_REQUEST_DEADLINE_MS, (signal) =>
-        client.reportSubmissionFailed(executionAttemptId, fixedProof, report, signal),
-      );
-    } catch {
-      // The authoritative SUBMITTING expiry sweep remains.
-    }
+    // The shared policy never throws; whatever it establishes, the
+    // authoritative SUBMITTING expiry sweep remains.
+    await reportSubmissionFailureWithPolicy({ client, deadlineTimer: timer }, executionAttemptId, fixedProof, report);
   }
 
   // After durable acceptance: the live report, then the shared recovery step.

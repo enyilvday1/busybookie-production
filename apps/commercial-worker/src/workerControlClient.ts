@@ -112,6 +112,28 @@ const SUBMISSION_FAILURE_OUTCOMES: Readonly<Record<SubmissionFailureOutcome, Rea
     }),
   });
 
+// The closed input-failed report (R44B10P2 contract, architecture section 18,
+// "input-failed route"): a permanent pre-provider input failure of a granted
+// LEASED attempt. Exactly five provider-neutral codes; storage codes never
+// cross the route. The only committed state is FAILED_BEFORE_SUBMISSION.
+export const INPUT_FAILURE_CODES = Object.freeze([
+  "INPUT_REFERENCE_INVALID",
+  "INPUT_OBJECT_NOT_FOUND",
+  "INPUT_OBJECT_TOO_LARGE",
+  "INPUT_OBJECT_INTEGRITY_MISMATCH",
+  "INPUT_MEDIA_TYPE_INVALID",
+] as const);
+export type InputFailureCode = (typeof INPUT_FAILURE_CODES)[number];
+export type WorkerInputFailedAcknowledgement = Readonly<{
+  executionAttemptId: string;
+  fencingCounter: number;
+  state: "FAILED_BEFORE_SUBMISSION";
+  failureCode: InputFailureCode;
+}>;
+
+export const isInputFailureCode = (value: unknown): value is InputFailureCode =>
+  typeof value === "string" && (INPUT_FAILURE_CODES as readonly string[]).includes(value);
+
 const isSubmissionFailureReport = (report: unknown): report is SubmissionFailureReport => {
   if (!isPlainObject(report) || typeof report.outcome !== "string" || !Object.hasOwn(SUBMISSION_FAILURE_OUTCOMES, report.outcome)) return false;
   const codes: readonly string[] = SUBMISSION_FAILURE_OUTCOMES[report.outcome as SubmissionFailureOutcome].codes;
@@ -136,6 +158,15 @@ export type WorkerControlClient = Readonly<{
     report: SubmissionFailureReport,
     signal?: AbortSignal,
   ) => Promise<WorkerSubmissionFailedAcknowledgement>;
+  // R44B10P2: single-shot report of a permanent pre-provider input failure.
+  // No retry, timeout or lease clock of its own; an externally supplied
+  // `signal` may abort it, which is a transport failure.
+  reportInputFailed: (
+    executionAttemptId: string,
+    proof: LeaseProof,
+    failureCode: InputFailureCode,
+    signal?: AbortSignal,
+  ) => Promise<WorkerInputFailedAcknowledgement>;
   // R44B6U: capability only; no worker path calls it yet (R44B6U0). One
   // request per call: no retry, no timeout of its own and no lease clock. An
   // externally supplied `signal` may abort it, which is a transport failure.
@@ -361,6 +392,26 @@ export function parseSubmissionFailedResponse(
   return Object.freeze({ executionAttemptId, fencingCounter, state, failureCode: expected.report.failureCode });
 }
 
+// The acknowledgement must answer exactly the attempt, fencing counter and
+// input-failure code reported, in state FAILED_BEFORE_SUBMISSION.
+export function parseInputFailedResponse(
+  body: unknown,
+  expected: Readonly<{ executionAttemptId: string; fencingCounter: number; failureCode: InputFailureCode }>,
+): WorkerInputFailedAcknowledgement {
+  const acknowledgement = exactKeys(body, ["executionAttemptId", "fencingCounter", "state", "failureCode"]);
+  const executionAttemptId = text(acknowledgement.executionAttemptId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (
+    executionAttemptId !== expected.executionAttemptId ||
+    fencingCounter !== expected.fencingCounter ||
+    acknowledgement.state !== "FAILED_BEFORE_SUBMISSION" ||
+    acknowledgement.failureCode !== expected.failureCode
+  ) {
+    throw malformed();
+  }
+  return Object.freeze({ executionAttemptId, fencingCounter, state: "FAILED_BEFORE_SUBMISSION", failureCode: expected.failureCode });
+}
+
 function controlUrl(options: WorkerControlClientOptions): URL {
   let base: URL;
   try {
@@ -535,6 +586,30 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
         signal,
       );
       return parseSubmissionFailedResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter, report: fixed });
+    },
+    // Exactly one request (R44B10P2): the caller owns any retry and deadline,
+    // and only the control plane decides lease expiry. A 409 is the route's
+    // uniform refusal and never proves anything about the lease.
+    reportInputFailed: async (executionAttemptId: string, proof: LeaseProof, failureCode: InputFailureCode, signal?: AbortSignal) => {
+      // Nothing outside the published contract is sent.
+      if (
+        !UUID.test(executionAttemptId) ||
+        typeof proof.fencingCounter !== "number" ||
+        !Number.isSafeInteger(proof.fencingCounter) ||
+        proof.fencingCounter < 1 ||
+        typeof proof.leaseToken !== "string" ||
+        !LEASE_TOKEN.test(proof.leaseToken) ||
+        !isInputFailureCode(failureCode)
+      ) {
+        throw new WorkerError("MALFORMED_CONTROL_RESPONSE");
+      }
+      const body = await post(
+        `/worker-control/v1/attempts/${executionAttemptId}/input-failed`,
+        { fencingCounter: proof.fencingCounter, leaseToken: proof.leaseToken, failureCode },
+        "INPUT_FAILED_REJECTED",
+        signal,
+      );
+      return parseInputFailedResponse(body, { executionAttemptId, fencingCounter: proof.fencingCounter, failureCode });
     },
     // The one route whose 409 body is read: it separates the expected
     // ATTEMPT_STILL_SUBMITTING wait from the uniform refusal. Every other

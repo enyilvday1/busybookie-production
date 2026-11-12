@@ -24,6 +24,7 @@ import { acknowledgeWorkerSubmitted, isProviderExecutionId } from "./workerSubmi
 import { acknowledgeWorkerSubmitting } from "./workerSubmittingService.js";
 import { recoverWorkerAcceptance } from "./workerAcceptanceRecoveryService.js";
 import { isSubmissionFailureOutcome, isWorkerReportableFailureCode, reportWorkerSubmissionFailed } from "./workerSubmissionFailedService.js";
+import { isInputFailureCode, reportWorkerInputFailed } from "./workerInputFailedService.js";
 import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecurityEvents.js";
 
 // Private worker-control routes, machine-to-machine only:
@@ -36,6 +37,7 @@ import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecur
 //   POST /worker-control/v1/attempts/:attemptId/submitted         live SUBMITTING -> SUBMITTED acknowledgement (R44B6O)
 //   POST /worker-control/v1/attempts/:attemptId/acceptance-recovery tokenless OUTCOME_UNKNOWN -> SUBMITTED (R44B6R)
 //   POST /worker-control/v1/attempts/:attemptId/submission-failed   SUBMITTING -> FAILED_BEFORE_SUBMISSION | OUTCOME_UNKNOWN (R44B6T)
+//   POST /worker-control/v1/attempts/:attemptId/input-failed        granted LEASED -> FAILED_BEFORE_SUBMISSION, pre-provider (R44B10P2)
 //
 // The router exists only when a WorkerAuthenticationAdapter, a
 // WorkerSecurityEventSink and the runtime pool are injected in code; the
@@ -64,11 +66,12 @@ export type WorkerControlApplicationOptions = Readonly<{
 export const WORKER_CONTROL_PREFIX = "/worker-control/v1";
 const LEASES_PATH = `${WORKER_CONTROL_PREFIX}/leases`;
 const ATTEMPT_ACTION =
-  /^\/worker-control\/v1\/attempts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(heartbeat|release|credential-grant|submitting|submitted|acceptance-recovery|submission-failed)$/;
+  /^\/worker-control\/v1\/attempts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(heartbeat|release|credential-grant|submitting|submitted|acceptance-recovery|submission-failed|input-failed)$/;
 const PROOF_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken"]);
 const SUBMITTED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "providerExecutionId"]);
 const RECOVERY_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "providerExecutionId"]);
 const SUBMISSION_FAILED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "outcome", "failureCode"]);
+const INPUT_FAILED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "failureCode"]);
 
 class HttpFailure extends Error {
   constructor(
@@ -133,6 +136,7 @@ export function createWorkerControlApplication(options: WorkerControlApplication
         | "WORKER_SUBMITTED_REJECTED"
         | "WORKER_ACCEPTANCE_RECOVERY_REJECTED"
         | "WORKER_SUBMISSION_FAILURE_REJECTED"
+        | "WORKER_INPUT_FAILURE_REJECTED"
         | null = null,
     ) =>
     async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -312,6 +316,28 @@ export function createWorkerControlApplication(options: WorkerControlApplication
       "WORKER_SUBMISSION_FAILURE_REJECTED",
     );
 
+  // The input-failed report (section 18, R44B10P2). Exactly the five closed
+  // input-failure codes; any other code, including a provider or storage
+  // code, is 400 and touches no state.
+  const inputFailed = (attemptId: string) =>
+    route(
+      async (request, response, context) => {
+        const body = await readJsonObjectBody(request, INPUT_FAILED_MEMBERS);
+        const proof = parseProof(body);
+        const { failureCode } = body;
+        if (!isInputFailureCode(failureCode)) throw new RequestBodyError("INVALID_REQUEST");
+        const result = await reportWorkerInputFailed(pool, context, attemptId, proof, failureCode);
+        sendJson(response, 200, {
+          executionAttemptId: result.executionAttemptId,
+          fencingCounter: result.fencingCounter,
+          state: result.state,
+          failureCode: result.failureCode,
+        });
+      },
+      attemptId,
+      "WORKER_INPUT_FAILURE_REJECTED",
+    );
+
   return Object.freeze({
     route: (pathname: string): ApplicationRoute | null => {
       if (pathname === LEASES_PATH) return leasesRoute;
@@ -320,7 +346,7 @@ export function createWorkerControlApplication(options: WorkerControlApplication
       const [, attemptId, action] = match as unknown as [
         string,
         string,
-        "heartbeat" | "release" | "credential-grant" | "submitting" | "submitted" | "acceptance-recovery" | "submission-failed",
+        "heartbeat" | "release" | "credential-grant" | "submitting" | "submitted" | "acceptance-recovery" | "submission-failed" | "input-failed",
       ];
       const handle =
         action === "heartbeat"
@@ -335,7 +361,9 @@ export function createWorkerControlApplication(options: WorkerControlApplication
                   ? submitted(attemptId)
                   : action === "acceptance-recovery"
                     ? acceptanceRecovery(attemptId)
-                    : submissionFailed(attemptId);
+                    : action === "submission-failed"
+                      ? submissionFailed(attemptId)
+                      : inputFailed(attemptId);
       return Object.freeze({ methods: ["POST"], handle });
     },
   });

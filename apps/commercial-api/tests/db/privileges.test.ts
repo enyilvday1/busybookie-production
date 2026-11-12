@@ -115,7 +115,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 6 }]);
+      expect(version.rows).toEqual([{ version: 7 }]);
     });
   });
 
@@ -186,6 +186,23 @@ describe("runtime role authority", () => {
       await expectSqlError(clients.runtime, "UPDATE execution_attempts SET submitting_fencing_counter = 1", [], { code: INSUFFICIENT_PRIVILEGE });
     });
   });
+
+  it.each(["input_failed_worker_principal_id", "input_failed_fencing_counter"])(
+    "has no UPDATE on input-failure provenance %s: only the database guard derives it (migration 0007)",
+    async (column) => {
+      const privileges = await clients.runtime.query(
+        `SELECT has_column_privilege(current_user, 'public.execution_attempts', $1, 'UPDATE') AS update,
+                has_column_privilege(current_user, 'public.execution_attempts', $1, 'SELECT') AS select,
+                has_column_privilege(current_user, 'public.execution_attempts', $1, 'REFERENCES') AS references`,
+        [column],
+      );
+      expect(privileges.rows).toEqual([{ update: false, select: true, references: false }]);
+      expect(RUNTIME_TABLE_PRIVILEGES.execution_attempts!.updateColumns).not.toContain(column);
+      await inRolledBackTransaction(clients.runtime, async () => {
+        await expectSqlError(clients.runtime, `UPDATE execution_attempts SET ${column} = NULL`, [], { code: INSUFFICIENT_PRIVILEGE });
+      });
+    },
+  );
 
   it("can insert and read audit events but never update, delete or truncate them", async () => {
     await inRolledBackTransaction(clients.runtime, async () => {

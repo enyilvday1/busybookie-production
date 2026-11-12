@@ -23,7 +23,9 @@ export type WorkerSecurityEventType =
   | "WORKER_SUBMITTING_REJECTED"
   | "WORKER_SUBMITTED_REJECTED"
   | "WORKER_ACCEPTANCE_RECOVERY_REJECTED"
-  | "WORKER_SUBMISSION_FAILURE_REJECTED";
+  | "WORKER_SUBMISSION_FAILURE_REJECTED"
+  // R44B10P2: input-failed refusals (no migration; a union member only).
+  | "WORKER_INPUT_FAILURE_REJECTED";
 
 export type WorkerLeaseRejectionReason =
   // The authenticated principal is not ACTIVE when re-checked in the transaction.
@@ -63,7 +65,10 @@ export type WorkerLeaseRejectionReason =
   | "PROVIDER_EXECUTION_ID_IN_USE"
   // submission-failed only (R44B6T0): a recognised outcome with a recognised
   // but incompatible failure code, classified only after authority is proven.
-  | "FAILURE_CODE_OUTCOME_MISMATCH";
+  | "FAILURE_CODE_OUTCOME_MISMATCH"
+  // input-failed replay only (R44B10P2): the caller is not the recorded
+  // input-failure reporter (or the attempt has none).
+  | "INPUT_FAILURE_PRINCIPAL_MISMATCH";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 

@@ -119,7 +119,10 @@ const STEP = {
   OUTCOME_UNKNOWN: `state = 'OUTCOME_UNKNOWN', ${CLEAR_LEASE}, failure_code = 'PROVIDER_CREATE_TIMEOUT'`,
   SUCCEEDED: `state = 'SUCCEEDED', ${CLEAR_LEASE}, output_object_key = 'accounts/a/attempts/' || id || '/output.mp4',
               output_sha256 = repeat('a', 64), output_byte_count = 10, output_content_type = 'video/mp4', completed_at = now()`,
-  FAILED_BEFORE_SUBMISSION: `state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR_LEASE}, failure_code = 'PROVIDER_REJECTED_REQUEST', completed_at = now()`,
+  // R44B10P2 (migration 0007): a pre-barrier failure is a granted input
+  // failure with an INPUT_* code; after the barrier it is a provider rejection.
+  FAILED_BEFORE_SUBMISSION: `state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR_LEASE},
+                             failure_code = CASE WHEN submitting_at IS NULL THEN 'INPUT_OBJECT_NOT_FOUND' ELSE 'PROVIDER_REJECTED_REQUEST' END, completed_at = now()`,
   SUBMITTED_FAILED: `state = 'SUBMITTED_FAILED', ${CLEAR_LEASE}, failure_code = 'PROVIDER_GENERATION_FAILED', completed_at = now()`,
   ABANDONED: `state = 'ABANDONED', ${CLEAR_LEASE}, failure_code = 'RECOVERY_ABANDONED', completed_at = now()`,
   CANCELLED: `state = 'CANCELLED', ${CLEAR_LEASE}, completed_at = now()`,
@@ -141,7 +144,7 @@ const PATHS = {
   SUBMITTED: ["LEASED", "SUBMITTING", "SUBMITTED"],
   OUTCOME_UNKNOWN: ["LEASED", "SUBMITTING", "OUTCOME_UNKNOWN"],
   SUCCEEDED: ["LEASED", "SUBMITTING", "SUBMITTED", "SUCCEEDED"],
-  FAILED_BEFORE_SUBMISSION: ["LEASED", "FAILED_BEFORE_SUBMISSION"],
+  FAILED_BEFORE_SUBMISSION: ["LEASED", "GRANT", "FAILED_BEFORE_SUBMISSION"],
   DEFINITIVE_REJECTION: ["LEASED", "SUBMITTING", "FAILED_BEFORE_SUBMISSION"],
   SUBMITTED_FAILED: ["LEASED", "SUBMITTING", "SUBMITTED", "SUBMITTED_FAILED"],
   ABANDONED: ["LEASED", "SUBMITTING", "SUBMITTED", "ABANDONED"],

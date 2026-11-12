@@ -125,7 +125,7 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001 to 0006 in order, contiguously, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0007 in order, contiguously, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
@@ -135,8 +135,9 @@ describe("committed migrations", () => {
       "0004_worker_bridge_persistence.sql",
       "0005_submission_authority_provenance.sql",
       "0006_submission_lease_epoch_provenance.sql",
+      "0007_input_failure_provenance.sql",
     ]);
-    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
@@ -144,12 +145,66 @@ describe("committed migrations", () => {
     }
     // Earlier migrations are byte-for-byte unchanged.
     expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
-    expect(migrations.slice(1, 5).map((entry) => entry.sha256)).toEqual([
+    expect(migrations.slice(1, 6).map((entry) => entry.sha256)).toEqual([
       "599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06",
       "639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868",
       "c19113d3e3022f26e17cb4eeba9cee2719a387914549d5c2996fc66fcd8cfe49",
       "ff12efddc15441e2c529796632ca3e1ad188ebb6c7df5ddfb1058426065934ec",
+      "99121d3d19b6044b309be149c0d1376a79f55f4f52b34cd90930cc3664d2813a",
     ]);
+  });
+
+  it("adds input-failure provenance in 0007 only: a uuid and a bigint column, no backfill, token verifier, table, role, grant, secret or provider brand", async () => {
+    const migrations = await discoverMigrations();
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const provenance = migrations[6]!;
+    const statements = withoutComments(provenance.sql);
+    expect(migrations.slice(0, 6).some((migration) => /input_failed_/.test(migration.sql))).toBe(false);
+
+    expect(statements).not.toMatch(/^CREATE TABLE/m);
+    // Exactly the two provenance columns, nullable, no default; the counter has lease_fencing_counter's type.
+    expect([...statements.matchAll(/ADD COLUMN (\w+) (\w+) (\w+)/g)].map((match) => [match[1], match[2], match[3]])).toEqual([
+      ["input_failed_worker_principal_id", "uuid", "NULL"],
+      ["input_failed_fencing_counter", "bigint", "NULL"],
+    ]);
+    expect(statements).not.toMatch(/\bDEFAULT\b/);
+    expect(statements).toMatch(/FOREIGN KEY \(input_failed_worker_principal_id\) REFERENCES worker_principals \(id\) ON DELETE RESTRICT/);
+    // No lease-token verifier of any name is kept.
+    expect(statements).not.toMatch(/ADD COLUMN \w*token\w*/i);
+    // No backfill: nothing is written to execution_attempts except through the guard.
+    expect(statements).not.toMatch(/^\s*UPDATE\b/im);
+    expect(statements).not.toMatch(/audit_events/);
+    expect(provenance.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+    expect(statements).not.toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b|\bREVOKE\b/im);
+    expect(statements).not.toMatch(/\bDELETE\s+FROM\b|\bTRUNCATE\b|\bCASCADE\b/i);
+    // Fail closed on any unprovable pre-provider failure row.
+    expect(statements).toMatch(/WHERE state = 'FAILED_BEFORE_SUBMISSION' AND submitting_at IS NULL;/);
+    // Exactly the five closed codes, the pairing, state, code and epoch checks.
+    expect([...statements.matchAll(/ADD CONSTRAINT (\w+)/g)].map((match) => match[1])).toEqual([
+      "execution_attempts_input_failed_worker_fk",
+      "execution_attempts_input_failed_pair_ck",
+      "execution_attempts_input_failed_state_ck",
+      "execution_attempts_input_failed_code_ck",
+      "execution_attempts_input_failed_epoch_ck",
+    ]);
+    expect(statements).toMatch(
+      /failure_code IN \('INPUT_REFERENCE_INVALID', 'INPUT_OBJECT_NOT_FOUND', 'INPUT_OBJECT_TOO_LARGE',\s+'INPUT_OBJECT_INTEGRITY_MISMATCH', 'INPUT_MEDIA_TYPE_INVALID'\)/,
+    );
+    // The guard is replaced in place, never dropped or duplicated, and stamps from OLD.
+    expect(statements).toMatch(/^CREATE OR REPLACE FUNCTION execution_attempts_guard\(\) RETURNS trigger/m);
+    expect(statements).not.toMatch(/\bDROP\b|CREATE TRIGGER/i);
+    expect(statements).toMatch(/NEW\.input_failed_worker_principal_id := OLD\.lease_worker_principal_id;/);
+    expect(statements).toMatch(/NEW\.input_failed_fencing_counter := OLD\.lease_fencing_counter;/);
+    // The 0006 guard is carried over unchanged: every line of it is still present, in order.
+    const guardOf = (sql: string) => withoutComments(sql.slice(sql.indexOf("CREATE OR REPLACE FUNCTION"))).split("\n").filter((line) => line.trim() !== "");
+    const previous = guardOf(migrations[5]!.sql);
+    const current = guardOf(provenance.sql);
+    let cursor = 0;
+    for (const line of previous) {
+      cursor = current.indexOf(line, cursor);
+      expect(cursor, line).toBeGreaterThanOrEqual(0);
+      cursor += 1;
+    }
   });
 
   it("adds submission-authority provenance in 0005 only: one column, no table, role, grant, secret or provider brand", async () => {

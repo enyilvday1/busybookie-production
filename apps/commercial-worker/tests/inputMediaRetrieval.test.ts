@@ -2,9 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { createHostFaultLatch } from "../src/hostFaultLatch.js";
 import {
   detectReferenceImageType,
+  InputMediaRetrievalError,
   isObjectKey,
   OBJECT_STORAGE_INPUT_MAX_READ_ATTEMPTS,
   OBJECT_STORAGE_INPUT_READ_DEADLINE_MS,
@@ -19,7 +19,9 @@ import { WorkerError } from "../src/workerError.js";
 import { createInMemoryObjectStore } from "./support/inMemoryObjectStore.js";
 
 // R44B10P1: the unwired input-media library with the test-only in-memory
-// store. No network, filesystem or real time.
+// store. No network, filesystem or real time. R44B10P2: every failure carries
+// one closed classification and the library trips no latch; the report and
+// latch decisions belong to the caller's policy (inputMediaFailurePolicy).
 
 const ACCOUNT_A = randomUUID();
 const ACCOUNT_B = randomUUID();
@@ -54,20 +56,25 @@ function manualTimer() {
 
 function setup() {
   const memory = createInMemoryObjectStore();
-  const latch = createHostFaultLatch();
   const time = manualTimer();
-  const dependencies: ReferenceImageRetrievalDependencies = { store: memory.store, latch, deadlineTimer: time.timer };
-  return { memory, latch, time, dependencies };
+  const dependencies: ReferenceImageRetrievalDependencies = { store: memory.store, deadlineTimer: time.timer };
+  return { memory, time, dependencies };
 }
 
-async function failure(promise: Promise<unknown>): Promise<WorkerError> {
+// Every retrieval failure is a classified closed worker error.
+async function failure(promise: Promise<unknown>): Promise<InputMediaRetrievalError> {
   const error = await promise.then(
     () => undefined,
     (caught: unknown) => caught,
   );
   expect(error).toBeInstanceOf(WorkerError);
-  return error as WorkerError;
+  expect(error).toBeInstanceOf(InputMediaRetrievalError);
+  return error as InputMediaRetrievalError;
 }
+
+const permanent = (reason: string) => ({ kind: "PERMANENT_INPUT", reason });
+const TRANSIENT = { kind: "TRANSIENT_STORAGE" };
+const HOST = { kind: "HOST_FAULT" };
 
 describe("reference-image parser", () => {
   it.each([
@@ -182,7 +189,6 @@ describe("verified reference-image retrieval", () => {
     expect(call).toMatchObject({ accountId: ACCOUNT_A, key: KEY, maxBytes: MAX });
     expect(call!.signal).toBeInstanceOf(AbortSignal);
     expect(Object.keys(call!).sort()).toEqual(["accountId", "key", "maxBytes", "signal"]);
-    expect(run.latch.isTripped()).toBe(false);
     // The deadline was armed at 10000 ms and cancelled once the read settled.
     expect(run.time.deadlines.map(({ ms, cancelled }) => ({ ms, cancelled }))).toEqual([{ ms: 10000, cancelled: true }]);
   });
@@ -203,6 +209,7 @@ describe("verified reference-image retrieval", () => {
     other.memory.seed(ACCOUNT_A, KEY, WEBP);
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_B, reference: ref(WEBP, "image/webp"), maxBytes: MAX }, other.dependencies));
     expect(error.code).toBe("OBJECT_NOT_FOUND");
+    expect(error.failure).toEqual(permanent("INPUT_OBJECT_NOT_FOUND"));
     expect(other.memory.calls.map(({ accountId }) => accountId)).toEqual([ACCOUNT_B]);
   });
 });
@@ -213,21 +220,25 @@ describe("size and integrity", () => {
     run.memory.seed(ACCOUNT_A, KEY, PNG);
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: PNG.length - 1 }, run.dependencies));
     expect(error.code).toBe("OBJECT_TOO_LARGE");
+    expect(error.failure).toEqual(permanent("INPUT_OBJECT_TOO_LARGE"));
     expect(run.memory.calls).toHaveLength(0);
-    expect(run.latch.isTripped()).toBe(true);
   });
 
-  it("fails closed when the store reports TOO_LARGE or returns more than maxBytes", async () => {
+  it("classifies a store TOO_LARGE within the declared size as an integrity mismatch, and an oversized return as a host fault", async () => {
     const run = setup();
     run.memory.forceNext("TOO_LARGE");
-    expect((await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, run.dependencies))).code).toBe("OBJECT_TOO_LARGE");
+    const disagreeing = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, run.dependencies));
+    expect(disagreeing.code).toBe("OBJECT_TOO_LARGE");
+    // The declared byteCount is within maxBytes, so the object disagrees with its reference.
+    expect(disagreeing.failure).toEqual(permanent("INPUT_OBJECT_INTEGRITY_MISMATCH"));
     expect(run.memory.calls).toHaveLength(1);
     const oversized = setup();
     oversized.memory.forceNext({ found: Buffer.concat([PNG, Buffer.alloc(32)]) });
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: PNG.length }, oversized.dependencies));
     expect(error.code).toBe("OBJECT_TOO_LARGE");
+    // The bounded read contract was broken: not the customer's input.
+    expect(error.failure).toEqual(HOST);
     expect(oversized.memory.calls).toHaveLength(1);
-    expect(oversized.latch.isTripped()).toBe(true);
   });
 
   it.each([
@@ -238,8 +249,8 @@ describe("size and integrity", () => {
     run.memory.forceNext({ found: returned });
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, run.dependencies));
     expect(error.code).toBe("OBJECT_INTEGRITY_MISMATCH");
+    expect(error.failure).toEqual(permanent("INPUT_OBJECT_INTEGRITY_MISMATCH"));
     expect(run.memory.calls).toHaveLength(1);
-    expect(run.latch.isTripped()).toBe(true);
   });
 
   it("rejects a wrong digest and mutated bytes with no retry", async () => {
@@ -249,6 +260,7 @@ describe("size and integrity", () => {
       retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png", { sha256: sha(JPEG) }), maxBytes: MAX }, wrong.dependencies),
     );
     expect(bad.code).toBe("OBJECT_INTEGRITY_MISMATCH");
+    expect(bad.failure).toEqual(permanent("INPUT_OBJECT_INTEGRITY_MISMATCH"));
     expect(wrong.memory.calls).toHaveLength(1);
 
     const mutated = setup();
@@ -259,8 +271,8 @@ describe("size and integrity", () => {
     mutated.memory.mutateForTest(ACCOUNT_A, KEY, altered);
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference, maxBytes: MAX }, mutated.dependencies));
     expect(error.code).toBe("OBJECT_INTEGRITY_MISMATCH");
+    expect(error.failure).toEqual(permanent("INPUT_OBJECT_INTEGRITY_MISMATCH"));
     expect(mutated.memory.calls).toHaveLength(1);
-    expect(mutated.latch.isTripped()).toBe(true);
     // The expected digest is never updated.
     expect(reference.sha256).toBe(sha(PNG));
   });
@@ -276,8 +288,17 @@ describe("size and integrity", () => {
     run.memory.seed(ACCOUNT_A, KEY, bytes);
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(bytes, contentType), maxBytes: MAX }, run.dependencies));
     expect(error.code).toBe("OBJECT_MEDIA_TYPE_INVALID");
+    expect(error.failure).toEqual(permanent("INPUT_MEDIA_TYPE_INVALID"));
     expect(run.memory.calls).toHaveLength(1);
-    expect(run.latch.isTripped()).toBe(true);
+  });
+
+  it("classifies an unsupported declared type as an invalid reference, with no store call", async () => {
+    const run = setup();
+    run.memory.seed(ACCOUNT_A, KEY, PNG);
+    const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/gif"), maxBytes: MAX }, run.dependencies));
+    expect(error.code).toBe("OBJECT_REFERENCE_INVALID");
+    expect(error.failure).toEqual(permanent("INPUT_REFERENCE_INVALID"));
+    expect(run.memory.calls).toHaveLength(0);
   });
 });
 
@@ -295,30 +316,29 @@ describe("read retry and deadlines", () => {
     expect(run.memory.calls).toHaveLength(2);
     expect(run.memory.calls[0]!.signal).not.toBe(run.memory.calls[1]!.signal);
     expect(run.time.deadlines.map(({ ms }) => ms)).toEqual([10000, 10000]);
-    expect(run.latch.isTripped()).toBe(false);
   });
 
-  it("stops after two UNAVAILABLE reads without tripping the latch", async () => {
+  it("stops after two UNAVAILABLE reads as transient storage", async () => {
     const run = setup();
     run.memory.forceNext("UNAVAILABLE", "UNAVAILABLE", "UNAVAILABLE");
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, run.dependencies));
     expect(error.code).toBe("OBJECT_STORAGE_UNAVAILABLE");
+    expect(error.failure).toEqual(TRANSIENT);
     expect(run.memory.calls).toHaveLength(2);
-    expect(run.latch.isTripped()).toBe(false);
   });
 
   it.each([
-    ["NOT_FOUND", "OBJECT_NOT_FOUND"],
-    ["ACCESS_DENIED", "OBJECT_STORAGE_ACCESS_DENIED"],
-    ["TOO_LARGE", "OBJECT_TOO_LARGE"],
-    ["INVALID_OBJECT", "OBJECT_INTEGRITY_MISMATCH"],
-  ] as const)("never retries %s and trips the latch", async (status, code) => {
+    ["NOT_FOUND", "OBJECT_NOT_FOUND", permanent("INPUT_OBJECT_NOT_FOUND")],
+    ["ACCESS_DENIED", "OBJECT_STORAGE_ACCESS_DENIED", HOST],
+    ["TOO_LARGE", "OBJECT_TOO_LARGE", permanent("INPUT_OBJECT_INTEGRITY_MISMATCH")],
+    ["INVALID_OBJECT", "OBJECT_INTEGRITY_MISMATCH", HOST],
+  ] as const)("never retries %s and classifies it exactly", async (status, code, classification) => {
     const run = setup();
     run.memory.forceNext(status, "UNAVAILABLE");
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, run.dependencies));
     expect(error.code).toBe(code);
+    expect(error.failure).toEqual(classification);
     expect(run.memory.calls).toHaveLength(1);
-    expect(run.latch.isTripped()).toBe(true);
   });
 
   it("makes zero store calls for a malformed reference", async () => {
@@ -327,9 +347,9 @@ describe("read retry and deadlines", () => {
       retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png", { key: "https://bucket.example/a.png" }), maxBytes: MAX }, run.dependencies),
     );
     expect(error.code).toBe("OBJECT_REFERENCE_INVALID");
+    expect(error.failure).toEqual(permanent("INPUT_REFERENCE_INVALID"));
     expect(run.memory.calls).toHaveLength(0);
     expect(run.time.deadlines).toHaveLength(0);
-    expect(run.latch.isTripped()).toBe(true);
   });
 
   it("treats an expired per-attempt deadline as UNAVAILABLE and retries once under a new deadline", async () => {
@@ -348,7 +368,7 @@ describe("read retry and deadlines", () => {
     expect(run.time.deadlines).toHaveLength(2);
   });
 
-  it("gives up after two expired deadlines without tripping the latch", async () => {
+  it("gives up after two expired deadlines as transient storage", async () => {
     const run = setup();
     run.memory.forceNext("HANG", "HANG");
     const pending = retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, run.dependencies);
@@ -356,25 +376,33 @@ describe("read retry and deadlines", () => {
       while (run.time.deadlines.length <= fired) await new Promise<void>((resolve) => setImmediate(resolve));
       run.time.deadlines[fired]!.fire();
     }
-    expect((await failure(pending)).code).toBe("OBJECT_STORAGE_UNAVAILABLE");
+    const error = await failure(pending);
+    expect(error.code).toBe("OBJECT_STORAGE_UNAVAILABLE");
+    expect(error.failure).toEqual(TRANSIENT);
     expect(run.memory.calls).toHaveLength(2);
-    expect(run.latch.isTripped()).toBe(false);
   });
 
-  it("treats a throwing or malformed store as an invariant failure, not an outage", async () => {
+  it("treats a throwing or malformed store as a host fault, not an outage", async () => {
     for (const store of [
       { getObject: async () => Promise.reject(new Error("vendor detail https://bucket.example/secret")) },
       { getObject: async () => ({ status: "WEIRD" }) },
       { getObject: async () => ({ status: "FOUND", bytes: "not bytes" }) },
     ] as unknown as ObjectStore[]) {
-      const latch = createHostFaultLatch();
       const error = await failure(
-        retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, { store, latch, deadlineTimer: manualTimer().timer }),
+        retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, { store, deadlineTimer: manualTimer().timer }),
       );
       expect(error.code).toBe("OBJECT_INTEGRITY_MISMATCH");
+      expect(error.failure).toEqual(HOST);
       expect(error.message).not.toMatch(/bucket|https|secret/);
-      expect(latch.isTripped()).toBe(true);
+      expect(JSON.stringify(error)).not.toMatch(/bucket|https|secret/);
     }
+  });
+
+  it("classifies by the closed result, never by message text", async () => {
+    // A store whose thrown message names every class and code is still a host fault.
+    const store = { getObject: async () => Promise.reject(new Error("NOT_FOUND UNAVAILABLE PERMANENT_INPUT INPUT_OBJECT_NOT_FOUND TRANSIENT_STORAGE")) } as unknown as ObjectStore;
+    const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX }, { store, deadlineTimer: manualTimer().timer }));
+    expect(error.failure).toEqual(HOST);
   });
 });
 
@@ -383,28 +411,27 @@ describe("configuration and no fallback", () => {
     ["no store", undefined],
     ["a store without getObject", {}],
     ["a null store", null],
-  ])("fails closed with %s, trips the latch and reads nothing", async (_name, store) => {
-    const latch = createHostFaultLatch();
+  ])("fails closed with %s as a host fault and reads nothing", async (_name, store) => {
     const error = await failure(
       retrieveVerifiedReferenceImage(
         { accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX },
-        { store, latch } as unknown as ReferenceImageRetrievalDependencies,
+        { store } as unknown as ReferenceImageRetrievalDependencies,
       ),
     );
     expect(error.code).toBe("WORKER_CONFIGURATION_INVALID");
-    expect(latch.isTripped()).toBe(true);
+    expect(error.failure).toEqual(HOST);
   });
 
   it.each([
     ["zero maxBytes", { maxBytes: 0 }],
     ["fractional maxBytes", { maxBytes: 1.5 }],
     ["empty account", { accountId: "" }],
-  ])("fails closed on %s before any read", async (_name, overrides) => {
+  ])("fails closed on %s before any read, as a host fault", async (_name, overrides) => {
     const run = setup();
     const error = await failure(retrieveVerifiedReferenceImage({ accountId: ACCOUNT_A, reference: ref(PNG, "image/png"), maxBytes: MAX, ...overrides }, run.dependencies));
     expect(error.code).toBe("WORKER_CONFIGURATION_INVALID");
+    expect(error.failure).toEqual(HOST);
     expect(run.memory.calls).toHaveLength(0);
-    expect(run.latch.isTripped()).toBe(true);
   });
 
   it("never resolves a relative-looking key anywhere but the injected store", async () => {

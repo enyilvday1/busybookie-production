@@ -127,6 +127,7 @@ describe("commercial-worker source boundary", () => {
       "src/fakeProvider.ts",
       "src/hostFaultLatch.ts",
       "src/inFlightHeartbeat.ts",
+      "src/inputMediaFailurePolicy.ts",
       "src/inputMediaRetrieval.ts",
       "src/objectStorageContract.ts",
       "src/preProviderOrchestration.ts",
@@ -348,18 +349,22 @@ describe("pre-provider orchestration boundary", () => {
     // R44B6Y: the acceptance adapter reuses only the injectable deadline-timer seam.
     // R44B6Z: so does the in-flight keeper. R44B9: the shared failure-report
     // policy takes only the timer type. R44B10P1: input-media retrieval reuses
-    // the same deadline-timer seam.
+    // the same deadline-timer seam. R44B10P2: the input-media failure policy
+    // takes only the timer type.
     expect(sources.filter(({ path, text }) => path !== ORCHESTRATION && /preProviderOrchestration/.test(code(text))).map(({ path }) => path)).toEqual([
       "src/acceptanceAdapter.ts",
       "src/attemptExecution.ts",
       "src/failureReportPolicy.ts",
       "src/inFlightHeartbeat.ts",
+      "src/inputMediaFailurePolicy.ts",
       "src/inputMediaRetrieval.ts",
     ]);
     for (const path of ["acceptanceAdapter.ts", "inFlightHeartbeat.ts", "inputMediaRetrieval.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).toMatch(/import \{ realDeadlineTimer, type DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
     }
-    expect(code(read(join(SRC_ROOT, "failureReportPolicy.ts")))).toMatch(/import type \{ DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
+    for (const path of ["failureReportPolicy.ts", "inputMediaFailurePolicy.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).toMatch(/import type \{ DeadlineTimer \} from "\.\/preProviderOrchestration\.js";/);
+    }
     expect(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).not.toMatch(/PreProvider|permit/i);
   });
 
@@ -469,8 +474,9 @@ describe("acceptance handler, adapter and host-fault latch boundary", () => {
     }
     // R44B6Z: the in-flight keeper also takes the injected latch; R44B9: the
     // composer holds it.
-    // R44B10P1: the unwired input-media retrieval takes the injected latch.
-    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/attemptExecution.ts", "src/inFlightHeartbeat.ts", "src/inputMediaRetrieval.ts"]);
+    // R44B10P2: retrieval no longer holds the latch; the caller-side
+    // input-media failure policy owns the host-fault decision.
+    expect(users(/hostFaultLatch|HostFaultLatch/, [LATCH])).toEqual([ADAPTER, HANDLER, "src/attemptExecution.ts", "src/inFlightHeartbeat.ts", "src/inputMediaFailurePolicy.ts"]);
     for (const path of ["credentialOpeningRun.ts", "startupJournalReconciliation.ts", "preProviderOrchestration.ts"]) {
       expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/acceptanceAdapter|acceptanceHandler|hostFaultLatch|AcceptanceAdapter|DurableAcceptance/);
     }
@@ -830,10 +836,15 @@ describe("object-storage input boundary", () => {
   const RETRIEVAL = "src/inputMediaRetrieval.ts";
   const contract = code(read(join(SRC_ROOT, "objectStorageContract.ts")));
   const retrieval = code(read(join(SRC_ROOT, "inputMediaRetrieval.ts")));
+  const POLICY = "src/inputMediaFailurePolicy.ts";
+  const policy = code(read(join(SRC_ROOT, "inputMediaFailurePolicy.ts")));
   const raw = (path: string) => read(join(APP_ROOT, path));
 
-  it("is unwired: no source module imports it except retrieval importing the contract", () => {
-    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /inputMediaRetrieval|retrieveVerifiedReferenceImage|parseReferenceImage/.test(code(text))).map(({ path }) => path)).toEqual([]);
+  it("is unwired: no source module calls it, and only the failure policy imports its classified error", () => {
+    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /retrieveVerifiedReferenceImage|parseReferenceImage/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // R44B10P2: the caller-side policy reads only the classification off the thrown error.
+    expect(sources.filter(({ path, text }) => path !== RETRIEVAL && /inputMediaRetrieval/.test(code(text))).map(({ path }) => path)).toEqual([POLICY]);
+    expect(policy).toMatch(/import \{ InputMediaRetrievalError, type InputMediaFailure \} from "\.\/inputMediaRetrieval\.js";/);
     expect(sources.filter(({ path, text }) => path !== CONTRACT && /objectStorageContract/.test(code(text))).map(({ path }) => path)).toEqual([RETRIEVAL]);
     // The fake composer, credential opening and the provider contract stay untouched by it.
     for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "providerExecutionContract.ts"]) {
@@ -841,10 +852,12 @@ describe("object-storage input boundary", () => {
     }
   });
 
-  it("imports only the timer seam, latch type, contract, worker errors and node:crypto", () => {
+  it("imports only the timer seam, contract, the input-failure code type, worker errors and node:crypto", () => {
     expect(importsOf(contract)).toEqual([]);
-    expect(importsOf(retrieval).sort()).toEqual(["./hostFaultLatch.js", "./objectStorageContract.js", "./preProviderOrchestration.js", "./workerError.js", "node:crypto"]);
+    expect(importsOf(retrieval).sort()).toEqual(["./objectStorageContract.js", "./preProviderOrchestration.js", "./workerControlClient.js", "./workerError.js", "node:crypto"]);
     expect(retrieval).toMatch(/import \{ createHash \} from "node:crypto";/);
+    // R44B10P2: only the closed wire-code type, never the client itself.
+    expect(retrieval).toMatch(/import type \{ InputFailureCode \} from "\.\/workerControlClient\.js";/);
   });
 
   it("has no filesystem, path, environment, network, vendor, provider or engine reach", () => {
@@ -864,6 +877,8 @@ describe("object-storage input boundary", () => {
         retrieval,
       ),
     ).toBe(false);
+    // R44B10P2: classification only; no report, latch or control-plane client.
+    expect(/reportInputFailed|reportInputFailureWithPolicy|handleInputMediaFailure|[Ll]atch|\.trip\(|createHttpWorkerControlClient|\bWorkerControlClient\b/.test(retrieval)).toBe(false);
   });
 
   it("keeps the contract read-only and vendor-neutral, and the store single-shot", () => {
@@ -899,14 +914,119 @@ describe("object-storage input boundary", () => {
     // The store is required, with no default or fallback.
     expect(retrieval).toMatch(/store: ObjectStore;/);
     expect(/store\s*\?\?|store\s*\|\||defaultStore|store\?:/.test(retrieval)).toBe(false);
-    expect(retrieval).toMatch(/return fail\("WORKER_CONFIGURATION_INVALID", true\);/);
+    expect(retrieval.match(/return fail\("WORKER_CONFIGURATION_INVALID", HOST_FAULT\);/g)).toHaveLength(2);
     // The test store reaches nothing beyond memory.
     expect(/node:fs|node:path|node:https?|fetch\s*\(|setTimeout|process\./.test(code(raw("tests/support/inMemoryObjectStore.ts")))).toBe(false);
   });
 
-  it("trips the latch for every failure except a transient outage", () => {
-    expect(retrieval.match(/fail\("[A-Z_]+", false\)/g)).toEqual(['fail("OBJECT_STORAGE_UNAVAILABLE", false)']);
-    expect(retrieval.match(/latch\.trip\(\)/g)).toHaveLength(1);
+  // R44B10P2 replaces the interim helper-side latch: every failure carries
+  // exactly one closed class, decided here once and by result, never by
+  // message text; the latch belongs to the caller's policy.
+  it("classifies every failure once, by closed result, and trips no latch itself", () => {
+    expect(retrieval.match(/fail\("[A-Z_]+", [^)]*\)\)?/g)).toEqual([
+      'fail("WORKER_CONFIGURATION_INVALID", HOST_FAULT)',
+      'fail("WORKER_CONFIGURATION_INVALID", HOST_FAULT)',
+      'fail("OBJECT_REFERENCE_INVALID", permanentInput("INPUT_REFERENCE_INVALID"))',
+      'fail("OBJECT_TOO_LARGE", permanentInput("INPUT_OBJECT_TOO_LARGE"))',
+      'fail("OBJECT_STORAGE_UNAVAILABLE", TRANSIENT_STORAGE)',
+      'fail("OBJECT_NOT_FOUND", permanentInput("INPUT_OBJECT_NOT_FOUND"))',
+      'fail("OBJECT_STORAGE_ACCESS_DENIED", HOST_FAULT)',
+      'fail("OBJECT_TOO_LARGE", permanentInput("INPUT_OBJECT_INTEGRITY_MISMATCH"))',
+      'fail("OBJECT_INTEGRITY_MISMATCH", HOST_FAULT)',
+      'fail("OBJECT_TOO_LARGE", HOST_FAULT)',
+      'fail("OBJECT_INTEGRITY_MISMATCH", permanentInput("INPUT_OBJECT_INTEGRITY_MISMATCH"))',
+      'fail("OBJECT_INTEGRITY_MISMATCH", permanentInput("INPUT_OBJECT_INTEGRITY_MISMATCH"))',
+      'fail("OBJECT_MEDIA_TYPE_INVALID", permanentInput("INPUT_MEDIA_TYPE_INVALID"))',
+    ]);
+    // Every throw from the verification path is the classified error.
+    expect(retrieval.match(/throw new InputMediaRetrievalError\(code, failure\);/g)).toHaveLength(1);
+    expect(/\.message\b|String\(error\)|\.includes\(\s*["'`]|\.match\(|\.test\(\s*(error|caught)/.test(retrieval.slice(retrieval.indexOf("export async function retrieveVerifiedReferenceImage")))).toBe(false);
+    expect(/latch|\.trip\(/.test(retrieval)).toBe(false);
+  });
+});
+
+// R44B10P2: the input-failed client, its two-attempt report policy and the
+// caller-side input-media failure policy (architecture section 18,
+// "input-failed route"). Unwired: no composer calls the policy yet; nothing
+// here reaches a permit, SUBMITTING, a provider or the acceptance journal.
+describe("input-failed client and input-media failure policy boundary", () => {
+  const POLICY = "src/inputMediaFailurePolicy.ts";
+  const policy = code(read(join(SRC_ROOT, "inputMediaFailurePolicy.ts")));
+  const method = methodSource("reportInputFailed");
+
+  it("sends one request to the exact route, with no retry, timer, lease clock or secret logging", () => {
+    expect(method.length).toBeGreaterThan(0);
+    expect(method).toMatch(/await post\(\s*`\/worker-control\/v1\/attempts\/\$\{executionAttemptId\}\/input-failed`/);
+    expect(method).toMatch(/\{ fencingCounter: proof\.fencingCounter, leaseToken: proof\.leaseToken, failureCode \}/);
+    expect(method).toMatch(/"INPUT_FAILED_REJECTED"/);
+    expect(method.match(/\bpost\(/g)).toHaveLength(1);
+    expect(FORBIDDEN_IN_PRIMITIVE.test(method)).toBe(false);
+    expect(/provider|PROVIDER_|OBJECT_|outcome|accountId|\bkey\b|sha256|url/i.test(method.replace(/`[^`]*`/g, ""))).toBe(false);
+  });
+
+  it("locks exactly the five closed input-failure codes, with no shared-protocol dependency", () => {
+    expect(clientSource).toMatch(
+      /export const INPUT_FAILURE_CODES = Object\.freeze\(\[\s*"INPUT_REFERENCE_INVALID",\s*"INPUT_OBJECT_NOT_FOUND",\s*"INPUT_OBJECT_TOO_LARGE",\s*"INPUT_OBJECT_INTEGRITY_MISMATCH",\s*"INPUT_MEDIA_TYPE_INVALID",\s*\] as const\);/,
+    );
+    // Wire codes only (the closed client error INPUT_FAILED_REJECTED is not one).
+    const WIRE_CODE = /"INPUT_(?!FAILED_REJECTED")[A-Z_]+"/;
+    expect(sources.filter(({ text }) => WIRE_CODE.test(code(text))).map(({ path }) => path).sort()).toEqual(["src/inputMediaRetrieval.ts", "src/workerControlClient.ts"]);
+    expect(WIRE_CODE.test('"INPUT_FAILED_REJECTED"')).toBe(false);
+    expect(WIRE_CODE.test('"INPUT_OBJECT_NOT_FOUND"')).toBe(true);
+    for (const text of [policy, code(read(join(SRC_ROOT, "inputMediaRetrieval.ts")))]) expect(text).not.toMatch(/commercial-worker-protocol/);
+  });
+
+  it("is reported only through the two-attempt policy, and the policy has no caller yet", () => {
+    expect(sources.filter(({ text }) => /\.reportInputFailed\s*\(/.test(code(text))).map(({ path }) => path)).toEqual([POLICY]);
+    expect(sources.filter(({ path, text }) => path !== POLICY && /inputMediaFailurePolicy|handleInputMediaFailure|reportInputFailureWithPolicy/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    for (const path of ["attemptExecution.ts", "fakeProvider.ts", "credentialOpeningRun.ts", "preProviderOrchestration.ts", "acceptanceAdapter.ts"]) {
+      expect(code(read(join(SRC_ROOT, path)))).not.toMatch(/reportInputFailed|input-failed|InputFailure|inputMedia/i);
+    }
+  });
+
+  it("locks two attempts, a fresh 10000 ms deadline each and retry only on CONTROL_API_UNAVAILABLE, through the shared helper", () => {
+    expect(policy).toMatch(/export const INPUT_FAILURE_REPORT_MAX_ATTEMPTS = 2;/);
+    expect(policy).toMatch(/export const INPUT_FAILURE_REPORT_REQUEST_DEADLINE_MS = 10000;/);
+    expect(policy).toMatch(/import \{ atMostTwoAttempts \} from "\.\/failureReportPolicy\.js";/);
+    expect(policy.match(/atMostTwoAttempts\(dependencies\.deadlineTimer, INPUT_FAILURE_REPORT_REQUEST_DEADLINE_MS,/g)).toHaveLength(1);
+    expect(policy.match(/\.reportInputFailed\(/g)).toHaveLength(1);
+    // The fresh controller and the unavailable-only retry live in the shared helper only.
+    expect(/new AbortController|CONTROL_API_UNAVAILABLE|\bfor\s*\(|\bwhile\s*\(|setInterval|setTimeout|backoff|jitter|retry\(/i.test(policy)).toBe(false);
+    const shared = code(read(join(SRC_ROOT, "failureReportPolicy.ts")));
+    expect(shared).toMatch(/error\.code !== "CONTROL_API_UNAVAILABLE"/);
+    expect(shared.match(/new AbortController\(\)/g)).toHaveLength(1);
+  });
+
+  it("decides by closed class only: permanent input reports, transient does nothing, a host fault latches", () => {
+    expect(importsOf(policy).sort()).toEqual([
+      "./failureReportPolicy.js",
+      "./hostFaultLatch.js",
+      "./inputMediaRetrieval.js",
+      "./preProviderOrchestration.js",
+      "./workerControlClient.js",
+    ]);
+    expect(policy).toMatch(/const failure = error instanceof InputMediaRetrievalError \? error\.failure : UNCLASSIFIED;/);
+    expect(policy).toMatch(/const UNCLASSIFIED: InputMediaFailure = Object\.freeze\(\{ kind: "HOST_FAULT" \}\);/);
+    const permanent = policy.slice(policy.indexOf('case "PERMANENT_INPUT":'), policy.indexOf('case "TRANSIENT_STORAGE":'));
+    const transient = policy.slice(policy.indexOf('case "TRANSIENT_STORAGE":'), policy.indexOf("default:"));
+    const hostFault = policy.slice(policy.indexOf("default:"));
+    expect(permanent).toMatch(/await reportInputFailureWithPolicy\(/);
+    expect(/latch/.test(permanent) || /latch|report/i.test(transient)).toBe(false);
+    expect(hostFault).toMatch(/dependencies\.latch\.trip\(\);/);
+    expect(/report/i.test(hostFault)).toBe(false);
+    expect(policy.match(/latch\.trip\(\)/g)).toHaveLength(1);
+    // Never from message text.
+    expect(/\.message\b|String\(error\)|\.code\b|\.includes\(|\.match\(/.test(policy)).toBe(false);
+  });
+
+  it("has no provider, permit, SUBMITTING, acceptance, journal, lease-clock or logging semantics", () => {
+    const FORBIDDEN_IN_POLICY =
+      /provider(?!-neutral)|obtainPreProviderPermit|acknowledgeSubmitting|reportSubmitted|reportSubmissionFailed|recoverAcceptance|createAcceptanceAdapter|acceptance|journal|heartbeat|runWithInFlightHeartbeat|\.execute\(|OUTCOME_UNKNOWN|Date\.now|new Date|leaseExpiresAt|console\.|log\(|fetch\s*\(|process\./i;
+    // The timer-seam module path is the one allowed "Provider" text.
+    expect(FORBIDDEN_IN_POLICY.test(policy.split("./preProviderOrchestration.js").join(""))).toBe(false);
+    // Guard the guards.
+    expect(FORBIDDEN_IN_POLICY.test("await obtainPreProviderPermit({ journal, client }, id, proof);")).toBe(true);
+    expect(FORBIDDEN_IN_POLICY.test("operation.execute(onAccepted)")).toBe(true);
   });
 });
 

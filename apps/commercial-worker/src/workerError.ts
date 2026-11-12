@@ -41,6 +41,9 @@ export type WorkerErrorCode =
   | "SUBMITTED_REPORT_REJECTED"
   // The control plane refused a submission failure report (R44B6Y0).
   | "SUBMISSION_FAILED_REJECTED"
+  // The control plane refused an input-failed report (R44B10P2): stale or
+  // foreign lease, no grant, or a conflicting committed report.
+  | "INPUT_FAILED_REJECTED"
   // A provider acceptance was invalid, mismatched or repeated (R44B6Y0); no
   // durable acceptance was recorded for it.
   | "PROVIDER_ACCEPTANCE_INVALID"
@@ -82,6 +85,7 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   SUBMITTED_REPORT_INVALID: "The submitted report is invalid and was not sent.",
   SUBMITTED_REPORT_REJECTED: "The worker-control API rejected the submitted report.",
   SUBMISSION_FAILED_REJECTED: "The worker-control API rejected the submission failure report.",
+  INPUT_FAILED_REJECTED: "The worker-control API rejected the input failure report.",
   PROVIDER_ACCEPTANCE_INVALID: "The provider acceptance is invalid; new work is blocked.",
   ACCEPTANCE_JOURNAL_WRITE_FAILED: "The acceptance record could not be made durable; new work is blocked.",
   LEASED_PROVIDER_INCOMPATIBLE: "The leased attempt's provider is not supported by this worker; new work is blocked.",

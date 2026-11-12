@@ -130,6 +130,7 @@ describe("boundary scanner", () => {
       "migrations/0004_worker_bridge_persistence.sql",
       "migrations/0005_submission_authority_provenance.sql",
       "migrations/0006_submission_lease_epoch_provenance.sql",
+      "migrations/0007_input_failure_provenance.sql",
     ]);
     expect(scannedFiles.map(label).some((path) => path.startsWith("tests/"))).toBe(false);
   });
@@ -386,14 +387,17 @@ describe("worker-control boundary (lease foundation only)", () => {
   const OUTCOME_UNKNOWN_ONLY = /(\bSET|,)\s*state\s*=\s*'OUTCOME_UNKNOWN'/i;
   const SWEEP_SERVICE = "src/workerControl/workerLeaseService.ts";
   // R44B6T: FAILED_BEFORE_SUBMISSION is entered only by the submission-failed report.
+  // R44B10P2 adds the pre-provider input-failed report.
   const FAILED_BEFORE_SUBMISSION_ONLY = /(\bSET|,)\s*state\s*=\s*'FAILED_BEFORE_SUBMISSION'/i;
   const SUBMISSION_FAILED_SERVICE = "src/workerControl/workerSubmissionFailedService.ts";
+  const INPUT_FAILED_SERVICE = "src/workerControl/workerInputFailedService.ts";
 
   it("keeps worker-control routes inside src/workerControl and out of the default process", () => {
     expect(workerControl.map(({ path }) => path).sort()).toEqual([
       "src/workerControl/workerAcceptanceRecoveryService.ts",
       "src/workerControl/workerControlApplication.ts",
       "src/workerControl/workerCredentialGrantService.ts",
+      "src/workerControl/workerInputFailedService.ts",
       "src/workerControl/workerLeasePolicy.ts",
       "src/workerControl/workerLeaseService.ts",
       "src/workerControl/workerSecurityEvents.ts",
@@ -468,7 +472,7 @@ describe("worker-control boundary (lease foundation only)", () => {
 
   it("confines entering FAILED_BEFORE_SUBMISSION to the submission-failed report, which is token-free on replay and reads no secret", () => {
     const offenders = workerControl
-      .filter(({ path, text }) => path !== SUBMISSION_FAILED_SERVICE && FAILED_BEFORE_SUBMISSION_ONLY.test(code(text)))
+      .filter(({ path, text }) => ![SUBMISSION_FAILED_SERVICE, INPUT_FAILED_SERVICE].includes(path) && FAILED_BEFORE_SUBMISSION_ONLY.test(code(text)))
       .map(({ path }) => path);
     expect(offenders).toEqual([]);
     const service = code(read(join(APP_ROOT, SUBMISSION_FAILED_SERVICE))).replace(/\/\/.*$/gm, "");
@@ -488,6 +492,63 @@ describe("worker-control boundary (lease foundation only)", () => {
     expect("Number(row.lease_fencing_counter) !== proof.fencingCounter").not.toMatch(FORBIDDEN_IN_SUBMISSION_FAILED);
     expect("SET state = 'FAILED_BEFORE_SUBMISSION', failure_code = $2").toMatch(FAILED_BEFORE_SUBMISSION_ONLY);
     expect("WHERE state = 'FAILED_BEFORE_SUBMISSION'").not.toMatch(FAILED_BEFORE_SUBMISSION_ONLY);
+  });
+
+  // R44B10P2: the pre-provider input-failed report enters FAILED_BEFORE_SUBMISSION
+  // only from a granted LEASED attempt, never names its guard-stamped
+  // provenance, keeps no lease-token verifier and has no provider semantics.
+  it("confines the input-failed report to granted LEASED -> FAILED_BEFORE_SUBMISSION, with guard-stamped provenance only", () => {
+    const service = code(read(join(APP_ROOT, INPUT_FAILED_SERVICE))).replace(/\/\/.*$/gm, "");
+    expect(FAILED_BEFORE_SUBMISSION_ONLY.test(service)).toBe(true);
+    expect(service).toMatch(/WHERE id = \$1 AND state = 'LEASED' AND credential_granted_at IS NOT NULL AND submitting_at IS NULL/);
+    expect(service).toMatch(/await requireActiveWorker\(client, context\.workerPrincipalId\);/);
+    expect(service).toMatch(/await lockCurrentLease\(client, context, attemptId, proof, \["LEASED"\]\);/);
+    expect(service).toMatch(/UPDATE execution_jobs SET status = 'FAILED', completed_at = now\(\), updated_at = now\(\) WHERE id = \$1 AND status = 'RUNNING'/);
+    expect(service).toMatch(/"execution_attempt\.input_failed"/);
+    expect(service.match(/await audit\(/g)).toHaveLength(1);
+    // Never SUBMITTING, SUBMITTED, OUTCOME_UNKNOWN, a grant write, secret material,
+    // a provider identity or call, a written provenance or a kept token verifier.
+    expect(SUBMITTED_ONLY.test(service)).toBe(false);
+    expect(SUBMITTING_ONLY.test(service)).toBe(false);
+    expect(OUTCOME_UNKNOWN_ONLY.test(service)).toBe(false);
+    expect(GRANT_ONLY.test(service)).toBe(false);
+    const FORBIDDEN_IN_INPUT_FAILED =
+      /sealed|envelope|fingerprint|provider_execution_id|providerExecutionId|NEEDS_ATTENTION|'QUEUED'|lease_token_sha256\s*=(?!\s*NULL\b)|lease_fencing_counter\s*=(?!=)|input_failed_\w+\s*=(?!=)|submitting_worker_principal_id\s*=(?!=)|submitting_fencing_counter\s*=(?!=)|recovery_expires_at|credential_granted_at\s*=(?!=)|INSERT INTO execution_attempts|FOR SHARE|fetch\s*\(|https?:|object_key|objectKey|\bsha256\b|signedUrl/i;
+    expect(FORBIDDEN_IN_INPUT_FAILED.test(service)).toBe(false);
+    // Replay is authorised by the stamped reporter and epoch, never the token.
+    expect(service).toMatch(/row\.input_failed_worker_principal_id !== context\.workerPrincipalId/);
+    expect(service).toMatch(/Number\(row\.input_failed_fencing_counter\) !== proof\.fencingCounter/);
+    const replay = service.slice(service.indexOf('if (row.state !== "LEASED") {'), service.indexOf("const lease = await lockCurrentLease("));
+    expect(replay.length).toBeGreaterThan(0);
+    expect(/leaseToken|lease_token|UPDATE|INSERT|audit\(/.test(replay)).toBe(false);
+    // Reporter, then epoch, then the failure code.
+    expect(replay.indexOf("INPUT_FAILURE_PRINCIPAL_MISMATCH")).toBeLessThan(replay.indexOf("FENCING_MISMATCH"));
+    expect(replay.indexOf("FENCING_MISMATCH")).toBeLessThan(replay.indexOf("row.failure_code !== failureCode"));
+    // Exactly the five closed codes.
+    expect(service).toMatch(
+      /export const INPUT_FAILURE_CODES = Object\.freeze\(\[\s*"INPUT_REFERENCE_INVALID",\s*"INPUT_OBJECT_NOT_FOUND",\s*"INPUT_OBJECT_TOO_LARGE",\s*"INPUT_OBJECT_INTEGRITY_MISMATCH",\s*"INPUT_MEDIA_TYPE_INVALID",\s*\] as const\);/,
+    );
+    // Guard the guards.
+    expect("SET input_failed_worker_principal_id = $3").toMatch(FORBIDDEN_IN_INPUT_FAILED);
+    expect("row.input_failed_worker_principal_id !== context.workerPrincipalId").not.toMatch(FORBIDDEN_IN_INPUT_FAILED);
+    expect("lease_token_sha256 = NULL, leased_at = NULL").not.toMatch(FORBIDDEN_IN_INPUT_FAILED);
+  });
+
+  it("routes input-failed only through the worker-control wrapper with a closed body and its own security event", () => {
+    const application = code(read(join(SRC_ROOT, "workerControl", "workerControlApplication.ts")));
+    expect(application).toMatch(/\|submission-failed\|input-failed\)\$\/;/);
+    expect(application).toMatch(/const INPUT_FAILED_MEMBERS: ReadonlySet<string> = new Set\(\["fencingCounter", "leaseToken", "failureCode"\]\);/);
+    expect(application).toMatch(/if \(!isInputFailureCode\(failureCode\)\) throw new RequestBodyError\("INVALID_REQUEST"\);/);
+    const handler = application.slice(application.indexOf("const inputFailed = (attemptId: string) =>"), application.indexOf("return Object.freeze({\n    route:"));
+    expect(handler.length).toBeGreaterThan(0);
+    expect(handler).toMatch(/route\(/);
+    expect(handler).toMatch(/"WORKER_INPUT_FAILURE_REJECTED"/);
+    expect(handler).toMatch(/readJsonObjectBody\(request, INPUT_FAILED_MEMBERS\)/);
+    expect(handler.match(/sendJson\(/g)).toHaveLength(1);
+    // Exactly the four acknowledgement members.
+    expect(handler).toMatch(/sendJson\(response, 200, \{\s*executionAttemptId: result\.executionAttemptId,\s*fencingCounter: result\.fencingCounter,\s*state: result\.state,\s*failureCode: result\.failureCode,\s*\}\);/);
+    const events = code(read(join(SRC_ROOT, "workerControl", "workerSecurityEvents.ts")));
+    expect(events).toMatch(/\| "WORKER_INPUT_FAILURE_REJECTED";/);
   });
 
   it("confines the grant timestamp write and the sealed-envelope read to the credential-grant service", () => {

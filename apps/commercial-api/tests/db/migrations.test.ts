@@ -28,6 +28,7 @@ const GENERATION_AUTHORIZATIONS_FILE = "0003_generation_authorizations.sql";
 const WORKER_BRIDGE_FILE = "0004_worker_bridge_persistence.sql";
 const SUBMISSION_PROVENANCE_FILE = "0005_submission_authority_provenance.sql";
 const LEASE_EPOCH_FILE = "0006_submission_lease_epoch_provenance.sql";
+const INPUT_FAILURE_FILE = "0007_input_failure_provenance.sql";
 const COMMITTED_FILES = [
   SCHEMA_V1_FILE,
   PROVIDER_CONNECTIONS_FILE,
@@ -35,6 +36,7 @@ const COMMITTED_FILES = [
   WORKER_BRIDGE_FILE,
   SUBMISSION_PROVENANCE_FILE,
   LEASE_EPOCH_FILE,
+  INPUT_FAILURE_FILE,
 ];
 
 let clients: GuardedClients;
@@ -104,19 +106,21 @@ function commandDependencies(migrationsDirectory: string) {
 }
 
 describe("migration runner against PostgreSQL 16", () => {
-  it("applies the bootstrap and 0001 to 0006 to an empty database and records the exact checksums", async () => {
+  it("applies the bootstrap and 0001 to 0007 to an empty database and records the exact checksums", async () => {
     expect(await publicTables()).toEqual([]);
 
     const migrations = await discoverMigrations();
     const result = await runMigrations(clients.migrator, migrations);
 
-    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 6 });
+    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 7 });
     const v1 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE));
     const v2 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE));
     const v3 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE));
     const v4 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, WORKER_BRIDGE_FILE));
     const v5 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SUBMISSION_PROVENANCE_FILE));
     const v6 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, LEASE_EPOCH_FILE));
+    const v7 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, INPUT_FAILURE_FILE));
+    expect(sha256Hex(v6)).toBe("99121d3d19b6044b309be149c0d1376a79f55f4f52b34cd90930cc3664d2813a");
     expect(sha256Hex(v5)).toBe("ff12efddc15441e2c529796632ca3e1ad188ebb6c7df5ddfb1058426065934ec");
     expect(sha256Hex(v1)).toBe("6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed");
     expect(sha256Hex(v2)).toBe("599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06");
@@ -129,6 +133,7 @@ describe("migration runner against PostgreSQL 16", () => {
       { version: 4, name: "worker_bridge_persistence", sha256: sha256Hex(v4) },
       { version: 5, name: "submission_authority_provenance", sha256: sha256Hex(v5) },
       { version: 6, name: "submission_lease_epoch_provenance", sha256: sha256Hex(v6) },
+      { version: 7, name: "input_failure_provenance", sha256: sha256Hex(v7) },
     ]);
     expect(await publicTables()).toEqual([
       "accounts",
@@ -146,18 +151,18 @@ describe("migration runner against PostgreSQL 16", () => {
     ]);
   });
 
-  it("applies 0002 to 0006 on top of a database already at version 1", async () => {
+  it("applies 0002 to 0007 on top of a database already at version 1", async () => {
     const [schemaV1] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1]);
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
-  it("upgrades a database at version 3 through version 6", async () => {
+  it("upgrades a database at version 3 through version 7", async () => {
     const [schemaV1, providerConnections, generationAuthorizations] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!, providerConnections!, generationAuthorizations!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
@@ -167,8 +172,8 @@ describe("migration runner against PostgreSQL 16", () => {
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE], latestVersion: 6 });
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE], latestVersion: 7 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     for (const table of ["worker_principals", "execution_jobs", "execution_attempts"]) {
       expect(await publicTables()).toContain(table);
     }
@@ -199,9 +204,10 @@ describe("migration runner against PostgreSQL 16", () => {
       `commercial-api migrate: applied ${WORKER_BRIDGE_FILE}\n`,
       `commercial-api migrate: applied ${SUBMISSION_PROVENANCE_FILE}\n`,
       `commercial-api migrate: applied ${LEASE_EPOCH_FILE}\n`,
-      "commercial-api migrate: schema at version 6\n",
+      `commercial-api migrate: applied ${INPUT_FAILURE_FILE}\n`,
+      "commercial-api migrate: schema at version 7\n",
     ]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   it.each(COMMITTED_FILES)("rejects checksum drift in an applied %s and changes nothing", async (edited) => {
@@ -219,7 +225,7 @@ describe("migration runner against PostgreSQL 16", () => {
     await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(scratch)), "MIGRATION_CHECKSUM_DRIFT");
     const after = await clients.migrator.query("SELECT version, sha256, applied_at FROM schema_migrations ORDER BY version");
     expect(after.rows).toEqual(before.rows);
-    expect(after.rows).toHaveLength(6);
+    expect(after.rows).toHaveLength(7);
   });
 
   it("rejects an applied version whose committed name differs", async () => {
@@ -558,7 +564,8 @@ describe("migration 0005 on a schema-version-4 database", () => {
       [failed.id],
     );
 
-    const result = await runMigrations(clients.migrator, await discoverMigrations());
+    // Through 0006 only: 0007 refuses this legacy pre-barrier failure (below).
+    const result = await runMigrations(clients.migrator, (await discoverMigrations()).slice(0, 6));
 
     expect(result).toEqual({ applied: [LEASE_EPOCH_FILE], latestVersion: 6 });
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -609,5 +616,92 @@ describe("migration 0005 on a schema-version-4 database", () => {
     await expect(runMigrations(clients.migrator, await discoverMigrations())).rejects.toMatchObject({ code: "23514" });
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
     expect(await epochInstalled()).toEqual({ column: false, constraints: 0, guardStamps: false });
+  });
+
+  // Migration 0007 on databases already at schema version 6 (R44B10P2).
+  async function migrateToVersion6(): Promise<void> {
+    await runMigrations(clients.migrator, (await discoverMigrations()).slice(0, 6));
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+  }
+
+  async function inputFailureInstalled() {
+    const columns = await clients.migrator.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'execution_attempts' AND column_name LIKE 'input_failed_%'",
+    );
+    const constraints = await clients.migrator.query("SELECT conname FROM pg_constraint WHERE conname LIKE 'execution_attempts_input_failed_%'");
+    const guard = await clients.migrator.query<{ src: string }>("SELECT prosrc AS src FROM pg_proc WHERE proname = 'execution_attempts_guard'");
+    return {
+      columns: columns.rowCount,
+      constraints: constraints.rowCount,
+      guardStamps: guard.rows.length === 1 && guard.rows[0]!.src.includes("input_failed_worker_principal_id"),
+    };
+  }
+
+  it("0007 A: applies to every provable row, including a provider-caused failure, and leaves their provenance NULL", async () => {
+    await migrateToVersion6();
+    const queued = await legacyAttempt("input-queued");
+    const leased = await legacyAttempt("input-leased");
+    await clients.migrator.query(LEASE, [leased.id, leased.workerId]);
+    const granted = await legacyAttempt("input-granted");
+    await clients.migrator.query(LEASE, [granted.id, granted.workerId]);
+    await clients.migrator.query("UPDATE execution_attempts SET credential_granted_at = now() WHERE id = $1", [granted.id]);
+    // Provider-caused FAILED_BEFORE_SUBMISSION crossed the SUBMITTING barrier.
+    const rejected = await legacyAttempt("input-provider-rejected");
+    await clients.migrator.query(LEASE, [rejected.id, rejected.workerId]);
+    await clients.migrator.query(SUBMIT, [rejected.id]);
+    await clients.migrator.query(
+      `UPDATE execution_attempts SET state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR}, failure_code = 'PROVIDER_REJECTED_DEFINITIVELY', completed_at = now() WHERE id = $1`,
+      [rejected.id],
+    );
+
+    const result = await runMigrations(clients.migrator, await discoverMigrations());
+
+    expect(result).toEqual({ applied: [INPUT_FAILURE_FILE], latestVersion: 7 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(await inputFailureInstalled()).toEqual({ columns: 2, constraints: 5, guardStamps: true });
+    const rows = await clients.migrator.query(
+      "SELECT state, input_failed_worker_principal_id, input_failed_fencing_counter FROM execution_attempts WHERE id = ANY($1) ORDER BY state, credential_granted_at NULLS FIRST",
+      [[queued.id, leased.id, granted.id, rejected.id]],
+    );
+    expect(rows.rows).toEqual([
+      { state: "FAILED_BEFORE_SUBMISSION", input_failed_worker_principal_id: null, input_failed_fencing_counter: null },
+      { state: "LEASED", input_failed_worker_principal_id: null, input_failed_fencing_counter: null },
+      { state: "LEASED", input_failed_worker_principal_id: null, input_failed_fencing_counter: null },
+      { state: "QUEUED", input_failed_worker_principal_id: null, input_failed_fencing_counter: null },
+    ]);
+    // A granted LEASED row migrated from schema 6 can still take the new transition, stamped from its lease.
+    await clients.migrator.query(
+      `UPDATE execution_attempts SET state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR}, failure_code = 'INPUT_OBJECT_NOT_FOUND', completed_at = now() WHERE id = $1`,
+      [granted.id],
+    );
+    const stamped = await clients.migrator.query("SELECT input_failed_worker_principal_id, input_failed_fencing_counter FROM execution_attempts WHERE id = $1", [granted.id]);
+    expect(stamped.rows).toEqual([{ input_failed_worker_principal_id: granted.workerId, input_failed_fencing_counter: "1" }]);
+  });
+
+  it("0007 B: refuses any pre-barrier FAILED_BEFORE_SUBMISSION row, inferring nothing from its code, installing nothing", async () => {
+    await migrateToVersion6();
+    const legacyCodes = ["CREDENTIAL_UNAVAILABLE", "INPUT_OBJECT_NOT_FOUND"];
+    const ids: string[] = [];
+    for (const failureCode of legacyCodes) {
+      const legacy = await legacyAttempt(`input-legacy-${failureCode.toLowerCase()}`);
+      await clients.migrator.query(LEASE, [legacy.id, legacy.workerId]);
+      await clients.migrator.query("UPDATE execution_attempts SET credential_granted_at = now() WHERE id = $1", [legacy.id]);
+      await clients.migrator.query(
+        `UPDATE execution_attempts SET state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR}, failure_code = $2, completed_at = now() WHERE id = $1`,
+        [legacy.id, failureCode],
+      );
+      ids.push(legacy.id);
+    }
+    const before = await clients.migrator.query("SELECT * FROM execution_attempts WHERE id = ANY($1) ORDER BY id", [ids]);
+
+    const failure = runMigrations(clients.migrator, await discoverMigrations());
+    await expect(failure).rejects.toMatchObject({ code: "23514" });
+    await expect(failure).rejects.toThrow(/migration 0007: 2 execution attempt\(s\) failed before submission without crossing SUBMITTING/);
+
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await inputFailureInstalled()).toEqual({ columns: 0, constraints: 0, guardStamps: false });
+    expect((await clients.migrator.query("SELECT * FROM execution_attempts WHERE id = ANY($1) ORDER BY id", [ids])).rows).toEqual(before.rows);
+    // The migration lock was released: a later run reaches the same refusal.
+    await expect(runMigrations(clients.migrator, await discoverMigrations())).rejects.toMatchObject({ code: "23514" });
   });
 });

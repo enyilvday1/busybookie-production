@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 
-import type { HostFaultLatch } from "./hostFaultLatch.js";
 import type { ObjectStore, ObjectStoreGetResult } from "./objectStorageContract.js";
 import { realDeadlineTimer, type DeadlineTimer } from "./preProviderOrchestration.js";
+import type { InputFailureCode } from "./workerControlClient.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
 
 // Commercial input-media retrieval
@@ -19,10 +19,14 @@ import { WorkerError, type WorkerErrorCode } from "./workerError.js";
 // The key is an opaque object-store key resolved only by the injected
 // store; nothing here interprets it as a path. Ownership is the
 // authoritative relational account, passed separately from the reference.
-// The interim failure handling below (fail closed, trip the latch, leave
-// the lease alone) is approved only while this library is unwired: an
-// honest pre-submission input-failure route (R44B10P2) must exist before
-// real-provider wiring.
+//
+// R44B10P2 (section 18, "input-failed route"): every failure is thrown as an
+// InputMediaRetrievalError carrying one closed, typed classification, never
+// derived from message text. This library decides the class only; it trips
+// no latch and makes no report. The caller's policy
+// (inputMediaFailurePolicy.ts) reports PERMANENT_INPUT through the
+// input-failed route, does nothing more for TRANSIENT_STORAGE, and trips the
+// host-fault latch for HOST_FAULT.
 
 export const OBJECT_STORAGE_INPUT_MAX_READ_ATTEMPTS = 2;
 export const OBJECT_STORAGE_INPUT_READ_DEADLINE_MS = 10000;
@@ -56,9 +60,30 @@ export type ReferenceImageRetrievalInput = Readonly<{
 export type ReferenceImageRetrievalDependencies = Readonly<{
   // Required: there is no default store.
   store: ObjectStore;
-  latch: HostFaultLatch;
   deadlineTimer?: DeadlineTimer;
 }>;
+
+// The three closed failure classes. PERMANENT_INPUT carries exactly one
+// input-failed wire code; the other two carry nothing.
+export type InputMediaFailure =
+  | Readonly<{ kind: "PERMANENT_INPUT"; reason: InputFailureCode }>
+  | Readonly<{ kind: "TRANSIENT_STORAGE" }>
+  | Readonly<{ kind: "HOST_FAULT" }>;
+
+const permanentInput = (reason: InputFailureCode): InputMediaFailure => Object.freeze({ kind: "PERMANENT_INPUT", reason });
+const TRANSIENT_STORAGE: InputMediaFailure = Object.freeze({ kind: "TRANSIENT_STORAGE" });
+const HOST_FAULT: InputMediaFailure = Object.freeze({ kind: "HOST_FAULT" });
+
+// A closed worker error plus its classification. Like every WorkerError it
+// holds fixed text only: no key, account, digest, URL or store detail.
+export class InputMediaRetrievalError extends WorkerError {
+  constructor(
+    code: WorkerErrorCode,
+    readonly failure: InputMediaFailure,
+  ) {
+    super(code);
+  }
+}
 
 // The migration 0004 storage-neutral key grammar, unchanged: 1 to 512
 // characters, alphanumeric first, then letters, digits, ".", "_", "/" and
@@ -135,32 +160,32 @@ export async function retrieveVerifiedReferenceImage(
   input: ReferenceImageRetrievalInput,
   dependencies: ReferenceImageRetrievalDependencies,
 ): Promise<VerifiedReferenceImage> {
-  const { latch } = dependencies;
-  const fail = (code: WorkerErrorCode, tripLatch: boolean): never => {
-    if (tripLatch) latch.trip();
-    throw new WorkerError(code);
+  const fail = (code: WorkerErrorCode, failure: InputMediaFailure): never => {
+    throw new InputMediaRetrievalError(code, failure);
   };
 
-  // Configuration: a store must be injected; there is no fallback.
+  // Configuration: a store must be injected; there is no fallback. A broken
+  // composition is a host fault, never an input fault.
   const candidate: unknown = (dependencies as Readonly<Record<string, unknown>>).store;
   if (typeof candidate !== "object" || candidate === null || typeof (candidate as Readonly<Record<string, unknown>>).getObject !== "function") {
-    return fail("WORKER_CONFIGURATION_INVALID", true);
+    return fail("WORKER_CONFIGURATION_INVALID", HOST_FAULT);
   }
   const store = candidate as ObjectStore;
   if (!isPositiveSafeInteger(input.maxBytes) || typeof input.accountId !== "string" || input.accountId.length === 0) {
-    return fail("WORKER_CONFIGURATION_INVALID", true);
+    return fail("WORKER_CONFIGURATION_INVALID", HOST_FAULT);
   }
   const { accountId, maxBytes } = input;
   const timer = dependencies.deadlineTimer ?? realDeadlineTimer;
 
-  // A malformed reference makes no store call.
+  // A malformed reference, including an unsupported declared type, makes no
+  // store call.
   let reference: ReferenceImage;
   try {
     reference = parseReferenceImage(input.reference);
   } catch {
-    return fail("OBJECT_REFERENCE_INVALID", true);
+    return fail("OBJECT_REFERENCE_INVALID", permanentInput("INPUT_REFERENCE_INVALID"));
   }
-  if (reference.byteCount > maxBytes) return fail("OBJECT_TOO_LARGE", true);
+  if (reference.byteCount > maxBytes) return fail("OBJECT_TOO_LARGE", permanentInput("INPUT_OBJECT_TOO_LARGE"));
 
   // One store read under a fresh controller and its own deadline. A deadline
   // expiry is UNAVAILABLE; any other throw or malformed result breaks the
@@ -190,26 +215,31 @@ export async function retrieveVerifiedReferenceImage(
     case "FOUND":
       break;
     case "UNAVAILABLE":
-      // A transient outage is not a host fault.
-      return fail("OBJECT_STORAGE_UNAVAILABLE", false);
+      // Two outages or expired deadlines: transient, not a host fault.
+      return fail("OBJECT_STORAGE_UNAVAILABLE", TRANSIENT_STORAGE);
     case "NOT_FOUND":
-      return fail("OBJECT_NOT_FOUND", true);
+      return fail("OBJECT_NOT_FOUND", permanentInput("INPUT_OBJECT_NOT_FOUND"));
     case "ACCESS_DENIED":
-      return fail("OBJECT_STORAGE_ACCESS_DENIED", true);
+      return fail("OBJECT_STORAGE_ACCESS_DENIED", HOST_FAULT);
     case "TOO_LARGE":
-      return fail("OBJECT_TOO_LARGE", true);
+      // The declared size is within maxBytes here, so by the store contract
+      // the object disagrees with its authorized reference.
+      return fail("OBJECT_TOO_LARGE", permanentInput("INPUT_OBJECT_INTEGRITY_MISMATCH"));
     default:
       // INVALID_OBJECT or a store contract violation: an invariant failure.
-      return fail("OBJECT_INTEGRITY_MISMATCH", true);
+      return fail("OBJECT_INTEGRITY_MISMATCH", HOST_FAULT);
   }
 
   // Verify a private copy, so later changes to the store's buffer cannot
   // alter what was verified.
   const bytes = Buffer.from(attempt.bytes);
-  if (bytes.length > maxBytes) return fail("OBJECT_TOO_LARGE", true);
-  if (bytes.length !== reference.byteCount) return fail("OBJECT_INTEGRITY_MISMATCH", true);
-  if (createHash("sha256").update(bytes).digest("hex") !== reference.sha256) return fail("OBJECT_INTEGRITY_MISMATCH", true);
-  if (detectReferenceImageType(bytes) !== reference.contentType) return fail("OBJECT_MEDIA_TYPE_INVALID", true);
+  // More than the bounded read allows breaks the store contract.
+  if (bytes.length > maxBytes) return fail("OBJECT_TOO_LARGE", HOST_FAULT);
+  if (bytes.length !== reference.byteCount) return fail("OBJECT_INTEGRITY_MISMATCH", permanentInput("INPUT_OBJECT_INTEGRITY_MISMATCH"));
+  if (createHash("sha256").update(bytes).digest("hex") !== reference.sha256) {
+    return fail("OBJECT_INTEGRITY_MISMATCH", permanentInput("INPUT_OBJECT_INTEGRITY_MISMATCH"));
+  }
+  if (detectReferenceImageType(bytes) !== reference.contentType) return fail("OBJECT_MEDIA_TYPE_INVALID", permanentInput("INPUT_MEDIA_TYPE_INVALID"));
 
   return Object.freeze({ bytes, byteCount: reference.byteCount, sha256: reference.sha256, contentType: reference.contentType });
 }

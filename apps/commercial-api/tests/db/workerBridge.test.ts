@@ -211,13 +211,20 @@ const INTO: Readonly<Record<State, string>> = {
   OUTCOME_UNKNOWN: `state = 'OUTCOME_UNKNOWN', ${CLEAR_LEASE}, failure_code = 'PROVIDER_CREATE_TIMEOUT'`,
   SUCCEEDED: `state = 'SUCCEEDED', ${CLEAR_LEASE}, output_object_key = 'accounts/' || account_id || '/attempts/' || id || '/output.mp4',
               output_sha256 = repeat('a', 64), output_byte_count = 1048576, output_content_type = 'video/mp4', completed_at = now()`,
-  FAILED_BEFORE_SUBMISSION: `state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR_LEASE}, failure_code = 'CREDENTIAL_UNAVAILABLE', completed_at = now()`,
+  // R44B10P2 (migration 0007): a pre-barrier failure is a granted input
+  // failure with an INPUT_* code; after the barrier it is a provider-side code.
+  FAILED_BEFORE_SUBMISSION: `state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR_LEASE},
+                             failure_code = CASE WHEN submitting_at IS NULL THEN 'INPUT_OBJECT_NOT_FOUND' ELSE 'CREDENTIAL_UNAVAILABLE' END, completed_at = now()`,
   SUBMITTED_FAILED: `state = 'SUBMITTED_FAILED', ${CLEAR_LEASE}, failure_code = 'PROVIDER_GENERATION_FAILED', completed_at = now()`,
   ABANDONED: `state = 'ABANDONED', ${CLEAR_LEASE}, failure_code = 'RECOVERY_ABANDONED', completed_at = now()`,
   CANCELLED: `state = 'CANCELLED', ${CLEAR_LEASE}, completed_at = now()`,
 };
 
 async function move(client: pg.Client, attemptId: string, to: State, worker = workerA): Promise<void> {
+  // Migration 0007: LEASED -> FAILED_BEFORE_SUBMISSION requires a prior credential grant.
+  if (to === "FAILED_BEFORE_SUBMISSION") {
+    await client.query("UPDATE execution_attempts SET credential_granted_at = now() WHERE id = $1 AND state = 'LEASED' AND credential_granted_at IS NULL", [attemptId]);
+  }
   const params = to === "LEASED" ? [attemptId, worker] : [attemptId];
   await client.query(`UPDATE execution_attempts SET ${INTO[to]}, updated_at = now() WHERE id = $1`, params);
 }
@@ -1377,6 +1384,222 @@ describe("submitting worker provenance (migration 0005)", () => {
         [id, workerA],
         { code: CHECK, constraint: "execution_attempts_submitting_epoch_ck" },
       );
+    });
+  });
+});
+
+// Migration 0007 (R44B10P2): the database derives immutable input-failure
+// provenance from the lease that moves a granted LEASED attempt to
+// FAILED_BEFORE_SUBMISSION without crossing SUBMITTING. Direct SQL, so no
+// application mistake can bypass it.
+describe("input-failure provenance (migration 0007)", () => {
+  const INPUT_FAILED_SET = `state = 'FAILED_BEFORE_SUBMISSION', ${CLEAR_LEASE}, failure_code = 'INPUT_OBJECT_NOT_FOUND', completed_at = now()`;
+  const provenance = async (client: pg.Client, id: string) =>
+    (
+      await client.query<{
+        state: string;
+        input_failed_worker_principal_id: string | null;
+        input_failed_fencing_counter: string | null;
+        lease_fencing_counter: string;
+        submitting_at: Date | null;
+      }>(
+        "SELECT state, input_failed_worker_principal_id, input_failed_fencing_counter, lease_fencing_counter, submitting_at FROM execution_attempts WHERE id = $1",
+        [id],
+      )
+    ).rows[0]!;
+  // A granted LEASED attempt at fencing generation 2 (one earlier lease was returned).
+  const grantedLeased = async (client: pg.Client, subject: string, worker = workerA) => {
+    const f = await fixture(client, subject);
+    const id = await insertAttempt(client, attemptFor(f));
+    await walk(client, id, ["LEASED", "QUEUED"]);
+    await move(client, id, "LEASED", worker);
+    await client.query("UPDATE execution_attempts SET credential_granted_at = now() WHERE id = $1", [id]);
+    return id;
+  };
+  const withoutGuard = async (fn: () => Promise<void>) => {
+    await clients.migrator.query("ALTER TABLE execution_attempts DISABLE TRIGGER execution_attempts_guard");
+    await fn();
+  };
+
+  it("begins NULL, and an attempt is never created with input-failure provenance", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const f = await fixture(clients.migrator, "wb-input-insert");
+      const id = await insertAttempt(clients.migrator, attemptFor(f));
+      expect(await provenance(clients.migrator, id)).toMatchObject({ input_failed_worker_principal_id: null, input_failed_fencing_counter: null });
+      const sibling = await siblingJob(clients.migrator, f);
+      for (const [column, value] of [
+        ["input_failed_worker_principal_id", workerA],
+        ["input_failed_fencing_counter", 0],
+      ] as const) {
+        await expectTriggerError(
+          clients.migrator,
+          `INSERT INTO execution_attempts (account_id, execution_job_id, generation_authorization_id, attempt_number, billing_mode, provider, provider_credential_version_id, ${column})
+           VALUES ($1, $2, $3, 1, 'USER_BYO', $4, $5, $6)`,
+          [sibling.accountId, sibling.jobId, sibling.authorizationId, sibling.provider, sibling.versionId, value],
+          "created without input-failure provenance",
+        );
+      }
+    });
+  });
+
+  it("stamps the OLD lease principal and fencing generation on the first granted LEASED -> FAILED_BEFORE_SUBMISSION, without the statement naming them", async () => {
+    expect(INPUT_FAILED_SET).not.toContain("input_failed_");
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const id = await grantedLeased(clients.runtime, "wb-input-stamp", workerB);
+      expect(await provenance(clients.runtime, id)).toMatchObject({ state: "LEASED", lease_fencing_counter: "2", input_failed_worker_principal_id: null });
+      await clients.runtime.query(`UPDATE execution_attempts SET ${INPUT_FAILED_SET} WHERE id = $1`, [id]);
+      expect(await provenance(clients.runtime, id)).toEqual({
+        state: "FAILED_BEFORE_SUBMISSION",
+        input_failed_worker_principal_id: workerB,
+        input_failed_fencing_counter: "2",
+        lease_fencing_counter: "2",
+        submitting_at: null,
+      });
+    });
+  });
+
+  it.each(["INPUT_REFERENCE_INVALID", "INPUT_OBJECT_NOT_FOUND", "INPUT_OBJECT_TOO_LARGE", "INPUT_OBJECT_INTEGRITY_MISMATCH", "INPUT_MEDIA_TYPE_INVALID"])(
+    "admits the closed code %s",
+    async (code) => {
+      await inRolledBackTransaction(clients.runtime, async () => {
+        const id = await grantedLeased(clients.runtime, `wb-input-code-${code.toLowerCase()}`);
+        await clients.runtime.query(`UPDATE execution_attempts SET ${INPUT_FAILED_SET.replace("'INPUT_OBJECT_NOT_FOUND'", "$2")} WHERE id = $1`, [id, code]);
+        expect((await clients.runtime.query("SELECT failure_code FROM execution_attempts WHERE id = $1", [id])).rows).toEqual([{ failure_code: code }]);
+      });
+    },
+  );
+
+  it("never lets the runtime role name the provenance, and rejects a forged value from any role", async () => {
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const id = await grantedLeased(clients.runtime, "wb-input-runtime-forge");
+      await clients.runtime.query("SAVEPOINT forge");
+      await expectSqlError(clients.runtime, `UPDATE execution_attempts SET ${INPUT_FAILED_SET}, input_failed_worker_principal_id = $2 WHERE id = $1`, [id, workerA], {
+        code: DENIED,
+      });
+      await clients.runtime.query("ROLLBACK TO SAVEPOINT forge");
+    });
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await grantedLeased(clients.migrator, "wb-input-owner-forge");
+      await expectTriggerError(clients.migrator, `UPDATE execution_attempts SET ${INPUT_FAILED_SET}, input_failed_worker_principal_id = $2 WHERE id = $1`, [id, workerB], "reporter must be the lease worker");
+      await expectTriggerError(clients.migrator, `UPDATE execution_attempts SET ${INPUT_FAILED_SET}, input_failed_fencing_counter = 1 WHERE id = $1`, [id], "lease epoch must be the lease fencing generation");
+      // Supplying exactly the stamped values is harmless.
+      await clients.migrator.query(`UPDATE execution_attempts SET ${INPUT_FAILED_SET}, input_failed_worker_principal_id = $2, input_failed_fencing_counter = 2 WHERE id = $1`, [id, workerA]);
+      expect(await provenance(clients.migrator, id)).toMatchObject({ input_failed_worker_principal_id: workerA, input_failed_fencing_counter: "2" });
+    });
+  });
+
+  it("requires a credential grant and an input-failure code for the pre-barrier transition", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const f = await fixture(clients.migrator, "wb-input-no-grant");
+      const ungranted = await insertAttempt(clients.migrator, attemptFor(f));
+      await move(clients.migrator, ungranted, "LEASED");
+      await expectTriggerError(clients.migrator, `UPDATE execution_attempts SET ${INPUT_FAILED_SET} WHERE id = $1`, [ungranted], "only after a credential grant");
+      const granted = await grantedLeased(clients.migrator, "wb-input-wrong-code");
+      for (const code of ["CREDENTIAL_UNAVAILABLE", "PROVIDER_REJECTED_DEFINITIVELY", "OBJECT_NOT_FOUND", "INPUT_OBJECT_EXPIRED"]) {
+        await expectSqlError(clients.migrator, `UPDATE execution_attempts SET ${INPUT_FAILED_SET.replace("'INPUT_OBJECT_NOT_FOUND'", "$2")} WHERE id = $1`, [granted, code], {
+          code: CHECK,
+          constraint: "execution_attempts_input_failed_code_ck",
+        });
+      }
+      // No SUBMITTING barrier can be fabricated in the same statement.
+      await expectSqlError(clients.migrator, `UPDATE execution_attempts SET ${INPUT_FAILED_SET}, submitting_at = now() WHERE id = $1`, [granted], { code: CHECK });
+      expect(await stateOf(clients.migrator, granted)).toBe("LEASED");
+    });
+  });
+
+  it("keeps the provider-caused FAILED_BEFORE_SUBMISSION free of input-failure provenance and codes", async () => {
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const rejected = await grantedLeased(clients.runtime, "wb-input-provider");
+      await move(clients.runtime, rejected, "SUBMITTING");
+      await expectSqlError(clients.runtime, `UPDATE execution_attempts SET ${INPUT_FAILED_SET} WHERE id = $1`, [rejected], {
+        code: CHECK,
+        constraint: "execution_attempts_input_failed_code_ck",
+      });
+      await move(clients.runtime, rejected, "FAILED_BEFORE_SUBMISSION");
+      const row = await provenance(clients.runtime, rejected);
+      expect(row).toMatchObject({ state: "FAILED_BEFORE_SUBMISSION", input_failed_worker_principal_id: null, input_failed_fencing_counter: null });
+      expect(row.submitting_at).not.toBeNull();
+    });
+  });
+
+  it("makes the stamped provenance, its code and its epoch immutable", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await grantedLeased(clients.migrator, "wb-input-immutable");
+      await clients.migrator.query(`UPDATE execution_attempts SET ${INPUT_FAILED_SET} WHERE id = $1`, [id]);
+      for (const change of [
+        "input_failed_worker_principal_id = $2",
+        "input_failed_worker_principal_id = NULL",
+        "input_failed_fencing_counter = 3",
+        "input_failed_fencing_counter = NULL",
+        "input_failed_worker_principal_id = NULL, input_failed_fencing_counter = NULL",
+      ]) {
+        const params = change.includes("$2") ? [id, workerB] : [id];
+        await expectTriggerError(clients.migrator, `UPDATE execution_attempts SET ${change} WHERE id = $1`, params, "input-failure provenance is immutable");
+      }
+      await expectTriggerError(clients.migrator, "UPDATE execution_attempts SET failure_code = 'INPUT_MEDIA_TYPE_INVALID' WHERE id = $1", [id], "failure code changes only with its state");
+      await expectTriggerError(clients.migrator, "UPDATE execution_attempts SET submitting_worker_principal_id = $2 WHERE id = $1", [id, workerA], "submitting worker provenance is immutable");
+      await expectSqlError(clients.migrator, "UPDATE execution_attempts SET lease_fencing_counter = lease_fencing_counter + 1 WHERE id = $1", [id], {
+        code: CHECK,
+        constraint: "execution_attempts_input_failed_epoch_ck",
+      });
+      for (const to of STATES.filter((state) => state !== "FAILED_BEFORE_SUBMISSION")) {
+        await expectTriggerError(clients.migrator, "UPDATE execution_attempts SET state = $2 WHERE id = $1", [id, to], "is not allowed");
+      }
+      expect(await provenance(clients.migrator, id)).toMatchObject({ input_failed_worker_principal_id: workerA, input_failed_fencing_counter: "2" });
+    });
+  });
+
+  it("enforces the pairing, state, code and epoch checks even with the guard disabled", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const stamped = await grantedLeased(clients.migrator, "wb-input-checks");
+      await clients.migrator.query(`UPDATE execution_attempts SET ${INPUT_FAILED_SET} WHERE id = $1`, [stamped]);
+      const provider = await grantedLeased(clients.migrator, "wb-input-checks-provider");
+      await walk(clients.migrator, provider, ["SUBMITTING", "FAILED_BEFORE_SUBMISSION"]);
+      const cancelledFixture = await fixture(clients.migrator, "wb-input-checks-cancelled");
+      const cancelled = await insertAttempt(clients.migrator, attemptFor(cancelledFixture));
+      await move(clients.migrator, cancelled, "CANCELLED");
+      await withoutGuard(async () => {
+        // Each probe breaks exactly one check (PostgreSQL reports the first by name).
+        const probes: Array<[string, unknown[], string]> = [
+          // A partial pair.
+          ["UPDATE execution_attempts SET input_failed_fencing_counter = NULL WHERE id = $1", [stamped], "execution_attempts_input_failed_pair_ck"],
+          // Provenance (with an input code) on another state: a provider-caused failure, a cancellation.
+          [
+            "UPDATE execution_attempts SET failure_code = 'INPUT_OBJECT_NOT_FOUND', input_failed_worker_principal_id = $2, input_failed_fencing_counter = 2 WHERE id = $1",
+            [provider, workerA],
+            "execution_attempts_input_failed_state_ck",
+          ],
+          [
+            "UPDATE execution_attempts SET failure_code = 'INPUT_OBJECT_NOT_FOUND', input_failed_worker_principal_id = $2, input_failed_fencing_counter = 0 WHERE id = $1",
+            [cancelled, workerA],
+            "execution_attempts_input_failed_state_ck",
+          ],
+          // A pre-barrier failure never sheds its provenance to pass as provider-caused.
+          [
+            "UPDATE execution_attempts SET failure_code = 'CREDENTIAL_UNAVAILABLE', input_failed_worker_principal_id = NULL, input_failed_fencing_counter = NULL WHERE id = $1",
+            [stamped],
+            "execution_attempts_input_failed_state_ck",
+          ],
+          // The input codes appear exactly with the provenance.
+          ["UPDATE execution_attempts SET failure_code = 'CREDENTIAL_UNAVAILABLE' WHERE id = $1", [stamped], "execution_attempts_input_failed_code_ck"],
+          ["UPDATE execution_attempts SET failure_code = 'INPUT_OBJECT_NOT_FOUND' WHERE id = $1", [provider], "execution_attempts_input_failed_code_ck"],
+          // The reporting epoch is the retained counter.
+          ["UPDATE execution_attempts SET input_failed_fencing_counter = 1 WHERE id = $1", [stamped], "execution_attempts_input_failed_epoch_ck"],
+        ];
+        for (const [sql, params, constraint] of probes) {
+          await clients.migrator.query("SAVEPOINT check_probe");
+          await expectSqlError(clients.migrator, sql, params, { code: CHECK, constraint });
+          await clients.migrator.query("ROLLBACK TO SAVEPOINT check_probe");
+        }
+      });
+    });
+  });
+
+  it("references an existing worker principal and restricts its deletion", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const id = await grantedLeased(clients.migrator, "wb-input-fk");
+      await clients.migrator.query(`UPDATE execution_attempts SET ${INPUT_FAILED_SET} WHERE id = $1`, [id]);
+      await expectSqlError(clients.migrator, "DELETE FROM worker_principals WHERE id = $1", [workerA], { code: FOREIGN_KEY });
     });
   });
 });

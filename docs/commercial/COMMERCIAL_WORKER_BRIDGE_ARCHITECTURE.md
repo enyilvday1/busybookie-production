@@ -403,6 +403,27 @@ COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_2026_11_10
   change; provider flags unchanged; implementation not started:
   introduction, sections 2, 5, 7, 16, 36 and 37).
 
+(R44B10A docs sync: implementation published in commit
+aefd2ea95cc0d11652596fd2e099262bc4a945ac. The commercial-worker now owns
+the first production-grade real-provider create adapter and composition for
+Google GenAI Interactions on the Gemini Developer API, ending at
+`SUBMITTED`; `@google/genai` is exact-pinned at 2.24.0; the closed request,
+verified input path, scoped sealed-credential re-open, permit-before-client
+ordering, one-client/one-create cardinality, zero-SDK-retry transport proof,
+raw `Interaction.id`, definitive and ambiguous failure composition,
+heartbeat plus durable acceptance, crash/recovery behaviour, no-network
+boundary and secret-safety requirements all pass. Validation: 972/972
+worker unit tests, 58/58 worker integration tests including seven new
+Google tier-3 tests, 858/858 commercial-api non-DB tests, 628/628
+commercial-api DB tests, 2052/2052 root Google regression tests, both
+typechecks clean, and the worker boundary block 116/116. All 25 R44B10A
+criteria pass. `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`;
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`. Production object storage,
+production issuer/provider credential and KMS readiness, section 24's
+destruction lifecycle, the live `SUBMITTED` capacity lifecycle, a process
+runner and deployment, controlled live validation, polling, output
+persistence and completion remain separate open work.)
+
 ```text
 ARCHITECTURE_STATUS=LOCKED
 BRIDGE_DIRECTION=PRIVATE_WORKER_OUTBOUND_TO_COMMERCIAL_CONTROL_PLANE
@@ -6917,7 +6938,8 @@ implemented. The following are separate and none is implied:
 
 - step 9 input scope complete;
 - a production storage backend (none; the vendor is undecided);
-- real-provider readiness (step 11 stays blocked on R44B10P2);
+- real-provider readiness (R44B10A create-to-`SUBMITTED` implementation
+  complete; separate live-readiness blockers remain);
 - live provider submission (disabled).
 
 **Step 11 status (R44B10P2 docs sync).** The R44B10P2 prerequisite is
@@ -6932,6 +6954,18 @@ locked: the first real provider is Google GenAI Interactions
 (`GOOGLE_GENAI`, `gemini-omni-1.1-flash`), ending at `SUBMITTED` (section 36,
 "First real-provider adapter: Google GenAI (revision R44B10A)"). Its
 implementation is **not started**; the provider flags stay NO.
+
+**Step 11 status (R44B10A docs sync).** The contract-lock paragraph above is
+the historical lock-time state. R44B10A implementation is now validated and
+published in commit `aefd2ea95cc0d11652596fd2e099262bc4a945ac`. The
+create-to-`SUBMITTED` real-provider slice therefore satisfies
+`REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`. This does not enable provider
+submission from normal production startup:
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`. Production object storage,
+production issuer/provider credentials and KMS readiness, section 24's
+destruction lifecycle, the live `SUBMITTED` capacity lifecycle, a process
+runner and deployment, controlled live validation, polling, output
+persistence and completion remain open.
 
 ### Status and fake-provider gate (revision R44B6K)
 
@@ -8323,6 +8357,17 @@ implemented, no package is installed and no provider is contacted.
 `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO` and
 `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` are unchanged.
 
+**Implementation status (R44B10A docs sync).** The lock-time paragraph above
+is preserved as historical contract evidence. The implementation was
+validated and published in commit
+`aefd2ea95cc0d11652596fd2e099262bc4a945ac`. The worker now contains
+`googleProviderContract.ts`, `googleProviderAdapter.ts` and
+`googleAttemptExecution.ts`, together with their unit, boundary and tier-3
+integration coverage; the existing fake-provider path remains isolated.
+All 25 criteria below pass, so the current canonical state is
+`REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`. Live provider submission remains
+disabled: `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
 **Basis.** The lock rests on: the repository-installed `@google/genai`
 2.24.0 source; the existing BusyBookie Google production creator
 (`createGoogleGenAiSingleShotProductionInteractionCreator`) and its
@@ -8763,7 +8808,24 @@ NO until all 25 pass; a file merely existing is insufficient.
 25. The real adapter stays default-off and
     `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
-**Expected implementation scope (later).** NEW in commercial-worker: the
+**Implementation result (R44B10A docs sync).** All 25 criteria pass against
+the implementation published in
+`aefd2ea95cc0d11652596fd2e099262bc4a945ac`. Evidence: 972/972 worker unit
+tests across 22 files; worker typecheck clean; 58/58 worker integration
+tests across 21 files, of which seven are the new Google tier-3 tests
+covering accepted, definitive, ambiguous, P2/pre-dispatch, lost-response
+and restart paths; 858/858 commercial-api non-DB tests and clean typecheck;
+628/628 commercial-api DB tests across 106 suites; 2052/2052 root Google
+regression tests across 33 files; and 116/116 worker boundary tests. The
+actual SDK counting-transport tests prove exactly one HTTP request for 429,
+503, connection failure, timeout and lost-response cases with
+`maxRetries: 0`; the staged dependency is exactly `@google/genai` 2.24.0
+in both worker manifest and lockfile. No protected commercial-api,
+migration, shared-protocol, deployment, engine, root-manifest,
+fake-provider, journal, acceptance or P1/P2 source was changed by the
+implementation.
+
+**Historical expected implementation scope (contract-lock time).** NEW in commercial-worker: the
 Google create adapter, the real Google composer, the closed Google
 `generationRequest` parser, and their unit, composer and tier 3 tests.
 MODIFIED: `credentialOpeningRun.ts` (the sealed capability and the opened
@@ -8786,14 +8848,17 @@ controlled live-provider validation; provider polling, output storage and
 provider completion; later provider adapters; and live provider
 enablement.
 
-**Status (R44B10A contract lock).**
+**Status (R44B10A docs sync).**
 
 - **R44B10P1:** fully closed.
 - **R44B10P2:** fully closed.
 - **R44B10A discovery:** PASS.
-- **R44B10A contract lock:** this revision.
-- **R44B10A implementation:** not started.
-- `REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO`;
+- **R44B10A contract lock:** published in
+  `5bf740f530b3fc41044fe405c308251db65c6a6c`.
+- **R44B10A implementation:** PASS; validated and published in
+  `aefd2ea95cc0d11652596fd2e099262bc4a945ac`.
+- **R44B10A implementation criteria:** 25/25 PASS.
+- `REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES`;
   `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
 ---
@@ -9019,7 +9084,7 @@ PROVIDER_EXACTLY_ONCE_CLAIMED=NO
 BUSYBOOKIE_AUTOMATIC_PROVIDER_CREATE_AT_MOST_ONCE_PER_ATTEMPT=YES
 FAKE_PROVIDER_EXECUTION_GATE=SECTION_36_SLICES_1_TO_7
 FAKE_PROVIDER_EXECUTION_IMPLEMENTED=YES
-REAL_PROVIDER_EXECUTION_IMPLEMENTED=NO
+REAL_PROVIDER_EXECUTION_IMPLEMENTED=YES
 MIGRATION_0005_REQUIRED_FOR_IMPLEMENTATION=YES
 MIGRATION_0005_SCOPE=IMMUTABLE_SUBMITTING_WORKER_PRINCIPAL
 MIGRATION_0005_CREATED=NO
@@ -9209,7 +9274,11 @@ OBJECT_STORAGE_INPUT_FAILURE_ROUTE_PROVIDER_SEMANTICS=NO
 OBJECT_STORAGE_INPUT_FAILURE_ROUTE_PROTOCOL_PACKAGE_CHANGE_REQUIRED=NO
 OBJECT_STORAGE_INPUT_FAILURE_CLASSIFICATION_EXTENSION_REQUIRED=YES
 R44B10A_CONTRACT_LOCKED=YES
-R44B10A_IMPLEMENTATION_STARTED=NO
+R44B10A_IMPLEMENTATION_STARTED=YES
+R44B10A_IMPLEMENTATION_VALIDATED=YES
+R44B10A_IMPLEMENTATION_PUBLISHED=YES
+R44B10A_IMPLEMENTATION_CRITERIA_PASSED=25/25
+R44B10A_IMPLEMENTATION_COMMIT=aefd2ea95cc0d11652596fd2e099262bc4a945ac
 R44B10A_FIRST_PROVIDER=GOOGLE_GENAI
 R44B10A_REAL_PROVIDER_COUNT=1
 R44B10A_PROVIDER_MODEL=gemini-omni-1.1-flash

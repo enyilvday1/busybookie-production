@@ -10606,13 +10606,91 @@ never the production database.
 
 `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
 
-**Current status (R44B11C contract lock).**
+**Implementation outcome (R44B11C).**
+
+The locked USER_BYO generation-authorization issuance slice is implemented,
+validated and published in
+`afc4d433a8c4f8b0c615f5968327e3fec54d4514`.
+
+The exact implementation commit scope is six files:
+
+- `apps/commercial-api/src/generationAuthorizations/generationAuthorityPolicy.ts`;
+- `apps/commercial-api/src/generationAuthorizations/generationAuthorizationError.ts`;
+- `apps/commercial-api/src/generationAuthorizations/generationAuthorizationService.ts`;
+- `apps/commercial-api/tests/boundary.test.ts`;
+- `apps/commercial-api/tests/generationAuthorizations/generationAuthorizationIssuance.test.ts`;
+- `apps/commercial-api/tests/db/generationAuthorizationIssuance.test.ts`.
+
+The implementation preserves the locked authority model:
+
+- the production generation-authority registry remains empty, so R44B11C
+  enables no production provider/model pair;
+- the issuance service remains internal to commercial-api and is not composed
+  into a customer HTTP route;
+- untrusted issuance input remains exactly Production, ProviderConnection,
+  model, generation request and mandatory idempotency key;
+- provider derives from the same-account ProviderConnection and billing mode
+  remains `USER_BYO`;
+- R44B11A remains the only request grammar, provider/model identity,
+  cost-unit and canonical request-hash authority;
+- the transaction uses the locked User -> Account -> ProviderConnection ->
+  Production -> entitlement-grant lock order and holds those authoritative
+  locks through commit;
+- the current credential is the newest credential version and must be
+  `ACTIVE` for new issuance;
+- issuance binds the Production's exact AVAILABLE FREE_BYO creation grant and
+  does not consume, reserve or otherwise mutate that grant;
+- true idempotent replay returns the original authorization unchanged and
+  performs no rebind, repricing, expiry extension, lifecycle mutation, usage
+  insertion or duplicate audit;
+- new issuance writes exactly one `ISSUED` authorization and one
+  `generation_authorization.issued` audit event;
+- expiry is derived from database-server `clock_timestamp()` plus the
+  versioned generation policy's positive whole-second claim lifetime;
+- issuance creates no generation-usage row, execution job, execution attempt,
+  worker lease, credential grant or provider work;
+- audit failure after the real authorization INSERT is proven to roll the
+  transaction back with no partial authorization left behind;
+- no database migration, runtime-grant change, worker change, shared-protocol
+  change or provider-adapter production change was introduced.
+
+Validation of the published implementation passed:
+
+- commercial-api TypeScript typecheck: PASS;
+- focused non-database issuance suite: 97/97;
+- commercial-api boundary suite: 197/197;
+- focused PostgreSQL validation: 123/123 across three files:
+  - R44B11C issuance: 48/48;
+  - generation-authorizations invariants: 59/59;
+  - generation-usage-ledger invariants: 16/16;
+- full commercial-api PostgreSQL suite: 698/698 across 22 files;
+- the earlier full commercial-api non-database suite passed 963/963 across
+  22 files; after the final DB-only atomicity addition, the focused
+  non-database issuance and boundary suites were rerun and remained green;
+- staged and post-validation `git diff --check`: PASS.
+
+PostgreSQL validation used PostgreSQL 16.13 on the dedicated
+`busybookie_commercial_test` database at `127.0.0.1:5433`; no production
+database was used.
+
+The unrelated
+`docs/commercial/BUSYBOOKIE_FREE_BYO_HOSTED_TRIAL_BACKLOG.md`
+remained untracked and unchanged throughout implementation, validation,
+staging, commit and publication.
+
+No real provider network call was required for R44B11C validation.
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
+
+**Current status (R44B11C docs sync).**
 
 - **R44B11A:** fully closed; unchanged.
 - **R44B11B:** fully closed; unchanged.
 - **R44B11C discovery:** PASS.
-- **R44B11C contract:** this revision.
-- **R44B11C implementation:** not started.
+- **R44B11C contract lock:**
+  `4d01d3f540bd2fc01c1b7f081c57a4ee1a70ec59`.
+- **R44B11C implementation:** PASS; validated and published in
+  `afc4d433a8c4f8b0c615f5968327e3fec54d4514`.
+- **R44B11C:** fully closed by this docs-sync revision.
 - **R44B11P1 implementation:** started, not complete.
 - **R44B11 parent implementation:** started, not complete.
 - **Remaining R44B11P1 work after R44B11C:** separate future discovery and
@@ -11307,7 +11385,10 @@ R44B11B_PROVIDER_VERIFICATION_INCLUDED=NO
 R44B11B_LIVE_PROVIDER_ENABLEMENT=NO
 R44B11C_DISCOVERY=PASS
 R44B11C_CONTRACT_LOCKED=YES
-R44B11C_IMPLEMENTATION_STARTED=NO
+R44B11C_IMPLEMENTATION_STARTED=YES
+R44B11C_IMPLEMENTATION_VALIDATED=YES
+R44B11C_IMPLEMENTATION_PUBLISHED=YES
+R44B11C_IMPLEMENTATION_COMMIT=afc4d433a8c4f8b0c615f5968327e3fec54d4514
 R44B11C_SCOPE=USER_BYO_GENERATION_AUTHORIZATION_ISSUANCE
 R44B11C_DISCOVERY_BASE=e5ecd6891ca3fd58dd64492b58bf890b8d9edee4
 R44B11C_DATABASE_MIGRATION_REQUIRED=NO

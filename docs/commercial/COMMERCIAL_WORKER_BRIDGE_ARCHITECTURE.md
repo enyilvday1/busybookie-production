@@ -10704,6 +10704,319 @@ No real provider network call was required for R44B11C validation.
 - Future revision suffixes for those slices are not locked by R44B11C.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
+
+### USER_BYO generation-authorization claim (revision R44B11D)
+
+**Locked decision (R44B11D contract lock; not implemented at lock time).**
+R44B11D is the fourth R44B11P1 implementation slice. R44B11A, R44B11B and
+R44B11C remain fully closed and are not reopened. R44B11D implements only the
+internal commercial-api USER_BYO generation-authorization claim transaction.
+It does not introduce a customer generation route, expiry convergence,
+post-claim disconnect convergence, credential cleanup, provider verification,
+production provider/model enablement, worker changes, shared-protocol changes,
+provider-adapter changes or live-provider enablement.
+
+Discovery ran against published R44B11C closure commit
+\`ce4e7ec5664855707ef93023ca4218004ef91bbd\`. The discovery report is
+\`.git/r44b11-next-claim-discovery.txt\`, 7533 lines, SHA-256
+\`5579ab9f00be0063764edb84006834e2538e6df823fb101f48205b8ba1722481\`.
+
+**Repository facts.** Discovery established:
+
+- migration 0003 already owns the GenerationAuthorization lifecycle
+  \`ISSUED | CLAIMED | EXPIRED | CANCELLED\`, the \`claimed_at\` equivalence,
+  the claim-before-expiry constraint and immutable authorization provenance;
+- migration 0004 already owns exactly one execution job per generation
+  authorization and the execution-attempt persistence required for an initial
+  \`QUEUED\` attempt;
+- migration 0008 already owns the append-only canonical CLAIMED usage row,
+  keyed by GenerationAuthorization ID, and its INSERT guard observes the
+  claiming transaction's own \`ISSUED -> CLAIMED\` transition;
+- runtime grants already permit the exact required writes:
+  GenerationAuthorization lifecycle UPDATE, execution-job INSERT,
+  execution-attempt INSERT, usage-ledger INSERT and audit-event INSERT;
+- worker lease, credential-grant, submitting and acceptance paths already
+  require the bound GenerationAuthorization to be \`CLAIMED\`;
+- worker new-work eligibility already recognises exact bound credential
+  versions in \`ACTIVE\` or \`SUPERSEDED\`, while refusing disconnected or
+  disabled connections;
+- there is no production claim service and no customer generation route.
+
+No database migration or runtime-grant change is justified.
+
+**Service boundary.** R44B11D introduces an internal commercial-api claim
+service under \`src/generationAuthorizations\`. The trusted principal is the
+existing database-derived \`ActivePrincipal { userId, accountId }\`.
+
+The untrusted claim intent is exactly one
+\`generationAuthorizationId\`. It must be a syntactically valid UUID. Account,
+Production, entitlement, billing mode, provider, ProviderConnection,
+credential version, claim timestamp, execution job, execution attempt and
+usage identity are never accepted from the caller.
+
+There is no separate claim idempotency key. The immutable
+GenerationAuthorization ID is the logical claim identity.
+
+A customer HTTP route is deliberately outside R44B11D.
+
+**Replay.** After revalidating the trusted User and PERSONAL Account as ACTIVE
+and still related to each other, the service may inspect the exact
+same-account GenerationAuthorization.
+
+A GenerationAuthorization already in \`CLAIMED\` is an idempotent claim
+replay. Replay returns the already-created execution job and the initial
+attempt with \`attempt_number = 1\`. It performs no lifecycle mutation,
+creates no usage row, creates no job or attempt and writes no second claim
+audit event.
+
+Replay does not revalidate current Production archival state, entitlement
+state, ProviderConnection state or credential-version eligibility. Those
+conditions governed the already-committed claim; later lifecycle changes do
+not erase the claim.
+
+A valid replay must observe the atomic artifacts a successful R44B11D claim
+necessarily committed: exactly one execution job for the authorization,
+exactly one initial attempt number 1 belonging to that job and authorization,
+exactly one canonical generation-usage-ledger row and exactly one
+\`generation_authorization.claimed\` audit transition. Missing, conflicting or
+duplicated claim composition is an invariant violation and is never repaired.
+
+An authorization in \`CANCELLED\` or \`EXPIRED\` is not claimable.
+
+An authorization still \`ISSUED\` whose database wall clock is at or beyond
+\`expires_at\` is refused without changing its lifecycle. R44B11D does not
+implement \`ISSUED -> EXPIRED\` convergence.
+
+**New-claim lock order.** Application/process-local locking is never
+authority. One READ COMMITTED transaction on one dedicated runtime database
+client owns a new claim.
+
+The service may perform a non-locking same-account read of the authorization
+to obtain its immutable provenance. It must not lock the
+GenerationAuthorization and then wait for the ProviderConnection.
+
+The authoritative row-lock order is:
+
+1. trusted User eligibility row, \`FOR SHARE\` or stronger;
+2. trusted PERSONAL Account lifecycle row using \`FOR NO KEY UPDATE\` or the
+   established equivalent;
+3. exact same-account ProviderConnection lifecycle row, \`FOR UPDATE\`;
+4. exact bound ProviderCredentialVersion, \`FOR SHARE\` or stronger;
+5. exact same-account Production eligibility row, \`FOR SHARE\` or stronger;
+6. that Production's exact entitlement-grant row, \`FOR SHARE\` or stronger;
+7. exact same-account GenerationAuthorization lifecycle row, \`FOR UPDATE\`.
+
+All locks are held through commit.
+
+This preserves the established ProviderConnection-before-authorization
+direction required by disconnect and rotation. A claim path may never hold the
+GenerationAuthorization lifecycle lock while waiting to acquire the
+ProviderConnection lifecycle lock.
+
+**Principal, Production and entitlement revalidation.** For a new claim:
+
+- the trusted User must remain ACTIVE;
+- the trusted PERSONAL Account must remain ACTIVE, owned by that User and
+  equal the authorization's account;
+- the authorization's exact Production must remain non-archived;
+- that Production's \`creation_entitlement_grant_id\` must equal the
+  authorization's immutable entitlement grant;
+- that exact grant must remain same-account, \`FREE_BYO\`, \`AVAILABLE\` and
+  use a FREE_BYO policy version supported by this code;
+- claim does not reserve, decrement, consume or otherwise mutate FREE_BYO.
+
+R44B11D does not re-price the authorization, recompute its expected-cost cap,
+rebind its credential, re-run generation capability admission or change its
+stored generation request/hash.
+
+**Post-issuance credential revalidation.** Claim uses exactly the immutable
+ProviderConnection and ProviderCredentialVersion bound by issuance. It never
+selects a replacement or "current" credential.
+
+The same-account connection provider must equal the authorization provider.
+
+An \`INVALID\`, \`DISCONNECTED\` or \`DISABLED\` ProviderConnection is not
+claimable.
+
+The exact bound credential must retain sealed credential material and must be
+either:
+
+- \`ACTIVE\` under the normal eligible connection state; or
+- \`SUPERSEDED\` under the locked post-issuance rotation exception.
+
+A bound \`RETAINED_FOR_RECOVERY\` or \`DESTROYED\` version is never claimable
+for new provider work.
+
+Rotation's \`PENDING_VERIFICATION\` / \`UNVERIFIED\` state does not by itself
+invalidate an authorization issued earlier against the prior verified
+credential. In that narrow case claim is allowed only when the authorization's
+bound version is \`SUPERSEDED\`, its sealed material still exists, and a
+distinct \`ACTIVE\` credential version exists on the same connection.
+
+No newer credential is substituted.
+
+Claim and rotation/disconnect therefore serialize on the ProviderConnection
+lifecycle lock. If disconnect wins first, claim refuses. If claim commits
+first, the GenerationAuthorization is terminally \`CLAIMED\`; later
+pre-submission disconnect convergence is a separate slice.
+
+**Database-clock claim instant.** Claim eligibility uses database wall-clock
+time, never the browser, application process, worker or transaction-start
+clock.
+
+The authoritative transition uses one database \`clock_timestamp()\` value for
+both the expiry comparison and \`claimed_at\`. The transition is admitted only
+when that value is strictly less than \`expires_at\`. A claim at or after
+expiry commits no claim side effect.
+
+**Atomic claim writes.** After all eligibility locks and revalidation, one
+transaction performs, in order:
+
+1. transition the exact authorization \`ISSUED -> CLAIMED\`, setting
+   \`claimed_at\` from the authoritative database wall clock;
+2. insert exactly one \`execution_jobs\` row for that authorization in
+   \`QUEUED\`;
+3. insert exactly one initial \`execution_attempts\` row for that job with
+   \`attempt_number = 1\` and \`state = 'QUEUED'\`;
+4. insert exactly one canonical \`generation_usage_ledger\` row for the
+   GenerationAuthorization, Account and Production, omitting
+   caller-supplied \`recorded_at\`;
+5. append exactly one safe
+   \`generation_authorization.claimed\` audit event;
+6. commit.
+
+The initial attempt copies the authorization's immutable Account,
+GenerationAuthorization, \`USER_BYO\` billing mode, provider and exact bound
+ProviderCredentialVersion and references the newly created job. No lease,
+credential grant, submission or provider execution exists at claim time.
+Its initial lease fencing counter remains the schema default zero.
+
+The existing unique job-per-authorization constraint and
+\`(execution_job_id, attempt_number)\` uniqueness remain authoritative. The
+usage-ledger primary key remains the one-authorised-usage identity.
+
+**Audit.** The claim audit uses:
+
+- actor type \`USER\`;
+- actor user ID from the trusted principal;
+- resource type \`generation_authorization\`;
+- resource ID equal to the claimed authorization;
+- event type \`generation_authorization.claimed\`;
+- the request correlation ID.
+
+Safe metadata is limited to the newly created execution-job ID, initial
+execution-attempt ID and supported entitlement-policy version. It contains no
+generation request, prompt, reference image, sealed credential, fingerprint,
+key reference, provider secret or other credential material.
+
+Replay appends no claim audit.
+
+**Atomicity.** Any failure after the transaction begins, including job,
+attempt, usage-ledger or audit failure, rolls back the lifecycle transition
+and every row created by the claim. No partial CLAIMED authorization, partial
+execution graph, orphan usage row or partial audit transition may remain.
+
+Concurrent claims of the same authorization commit exactly one claim
+transition, one job, one initial attempt, one canonical usage row and one
+claim audit. The loser returns the committed claim as an idempotent replay.
+
+**Claim error surface.** R44B11D uses a claim-specific error type rather than
+changing R44B11C's already-published issuance error messages. Stable internal
+claim classifications distinguish at minimum:
+
+- malformed claim input;
+- active-principal unavailable;
+- generation authorization unavailable;
+- generation authorization not claimable;
+- claim deadline expired;
+- Production unavailable;
+- entitlement unavailable;
+- unsupported entitlement policy;
+- ProviderConnection unavailable;
+- bound credential unavailable;
+- persisted-state invariant violation;
+- database failure.
+
+Messages remain fixed and safe. Database causes, SQL detail, generation
+request data and credential material are never exposed.
+
+**Required proof.** Implementation must prove at minimum:
+
+- malformed authorization identity fails before SQL;
+- foreign/missing authorization is indistinguishable and cannot be claimed;
+- active User and Account are revalidated under held locks;
+- exact Production and creation grant are revalidated and never substituted;
+- unsupported/non-AVAILABLE FREE_BYO grant is refused;
+- database wall-clock claim immediately before expiry succeeds while claim at
+  or after expiry is refused without expiry convergence;
+- normal exact ACTIVE credential claim succeeds;
+- the exact locked SUPERSEDED rotation exception succeeds;
+- PENDING_VERIFICATION allows only that narrow SUPERSEDED exception with a
+  distinct ACTIVE version;
+- INVALID, DISCONNECTED and DISABLED connections are refused;
+- RETAINED_FOR_RECOVERY and DESTROYED versions are refused;
+- claim never rebinds to another credential version;
+- a successful claim atomically creates the CLAIMED lifecycle transition,
+  one job, initial attempt 1, one usage row and one audit event;
+- claim replay returns those existing artifacts without new writes even after
+  later Production, entitlement or connection lifecycle changes;
+- a malformed CLAIMED composition fails closed as an invariant and is not
+  repaired;
+- concurrent claim commits one logical claim only;
+- User disablement, Account disablement, Production archival, entitlement
+  lifecycle mutation, rotation and disconnect races are proved against real
+  PostgreSQL locks;
+- disconnect cannot commit an ineligible connection ahead of a claim already
+  holding the lifecycle lock, and claim cannot commit against disconnect that
+  won first;
+- audit failure after all preceding real PostgreSQL writes proves total
+  rollback;
+- issuance behavior, usage-ledger invariants and worker bridge invariants
+  remain green;
+- no provider network call is made.
+
+PostgreSQL integration validation continues to use the dedicated PostgreSQL 16
+test database at \`127.0.0.1:5433\`, never the production database.
+
+**Not in R44B11D.** This slice does not include:
+
+- a customer generation HTTP route;
+- \`ISSUED -> EXPIRED\` convergence;
+- disconnect cancellation of an already-CLAIMED pre-submission job/attempt;
+- post-disconnect credential cleanup;
+- provider verification implementation;
+- production provider/model enablement;
+- worker source changes;
+- shared worker-protocol changes;
+- provider-adapter changes;
+- another database migration;
+- runtime-grant changes;
+- live-provider enablement.
+
+\`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO\` remains authoritative.
+
+**Current status (R44B11D contract lock).**
+
+- **R44B11A:** fully closed; unchanged.
+- **R44B11B:** fully closed; unchanged.
+- **R44B11C:** fully closed; unchanged.
+- **R44B11D discovery:** PASS.
+- **R44B11D conflict screen:** PASS.
+- **R44B11D contract:** this revision.
+- **R44B11D implementation:** not started.
+- **R44B11P1 implementation:** started, not complete.
+- **R44B11 parent implementation:** started, not complete.
+- **Remaining R44B11P1 work after R44B11D:** separate future discovery and
+  contract locks remain required for:
+  - any required expiry-convergence service;
+  - ProviderConnection disconnect/pre-submission convergence and deterministic
+    credential cleanup;
+  - provider verification;
+  - any customer generation route and production generation-policy enablement
+    justified after those gates.
+- Future suffixes after R44B11D are not locked here.
+- \`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO\`.
+
 ---
 
 ## 37. Lock flags
@@ -11478,6 +11791,64 @@ R44B11C_PROVIDER_ADAPTER_CHANGE_REQUIRED=NO
 R44B11C_PRODUCTION_PROVIDER_MODEL_ENABLEMENT=NO
 R44B11C_LIVE_PROVIDER_ENABLEMENT=NO
 R44B11C_FUTURE_SLICE_SUFFIXES_LOCKED=NO
+R44B11D_DISCOVERY=PASS
+R44B11D_CONFLICT_SCREEN=PASS
+R44B11D_CONTRACT_LOCKED=YES
+R44B11D_IMPLEMENTATION_STARTED=NO
+R44B11D_SCOPE=USER_BYO_GENERATION_AUTHORIZATION_CLAIM
+R44B11D_DISCOVERY_BASE=ce4e7ec5664855707ef93023ca4218004ef91bbd
+R44B11D_DISCOVERY_REPORT_SHA256=5579ab9f00be0063764edb84006834e2538e6df823fb101f48205b8ba1722481
+R44B11D_DATABASE_MIGRATION_REQUIRED=NO
+R44B11D_RUNTIME_GRANT_CHANGE_REQUIRED=NO
+R44B11D_TRUSTED_PRINCIPAL=ACTIVE_PRINCIPAL
+R44B11D_UNTRUSTED_INPUT=GENERATION_AUTHORIZATION_ID
+R44B11D_CLAIM_IDEMPOTENCY_KEY_REQUIRED=NO
+R44B11D_IDEMPOTENCY_IDENTITY=GENERATION_AUTHORIZATION_ID
+R44B11D_REPLAY_REVALIDATES_ACTIVE_PRINCIPAL=YES
+R44B11D_REPLAY_REVALIDATES_OTHER_DYNAMIC_ELIGIBILITY=NO
+R44B11D_REPLAY_WRITES=NO
+R44B11D_REPLAY_RETURNS_EXISTING_JOB_AND_INITIAL_ATTEMPT=YES
+R44B11D_REPLAY_REQUIRES_CANONICAL_USAGE_ROW=YES
+R44B11D_REPLAY_REQUIRES_CLAIM_AUDIT=YES
+R44B11D_CLAIMED_COMPOSITION_REPAIR_ALLOWED=NO
+R44B11D_CLAIM_SOURCE_STATUS=ISSUED
+R44B11D_CLAIM_TARGET_STATUS=CLAIMED
+R44B11D_CLAIMED_AT_AUTHORITY=DATABASE_CLOCK_TIMESTAMP
+R44B11D_CLAIM_AT_OR_AFTER_EXPIRY_ALLOWED=NO
+R44B11D_EXPIRED_ISSUED_TRANSITION_INCLUDED=NO
+R44B11D_LOCK_ORDER=USER_THEN_ACCOUNT_THEN_PROVIDER_CONNECTION_THEN_BOUND_CREDENTIAL_THEN_PRODUCTION_THEN_ENTITLEMENT_GRANT_THEN_GENERATION_AUTHORIZATION
+R44B11D_AUTHORIZATION_LOCK_BEFORE_CONNECTION_ALLOWED=NO
+R44B11D_NONLOCKING_IMMUTABLE_PROVENANCE_PREREAD_ALLOWED=YES
+R44B11D_BOUND_ACTIVE_CREDENTIAL_ALLOWED=YES
+R44B11D_BOUND_SUPERSEDED_CREDENTIAL_ALLOWED=YES
+R44B11D_BOUND_RETAINED_FOR_RECOVERY_ALLOWED=NO
+R44B11D_BOUND_DESTROYED_CREDENTIAL_ALLOWED=NO
+R44B11D_CREDENTIAL_REBIND_ALLOWED=NO
+R44B11D_DISCONNECTED_CONNECTION_ALLOWED=NO
+R44B11D_DISABLED_CONNECTION_ALLOWED=NO
+R44B11D_INVALID_CONNECTION_ALLOWED=NO
+R44B11D_PENDING_VERIFICATION_SUPERSEDED_EXCEPTION=YES
+R44B11D_FREE_BYO_GRANT_STATE=AVAILABLE
+R44B11D_FREE_BYO_CONSUMED_BY_CLAIM=NO
+R44B11D_JOB_CARDINALITY=EXACTLY_ONE
+R44B11D_INITIAL_ATTEMPT_NUMBER=1
+R44B11D_INITIAL_ATTEMPT_STATE=QUEUED
+R44B11D_INITIAL_FENCING_COUNTER=0
+R44B11D_USAGE_ROW_CARDINALITY=EXACTLY_ONE
+R44B11D_CLAIM_AUDIT_EVENT=generation_authorization.claimed
+R44B11D_CLAIM_AUDIT_CARDINALITY=EXACTLY_ONE
+R44B11D_ATOMIC_ROLLBACK_REQUIRED=YES
+R44B11D_CUSTOMER_ROUTE_INCLUDED=NO
+R44B11D_EXPIRY_CONVERGENCE_INCLUDED=NO
+R44B11D_DISCONNECT_CONVERGENCE_INCLUDED=NO
+R44B11D_CREDENTIAL_CLEANUP_INCLUDED=NO
+R44B11D_PROVIDER_VERIFICATION_INCLUDED=NO
+R44B11D_PRODUCTION_PROVIDER_MODEL_ENABLEMENT=NO
+R44B11D_WORKER_CHANGE_REQUIRED=NO
+R44B11D_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
+R44B11D_PROVIDER_ADAPTER_CHANGE_REQUIRED=NO
+R44B11D_LIVE_PROVIDER_ENABLEMENT=NO
+R44B11D_FUTURE_SLICE_SUFFIXES_LOCKED=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

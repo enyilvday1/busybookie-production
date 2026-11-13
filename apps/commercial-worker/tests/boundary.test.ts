@@ -34,6 +34,8 @@ const BUILTINS = new Set(builtinModules);
 // module (runtime or type) is imported by worker source.
 const PROTOCOL_PACKAGE = "commercial-worker-protocol";
 const PROTOCOL_ROOT = join(REPO_ROOT, "packages", "commercial-worker-protocol");
+// R44B11A: the shared generation-request and canonical-hash authority.
+const SHARED_GENERATION_MODULE = "src/generationRequestContract.ts";
 
 const FORBIDDEN: readonly Readonly<{ label: string; pattern: RegExp }>[] = [
   { label: "commercial-api module", pattern: /commercial-api/ },
@@ -174,8 +176,10 @@ const withoutGoogleContractIdentifiers = (text: string) =>
   GOOGLE_CONTRACT_IDENTIFIERS.reduce((remaining, token) => remaining.replace(new RegExp(`\\b${token}\\b`, "g"), ""), text);
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
-// The two worker files that import the shared protocol package.
-const PROTOCOL_IMPORTERS = new Set(["src/credentialContracts.ts", "src/providerExecutionContract.ts"]);
+// The worker files that import the shared protocol package: the credential
+// and provider-execution re-exports, and (R44B11A) the two provider contracts
+// that adapt the shared generation-request authority.
+const PROTOCOL_IMPORTERS = new Set(["src/credentialContracts.ts", "src/googleProviderContract.ts", "src/providerExecutionContract.ts", "src/runwayProviderContract.ts"]);
 
 describe("commercial-worker source boundary", () => {
   it("scans the worker source", () => {
@@ -314,6 +318,8 @@ describe("commercial-worker source boundary", () => {
       for (const specifier of importsOf(read(file))) {
         if (specifier.startsWith("node:") || BUILTINS.has(specifier)) {
           expect(["node:crypto"].includes(specifier) || specifier === "node:buffer").toBe(true);
+          // R44B11A: the only built-in import is node:crypto, in the shared generation-request module.
+          expect({ file: relative(PROTOCOL_ROOT, file).split(sep).join("/"), specifier }).toEqual({ file: SHARED_GENERATION_MODULE, specifier: "node:crypto" });
           continue;
         }
         expect(specifier.startsWith("./")).toBe(true);
@@ -325,15 +331,20 @@ describe("commercial-worker source boundary", () => {
       "src/credentialCrypto.ts",
       "src/credentialCryptoError.ts",
       "src/credentialInput.ts",
+      "src/generationRequestContract.ts",
       "src/index.ts",
       "src/providerExecutionId.ts",
       "src/sealedEnvelope.ts",
     ]);
     for (const file of visited) {
       const body = code(read(file));
+      // R44B11A: the shared generation-request module legitimately names the
+      // locked provider/model identities, so for that one file the brand rule
+      // narrows to the provider SDK packages (and the unlocked Veo name).
+      const shared = relative(PROTOCOL_ROOT, file).split(sep).join("/") === SHARED_GENERATION_MODULE;
       const rules = FORBIDDEN.filter(
         ({ label: name }) => !["SUBMITTING acknowledgement or recovery routes", "SUBMITTING vocabulary", "provider execution identity"].includes(name),
-      );
+      ).map((rule) => (shared && rule.label === "provider SDK or brand" ? { label: rule.label, pattern: /@runwayml|@google\/|\bveo\b/i } : rule));
       expect({ file: relative(PROTOCOL_ROOT, file), violations: rules.filter(({ pattern }) => pattern.test(body)).map(({ label: name }) => name) }).toEqual({
         file: relative(PROTOCOL_ROOT, file),
         violations: [],
@@ -1302,11 +1313,18 @@ describe("real Google provider boundary (R44B10A)", () => {
   });
 
   it("keeps the contract pure: the locked constants, the closed request members, no I/O", () => {
-    expect(importsOf(contract).sort()).toEqual(["./workerControlClient.js", "./workerError.js"]);
-    expect(contract).toMatch(/export const GOOGLE_PROVIDER_ID = "GOOGLE_GENAI";/);
-    expect(contract).toMatch(/export const GOOGLE_MODEL = "gemini-omni-1\.1-flash";/);
-    expect(contract).toMatch(/export const GOOGLE_PROMPT_MAX_CODE_UNITS = 1000;/);
-    expect(contract).toMatch(/export const GOOGLE_RESOLUTION = "720p";/);
+    expect(importsOf(contract).sort()).toEqual(["./workerControlClient.js", "./workerError.js", PROTOCOL_PACKAGE]);
+    // R44B11A: the identities, grammar, cost unit and hash are the shared
+    // authority's, re-exported unchanged; no worker-local copy remains.
+    expect(contract).toMatch(
+      /export \{ GOOGLE_EXPECTED_COST_CAP_UNIT, GOOGLE_MODEL, GOOGLE_PROMPT_MAX_CODE_UNITS, GOOGLE_PROVIDER_ID, GOOGLE_RESOLUTION, type GoogleGenerationRequest \};/,
+    );
+    expect(/"GOOGLE_GENAI"|"gemini-omni|"720p"|"MICRO_USD"|REQUEST_MEMBERS|EDGE_WHITESPACE|isPlainObject|export const GOOGLE_(PROVIDER_ID|MODEL|PROMPT_MAX_CODE_UNITS|RESOLUTION|EXPECTED_COST_CAP_UNIT)\b/.test(contract)).toBe(false);
+    expect(contract.match(/admitGoogleGenerationRequest\(\{/g)).toHaveLength(1);
+    // The locked mapping onto the existing worker codes, and no other code.
+    expect(contract).toMatch(/new WorkerError\(error\.code === "PROVIDER_MODEL_UNSUPPORTED" \? "LEASED_PROVIDER_INCOMPATIBLE" : "LEASED_REQUEST_INVALID"\)/);
+    expect(contract.match(/new WorkerError\(/g)).toHaveLength(1);
+    expect(/createHash|JSON\.stringify|canonicalize/.test(contract)).toBe(false);
     expect(contract).toMatch(/export const GOOGLE_MAX_REFERENCE_IMAGE_BYTES = 10_485_760;/);
     expect(contract).toMatch(/export const GOOGLE_CREATE_TIMEOUT_MS = 60000;/);
     expect(contract).toMatch(/export const GOOGLE_CREATE_MAX_RETRIES = 0;/);
@@ -1314,7 +1332,6 @@ describe("real Google provider boundary (R44B10A)", () => {
     expect(contract).toMatch(/export const GOOGLE_API_VERSION = "v1beta";/);
     expect(contract).toMatch(/export const GOOGLE_RESPONSE_FORMAT = Object\.freeze\(\{ type: "video", delivery: "uri", resolution: GOOGLE_RESOLUTION \} as const\);/);
     expect(contract).toMatch(/export const GOOGLE_INTERACTION_FLAGS = Object\.freeze\(\{ background: true, store: true, stream: false \} as const\);/);
-    expect(contract).toMatch(/const REQUEST_MEMBERS = Object\.freeze\(\["prompt", "referenceImage", "resolution"\]\);/);
     // No normalisation, I/O, environment, credential, storage or provider call.
     expect(/\.trim\(|toLowerCase|toUpperCase|normali[sz]e|replace\(|fetch\s*\(|process\.|node:|getObject|retrieveVerifiedReferenceImage|parseReferenceImage|opener|credential|journal|interactions|@google/i.test(contract)).toBe(false);
   });
@@ -1449,12 +1466,20 @@ describe("real Runway provider boundary (R44B10B)", () => {
   });
 
   it("keeps the contract pure: the locked constants, the closed request members, no I/O", () => {
-    expect(importsOf(contract).sort()).toEqual(["./workerControlClient.js", "./workerError.js"]);
-    expect(contract).toMatch(/export const RUNWAY_PROVIDER_ID = "RUNWAY";/);
-    expect(contract).toMatch(/export const RUNWAY_MODEL = "gen4\.5";/);
-    expect(contract).toMatch(/export const RUNWAY_PROMPT_MAX_CODE_UNITS = 1000;/);
-    expect(contract).toMatch(/export const RUNWAY_DURATION_MIN_SECONDS = 2;/);
-    expect(contract).toMatch(/export const RUNWAY_DURATION_MAX_SECONDS = 5;/);
+    expect(importsOf(contract).sort()).toEqual(["./workerControlClient.js", "./workerError.js", PROTOCOL_PACKAGE]);
+    // R44B11A: the identities, grammar, duration range, cost unit and hash are
+    // the shared authority's, re-exported unchanged; no worker-local copy remains.
+    expect(contract).toMatch(
+      /export \{\s*RUNWAY_DURATION_MAX_SECONDS,\s*RUNWAY_DURATION_MIN_SECONDS,\s*RUNWAY_EXPECTED_COST_CAP_UNIT,\s*RUNWAY_MODEL,\s*RUNWAY_PROMPT_MAX_CODE_UNITS,\s*RUNWAY_PROVIDER_ID,\s*type RunwayGenerationRequest,\s*\};/,
+    );
+    expect(
+      /"RUNWAY"|"gen4\.5"|"PROVIDER_CREDITS"|REQUEST_MEMBERS|EDGE_WHITESPACE|isPlainObject|isInteger|export const RUNWAY_(PROVIDER_ID|MODEL|PROMPT_MAX_CODE_UNITS|DURATION_MIN_SECONDS|DURATION_MAX_SECONDS|EXPECTED_COST_CAP_UNIT)\b/.test(contract),
+    ).toBe(false);
+    expect(contract.match(/admitRunwayGenerationRequest\(\{/g)).toHaveLength(1);
+    // The locked mapping onto the existing worker codes, and no other code.
+    expect(contract).toMatch(/new WorkerError\(error\.code === "PROVIDER_MODEL_UNSUPPORTED" \? "LEASED_PROVIDER_INCOMPATIBLE" : "LEASED_REQUEST_INVALID"\)/);
+    expect(contract.match(/new WorkerError\(/g)).toHaveLength(1);
+    expect(/createHash|JSON\.stringify|canonicalize/.test(contract)).toBe(false);
     expect(contract).toMatch(/export const RUNWAY_RATIO = "1280:720";/);
     expect(contract).toMatch(/export const RUNWAY_OUTPUT_FORMAT = "mp4";/);
     expect(contract).toMatch(/export const RUNWAY_DATA_URI_MAX_CHARS = 5_242_880;/);
@@ -1463,9 +1488,6 @@ describe("real Runway provider boundary (R44B10B)", () => {
     expect(contract).toMatch(/export const RUNWAY_CREATE_MAX_RETRIES = 0;/);
     expect(contract).toMatch(/export const RUNWAY_API_BASE_URL = "https:\/\/api\.dev\.runwayml\.com";/);
     expect(contract).toMatch(/export const RUNWAY_API_VERSION = "2024-11-06";/);
-    expect(contract).toMatch(/export const RUNWAY_EXPECTED_COST_CAP_UNIT = "PROVIDER_CREDITS";/);
-    expect(contract).toMatch(/const REQUEST_MEMBERS = Object\.freeze\(\["durationSeconds", "prompt", "referenceImage"\]\);/);
-    expect(contract).toMatch(/!Number\.isInteger\(durationSeconds\)/);
     // No normalisation, rounding, pricing, I/O, environment, credential, storage or provider call.
     expect(
       /\.trim\(|toLowerCase|toUpperCase|normali[sz]e|replace\(|Math\.(round|floor|ceil|trunc)|parseInt|parseFloat|Number\(|credits\s*\*|\* *12\b|fetch\s*\(|process\.|node:|getObject|retrieveVerifiedReferenceImage|parseReferenceImage|opener|credential|journal|imageToVideo|@runwayml/i.test(
@@ -1627,9 +1649,73 @@ describe("real Runway provider boundary (R44B10B)", () => {
     for (const path of runwayModules) {
       const text = read(join(APP_ROOT, path));
       for (const specifier of importsOf(text)) {
-        expect(specifier === "@runwayml/sdk" ? path === ADAPTER : specifier.startsWith("./") && !specifier.includes("..")).toBe(true);
+        // R44B11A: the contract alone also reaches the shared protocol package.
+        const allowed =
+          specifier === "@runwayml/sdk" ? path === ADAPTER : specifier === PROTOCOL_PACKAGE ? path === CONTRACT : specifier.startsWith("./") && !specifier.includes("..");
+        expect({ path, specifier, allowed }).toEqual({ path, specifier, allowed: true });
       }
     }
+  });
+});
+
+// R44B11A (docs/commercial/COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE.md, "Shared
+// generation-request contract and canonical-hash authority"): one pure shared
+// module owns the identities, grammars, cost units and canonical hash; the
+// worker reaches it only through the two provider contracts' admission.
+describe("shared generation-request authority (R44B11A)", () => {
+  const shared = code(read(join(PROTOCOL_ROOT, SHARED_GENERATION_MODULE)));
+  const SHARED_ENTRY = /admitGoogleGenerationRequest|admitRunwayGenerationRequest|generationRequestSha256\(|canonicalizeGenerationRequest|GenerationContractError/;
+
+  it("imports only node:crypto, depends on no worker type and hashes with createHash once", () => {
+    expect(importsOf(shared)).toEqual(["node:crypto"]);
+    expect(shared).toMatch(/^import \{ createHash \} from "node:crypto";$/m);
+    expect(/WorkerLease|WorkerError|workerControlClient|workerError|process\.|node:fs|fetch\s*\(|@runwayml|@google\//.test(shared)).toBe(false);
+    expect(shared.match(/createHash\(/g)).toHaveLength(1);
+    expect(shared).toMatch(/createHash\("sha256"\)\.update\(canonicalizeGenerationRequest\(value\), "utf8"\)\.digest\("hex"\)/);
+    // No toJSON call and no locale collation.
+    expect(/\.toJSON\(|localeCompare|Intl\./.test(shared)).toBe(false);
+  });
+
+  it("holds the locked identities, members, limits and cost units", () => {
+    for (const pinned of [
+      /export const GOOGLE_PROVIDER_ID = "GOOGLE_GENAI";/,
+      /export const GOOGLE_MODEL = "gemini-omni-1\.1-flash";/,
+      /export const GOOGLE_PROMPT_MAX_CODE_UNITS = 1000;/,
+      /export const GOOGLE_RESOLUTION = "720p";/,
+      /export const GOOGLE_EXPECTED_COST_CAP_UNIT = "MICRO_USD";/,
+      /export const RUNWAY_PROVIDER_ID = "RUNWAY";/,
+      /export const RUNWAY_MODEL = "gen4\.5";/,
+      /export const RUNWAY_PROMPT_MAX_CODE_UNITS = 1000;/,
+      /export const RUNWAY_DURATION_MIN_SECONDS = 2;/,
+      /export const RUNWAY_DURATION_MAX_SECONDS = 5;/,
+      /export const RUNWAY_EXPECTED_COST_CAP_UNIT = "PROVIDER_CREDITS";/,
+      /const GOOGLE_REQUEST_MEMBERS = Object\.freeze\(\["prompt", "referenceImage", "resolution"\]\);/,
+      /const RUNWAY_REQUEST_MEMBERS = Object\.freeze\(\["durationSeconds", "prompt", "referenceImage"\]\);/,
+      /!Number\.isInteger\(durationSeconds\)/,
+    ]) {
+      expect(shared).toMatch(pinned);
+    }
+    // No normalisation of any request member.
+    expect(/\.trim\(|toLowerCase|toUpperCase|normali[sz]e|Math\.(round|floor|ceil|trunc)|parseInt|parseFloat/.test(shared)).toBe(false);
+  });
+
+  it("admits in the locked order: provider/model, cost unit, grammar, then the exact hash", () => {
+    const admit = shared.slice(shared.indexOf("function admit<T>("));
+    const order = [
+      admit.indexOf('fail("PROVIDER_MODEL_UNSUPPORTED")'),
+      admit.indexOf('fail("COST_UNIT_INCOMPATIBLE")'),
+      admit.indexOf("parse(input.generationRequest)"),
+      admit.indexOf("generationRequestSha256(request) !== input.generationRequestSha256"),
+    ];
+    expect(order.every((index) => index > 0)).toBe(true);
+    expect([...order].sort((left, right) => left - right)).toEqual(order);
+  });
+
+  it("is reached only by the two provider contracts, so the hash check stays in the existing pre-grant admission", () => {
+    expect(sources.filter(({ text }) => SHARED_ENTRY.test(code(text))).map(({ path }) => path).sort()).toEqual(["src/googleProviderContract.ts", "src/runwayProviderContract.ts"]);
+    // No worker module keeps its own copy of the shared identities or request grammar.
+    const COPY = /"GOOGLE_GENAI"|"gemini-omni-1\.1-flash"|"RUNWAY"|"gen4\.5"|"720p"|REQUEST_MEMBERS|"durationSeconds"/;
+    expect(sources.filter(({ text }) => COPY.test(code(text))).map(({ path }) => path)).toEqual([]);
   });
 });
 

@@ -593,12 +593,19 @@ describe("shared commercial-worker protocol package", () => {
     expect(ESCAPE.test('import "../../packages/other-package/index.js";')).toBe(true);
   });
 
-  it("contains exactly the pure credential contract, importing only itself", () => {
+  // R44B11A: the shared generation-request authority, the one protocol module
+  // that may import node:crypto (for createHash) and name the locked
+  // provider/model identities.
+  const GENERATION_MODULE = "generationRequestContract.ts";
+  const GENERATION_MODULE_LABEL_EXEMPTIONS: readonly string[] = ["Runway provider", "Google GenAI provider"];
+
+  it("contains exactly the pure credential and generation-request contracts, importing only itself and node:crypto", () => {
     expect(protocolFiles.map((path) => relative(PROTOCOL_SRC, path).split(sep).join("/")).sort()).toEqual([
       "credentialContext.ts",
       "credentialCrypto.ts",
       "credentialCryptoError.ts",
       "credentialInput.ts",
+      GENERATION_MODULE,
       "index.ts",
       // R44B6P: the provider execution ID rule shared by the submitted route and the worker journal.
       "providerExecutionId.ts",
@@ -606,14 +613,18 @@ describe("shared commercial-worker protocol package", () => {
     ]);
     for (const path of protocolFiles) {
       const text = read(path);
+      const isGenerationModule = relative(PROTOCOL_SRC, path) === GENERATION_MODULE;
       for (const specifier of importSpecifiers(text)) {
         if (specifier.startsWith("./")) {
           expect(resolve(dirname(path), specifier).startsWith(PROTOCOL_SRC + sep)).toBe(true);
+        } else if (isGenerationModule && specifier === "node:crypto") {
+          continue;
         } else {
           expect(specifier, path).toBe("node:never-imported");
         }
       }
-      expect(findViolations(text), path).toEqual([]);
+      const violations = findViolations(text).filter((label) => !(isGenerationModule && GENERATION_MODULE_LABEL_EXEMPTIONS.includes(label)));
+      expect(violations, path).toEqual([]);
       expect(/process\.env|node:fs|node:http|node:net|createServer|createDecipheriv|setAuthTag|pg\b|kms/i.test(text.replace(/^\s*\/\/.*$/gm, "")), path).toBe(false);
     }
     const manifest = JSON.parse(read(join(REPO_ROOT, "packages", "commercial-worker-protocol", "package.json"))) as Record<string, unknown>;

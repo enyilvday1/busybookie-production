@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { GoogleGenAI } from "@google/genai";
+import { generationRequestSha256 } from "commercial-worker-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RecoverySleep } from "../src/acceptanceRecoveryPolicy.js";
@@ -44,20 +45,27 @@ const request = (overrides: Record<string, unknown> = {}) => ({ prompt: "A red k
 const openingContext = (provider: string) => ({ accountId: ACCOUNT, providerConnectionId: CONNECTION, provider, credentialVersion: 1, purpose: "provider-credential" as const });
 const googleEnvelope = await sealer.seal(PLAINTEXT, openingContext("GOOGLE_GENAI"));
 
-const lease = (overrides: Partial<WorkerLease> = {}): WorkerLease => ({
-  executionJobId: JOB,
-  executionAttemptId: ATTEMPT,
-  attemptNumber: 1,
-  provider: "GOOGLE_GENAI",
-  model: "gemini-omni-1.1-flash",
-  generationRequest: request(),
-  generationRequestSha256: "c".repeat(64),
-  expectedCostCap: { unit: "MICRO_USD", amount: 2_000_000 },
-  leaseToken: LEASE_TOKEN,
-  fencingCounter: 1,
-  leaseExpiresAt: new Date(Date.now() + 120_000),
-  ...overrides,
-});
+// R44B11A: the issuer's hash is the canonical hash of the exact leased
+// request, so the fixture derives it from whichever request it carries; the
+// default request's value is also pinned independently below.
+const DEFAULT_REQUEST_SHA256 = "34a2c546aa68163530865f1f7b878df24091d37cdeb5206ecb5893017bb4a44f";
+const lease = (overrides: Partial<WorkerLease> = {}): WorkerLease => {
+  const generationRequest = overrides.generationRequest ?? request();
+  return {
+    executionJobId: JOB,
+    executionAttemptId: ATTEMPT,
+    attemptNumber: 1,
+    provider: "GOOGLE_GENAI",
+    model: "gemini-omni-1.1-flash",
+    generationRequest,
+    generationRequestSha256: generationRequestSha256(generationRequest),
+    expectedCostCap: { unit: "MICRO_USD", amount: 2_000_000 },
+    leaseToken: LEASE_TOKEN,
+    fencingCounter: 1,
+    leaseExpiresAt: new Date(Date.now() + 120_000),
+    ...overrides,
+  };
+};
 
 const grant = (): WorkerCredentialGrant => ({
   executionAttemptId: ATTEMPT,
@@ -252,6 +260,29 @@ describe("zero construction and zero dispatch before the permit", () => {
     expect(run.opened.opened).toBe(0);
     expect(run.counts).toEqual({ constructed: 0, dispatched: 0 });
     expect(run.memory.calls).toHaveLength(0);
+    expect(run.latch.isTripped()).toBe(true);
+  });
+
+  // R44B11A: the fixture's valid default lease carries the independently pinned canonical hash.
+  it("leases the default request under its independently pinned canonical hash", () => {
+    expect(lease().generationRequestSha256).toBe(DEFAULT_REQUEST_SHA256);
+  });
+
+  // R44B11A: an otherwise valid lease whose issued hash is wrong stops in
+  // pre-grant admission: no grant, open, retrieval, permit, client or call.
+  it("refuses a wrong but well-formed generation-request hash before the credential grant", async () => {
+    const wrong = "d".repeat(64);
+    expect(wrong).not.toBe(DEFAULT_REQUEST_SHA256);
+    const run = setup({ overrides: { lease: async () => lease({ generationRequestSha256: wrong }) } });
+    expect((await rejection(runGoogleProviderAttemptOnce(config, run.dependencies))).code).toBe("LEASED_REQUEST_INVALID");
+    // Only the lease: zero grant requests, no pre-provider permit (SUBMITTING), no heartbeat, no report.
+    expect(run.calls).toEqual(["lease"]);
+    expect(run.proofs).toHaveLength(0);
+    expect(run.opened.opened).toBe(0);
+    // No reference-image retrieval.
+    expect(run.memory.calls).toHaveLength(0);
+    // No provider preparation (client construction) and no provider call.
+    expect(run.counts).toEqual({ constructed: 0, dispatched: 0 });
     expect(run.latch.isTripped()).toBe(true);
   });
 

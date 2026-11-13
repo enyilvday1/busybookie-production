@@ -134,17 +134,47 @@ describe("closed generation request parser", () => {
   });
 });
 
+// The canonical hash of valid(), pinned independently of the code under test
+// (sha256sum over its hand-written RFC 8785 text).
+const VALID_SHA256 = "84e74e83e10ba48dfd9a8fc5d1fb89fa77a69cfa3582f03959f9e9d98e1737f3";
+
 describe("lease admission (before any grant)", () => {
   const lease = (overrides: Record<string, unknown> = {}) => ({
     provider: "RUNWAY",
     model: "gen4.5",
     generationRequest: valid(),
+    generationRequestSha256: VALID_SHA256,
     expectedCostCap: { unit: "PROVIDER_CREDITS" as const, amount: 60 },
     ...overrides,
   });
 
-  it("admits the one provider, the one model, the closed request and the issuer's cost unit", () => {
+  it("admits the one provider, the one model, the closed request, the issuer's cost unit and the exact canonical hash", () => {
     expect(admitRunwayLease(lease())).toEqual(valid());
+  });
+
+  // R44B11A: every shared refusal maps onto the existing worker codes.
+  it.each([
+    ["an incorrect lowercase hash", { generationRequestSha256: "0".repeat(64) }],
+    ["the uppercase form of the right hash", { generationRequestSha256: VALID_SHA256.toUpperCase() }],
+    ["a request mutated after hashing", { generationRequest: valid({ durationSeconds: 4 }) }],
+    ["a reference mutated after hashing", { generationRequest: valid({ referenceImage: { ...REFERENCE, key: "inputs/other.png" } }) }],
+    ["a lone surrogate inside the reference", { generationRequest: valid({ referenceImage: { ...REFERENCE, key: `inputs/${String.fromCharCode(0xd800)}.png` } }) }],
+  ])("refuses %s as LEASED_REQUEST_INVALID", (_label, overrides) => {
+    expect(codeOf(() => admitRunwayLease(lease(overrides)))).toBe("LEASED_REQUEST_INVALID");
+  });
+
+  it("keeps the incompatibility, grammar and cost-unit codes even when the hash is also wrong", () => {
+    const wrong = { generationRequestSha256: "0".repeat(64) };
+    expect(codeOf(() => admitRunwayLease(lease({ ...wrong, provider: "GOOGLE_GENAI" })))).toBe("LEASED_PROVIDER_INCOMPATIBLE");
+    expect(codeOf(() => admitRunwayLease(lease({ ...wrong, model: "gen4_turbo" })))).toBe("LEASED_PROVIDER_INCOMPATIBLE");
+    expect(codeOf(() => admitRunwayLease(lease({ ...wrong, generationRequest: { prompt: "x" } })))).toBe("LEASED_REQUEST_INVALID");
+    expect(codeOf(() => admitRunwayLease(lease({ ...wrong, expectedCostCap: { unit: "MICRO_USD", amount: 2_000_000 } })))).toBe("LEASED_REQUEST_INVALID");
+  });
+
+  it("does not parse the reference grammar: a malformed reference with its exact hash is admitted", () => {
+    // sha256sum of {"durationSeconds":5,"prompt":"A red kite over a quiet harbour.","referenceImage":{"key":"../escape"}}
+    const malformed = valid({ referenceImage: { key: "../escape" } });
+    expect(admitRunwayLease(lease({ generationRequest: malformed, generationRequestSha256: "79c757495acda836a5324ef3ebb99e4c4cc179077bd5029aabc2a2344d84640a" }))).toEqual(malformed);
   });
 
   it.each([

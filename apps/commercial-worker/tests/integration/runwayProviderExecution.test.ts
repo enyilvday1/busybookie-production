@@ -73,6 +73,9 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0
 const TASK_ID = "5c0f1e7a-8d3b-4f6a-9e21-7b4d2c9a1f08";
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const generationRequest = () => ({ prompt: "A red kite over a quiet harbour.", referenceImage: { key: KEY, sha256: sha(PNG), byteCount: PNG.length, contentType: "image/png" }, durationSeconds: 5 });
+// R44B11A: the canonical hash of exactly the seeded request (RFC 8785 text,
+// hashed with sha256sum outside the code under test), as an issuer would store it.
+const SEEDED_REQUEST_SHA256 = "a2ae3e031aa32cabce5c96e671f261ba06ac78680982f29351eeb8ce7c794f23";
 
 const q = <T extends object>(sql: string, params: unknown[]) => clients.migrator.query<T>(sql, params).then((result) => result.rows[0]!);
 
@@ -102,9 +105,9 @@ async function work(): Promise<Work> {
        (account_id, production_id, entitlement_grant_id, billing_mode, provider, model, provider_connection_id,
         provider_credential_version_id, generation_request, generation_request_sha256, expected_cost_cap_unit,
         expected_cost_cap_amount, expires_at, created_by_user_id)
-     VALUES ($1, $2, $3, 'USER_BYO', $4, $5, $6, $7, $8::jsonb, repeat('c', 64),
+     VALUES ($1, $2, $3, 'USER_BYO', $4, $5, $6, $7, $8::jsonb, $10,
              'PROVIDER_CREDITS', 60, now() + interval '15 minutes', $9) RETURNING id`,
-    [owner.accountId, production.id, owner.grantId, PROVIDER, MODEL, connection.id, version.id, JSON.stringify(generationRequest()), owner.userId],
+    [owner.accountId, production.id, owner.grantId, PROVIDER, MODEL, connection.id, version.id, JSON.stringify(generationRequest()), owner.userId, SEEDED_REQUEST_SHA256],
   );
   await clients.migrator.query("UPDATE generation_authorizations SET status = 'CLAIMED', claimed_at = now() WHERE id = $1", [authorization.id]);
   const job = await q<{ id: string }>(

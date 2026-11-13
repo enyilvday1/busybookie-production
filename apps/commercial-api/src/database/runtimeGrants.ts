@@ -105,6 +105,11 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
     ],
   },
   audit_events: { select: true, insert: true, updateColumns: [] },
+  // Append-only canonical CLAIMED usage: read and insert only. The insert
+  // guard admits only the exact CLAIMED authorization and owns recorded_at;
+  // the append-only triggers also reject UPDATE, DELETE and TRUNCATE for the
+  // owner.
+  generation_usage_ledger: { select: true, insert: true, updateColumns: [] },
   // Read-only: lets the API verify the applied schema version.
   schema_migrations: { select: true, insert: false, updateColumns: [] },
 });

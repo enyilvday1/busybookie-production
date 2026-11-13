@@ -125,7 +125,7 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001 to 0007 in order, contiguously, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0008 in order, contiguously, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
@@ -136,8 +136,9 @@ describe("committed migrations", () => {
       "0005_submission_authority_provenance.sql",
       "0006_submission_lease_epoch_provenance.sql",
       "0007_input_failure_provenance.sql",
+      "0008_generation_usage_ledger.sql",
     ]);
-    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
@@ -277,6 +278,7 @@ describe("committed migrations", () => {
       "execution_attempts",
       "execution_jobs",
       "generation_authorizations",
+      "generation_usage_ledger",
       "productions",
       "provider_connections",
       "provider_credential_versions",

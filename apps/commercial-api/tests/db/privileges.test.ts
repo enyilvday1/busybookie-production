@@ -115,7 +115,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 7 }]);
+      expect(version.rows).toEqual([{ version: 8 }]);
     });
   });
 
@@ -203,6 +203,29 @@ describe("runtime role authority", () => {
       });
     },
   );
+
+  it("holds only SELECT and INSERT on the generation usage ledger, with no updatable column (migration 0008)", async () => {
+    expect(RUNTIME_TABLE_PRIVILEGES.generation_usage_ledger).toEqual({ select: true, insert: true, updateColumns: [] });
+    const privileges = await clients.runtime.query(
+      `SELECT has_table_privilege(current_user, 'public.generation_usage_ledger', 'SELECT') AS select,
+              has_table_privilege(current_user, 'public.generation_usage_ledger', 'INSERT') AS insert,
+              has_table_privilege(current_user, 'public.generation_usage_ledger', 'UPDATE') AS table_update,
+              has_table_privilege(current_user, 'public.generation_usage_ledger', 'DELETE') AS delete,
+              has_table_privilege(current_user, 'public.generation_usage_ledger', 'TRUNCATE') AS truncate,
+              has_table_privilege(current_user, 'public.generation_usage_ledger', 'REFERENCES') AS references,
+              has_table_privilege(current_user, 'public.generation_usage_ledger', 'TRIGGER') AS trigger,
+              has_any_column_privilege(current_user, 'public.generation_usage_ledger', 'UPDATE') AS any_column_update`,
+    );
+    expect(privileges.rows).toEqual([
+      { select: true, insert: true, table_update: false, delete: false, truncate: false, references: false, trigger: false, any_column_update: false },
+    ]);
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const denied = { code: INSUFFICIENT_PRIVILEGE };
+      await expectSqlError(clients.runtime, "UPDATE generation_usage_ledger SET recorded_at = now()", [], denied);
+      await expectSqlError(clients.runtime, "DELETE FROM generation_usage_ledger", [], denied);
+      await expectSqlError(clients.runtime, "TRUNCATE generation_usage_ledger", [], denied);
+    });
+  });
 
   it("can insert and read audit events but never update, delete or truncate them", async () => {
     await inRolledBackTransaction(clients.runtime, async () => {

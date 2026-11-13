@@ -10178,12 +10178,68 @@ direct repository evidence, documented before the modification.
 
 `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
 
-**Current status (R44B11B contract lock).**
+**Implementation result (R44B11B docs sync).**
+
+R44B11B was implemented and validated after the contract lock without
+reopening the locked generation-authority semantics.
+
+- Contract-lock commit:
+  `149890216dae24119e7b7fd0bbf4e123b67d23cb`.
+- Implementation commit:
+  `374f36be992bd278a267db09c37046fbd16b6912`
+  (`feat(commercial): add generation usage ledger`).
+- Migration:
+  `apps/commercial-api/migrations/0008_generation_usage_ledger.sql`.
+- Migration SHA-256:
+  `087c2d4512180bfd8607663120e90c8928ab48fefe8ca4ca1c4063ef5d9cfee5`.
+- Exact implementation commit scope: nine files.
+- `generation_usage_ledger` has exactly the four locked normalized columns:
+  `generation_authorization_id`, `account_id`, `production_id` and
+  database-authored `recorded_at`.
+- `generation_authorization_id` remains the canonical authorised-usage
+  identity and PRIMARY KEY. No surrogate usage identity or execution-layer
+  identity was introduced.
+- The composite authorization FK remains the identity/account/production
+  scope authority with `ON DELETE RESTRICT`.
+- The INSERT guard admits only the exact matching authorization in `CLAIMED`
+  with non-NULL `claimed_at` and overwrites caller-supplied `recorded_at`
+  with `clock_timestamp()`.
+- Runtime authority is SELECT plus INSERT only, with no UPDATE columns and
+  no DELETE, TRUNCATE, REFERENCES or TRIGGER privilege.
+- Database append-only guards reject owner/migrator UPDATE and DELETE, and
+  the statement-level `BEFORE TRUNCATE` guard rejects owner/migrator
+  TRUNCATE.
+- Migration 0008 performs no backfill and infers no historical usage.
+- R44B11B does not implement issuance or the future claim service/transaction.
+  A later claim slice remains responsible for atomically performing
+  `ISSUED -> CLAIMED`, inserting exactly one canonical CLAIMED usage row,
+  creating the execution job and first attempt, and performing required
+  audit work.
+- Worker retry, recovery, provider submission and provider completion create
+  no second authorised-usage identity.
+- Validation passed:
+  - TypeScript typecheck: PASS;
+  - targeted PostgreSQL suites: 118/118;
+  - full commercial-api PostgreSQL suite: 650/650 across 21 files;
+  - full commercial-api non-database suite: 859/859 across 21 files;
+  - staged implementation diff check: PASS.
+- PostgreSQL validation used the dedicated PostgreSQL 16 test database at
+  `127.0.0.1:5433`; no production database was used.
+- The unrelated
+  `docs/commercial/BUSYBOOKIE_FREE_BYO_HOSTED_TRIAL_BACKLOG.md`
+  remained untracked and unchanged.
+- No worker, shared worker-protocol or provider-adapter production change was
+  introduced.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
+
+**Current status (R44B11B docs sync).**
 
 - **R44B11A:** fully closed; unchanged.
 - **R44B11B discovery:** PASS.
-- **R44B11B contract:** this revision.
-- **R44B11B implementation:** not started.
+- **R44B11B contract lock:** `149890216dae24119e7b7fd0bbf4e123b67d23cb`.
+- **R44B11B implementation:** PASS; validated in
+  `374f36be992bd278a267db09c37046fbd16b6912`.
+- **R44B11B:** fully closed by this docs-sync revision.
 - **R44B11P1 implementation:** started, not complete.
 - **R44B11 parent implementation:** started, not complete.
 - **Remaining R44B11P1 slices after R44B11B:** each remains a separate future
@@ -10802,7 +10858,9 @@ R44B11A_PROCESS_RUNNER_REQUIRED=NO
 R44B11A_LIVE_PROVIDER_ENABLEMENT=NO
 R44B11B_DISCOVERY=PASS
 R44B11B_CONTRACT_LOCKED=YES
-R44B11B_IMPLEMENTATION_STARTED=NO
+R44B11B_IMPLEMENTATION_STARTED=YES
+R44B11B_IMPLEMENTATION_VALIDATED=YES
+R44B11B_IMPLEMENTATION_COMMIT=374f36be992bd278a267db09c37046fbd16b6912
 R44B11B_SCOPE=GENERATION_USAGE_LEDGER_PERSISTENCE
 R44B11B_DATABASE_MIGRATION_REQUIRED=YES
 R44B11B_MIGRATION=0008_generation_usage_ledger.sql

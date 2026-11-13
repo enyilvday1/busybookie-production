@@ -9466,7 +9466,7 @@ still justified by the production-storage and live-enablement gates. Exact revis
 suffixes and file scope are locked only after the next implementation
 discovery.
 
-**Status (R44B11P1 contract lock).**
+**Historical status (R44B11P1 contract lock).**
 
 - **R44B11 discovery:** PASS.
 - **R44B11 conflict screen:** PASS.
@@ -9478,7 +9478,8 @@ discovery.
 
 ### Shared generation-request contract and canonical-hash authority (revision R44B11A)
 
-**Locked decision (R44B11A; contract lock only, not implemented).** R44B11A
+**Historical locked decision (R44B11A contract lock; not implemented at lock
+time).** R44B11A
 is the first implementation slice following the R44B11P1 prerequisite lock.
 It implements only the first item of the R44B11P1 decomposition: the shared
 issuer/worker generation-request contract and canonical request hashing. It
@@ -9817,12 +9818,96 @@ modification.
 
 `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
 
-**Status (R44B11A contract lock).**
+**Historical status (R44B11A contract lock).**
 
 - **R44B11A discovery:** PASS.
 - **R44B11A contract:** this revision.
 - **R44B11A implementation:** not started.
 - **R44B11 parent implementation:** not started.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
+**Implementation result (R44B11A docs sync).** R44B11A was implemented,
+validated and published in `c5a21f578ecc573e04a2438c876c3eb155f5cf84`. The
+implementation changed exactly the 13 files this lock authorised: the
+expected scope plus the three documented test-only adjustments.
+
+What the implementation does:
+
+- **Shared authority.** It lives in
+  `packages/commercial-worker-protocol/src/generationRequestContract.ts`.
+  The Google and Runway provider/model identities moved there rather than
+  being copied, along with:
+  - the closed Google and Runway generation-request grammars;
+  - the prompt limits;
+  - the Google resolution and the Runway duration authority;
+  - the expected-cost units.
+- **Hashing.** RFC 8785 canonicalization is dependency-free. The hash is the
+  lowercase SHA-256 of the canonical UTF-8 bytes, computed with `node:crypto`.
+- **Pre-grant check.** The worker recomputes the hash and compares it exactly
+  inside the existing pre-grant lease admission. A mismatch prevents the
+  credential grant and all provider execution.
+- **Worker contracts.** The Google and Runway worker contracts are thin
+  adapters. They re-export the shared authority, keep only the
+  adapter-owned constants, and map shared failures to the existing worker
+  codes: `LEASED_PROVIDER_INCOMPATIBLE` for an unsupported provider or model,
+  and `LEASED_REQUEST_INVALID` for everything else.
+- **Reference image.** `referenceImage` remains opaque at this layer. Its
+  inner validation remains R44B10P1's, after the grant, so a malformed inner
+  reference remains an R44B10P2 input failure.
+- **Not included:** no database migration, commercial-api runtime
+  implementation, usage ledger, issuance or claim implementation, provider
+  verification, customer route, process runner or live-provider enablement.
+
+The final review added one parser-hardening correction. The root request
+structure is now checked through its own property descriptors before any
+value is read:
+
+- accessors, symbol keys and hidden (non-enumerable) members fail closed;
+- getters are never invoked;
+- unsupported non-JSON structure cannot be projected away before canonical
+  hashing.
+
+Validation of the final published implementation:
+
+| Check | Result |
+|---|---|
+| Protocol, commercial-worker and commercial-api typechecks | PASS |
+| Shared generation-request contract tests | 121/121 |
+| Google provider contract | 46/46 |
+| Runway provider contract | 62/62 |
+| Google attempt execution | 39/39 |
+| Runway attempt execution | 52/52 |
+| Worker boundary | 135/135 |
+| commercial-api boundary | 189/189 |
+| Full commercial-worker unit suite | 1302/1302 across 26 files |
+| Full commercial-api non-DB suite | 858/858 across 21 files |
+| commercial-worker PostgreSQL integration | 67/67 across 6 files |
+| `git diff --check` | clean |
+
+The commercial-api PostgreSQL suite passed 628/628 across 20 files before the
+final parser-hardening correction. It was not rerun afterwards: that
+correction changed only the shared generation-request module and its worker
+test file, with no commercial-api runtime, schema, migration or database
+behaviour change. No real provider network call was made during automated
+validation.
+
+**Current status (R44B11A docs sync).**
+
+- **R44B11A discovery:** PASS.
+- **R44B11A contract lock:** published in
+  `4ccefc9927786869fe80a5cc231a3e1365ab8108`.
+- **R44B11A implementation:** PASS; validated and published in
+  `c5a21f578ecc573e04a2438c876c3eb155f5cf84`.
+- **R44B11A:** fully closed.
+- **R44B11P1 implementation:** started, not complete.
+- **R44B11 parent implementation:** started, not complete.
+- **Remaining R44B11P1 slices:** each remains a separate future slice:
+  - the usage ledger;
+  - USER_BYO issuance, claim and expiry;
+  - ProviderConnection disconnect/rotation convergence and credential
+    cleanup;
+  - provider verification;
+  - any customer route that is still justified.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
 ---
@@ -10314,9 +10399,9 @@ R44B11_DISCOVERY=PASS
 R44B11_CONFLICT_SCREEN=PASS
 R44B11_PREREQUISITE_REQUIRED=YES
 R44B11_CONTRACT_LOCKED=NO
-R44B11_IMPLEMENTATION_STARTED=NO
+R44B11_IMPLEMENTATION_STARTED=YES
 R44B11P1_CONTRACT_LOCKED=YES
-R44B11P1_IMPLEMENTATION_STARTED=NO
+R44B11P1_IMPLEMENTATION_STARTED=YES
 R44B11P1_SCOPE=USER_BYO_GENERATION_AUTHORITY_AND_USAGE_LEDGER
 R44B11P1_PLATFORM_HOSTED_INCLUDED=NO
 R44B11P1_HOSTED_TRIAL_INCLUDED=NO
@@ -10392,7 +10477,10 @@ R44B11P1_CUSTOMER_GENERATION_ROUTE_ENABLED=NO
 R44B11P1_LIVE_PROVIDER_ENABLEMENT=NO
 R44B11A_DISCOVERY=PASS
 R44B11A_CONTRACT_LOCKED=YES
-R44B11A_IMPLEMENTATION_STARTED=NO
+R44B11A_IMPLEMENTATION_STARTED=YES
+R44B11A_IMPLEMENTATION_VALIDATED=YES
+R44B11A_IMPLEMENTATION_PUBLISHED=YES
+R44B11A_IMPLEMENTATION_COMMIT=c5a21f578ecc573e04a2438c876c3eb155f5cf84
 R44B11A_SCOPE=SHARED_GENERATION_REQUEST_AND_CANONICAL_HASH_AUTHORITY
 R44B11A_SHARED_PACKAGE=COMMERCIAL_WORKER_PROTOCOL
 R44B11A_SHARED_MODULE=packages/commercial-worker-protocol/src/generationRequestContract.ts

@@ -194,9 +194,27 @@ describe("boundary scanner", () => {
   );
 });
 
+// R44B11C: issuance dispatches to the shared R44B11A request contract, whose
+// exported provider/model identities and parsers carry the provider's name.
+// Only this one policy module may name them, and only that one label is
+// exempt. Its only external import is the shared protocol package; local
+// relative imports remain subject to the ordinary commercial-api src boundary.
+const GENERATION_POLICY_MODULE = "src/generationAuthorizations/generationAuthorityPolicy.ts";
+const GENERATION_POLICY_LABEL_EXEMPTIONS: readonly string[] = ["Runway provider"];
+
 describe("commercial-api source boundary", () => {
-  it.each(scannedFiles.map((path) => [label(path), path] as const))("%s references no forbidden surface", (_name, path) => {
-    expect(findViolations(read(path))).toEqual([]);
+  it.each(scannedFiles.map((path) => [label(path), path] as const))("%s references no forbidden surface", (name, path) => {
+    const exempt = name === GENERATION_POLICY_MODULE ? GENERATION_POLICY_LABEL_EXEMPTIONS : [];
+    expect(findViolations(read(path)).filter((violation) => !exempt.includes(violation))).toEqual([]);
+  });
+
+  it("confines provider/model names to the generation policy module, whose only external import is the shared protocol", () => {
+    const named = sourceFiles.filter((path) => findViolations(read(path)).includes("Runway provider")).map(label);
+    expect(named).toEqual([GENERATION_POLICY_MODULE]);
+    const policy = read(join(APP_ROOT, GENERATION_POLICY_MODULE));
+    expect(importSpecifiers(policy).filter((specifier) => !specifier.startsWith("./"))).toEqual(["commercial-worker-protocol"]);
+    // Every other forbidden surface stays forbidden in that module.
+    expect(findViolations(policy).filter((violation) => !GENERATION_POLICY_LABEL_EXEMPTIONS.includes(violation))).toEqual([]);
   });
 
   it.each(sourceFiles.map((path) => [label(path), path] as const))(

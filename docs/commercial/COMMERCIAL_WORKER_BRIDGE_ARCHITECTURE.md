@@ -9476,6 +9476,355 @@ discovery.
 - **R44B11 parent implementation:** not started.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
+### Shared generation-request contract and canonical-hash authority (revision R44B11A)
+
+**Locked decision (R44B11A; contract lock only, not implemented).** R44B11A
+is the first implementation slice following the R44B11P1 prerequisite lock.
+It implements only the first item of the R44B11P1 decomposition: the shared
+issuer/worker generation-request contract and canonical request hashing. It
+resolves the package/module placement that R44B11P1 deliberately deferred to
+this sub-slice. The usage ledger, issuance, claim, disconnect convergence,
+provider verification and any customer route remain later slices.
+
+**Discovery.** Discovery ran against
+`cbdc7691d8b55cb8d173a05957ba35cb43b261dc`. The R44B11A shared-contract
+discovery report SHA-256 is
+`8835e6bdd5b7ac676ca2122195cc1afb009c22e64466a5f0b7e63d1b0d19c840`.
+
+It found no suitable RFC 8785 generation-request canonicalization or hash
+authority in `packages/commercial-worker-protocol`. The shared protocol
+package currently has no runtime dependencies.
+
+The repository does contain an editorial canonicalizer,
+`src/editorial/canonicalizeEditorialPlan.ts`, with an `editorialSha256()`
+helper built on `node:crypto`. R44B11A does not reuse it, for two reasons:
+
+- it is local to the engine's editorial code, not part of the shared
+  commercial protocol authority;
+- its canonical-number policy rejects negative zero, while RFC 8785 requires
+  negative zero to canonicalize as `0`, so it is not byte-compatible with
+  the R44B11A JCS contract as written.
+
+The editorial implementation is not changed in this slice.
+
+**Placement.** The single shared authority lives in the existing private
+package `packages/commercial-worker-protocol`. No other shared package is
+introduced, so the worker boundary rule of exactly one shared package stays
+true. The implementation adds
+`packages/commercial-worker-protocol/src/generationRequestContract.ts` and
+re-exports it from `src/index.ts`. The package manifest is unchanged: still
+private, with no `dependencies`.
+
+**Shared authority scope.** The shared module owns:
+
+- the `GOOGLE_GENAI` / `gemini-omni-1.1-flash` identity;
+- the `RUNWAY` / `gen4.5` identity;
+- provider/model compatibility;
+- the closed Google generation-request grammar
+  (`{prompt, referenceImage, resolution}`);
+- the closed Runway generation-request grammar
+  (`{prompt, referenceImage, durationSeconds}`);
+- the prompt limits that form part of request validity (non-empty, at most
+  1000 UTF-16 code units, no edge whitespace, never trimmed);
+- the Google resolution request authority (`720p` only);
+- the Runway duration request authority (integer, 2 to 5 inclusive);
+- expected-cost-cap unit compatibility (`MICRO_USD` for Google,
+  `PROVIDER_CREDITS` for Runway);
+- RFC 8785 JSON Canonicalization Scheme serialisation of the generation
+  request;
+- UTF-8 encoding of the canonical text;
+- lowercase hexadecimal SHA-256 of exactly those bytes;
+- worker-side recomputation of `generation_request_sha256` and the exact
+  equality check against the lease.
+
+These values and rules move; they are not copied. After R44B11A no worker
+module keeps a second literal or validator for any of them.
+
+**Adapter-owned values that do not move.** The following stay in the worker's
+Google/Runway contract and adapter modules. They are not part of shared
+generation authority:
+
+- provider API origins;
+- API versions;
+- SDK construction;
+- create timeout and retry settings;
+- Google response-format and interaction flags;
+- Runway output ratio and output format;
+- reference-image byte ceilings;
+- Runway data-URI limits;
+- provider response and error classification;
+- provider execution ID handling.
+
+The provider execution ID rule already in the protocol package (R44B6P) is
+unaffected.
+
+**Purity.** The shared module stays pure in the sense the protocol package
+already enforces. It has no provider SDK, network, database, environment,
+filesystem, credential or KMS implementation, and no process or runtime
+composition. Its only non-relative import is the Node built-in
+`node:crypto`, used solely for `createHash("sha256")`. That is a built-in,
+not an npm dependency, and it reads no key, environment, file or network. A
+hand-written SHA-256 is not allowed.
+
+**Independence from worker types.** The shared contract does not import or
+depend on `WorkerLease` or `WorkerError`. It accepts plain values (provider,
+model, generation request, expected-cost unit and expected hash) and reports
+failure through its own closed classification. That classification
+distinguishes:
+
+- provider/model unsupported;
+- request invalid;
+- cost unit incompatible;
+- value not canonicalizable;
+- hash mismatch.
+
+It never yields provider, credential or environment text.
+
+The worker-local `googleProviderContract.ts` and `runwayProviderContract.ts`
+remain thin adapters. They call the shared authority, map its classification
+to the existing `WorkerError` semantics, and keep the adapter-only constants
+listed above. Their exported names and the types consumed by the composers
+and adapters do not change, so no other worker module changes.
+
+**Worker-facing error semantics.** The outward worker failure taxonomy is
+unchanged:
+
+| Shared classification | Worker error |
+|---|---|
+| Unsupported provider or model | `LEASED_PROVIDER_INCOMPATIBLE` |
+| Closed-grammar failure (including prompt, resolution and duration) | `LEASED_REQUEST_INVALID` |
+| Expected-cost-unit mismatch | `LEASED_REQUEST_INVALID` |
+| Value outside the JSON/JCS domain | `LEASED_REQUEST_INVALID` |
+| Generation-request hash mismatch | `LEASED_REQUEST_INVALID` |
+
+No new outward worker failure code is added for R44B11A.
+
+**Admission order and the pre-grant seam.** The hash check runs inside the
+existing authoritative lease admission. `credentialOpeningRun` already
+invokes the `admitLease` hook on the lease before
+`requestCredentialGrant`, and the Google and Runway composers already pass
+`admitGoogleLease` / `admitRunwayLease` through that hook. R44B11A extends
+those two admission functions only. Within admission the order is:
+
+1. provider/model compatibility;
+2. expected-cost-cap unit;
+3. closed request grammar;
+4. canonical hash recomputed from the validated closed request;
+5. exact string equality with `lease.generationRequestSha256`.
+
+The wire client already validates `lease.generationRequestSha256` as 64
+lowercase hexadecimal characters, so step 5 has no case folding.
+
+There is no second credential-grant path, no process-local gate and no
+reordering of orchestration. `credentialOpeningRun.ts`,
+`googleAttemptExecution.ts`, `runwayAttemptExecution.ts`,
+`googleProviderAdapter.ts` and `runwayProviderAdapter.ts` are expected to stay
+byte-identical. `CREDENTIAL_RETENTION_OBLIGATION_OPENS_AT_GRANT=YES` is
+neither moved nor weakened. A mismatch is decided before any grant, so it
+opens no retention obligation.
+
+**Hash mismatch.** A mismatch is an issuer/control-plane invariant fault, not
+a provider rejection or an input failure. It is handled exactly as every
+existing `LEASED_REQUEST_INVALID` admission failure. After a mismatch there
+is:
+
+- no credential grant;
+- no credential opening;
+- no reference-image retrieval;
+- no pre-provider permit;
+- no provider SDK construction;
+- no provider call.
+
+**Reference-image boundary.** `referenceImage` remains a present but opaque,
+untrusted member at generation-contract validation. Its exact JSON value
+takes part, unchanged, in canonical generation-request hashing. R44B11A does
+not parse its object-storage grammar, and does not trim, normalise, rewrite or
+substitute it.
+
+R44B10P1 remains the authority for the inner validation of the reference
+image, after the credential grant. A malformed inner object therefore remains
+an R44B10P2 input failure; R44B11A does not move that validation earlier.
+
+Being inside the JSON/JCS domain is not inner grammar. A request containing a
+value the issuer could not have canonicalized at all is an issuer invariant
+fault (`LEASED_REQUEST_INVALID`), wherever in the request that value sits.
+An example is a lone surrogate, including one inside `referenceImage`.
+
+**Canonicalization.** The JCS implementation is dependency-free and written in
+the shared module. No new npm runtime dependency is authorised by this lock.
+A later conflict screen would have to prove that an external dependency is
+necessary before one could be added.
+
+Serialisation follows RFC 8785:
+
+- object members are ordered by UTF-16 code units, recursively;
+- array order is preserved;
+- strings use the RFC 8785 escaping and are otherwise emitted literally
+  (non-ASCII is not escaped);
+- finite numbers use the ECMAScript number-to-string form;
+- `-0` serialises as `0`.
+
+The output is encoded as UTF-8, and the hash is the lowercase hexadecimal
+SHA-256 of those bytes.
+
+Canonicalization fails closed for every value outside the JSON/JCS domain:
+
+- non-finite numbers;
+- lone or unpaired surrogates, in strings or member names;
+- `undefined`, functions, symbols and bigints;
+- non-plain objects and sparse arrays.
+
+It never invokes `toJSON`. It never hashes raw HTTP bytes, property insertion
+order, PostgreSQL `jsonb::text`, provider-SDK serialisation or a normalised
+provider request.
+
+**Required tests.** Shared-contract tests
+(`apps/commercial-worker/tests/generationRequestContract.test.ts`) cover at
+least:
+
+- object-key order independence;
+- recursive ordering of nested objects;
+- array order preservation;
+- UTF-8 and non-ASCII strings;
+- escaping;
+- finite number serialisation;
+- negative zero canonicalizing as zero;
+- rejection of non-finite numbers;
+- rejection of lone and unpaired surrogates;
+- rejection of unsupported non-JSON JavaScript values;
+- a stable lowercase SHA-256 pinned to a literal;
+- exact-value participation of `referenceImage`;
+- a different request producing a different hash.
+
+Those tests must also include conformance vectors:
+
+- At least one test is pinned directly to an official RFC 8785 published
+  canonicalization vector. At minimum this is the RFC 8785 object-property
+  sorting example. Its non-ASCII property names (including a non-BMP
+  surrogate pair) prove that members are ordered by raw UTF-16 code units,
+  not by UTF-8 byte order, locale collation, escaped-property text or
+  insertion order.
+- Number tests are RFC-compatible and pin at least negative zero as `0`,
+  plus representative exponent and number serialisation forms (for example
+  the `1e+21` and `1e-7` boundaries, and the trailing-zero and
+  shortest-round-trip forms in the RFC 8785 number samples).
+- Every expected canonical string and hash used as a conformance vector is an
+  independently pinned literal, or comes from the published RFC 8785
+  expectation. No expected value is derived by calling the production
+  canonicalizer itself.
+- No new dependency is authorised for these tests.
+
+Worker provider-contract unit tests
+(`googleProviderContract.test.ts`, `runwayProviderContract.test.ts`) prove
+the shared classification and its `WorkerError` mapping, for both Google and
+Runway:
+
+- an exact valid lease hash admits;
+- a wrong hash is refused by admission;
+- mutating the request after hashing fails;
+- a provider/model mismatch remains `LEASED_PROVIDER_INCOMPATIBLE`;
+- a malformed request remains `LEASED_REQUEST_INVALID`;
+- an expected-cost-unit mismatch remains `LEASED_REQUEST_INVALID`;
+- this layer still does not validate the inner grammar of `referenceImage`.
+
+**Behavioural proof that a mismatch stops before the grant.** Each composer
+test file carries one R44B11A behavioural test:
+`apps/commercial-worker/tests/googleAttemptExecution.test.ts` for Google and
+`apps/commercial-worker/tests/runwayAttemptExecution.test.ts` for Runway.
+Each test uses a lease whose provider/model, expected-cost unit and
+generation request are all valid, but whose `generationRequestSha256` is a
+deliberately incorrect 64-character lowercase hexadecimal value. It proves
+that:
+
+- the attempt fails with `LEASED_REQUEST_INVALID`;
+- `requestCredentialGrant` is called zero times;
+- reference-image retrieval is not reached;
+- the pre-provider permit is not reached;
+- provider preparation and execution are not reached;
+- no provider call occurs.
+
+These tests use the existing test seams, counters and mocks. They require no
+production orchestration change and no additional production file.
+
+**Implementation file scope.** The expected scope is narrow.
+
+- New:
+  - `packages/commercial-worker-protocol/src/generationRequestContract.ts`
+  - `apps/commercial-worker/tests/generationRequestContract.test.ts`
+- Modified:
+  - `packages/commercial-worker-protocol/src/index.ts`
+  - `apps/commercial-worker/src/googleProviderContract.ts`
+  - `apps/commercial-worker/src/runwayProviderContract.ts`
+  - `apps/commercial-worker/tests/googleProviderContract.test.ts`
+  - `apps/commercial-worker/tests/runwayProviderContract.test.ts`
+  - `apps/commercial-worker/tests/boundary.test.ts`. This covers the two
+    contract modules joining the protocol importers, the protocol closure
+    gaining the new module, and the vocabulary pins.
+
+Direct repository evidence at `cbdc7691` shows that this list alone cannot
+pass the existing suites. Each adjustment below is test-only, documented here
+before any modification, and authorised by this lock.
+
+1. **`apps/commercial-api/tests/boundary.test.ts`.** Its test "contains
+   exactly the pure credential contract, importing only itself" has three
+   rules that the new module conflicts with:
+   - it pins the exact protocol source inventory;
+   - it requires every non-relative protocol import to be absent;
+   - it applies commercial-api's forbidden-vocabulary scan to every protocol
+     file, including `Runway provider` (`/runway/i`) and `Google GenAI provider`
+     (`/genai|gemini/i`).
+
+   The only changes allowed are:
+   - add the new module to the inventory;
+   - allow exactly `node:crypto` in exactly that module;
+   - exempt exactly those two provider-vocabulary labels in exactly that
+     module.
+
+   Every other rule stays as it is, including the provider-SDK-package and
+   provider-secret rules, and so does the commercial-api source scan.
+   commercial-api runtime source does not change.
+
+2. **`apps/commercial-worker/tests/googleAttemptExecution.test.ts` and
+   `apps/commercial-worker/tests/runwayAttemptExecution.test.ts`.** Their
+   lease fixtures carry the placeholder hash `"c".repeat(64)`, which the
+   extended admission correctly refuses. Each fixture's hash becomes the
+   canonical hash of its fixture request. A case whose request is deliberately
+   invalid keeps its expected `LEASED_*` outcome. These two files also carry
+   the pre-grant hash-mismatch behavioural proof required above.
+
+3. **`apps/commercial-worker/tests/integration/googleProviderExecution.test.ts`
+   and `apps/commercial-worker/tests/integration/runwayProviderExecution.test.ts`.**
+   Their tier-3 seeds insert `generation_request_sha256` as `repeat('c', 64)`.
+   Each seed becomes the canonical hash of its seeded request.
+
+Placeholder hashes in fixtures that never reach Google or Runway admission
+stay unchanged. These include the fake-provider, credential-opening,
+acceptance-journal and whole-chain fixtures.
+
+Any further deviation needs direct repository evidence, documented before the
+modification.
+
+**Not in R44B11A.** R44B11A does not include:
+
+- a database migration;
+- a usage-ledger implementation;
+- a commercial-api issuance service or other runtime change;
+- a customer HTTP route;
+- a provider-verification implementation;
+- a provider selector;
+- a process runner;
+- production live-provider enablement.
+
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
+
+**Status (R44B11A contract lock).**
+
+- **R44B11A discovery:** PASS.
+- **R44B11A contract:** this revision.
+- **R44B11A implementation:** not started.
+- **R44B11 parent implementation:** not started.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
 ---
 
 ## 37. Lock flags
@@ -10041,6 +10390,43 @@ R44B11P1_WORKER_CHANGE_REQUIRED=NO
 R44B11_USAGE_LEDGER_MIGRATION_REQUIRED=YES
 R44B11P1_CUSTOMER_GENERATION_ROUTE_ENABLED=NO
 R44B11P1_LIVE_PROVIDER_ENABLEMENT=NO
+R44B11A_DISCOVERY=PASS
+R44B11A_CONTRACT_LOCKED=YES
+R44B11A_IMPLEMENTATION_STARTED=NO
+R44B11A_SCOPE=SHARED_GENERATION_REQUEST_AND_CANONICAL_HASH_AUTHORITY
+R44B11A_SHARED_PACKAGE=COMMERCIAL_WORKER_PROTOCOL
+R44B11A_SHARED_MODULE=packages/commercial-worker-protocol/src/generationRequestContract.ts
+R44B11A_NEW_SHARED_PACKAGE_REQUIRED=NO
+R44B11A_EXTERNAL_RUNTIME_DEPENDENCY_REQUIRED=NO
+R44B11A_JCS_IMPLEMENTATION=DEPENDENCY_FREE
+R44B11A_SHA256_PRIMITIVE=NODE_CRYPTO_BUILTIN
+R44B11A_EDITORIAL_CANONICALIZER_REUSED=NO
+R44B11A_RFC8785_PUBLISHED_VECTOR_TEST_REQUIRED=YES
+R44B11A_CONFORMANCE_EXPECTATIONS_FROM_PRODUCTION_CANONICALIZER=NO
+R44B11A_PRE_GRANT_MISMATCH_BEHAVIOURAL_TEST_REQUIRED=YES
+R44B11A_SHARED_CONTRACT_DEPENDS_ON_WORKER_TYPES=NO
+R44B11A_CANONICALIZATION_FAILS_CLOSED_OUTSIDE_JSON_DOMAIN=YES
+R44B11A_ADAPTER_ONLY_CONSTANTS_MOVED=NO
+R44B11A_PROVIDER_INCOMPATIBLE_ERROR=LEASED_PROVIDER_INCOMPATIBLE
+R44B11A_REQUEST_COST_UNIT_OR_HASH_ERROR=LEASED_REQUEST_INVALID
+R44B11A_NEW_WORKER_FAILURE_CODE=NO
+R44B11A_DATABASE_MIGRATION_REQUIRED=NO
+R44B11A_USAGE_LEDGER_INCLUDED=NO
+R44B11A_COMMERCIAL_API_RUNTIME_CHANGE_REQUIRED=NO
+R44B11A_COMMERCIAL_API_BOUNDARY_TEST_CHANGE_REQUIRED=YES
+R44B11A_WORKER_SOURCE_CHANGE_REQUIRED=YES
+R44B11A_PLACEHOLDER_HASH_FIXTURE_UPDATE_REQUIRED=YES
+R44B11A_CREDENTIAL_GRANT_FLOW_REWRITE_REQUIRED=NO
+R44B11A_PRE_GRANT_HASH_CHECK_REQUIRED=YES
+R44B11A_HASH_CHECK_SEAM=EXISTING_PRE_GRANT_LEASE_ADMISSION
+R44B11A_HASH_MISMATCH_CREDENTIAL_GRANT_ALLOWED=NO
+R44B11A_HASH_MISMATCH_PROVIDER_CALL_ALLOWED=NO
+R44B11A_RETENTION_OBLIGATION_OPENS_AT_GRANT=UNCHANGED
+R44B11A_REFERENCE_IMAGE_BOUNDARY_CHANGED=NO
+R44B11A_PROVIDER_ADAPTER_BEHAVIOUR_CHANGED=NO
+R44B11A_CUSTOMER_ROUTE_ENABLED=NO
+R44B11A_PROCESS_RUNNER_REQUIRED=NO
+R44B11A_LIVE_PROVIDER_ENABLEMENT=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

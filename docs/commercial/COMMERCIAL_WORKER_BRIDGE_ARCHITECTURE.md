@@ -9910,6 +9910,291 @@ validation.
   - any customer route that is still justified.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
+### Generation usage-ledger persistence (revision R44B11B)
+
+**Locked decision (R44B11B contract lock; not implemented at lock time).**
+R44B11B is the second R44B11P1 implementation slice. R44B11A is fully closed
+and is not reopened. R44B11B implements only the persistence and database
+invariants for the append-only commercial generation usage ledger that
+R44B11P1 requires. It does not implement issuance, claim, provider
+verification, disconnect/rotation convergence, a customer generation route
+or live-provider enablement. Discovery ran against
+`e9e98954acfd6c6057c5a2fb654f836b7c3ccf1c`, the published R44B11A closure
+commit.
+
+**Repository facts.** Discovery found:
+
+- `generation_authorizations` is created by migration 0003.
+- Each authorization carries immutable provenance: account, production,
+  entitlement grant, the `USER_BYO` billing mode, provider and model, the
+  exact ProviderConnection and ProviderCredentialVersion binding, the frozen
+  generation request and its SHA-256, the expected-cost cap, the creator and
+  the issuance idempotency key. The `generation_authorizations_guard_update`
+  trigger rejects provenance changes even for the owner.
+- The constraint
+  `generation_authorizations_production_scope_uq UNIQUE (account_id, production_id, id)`
+  already exists as a composite-FK target.
+- Migration 0004 allows one execution job per authorization
+  (`execution_jobs_authorization_uq`). Retry attempts live below the
+  job/authorization layer in `execution_attempts`.
+- The existing future-claim DB test locks an `ISSUED` authorization, marks it
+  `CLAIMED`, then creates the job and its first attempt.
+- Migrations are committed through 0007 only.
+- `applyRuntimeGrants()` refuses to run unless the public-table inventory
+  equals the keys of `RUNTIME_TABLE_PRIVILEGES` exactly.
+
+R44B11B therefore attaches usage identity to the existing generation
+authorization. It must not invent a second commercial generation identity.
+
+**Migration and table.** The migration is
+`apps/commercial-api/migrations/0008_generation_usage_ledger.sql`. It creates
+the table `generation_usage_ledger` with exactly these normalized columns:
+
+| Column | Type |
+|---|---|
+| `generation_authorization_id` | `uuid NOT NULL` |
+| `account_id` | `uuid NOT NULL` |
+| `production_id` | `uuid NOT NULL` |
+| `recorded_at` | `timestamptz NOT NULL DEFAULT clock_timestamp()` |
+
+`generation_authorization_id` is the PRIMARY KEY. There is no surrogate
+usage ID: the usage identity is exactly the generation authorization ID.
+
+**Database-authoritative `recorded_at`.** `recorded_at` is database
+authority. INSERT privilege does not let a caller choose, backdate or
+future-date the accounting evidence timestamp. The migration 0008 insertion
+guard sets `recorded_at` from `clock_timestamp()` on every insert,
+overwriting any caller-supplied value. No user-supplied or worker-supplied
+timestamp is introduced.
+
+One composite foreign key
+`(account_id, production_id, generation_authorization_id)` references
+`generation_authorizations (account_id, production_id, id)` with
+`ON DELETE RESTRICT`. It reuses the existing
+`generation_authorizations_production_scope_uq` target. R44B11B does not alter
+`generation_authorizations` to support this FK. The composite FK makes
+cross-account and cross-production provenance unrepresentable.
+
+**CLAIMED-state admission guard.** The composite FK proves authorization
+identity, account scope and production scope. It does not prove lifecycle
+state. Migration 0008 therefore also adds a database INSERT guard. An insert
+into `generation_usage_ledger` is admitted only when the exact referenced
+`generation_authorizations` row has:
+
+- a matching `account_id`;
+- a matching `production_id`;
+- a matching `id`;
+- `status = 'CLAIMED'`;
+- `claimed_at IS NOT NULL`.
+
+An authorization in any non-CLAIMED state (`ISSUED`, `EXPIRED` or
+`CANCELLED`) cannot acquire a canonical CLAIMED usage row. The guard adds to
+the composite FK and does not replace it:
+
+| Mechanism | Authority |
+|---|---|
+| Composite FK | Identity and scope integrity |
+| INSERT guard | Lifecycle admission integrity |
+
+Migration 0003 already makes `CLAIMED` terminal, through
+`generation_authorizations_claimed_at_ck` and the
+`generation_authorizations_guard_update` trigger, which allows lifecycle
+changes only from `ISSUED`. So an admitted row cannot later reference a
+non-CLAIMED authorization.
+
+**No duplicated provenance.** The ledger does not copy the entitlement grant,
+billing mode, provider, model, ProviderConnection, ProviderCredentialVersion,
+generation request, `generation_request_sha256`, expected-cost unit,
+expected-cost amount or creator. Those remain authoritative on the immutable
+generation authorization. The ledger is an append-only accounting/provenance
+index over that authorization, not a second copy of it.
+
+**No execution-layer identity.** The ledger contains no `execution_job_id`,
+`execution_attempt_id`, attempt number, worker principal, fencing counter,
+lease token or lease-token hash, or provider execution ID. Worker retry and
+recovery mechanics can never create another commercial usage identity.
+
+**Append-only enforcement.** Two layers enforce it:
+
+1. **Runtime privilege manifest.** `RUNTIME_TABLE_PRIVILEGES` gains
+   `generation_usage_ledger` with SELECT and INSERT and no update columns.
+   The runtime role has no UPDATE, DELETE, TRUNCATE, REFERENCES or TRIGGER
+   on the table, consistent with the manifest's existing rule that no table
+   grants DELETE, TRUNCATE, REFERENCES or TRIGGER.
+2. **Database immutability guards.** Migration 0008 adds guards that refuse
+   the following, including for the migration/owner role:
+   - every UPDATE of a ledger row;
+   - every DELETE of a ledger row;
+   - every TRUNCATE of the table.
+
+   Row-level UPDATE/DELETE triggers do not fire for PostgreSQL TRUNCATE.
+   TRUNCATE therefore needs its own statement-level
+   `BEFORE TRUNCATE ... FOR EACH STATEMENT` guard that refuses the operation.
+
+The table has no mutable status, balance, count or quota column. A row
+exists or does not exist.
+
+**Lifecycle.** `generation_usage_ledger` holds the canonical CLAIMED
+authorised-usage record that the R44B11P1 claim boundary requires.
+
+- **Issuance** creates the generation authorization and no usage-ledger row.
+  An idempotent issuance replay also creates no usage row. R44B11B does not
+  implement issuance.
+- **Claim.** A future claim slice will run one atomic transaction that:
+  1. locks the exact `ISSUED`, unexpired generation authorization;
+  2. validates the claim authority required by R44B11P1;
+  3. transitions the authorization `ISSUED -> CLAIMED`;
+  4. records exactly one canonical append-only CLAIMED usage row for that
+     generation authorization;
+  5. creates the execution job;
+  6. creates its first `QUEUED` attempt;
+  7. performs the required audit work.
+
+  R44B11B implements only the persistence and invariants step 4 needs. It
+  does not implement the claim service or transaction.
+- **Retry and recovery.** None of the following creates another authorised
+  usage record:
+  - idempotent issuance replay;
+  - claim replay;
+  - worker retry;
+  - crash recovery;
+  - a replacement execution attempt;
+  - provider submission;
+  - provider completion.
+
+The commercial usage identity remains the generation authorization ID.
+
+**Cardinality.** There is exactly one AUTHORISED USAGE identity per
+generation authorization: zero CLAIMED usage rows before claim and exactly
+one after successful claim. Two layers establish this, and they prove
+different things.
+
+- **What R44B11B (migration 0008) proves:**
+  - at most one canonical CLAIMED usage row per generation authorization
+    (zero or one);
+  - any existing row references a CLAIMED authorization;
+  - the PRIMARY KEY on `generation_authorization_id` is the at-most-one
+    authority.
+- **What the future claim transaction proves:** a successfully committed
+  claim creates exactly one canonical usage row. It does so in the same
+  transaction as the `CLAIMED` transition, the execution job, the first
+  attempt and the required audit work.
+
+Migration 0008 by itself does not guarantee that every CLAIMED authorization
+already has a ledger row. That guarantee belongs to the future claim
+transaction.
+
+**Reconciliation with R44B11P1.** R44B11B follows the R44B11P1 claim boundary
+and does not redefine it:
+
+- The canonical CLAIMED usage row is created by the future claim
+  transaction.
+- R44B11B creates only its persistence substrate.
+- Issuance creates no usage. Worker retry and recovery create no usage.
+
+**Future terminal or accounting evidence.** R44B11P1 allows later additive
+terminal or accounting evidence. R44B11B locks only the canonical CLAIMED
+authorised-usage record and its invariants, not the storage design for later
+evidence. Any later terminal or accounting evidence:
+
+- requires its own architecture revision;
+- must remain append-only;
+- must not create another authorised-usage identity for the same generation
+  authorization.
+
+R44B11B does not decide whether that later evidence uses another append-only
+relation, an additive extension, or another architecture-approved
+representation.
+
+**Semantics.** The ledger role is `ACCOUNTING_PROVENANCE`. It is not quota
+authority, entitlement-consumption authority, a billing balance, provider
+invoice truth or provider completion truth. FREE_BYO remains an
+access/provenance grant, not a per-generation consumable balance.
+
+**No backfill.** Migration 0008 creates an empty ledger. It does not infer
+historical usage from existing `generation_authorizations`,
+`execution_jobs`, `execution_attempts`, provider execution IDs or audit
+events.
+
+**Runtime grant manifest.** Because `applyRuntimeGrants()` compares every
+public table against `RUNTIME_TABLE_PRIVILEGES`, implementing R44B11B
+necessarily modifies `apps/commercial-api/src/database/runtimeGrants.ts` to
+add the ledger with SELECT and INSERT and no update columns. That is a
+runtime grant-manifest change only, not an issuance or claim service.
+
+**Expected implementation scope (later, not this lock).**
+
+Production changes:
+
+- NEW: `apps/commercial-api/migrations/0008_generation_usage_ledger.sql`.
+- MODIFIED: `apps/commercial-api/src/database/runtimeGrants.ts`.
+
+Test changes:
+
+- the migration harness, version and checksum tests;
+- the catalog/schema tests;
+- the privilege tests;
+- a dedicated generation-usage-ledger DB invariant test, if repository
+  conventions support one.
+
+Exact file scope is confirmed by implementation discovery. Any deviation needs
+direct repository evidence, documented before the modification.
+
+**Required proof.** The implementation must prove at minimum:
+
+- migration 0008 applies after 0001–0007, and a second run is a no-op;
+- checksum drift protection covers 0008;
+- the schema version becomes 8;
+- a valid same-account, same-production `CLAIMED` authorization can receive
+  one ledger row;
+- an insert for an `ISSUED`, `CANCELLED` or `EXPIRED` authorization is refused
+  by the INSERT state guard;
+- a caller-supplied `recorded_at` (backdated or future-dated) is not stored;
+  the stored value comes from the database clock;
+- a duplicate `generation_authorization_id` is refused;
+- cross-account and cross-production provenance is refused;
+- the runtime role can SELECT and INSERT;
+- the runtime role has no UPDATE, DELETE, TRUNCATE, REFERENCES or TRIGGER
+  privilege, so runtime TRUNCATE is refused by privilege;
+- owner/migrator UPDATE and DELETE are rejected by the append-only guard;
+- owner/migrator TRUNCATE is rejected by the statement-level append-only
+  guard, and the existing rows remain intact after the refusal;
+- no backfill occurs;
+- no execution-attempt, worker or provider-execution identity appears in the
+  table;
+- the existing authorization, bridge and runtime invariants remain green.
+
+**Not in R44B11B.** R44B11B does not include:
+
+- a generation authorization issuance service or issuance HTTP route;
+- a claim service or claim HTTP route;
+- execution-job or attempt creation wiring;
+- disconnect/rotation convergence;
+- provider verification;
+- a customer generation route;
+- worker, shared worker protocol or provider SDK changes;
+- quota decrement or FREE_BYO consumption;
+- live-provider enablement.
+
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
+
+**Current status (R44B11B contract lock).**
+
+- **R44B11A:** fully closed; unchanged.
+- **R44B11B discovery:** PASS.
+- **R44B11B contract:** this revision.
+- **R44B11B implementation:** not started.
+- **R44B11P1 implementation:** started, not complete.
+- **R44B11 parent implementation:** started, not complete.
+- **Remaining R44B11P1 slices after R44B11B:** each remains a separate future
+  slice:
+  - USER_BYO issuance, claim and expiry;
+  - ProviderConnection disconnect/rotation convergence and credential
+    cleanup;
+  - provider verification;
+  - any customer route that is still justified.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
 ---
 
 ## 37. Lock flags
@@ -10515,6 +10800,78 @@ R44B11A_PROVIDER_ADAPTER_BEHAVIOUR_CHANGED=NO
 R44B11A_CUSTOMER_ROUTE_ENABLED=NO
 R44B11A_PROCESS_RUNNER_REQUIRED=NO
 R44B11A_LIVE_PROVIDER_ENABLEMENT=NO
+R44B11B_DISCOVERY=PASS
+R44B11B_CONTRACT_LOCKED=YES
+R44B11B_IMPLEMENTATION_STARTED=NO
+R44B11B_SCOPE=GENERATION_USAGE_LEDGER_PERSISTENCE
+R44B11B_DATABASE_MIGRATION_REQUIRED=YES
+R44B11B_MIGRATION=0008_generation_usage_ledger.sql
+R44B11B_TABLE=generation_usage_ledger
+R44B11B_USAGE_IDENTITY=GENERATION_AUTHORIZATION_ID
+R44B11B_SURROGATE_USAGE_ID=NO
+R44B11B_AUTHORISED_USAGE_CARDINALITY=ONE_PER_GENERATION_AUTHORIZATION
+R44B11B_CLAIMED_USAGE_ROW_CARDINALITY=ONE_PER_GENERATION_AUTHORIZATION
+R44B11B_CLAIMED_USAGE_ROW_AUTHORITY=PRIMARY_KEY_GENERATION_AUTHORIZATION_ID
+R44B11B_USAGE_RECORD_CREATION_POINT=CLAIM_TRANSACTION
+R44B11B_INITIAL_USAGE_EVENT=CLAIMED
+R44B11B_SCHEMA_ROW_CARDINALITY=ZERO_OR_ONE_PER_GENERATION_AUTHORIZATION
+R44B11B_SUCCESSFUL_CLAIM_ROW_CARDINALITY=EXACTLY_ONE
+R44B11B_SCHEMA_GUARANTEES_ROW_FOR_EVERY_CLAIMED_AUTHORIZATION=NO
+R44B11B_INSERT_STATE_GUARD_REQUIRED=YES
+R44B11B_INSERT_REQUIRES_CLAIMED_AUTHORIZATION=YES
+R44B11B_INSERT_REQUIRES_CLAIMED_AT=YES
+R44B11B_NON_CLAIMED_USAGE_INSERT_ALLOWED=NO
+R44B11B_INSERT_STATE_GUARD_REPLACES_COMPOSITE_FK=NO
+R44B11B_RECORDED_AT_AUTHORITY=DATABASE
+R44B11B_RECORDED_AT_SOURCE=CLOCK_TIMESTAMP_AT_INSERT
+R44B11B_CALLER_SUPPLIED_RECORDED_AT_ALLOWED=NO
+R44B11B_AUTHORIZATION_COMPOSITE_FK=YES
+R44B11B_AUTHORIZATION_FK_TARGET=generation_authorizations_production_scope_uq
+R44B11B_AUTHORIZATION_DELETE_ACTION=RESTRICT
+R44B11B_GENERATION_AUTHORIZATIONS_ALTERED=NO
+R44B11B_APPEND_ONLY=YES
+R44B11B_RUNTIME_SELECT=YES
+R44B11B_RUNTIME_INSERT=YES
+R44B11B_RUNTIME_UPDATE=NO
+R44B11B_RUNTIME_DELETE=NO
+R44B11B_RUNTIME_TRUNCATE=NO
+R44B11B_RUNTIME_REFERENCES=NO
+R44B11B_RUNTIME_TRIGGER=NO
+R44B11B_RUNTIME_UPDATE_COLUMNS=NONE
+R44B11B_OWNER_UPDATE_ALLOWED=NO
+R44B11B_OWNER_DELETE_ALLOWED=NO
+R44B11B_OWNER_TRUNCATE_ALLOWED=NO
+R44B11B_TRUNCATE_GUARD_REQUIRED=YES
+R44B11B_TRUNCATE_GUARD=BEFORE_TRUNCATE_FOR_EACH_STATEMENT
+R44B11B_BACKFILL_EXISTING_AUTHORIZATIONS=NO
+R44B11B_LEDGER_ROLE=ACCOUNTING_PROVENANCE
+R44B11B_QUOTA_AUTHORITY=NO
+R44B11B_ENTITLEMENT_CONSUMPTION_AUTHORITY=NO
+R44B11B_COUNTER_OR_BALANCE_COLUMN=NO
+R44B11B_STATUS_COLUMN=NO
+R44B11B_AUTHORIZATION_PROVENANCE_DUPLICATED=NO
+R44B11B_EXECUTION_JOB_ID_INCLUDED=NO
+R44B11B_EXECUTION_ATTEMPT_ID_INCLUDED=NO
+R44B11B_WORKER_PRINCIPAL_INCLUDED=NO
+R44B11B_FENCING_COUNTER_INCLUDED=NO
+R44B11B_PROVIDER_EXECUTION_ID_INCLUDED=NO
+R44B11B_ISSUANCE_APPENDS_USAGE=NO
+R44B11B_IDEMPOTENT_ISSUANCE_REPLAY_APPENDS_USAGE=NO
+R44B11B_CLAIM_APPENDS_USAGE=YES
+R44B11B_CLAIM_REPLAY_APPENDS_USAGE=NO
+R44B11B_WORKER_RETRY_APPENDS_USAGE=NO
+R44B11B_RECOVERY_APPENDS_USAGE=NO
+R44B11B_PROVIDER_SUBMISSION_APPENDS_USAGE=NO
+R44B11B_PROVIDER_COMPLETION_APPENDS_USAGE=NO
+R44B11B_FUTURE_ACCOUNTING_EVENT_STORAGE_LOCKED=NO
+R44B11B_RUNTIME_GRANT_MANIFEST_CHANGE_REQUIRED=YES
+R44B11B_ISSUANCE_SERVICE_INCLUDED=NO
+R44B11B_CLAIM_SERVICE_INCLUDED=NO
+R44B11B_CUSTOMER_ROUTE_INCLUDED=NO
+R44B11B_WORKER_CHANGE_REQUIRED=NO
+R44B11B_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
+R44B11B_PROVIDER_VERIFICATION_INCLUDED=NO
+R44B11B_LIVE_PROVIDER_ENABLEMENT=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

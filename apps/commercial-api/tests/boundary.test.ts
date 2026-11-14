@@ -217,6 +217,32 @@ describe("commercial-api source boundary", () => {
     expect(findViolations(policy).filter((violation) => !GENERATION_POLICY_LABEL_EXEMPTIONS.includes(violation))).toEqual([]);
   });
 
+  // R44B11D: claim remains an internal service. No customer/application,
+  // process or worker-control source may compose it before a later reviewed
+  // route/production-enablement slice changes this boundary deliberately.
+  it("keeps the R44B11D generation-authorization claim service internal and uncomposed", () => {
+    const claimService = "src/generationAuthorizations/generationAuthorizationClaimService.ts";
+    const importers = sourceFiles
+      .filter((path) => label(path) !== claimService)
+      .filter((path) =>
+        importSpecifiers(read(path)).some((specifier) =>
+          /generationAuthorizationClaimService\.js$/.test(specifier),
+        ),
+      )
+      .map(label);
+
+    expect(importers).toEqual([]);
+
+    const claim = read(join(APP_ROOT, claimService));
+    expect(
+      importSpecifiers(claim).filter(
+        (specifier) =>
+          !specifier.startsWith(".") &&
+          !specifier.startsWith("node:"),
+      ),
+    ).toEqual([]);
+  });
+
   it.each(sourceFiles.map((path) => [label(path), path] as const))(
     "%s imports only Node built-ins, approved packages and modules inside src",
     (_name, path) => {

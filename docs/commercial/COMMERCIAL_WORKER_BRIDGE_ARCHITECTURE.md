@@ -10995,15 +10995,121 @@ test database at \`127.0.0.1:5433\`, never the production database.
 
 \`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO\` remains authoritative.
 
-**Current status (R44B11D contract lock).**
+**Implemented and validated (R44B11D publication and closure sync).**
+
+The locked R44B11D contract is implemented and published.
+
+- Contract-lock commit:
+  `57b10268c62da2fbbd7707838a08b25d139e9561`.
+- Implementation commit:
+  `35033010a6e9a3fcdc1e0549f10f5ddd60e17c53`.
+- Implementation commit subject:
+  `feat(commercial-api): implement R44B11D generation authorization claim`.
+
+The published implementation file scope is exactly:
+
+- new:
+  - `apps/commercial-api/src/generationAuthorizations/generationAuthorizationClaimError.ts`;
+  - `apps/commercial-api/src/generationAuthorizations/generationAuthorizationClaimService.ts`;
+  - `apps/commercial-api/tests/generationAuthorizations/generationAuthorizationClaim.test.ts`;
+  - `apps/commercial-api/tests/db/generationAuthorizationClaim.test.ts`;
+- modified:
+  - `apps/commercial-api/tests/boundary.test.ts`.
+
+No database migration, runtime-grant change, customer route, worker source
+change, shared-protocol change, provider-adapter change or production
+provider/model enablement was introduced.
+
+The implementation preserves the locked R44B11D authority model:
+
+- claim remains an internal commercial-api service and is not composed into
+  a customer or worker-control route;
+- trusted authority remains the database-derived active User and PERSONAL
+  Account principal; untrusted claim input is only the
+  GenerationAuthorization ID;
+- GenerationAuthorization ID remains the claim idempotency identity; no
+  separate claim idempotency key exists;
+- new claim uses the locked User -> Account -> ProviderConnection -> exact
+  bound credential -> Production -> entitlement grant ->
+  GenerationAuthorization lock order;
+- the service never holds the GenerationAuthorization lifecycle lock while
+  waiting for the ProviderConnection lifecycle lock;
+- claim uses exactly the immutable ProviderConnection and credential version
+  bound at issuance and never rebinds to another credential;
+- ACTIVE and the locked SUPERSEDED cases are supported exactly as specified;
+  RETAINED_FOR_RECOVERY and DESTROYED remain ineligible for a new claim;
+- the PENDING_VERIFICATION / UNVERIFIED exception requires the bound version
+  to be SUPERSEDED with retained sealed material and a distinct ACTIVE
+  version on the same connection;
+- credential material is not returned into claim-service memory merely to
+  test its presence; the query returns only
+  `(sealed_credential IS NOT NULL) AS has_sealed_credential`;
+- database `clock_timestamp()` remains the authority for both the strict
+  expiry comparison and `claimed_at`;
+- one successful transaction creates exactly one CLAIMED transition, one
+  QUEUED execution job, initial QUEUED attempt number 1, one canonical usage
+  row and one `generation_authorization.claimed` audit event;
+- the initial attempt remains USER_BYO, bound to the exact immutable
+  credential version, with initial fencing counter zero and no lease, grant,
+  submission or provider execution;
+- FREE_BYO remains access/provenance authority and is not consumed by claim;
+- CLAIMED replay revalidates the active principal but does not revalidate
+  later dynamic Production, entitlement, connection or credential
+  eligibility; it performs no write;
+- replay requires the canonical existing job, initial attempt, usage row and
+  claim audit and never repairs malformed persisted composition;
+- an expired still-ISSUED authorization is refused unchanged; expiry
+  convergence remains outside this slice;
+- audit or other transaction failure rolls back the entire claim
+  composition;
+- no provider network call is made by claim.
+
+Validation of the published implementation passed:
+
+- commercial-api TypeScript typecheck: PASS;
+- focused non-database R44B11D claim suite: 33/33;
+- existing R44B11C non-database issuance regression: 97/97;
+- commercial-api boundary suite: 202/202;
+- focused PostgreSQL R44B11D claim suite: 33/33, including:
+  - successful atomic claim composition;
+  - database-clock expiry admission/refusal;
+  - exact ACTIVE and SUPERSEDED credential cases;
+  - narrow PENDING_VERIFICATION rotation exception;
+  - replay and malformed-composition refusal;
+  - concurrent claim convergence;
+  - real audit-failure total rollback;
+  - 12/12 real PostgreSQL lifecycle-lock races;
+- focused PostgreSQL regression across issuance, authorization invariants,
+  usage-ledger invariants and worker bridge: 233/233;
+- full commercial-api non-database suite: 1001/1001 across 23 files;
+- full commercial-api PostgreSQL suite: 731/731 across 23 files;
+- commercial-api production build: PASS;
+- staged and committed `git diff --check`: PASS.
+
+PostgreSQL validation used PostgreSQL 16 on the dedicated
+`busybookie_commercial_test` database at `127.0.0.1:5433`; no production
+database was used.
+
+The unrelated
+`docs/commercial/BUSYBOOKIE_FREE_BYO_HOSTED_TRIAL_BACKLOG.md`
+remained untracked and unchanged throughout implementation, validation,
+staging, commit and publication.
+
+No real provider network call was required for R44B11D validation.
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains authoritative.
+
+**Current status (R44B11D docs sync).**
 
 - **R44B11A:** fully closed; unchanged.
 - **R44B11B:** fully closed; unchanged.
 - **R44B11C:** fully closed; unchanged.
 - **R44B11D discovery:** PASS.
 - **R44B11D conflict screen:** PASS.
-- **R44B11D contract:** this revision.
-- **R44B11D implementation:** not started.
+- **R44B11D contract lock:**
+  `57b10268c62da2fbbd7707838a08b25d139e9561`.
+- **R44B11D implementation:** PASS; validated and published in
+  `35033010a6e9a3fcdc1e0549f10f5ddd60e17c53`.
+- **R44B11D:** fully closed by this docs-sync revision.
 - **R44B11P1 implementation:** started, not complete.
 - **R44B11 parent implementation:** started, not complete.
 - **Remaining R44B11P1 work after R44B11D:** separate future discovery and
@@ -11014,9 +11120,8 @@ test database at \`127.0.0.1:5433\`, never the production database.
   - provider verification;
   - any customer generation route and production generation-policy enablement
     justified after those gates.
-- Future suffixes after R44B11D are not locked here.
-- \`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO\`.
-
+- Future suffixes after R44B11D remain unlocked.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 ---
 
 ## 37. Lock flags
@@ -11794,7 +11899,10 @@ R44B11C_FUTURE_SLICE_SUFFIXES_LOCKED=NO
 R44B11D_DISCOVERY=PASS
 R44B11D_CONFLICT_SCREEN=PASS
 R44B11D_CONTRACT_LOCKED=YES
-R44B11D_IMPLEMENTATION_STARTED=NO
+R44B11D_IMPLEMENTATION_STARTED=YES
+R44B11D_IMPLEMENTATION_VALIDATED=YES
+R44B11D_IMPLEMENTATION_PUBLISHED=YES
+R44B11D_IMPLEMENTATION_COMMIT=35033010a6e9a3fcdc1e0549f10f5ddd60e17c53
 R44B11D_SCOPE=USER_BYO_GENERATION_AUTHORIZATION_CLAIM
 R44B11D_DISCOVERY_BASE=ce4e7ec5664855707ef93023ca4218004ef91bbd
 R44B11D_DISCOVERY_REPORT_SHA256=5579ab9f00be0063764edb84006834e2538e6df823fb101f48205b8ba1722481

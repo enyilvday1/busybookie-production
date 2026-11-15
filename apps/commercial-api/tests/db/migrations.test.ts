@@ -30,6 +30,7 @@ const SUBMISSION_PROVENANCE_FILE = "0005_submission_authority_provenance.sql";
 const LEASE_EPOCH_FILE = "0006_submission_lease_epoch_provenance.sql";
 const INPUT_FAILURE_FILE = "0007_input_failure_provenance.sql";
 const USAGE_LEDGER_FILE = "0008_generation_usage_ledger.sql";
+const DISCONNECT_CONVERGENCE_FILE = "0009_provider_connection_disconnect_convergence.sql";
 const COMMITTED_FILES = [
   SCHEMA_V1_FILE,
   PROVIDER_CONNECTIONS_FILE,
@@ -39,6 +40,7 @@ const COMMITTED_FILES = [
   LEASE_EPOCH_FILE,
   INPUT_FAILURE_FILE,
   USAGE_LEDGER_FILE,
+  DISCONNECT_CONVERGENCE_FILE,
 ];
 
 let clients: GuardedClients;
@@ -108,13 +110,13 @@ function commandDependencies(migrationsDirectory: string) {
 }
 
 describe("migration runner against PostgreSQL 16", () => {
-  it("applies the bootstrap and 0001 to 0008 to an empty database and records the exact checksums", async () => {
+  it("applies the bootstrap and 0001 to 0009 to an empty database and records the exact checksums", async () => {
     expect(await publicTables()).toEqual([]);
 
     const migrations = await discoverMigrations();
     const result = await runMigrations(clients.migrator, migrations);
 
-    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 8 });
+    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 9 });
     const v1 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE));
     const v2 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE));
     const v3 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE));
@@ -123,6 +125,8 @@ describe("migration runner against PostgreSQL 16", () => {
     const v6 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, LEASE_EPOCH_FILE));
     const v7 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, INPUT_FAILURE_FILE));
     const v8 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, USAGE_LEDGER_FILE));
+    const v9 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, DISCONNECT_CONVERGENCE_FILE));
+    expect(sha256Hex(v9)).toBe("bfda9520641dd1b0e4789ad57766e0f9e0efcc899c98babcca6e0daafa090223");
     expect(sha256Hex(v8)).toBe("087c2d4512180bfd8607663120e90c8928ab48fefe8ca4ca1c4063ef5d9cfee5");
     expect(sha256Hex(v6)).toBe("99121d3d19b6044b309be149c0d1376a79f55f4f52b34cd90930cc3664d2813a");
     expect(sha256Hex(v5)).toBe("ff12efddc15441e2c529796632ca3e1ad188ebb6c7df5ddfb1058426065934ec");
@@ -139,6 +143,7 @@ describe("migration runner against PostgreSQL 16", () => {
       { version: 6, name: "submission_lease_epoch_provenance", sha256: sha256Hex(v6) },
       { version: 7, name: "input_failure_provenance", sha256: sha256Hex(v7) },
       { version: 8, name: "generation_usage_ledger", sha256: sha256Hex(v8) },
+      { version: 9, name: "provider_connection_disconnect_convergence", sha256: sha256Hex(v9) },
     ]);
     expect(await publicTables()).toEqual([
       "accounts",
@@ -147,6 +152,7 @@ describe("migration runner against PostgreSQL 16", () => {
       "execution_attempts",
       "execution_jobs",
       "generation_authorizations",
+      "generation_usage_events",
       "generation_usage_ledger",
       "productions",
       "provider_connections",
@@ -157,18 +163,18 @@ describe("migration runner against PostgreSQL 16", () => {
     ]);
   });
 
-  it("applies 0002 to 0008 on top of a database already at version 1", async () => {
+  it("applies 0002 to 0009 on top of a database already at version 1", async () => {
     const [schemaV1] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1]);
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE, DISCONNECT_CONVERGENCE_FILE]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
-  it("upgrades a database at version 3 through version 8", async () => {
+  it("upgrades a database at version 3 through version 9", async () => {
     const [schemaV1, providerConnections, generationAuthorizations] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!, providerConnections!, generationAuthorizations!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
@@ -178,8 +184,8 @@ describe("migration runner against PostgreSQL 16", () => {
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE], latestVersion: 8 });
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE, DISCONNECT_CONVERGENCE_FILE], latestVersion: 9 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     for (const table of ["worker_principals", "execution_jobs", "execution_attempts"]) {
       expect(await publicTables()).toContain(table);
     }
@@ -212,9 +218,10 @@ describe("migration runner against PostgreSQL 16", () => {
       `commercial-api migrate: applied ${LEASE_EPOCH_FILE}\n`,
       `commercial-api migrate: applied ${INPUT_FAILURE_FILE}\n`,
       `commercial-api migrate: applied ${USAGE_LEDGER_FILE}\n`,
-      "commercial-api migrate: schema at version 8\n",
+      `commercial-api migrate: applied ${DISCONNECT_CONVERGENCE_FILE}\n`,
+      "commercial-api migrate: schema at version 9\n",
     ]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
   it.each(COMMITTED_FILES)("rejects checksum drift in an applied %s and changes nothing", async (edited) => {
@@ -232,7 +239,7 @@ describe("migration runner against PostgreSQL 16", () => {
     await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(scratch)), "MIGRATION_CHECKSUM_DRIFT");
     const after = await clients.migrator.query("SELECT version, sha256, applied_at FROM schema_migrations ORDER BY version");
     expect(after.rows).toEqual(before.rows);
-    expect(after.rows).toHaveLength(8);
+    expect(after.rows).toHaveLength(9);
   });
 
   it("rejects an applied version whose committed name differs", async () => {
@@ -730,11 +737,41 @@ describe("migration 0005 on a schema-version-4 database", () => {
     expect(before.rows.map((row: { status: string }) => row.status).sort()).toEqual(["CLAIMED", "ISSUED"]);
     expect(await authorizationOf(issued.id)).not.toBe(claimedAuthorization);
 
-    const result = await runMigrations(clients.migrator, await discoverMigrations());
+    const result = await runMigrations(clients.migrator, (await discoverMigrations()).slice(0, 8));
 
     expect(result).toEqual({ applied: [USAGE_LEDGER_FILE], latestVersion: 8 });
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect((await clients.migrator.query("SELECT count(*)::int AS count FROM generation_usage_ledger")).rows).toEqual([{ count: 0 }]);
     expect((await clients.migrator.query("SELECT * FROM generation_authorizations ORDER BY id")).rows).toEqual(before.rows);
+  });
+
+  // Migration 0009 on databases already at schema version 8 (R44B11E).
+  it("0009: creates empty terminal usage evidence with no backfill and preserves canonical usage", async () => {
+    await runMigrations(clients.migrator, (await discoverMigrations()).slice(0, 8));
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    const claimed = await legacyAttempt("disconnect-convergence-ledger");
+    const authorization = await clients.migrator.query<{ id: string }>(
+      "SELECT generation_authorization_id AS id FROM execution_attempts WHERE id = $1",
+      [claimed.id],
+    );
+    const authorizationId = authorization.rows[0]!.id;
+    await clients.migrator.query(
+      "UPDATE generation_authorizations SET status = 'CLAIMED', claimed_at = now() WHERE id = $1",
+      [authorizationId],
+    );
+    await clients.migrator.query(
+      `INSERT INTO generation_usage_ledger (generation_authorization_id, account_id, production_id)
+       SELECT id, account_id, production_id FROM generation_authorizations WHERE id = $1`,
+      [authorizationId],
+    );
+    const before = await clients.migrator.query("SELECT * FROM generation_usage_ledger ORDER BY generation_authorization_id");
+
+    const result = await runMigrations(clients.migrator, (await discoverMigrations()).slice(0, 9));
+
+    expect(result).toEqual({ applied: [DISCONNECT_CONVERGENCE_FILE], latestVersion: 9 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect((await clients.migrator.query("SELECT count(*)::int AS count FROM generation_usage_events")).rows).toEqual([{ count: 0 }]);
+    expect((await clients.migrator.query("SELECT * FROM generation_usage_ledger ORDER BY generation_authorization_id")).rows).toEqual(before.rows);
   });
 });

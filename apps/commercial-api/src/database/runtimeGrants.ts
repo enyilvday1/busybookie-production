@@ -110,6 +110,9 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
   // the append-only triggers also reject UPDATE, DELETE and TRUNCATE for the
   // owner.
   generation_usage_ledger: { select: true, insert: true, updateColumns: [] },
+  // Append-only terminal evidence subordinate to the canonical usage identity.
+  // Runtime may read and insert only; recorded_at remains database authority.
+  generation_usage_events: { select: true, insert: true, updateColumns: [] },
   // Read-only: lets the API verify the applied schema version.
   schema_migrations: { select: true, insert: false, updateColumns: [] },
 });

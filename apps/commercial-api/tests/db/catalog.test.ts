@@ -187,11 +187,17 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "execution_attempts_input_failed_code_ck",
     "execution_attempts_input_failed_epoch_ck",
   ],
+  generation_usage_events: [
+    "generation_usage_events_event_type_ck",
+    "generation_usage_events_pk",
+    "generation_usage_events_reason_code_ck",
+    "generation_usage_events_usage_fk",
+  ],
   generation_usage_ledger: ["generation_usage_ledger_authorization_same_production_fk", "generation_usage_ledger_pk"],
 };
 
-describe("schema catalog (migrations 0001 to 0008)", () => {
-  it("contains exactly the twelve domain tables and schema_migrations", async () => {
+describe("schema catalog (migrations 0001 to 0009)", () => {
+  it("contains exactly the thirteen domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v', 'm', 'p', 'f') ORDER BY c.relname`,
@@ -204,6 +210,7 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
         "execution_attempts",
         "execution_jobs",
         "generation_authorizations",
+        "generation_usage_events",
         "generation_usage_ledger",
         "productions",
         "provider_connections",
@@ -312,6 +319,11 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
           "CREATE INDEX generation_authorizations_credential_version_ix ON public.generation_authorizations USING btree (provider_credential_version_id) WHERE (provider_credential_version_id IS NOT NULL)",
       },
       {
+        indexname: "generation_authorizations_disconnect_issued_ix",
+        indexdef:
+          "CREATE INDEX generation_authorizations_disconnect_issued_ix ON public.generation_authorizations USING btree (provider_connection_id, created_at, id) WHERE ((billing_mode = 'USER_BYO'::text) AND (status = 'ISSUED'::text) AND (provider_connection_id IS NOT NULL))",
+      },
+      {
         indexname: "generation_authorizations_grant_ix",
         indexdef: "CREATE INDEX generation_authorizations_grant_ix ON public.generation_authorizations USING btree (entitlement_grant_id)",
       },
@@ -341,6 +353,11 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
         indexname: "provider_connections_creation_idempotency_key_uq",
         indexdef:
           "CREATE UNIQUE INDEX provider_connections_creation_idempotency_key_uq ON public.provider_connections USING btree (account_id, creation_idempotency_key) WHERE (creation_idempotency_key IS NOT NULL)",
+      },
+      {
+        indexname: "provider_connections_disconnected_convergence_ix",
+        indexdef:
+          "CREATE INDEX provider_connections_disconnected_convergence_ix ON public.provider_connections USING btree (disconnected_at, id) WHERE (status = 'DISCONNECTED'::text)",
       },
       {
         // Deliberately not unique: duplicate policy is Account-scoped application logic.
@@ -643,8 +660,90 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
     }
     expect(insertGuard).not.toMatch(/\bnow\(\)|current_timestamp|transaction_timestamp|statement_timestamp/i);
 
-    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations WHERE version = 8");
     expect(version).toEqual([{ version: 8, name: "generation_usage_ledger" }]);
+  });
+
+  it("records disconnect terminal usage evidence (0009): four columns and exact constraints", async () => {
+    const columns = await rows<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'generation_usage_events' ORDER BY ordinal_position`,
+    );
+    expect(columns).toEqual([
+      { column_name: "generation_authorization_id", data_type: "uuid", is_nullable: "NO", column_default: null },
+      { column_name: "event_type", data_type: "text", is_nullable: "NO", column_default: null },
+      { column_name: "reason_code", data_type: "text", is_nullable: "NO", column_default: null },
+      { column_name: "recorded_at", data_type: "timestamp with time zone", is_nullable: "NO", column_default: "clock_timestamp()" },
+    ]);
+
+    const constraints = await rows<{ conname: string; def: string; target_index: string | null; on_update: string | null }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def,
+              CASE WHEN contype = 'f' THEN conindid::regclass::text END AS target_index,
+              CASE WHEN contype = 'f' THEN confupdtype::text END AS on_update
+         FROM pg_constraint WHERE conrelid = 'public.generation_usage_events'::regclass ORDER BY conname`,
+    );
+    expect(constraints).toEqual([
+      {
+        conname: "generation_usage_events_event_type_ck",
+        def: "CHECK ((event_type = 'CANCELLED_BEFORE_SUBMISSION'::text))",
+        target_index: null,
+        on_update: null,
+      },
+      {
+        conname: "generation_usage_events_pk",
+        def: "PRIMARY KEY (generation_authorization_id, event_type)",
+        target_index: null,
+        on_update: null,
+      },
+      {
+        conname: "generation_usage_events_reason_code_ck",
+        def: "CHECK ((reason_code = 'PROVIDER_CONNECTION_DISCONNECTED'::text))",
+        target_index: null,
+        on_update: null,
+      },
+      {
+        conname: "generation_usage_events_usage_fk",
+        def: "FOREIGN KEY (generation_authorization_id) REFERENCES generation_usage_ledger(generation_authorization_id) ON DELETE RESTRICT",
+        target_index: "generation_usage_ledger_pk",
+        on_update: "a",
+      },
+    ]);
+
+    const triggers = await rows<{ tgname: string; def: string }>(
+      `SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger
+        WHERE tgrelid = 'public.generation_usage_events'::regclass AND NOT tgisinternal ORDER BY tgname`,
+    );
+    expect(triggers).toEqual([
+      {
+        tgname: "generation_usage_events_guard_insert",
+        def: "CREATE TRIGGER generation_usage_events_guard_insert BEFORE INSERT ON public.generation_usage_events FOR EACH ROW EXECUTE FUNCTION generation_usage_events_guard_insert()",
+      },
+      {
+        tgname: "generation_usage_events_reject_truncate",
+        def: "CREATE TRIGGER generation_usage_events_reject_truncate BEFORE TRUNCATE ON public.generation_usage_events FOR EACH STATEMENT EXECUTE FUNCTION generation_usage_events_guard_append_only()",
+      },
+      {
+        tgname: "generation_usage_events_reject_update_delete",
+        def: "CREATE TRIGGER generation_usage_events_reject_update_delete BEFORE DELETE OR UPDATE ON public.generation_usage_events FOR EACH ROW EXECUTE FUNCTION generation_usage_events_guard_append_only()",
+      },
+    ]);
+
+    const functions = await rows<{ proname: string; src: string; security_definer: boolean; public_execute: boolean }>(
+      `SELECT proname, prosrc AS src, prosecdef AS security_definer, has_function_privilege('public', oid, 'EXECUTE') AS public_execute
+         FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'generation_usage_events_%' ORDER BY proname`,
+    );
+    expect(functions.map(({ proname, security_definer, public_execute }) => ({ proname, security_definer, public_execute }))).toEqual([
+      { proname: "generation_usage_events_guard_append_only", security_definer: false, public_execute: false },
+      { proname: "generation_usage_events_guard_insert", security_definer: false, public_execute: false },
+    ]);
+    const source = (name: string) => functions.find(({ proname }) => proname === name)!.src;
+    expect(source("generation_usage_events_guard_append_only")).toContain("generation_usage_events is append-only: % rejected");
+    const insertGuard = source("generation_usage_events_guard_insert");
+    expect(insertGuard).toContain("NEW.recorded_at := clock_timestamp();");
+    expect(insertGuard).not.toMatch(/\bnow\(\)|current_timestamp|transaction_timestamp|statement_timestamp/i);
+
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
+    expect(version).toEqual([{ version: 9, name: "provider_connection_disconnect_convergence" }]);
   });
 
   it("stores no secret, sealed credential, fingerprint or plaintext lease token on worker-bridge tables", async () => {
@@ -775,9 +874,9 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
       "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace ORDER BY conname",
     );
     // 24 through 0004, plus execution_attempts_submitting_worker_fk (0005),
-    // execution_attempts_input_failed_worker_fk (0007) and
-    // generation_usage_ledger_authorization_same_production_fk (0008).
-    expect(actions).toHaveLength(27);
+    // execution_attempts_input_failed_worker_fk (0007), generation_usage_ledger_authorization_same_production_fk (0008), and
+    // generation_usage_events_usage_fk (0009).
+    expect(actions).toHaveLength(28);
     for (const action of actions) {
       expect(action.confdeltype, action.conname).toBe("r");
     }
@@ -835,6 +934,21 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
         def: "CREATE TRIGGER generation_authorizations_guard_update BEFORE UPDATE ON public.generation_authorizations FOR EACH ROW EXECUTE FUNCTION generation_authorizations_guard_update()",
       },
       {
+        relname: "generation_usage_events",
+        tgname: "generation_usage_events_guard_insert",
+        def: "CREATE TRIGGER generation_usage_events_guard_insert BEFORE INSERT ON public.generation_usage_events FOR EACH ROW EXECUTE FUNCTION generation_usage_events_guard_insert()",
+      },
+      {
+        relname: "generation_usage_events",
+        tgname: "generation_usage_events_reject_truncate",
+        def: "CREATE TRIGGER generation_usage_events_reject_truncate BEFORE TRUNCATE ON public.generation_usage_events FOR EACH STATEMENT EXECUTE FUNCTION generation_usage_events_guard_append_only()",
+      },
+      {
+        relname: "generation_usage_events",
+        tgname: "generation_usage_events_reject_update_delete",
+        def: "CREATE TRIGGER generation_usage_events_reject_update_delete BEFORE DELETE OR UPDATE ON public.generation_usage_events FOR EACH ROW EXECUTE FUNCTION generation_usage_events_guard_append_only()",
+      },
+      {
         relname: "generation_usage_ledger",
         tgname: "generation_usage_ledger_guard_insert",
         def: "CREATE TRIGGER generation_usage_ledger_guard_insert BEFORE INSERT ON public.generation_usage_ledger FOR EACH ROW EXECUTE FUNCTION generation_usage_ledger_guard_insert()",
@@ -870,6 +984,8 @@ describe("schema catalog (migrations 0001 to 0008)", () => {
       { proname: "execution_attempts_guard", public_execute: false },
       { proname: "execution_jobs_guard", public_execute: false },
       { proname: "generation_authorizations_guard_update", public_execute: false },
+      { proname: "generation_usage_events_guard_append_only", public_execute: false },
+      { proname: "generation_usage_events_guard_insert", public_execute: false },
       { proname: "generation_usage_ledger_guard_append_only", public_execute: false },
       { proname: "generation_usage_ledger_guard_insert", public_execute: false },
       { proname: "provider_credential_versions_guard_update", public_execute: false },

@@ -280,7 +280,7 @@ describe("append-only enforcement", () => {
     });
   });
 
-  it("refuses owner UPDATE, DELETE and TRUNCATE through the append-only guards, leaving the row intact", async () => {
+  it("refuses owner UPDATE and DELETE through append-only guards and TRUNCATE through the 0009 FK barrier, leaving the row intact", async () => {
     await inRolledBackTransaction(clients.migrator, async () => {
       const f = await fixture(clients.migrator, "gul-owner-mutation");
       const authorizationId = await insertAuthorization(clients.migrator, f, "CLAIMED");
@@ -295,7 +295,7 @@ describe("append-only enforcement", () => {
       ] as const) {
         await expectRefused(clients.migrator, sql, [authorizationId], DENIED, `generation_usage_ledger is append-only: ${operation} rejected`);
       }
-      await expectRefused(clients.migrator, "TRUNCATE generation_usage_ledger", [], DENIED, "generation_usage_ledger is append-only: TRUNCATE rejected");
+      await expectSqlError(clients.migrator, "TRUNCATE generation_usage_ledger", [], { code: "0A000" });
 
       const after = await clients.migrator.query("SELECT * FROM generation_usage_ledger WHERE generation_authorization_id = $1", [authorizationId]);
       expect(after.rows).toEqual(before.rows);

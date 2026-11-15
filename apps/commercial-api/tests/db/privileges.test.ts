@@ -29,6 +29,82 @@ async function runtimeHas(sql: string, params: readonly unknown[] = []): Promise
   return result.rows[0]?.allowed === true;
 }
 
+async function insertClaimedUsageEventFixture(): Promise<string> {
+  const { userId, accountId, grantId } = await insertAccountWithFreeGrant(
+    clients.migrator,
+    "usage-events-owner",
+  );
+
+  const production = await clients.migrator.query<{ id: string }>(
+    `INSERT INTO productions (account_id, title, creation_entitlement_grant_id, created_by_user_id)
+     VALUES ($1, 'Usage event immutability', $2, $3) RETURNING id`,
+    [accountId, grantId, userId],
+  );
+  const productionId = production.rows[0]!.id;
+
+  const connection = await clients.migrator.query<{ id: string }>(
+    `INSERT INTO provider_connections
+       (account_id, provider, credential_kind, status, verification_status,
+        last_verification_attempt_at, verified_at, created_by_user_id)
+     VALUES ($1, 'GOOGLE_GENAI', 'API_KEY', 'ACTIVE', 'VERIFIED',
+             clock_timestamp(), clock_timestamp(), $2)
+     RETURNING id`,
+    [accountId, userId],
+  );
+  const connectionId = connection.rows[0]!.id;
+
+  const credential = await clients.migrator.query<{ id: string }>(
+    `INSERT INTO provider_credential_versions
+       (account_id, provider_connection_id, credential_version, status,
+        sealed_credential, fingerprint_algorithm, fingerprint_key_ref,
+        fingerprint_value, created_by_user_id)
+     VALUES ($1, $2, 1, 'ACTIVE',
+             '{"format":"fixture-envelope"}'::jsonb, 'HMAC-SHA-256',
+             'fixture/v1', repeat('a', 43), $3)
+     RETURNING id`,
+    [accountId, connectionId, userId],
+  );
+  const credentialId = credential.rows[0]!.id;
+
+  const authorization = await clients.migrator.query<{ id: string }>(
+    `INSERT INTO generation_authorizations
+       (account_id, production_id, entitlement_grant_id, billing_mode,
+        provider, model, provider_connection_id, provider_credential_version_id,
+        generation_request, generation_request_sha256,
+        expected_cost_cap_unit, expected_cost_cap_amount,
+        status, expires_at, claimed_at, created_by_user_id, created_at)
+     VALUES ($1, $2, $3, 'USER_BYO',
+             'GOOGLE_GENAI', 'gemini-omni-1.1-flash', $4, $5,
+             '{"prompt":"owner-immutability"}'::jsonb, repeat('a', 64),
+             'MICRO_USD', 1,
+             'CLAIMED', clock_timestamp() + interval '1 hour',
+             clock_timestamp(), $6, clock_timestamp() - interval '1 hour')
+     RETURNING id`,
+    [accountId, productionId, grantId, connectionId, credentialId, userId],
+  );
+  const authorizationId = authorization.rows[0]!.id;
+
+  await clients.migrator.query(
+    `INSERT INTO generation_usage_ledger
+       (generation_authorization_id, account_id, production_id)
+     VALUES ($1, $2, $3)`,
+    [authorizationId, accountId, productionId],
+  );
+
+  const event = await clients.migrator.query<{ generation_authorization_id: string; db_owned: boolean }>(
+    `INSERT INTO generation_usage_events
+       (generation_authorization_id, event_type, reason_code, recorded_at)
+     VALUES ($1, 'CANCELLED_BEFORE_SUBMISSION', 'PROVIDER_CONNECTION_DISCONNECTED',
+             '2000-01-01T00:00:00Z'::timestamptz)
+     RETURNING generation_authorization_id,
+               recorded_at <> '2000-01-01T00:00:00Z'::timestamptz AS db_owned`,
+    [authorizationId],
+  );
+  expect(event.rows).toEqual([{ generation_authorization_id: authorizationId, db_owned: true }]);
+
+  return authorizationId;
+}
+
 describe("runtime role authority", () => {
   it("has no schema, database or temporary-object creation authority", async () => {
     expect(await runtimeHas("SELECT has_schema_privilege(current_user, 'public', 'CREATE') AS allowed")).toBe(false);
@@ -115,7 +191,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 8 }]);
+      expect(version.rows).toEqual([{ version: 9 }]);
     });
   });
 
@@ -227,6 +303,29 @@ describe("runtime role authority", () => {
     });
   });
 
+  it("holds only SELECT and INSERT on disconnect terminal usage events, with no updatable column (migration 0009)", async () => {
+    expect(RUNTIME_TABLE_PRIVILEGES.generation_usage_events).toEqual({ select: true, insert: true, updateColumns: [] });
+    const privileges = await clients.runtime.query(
+      `SELECT has_table_privilege(current_user, 'public.generation_usage_events', 'SELECT') AS select,
+              has_table_privilege(current_user, 'public.generation_usage_events', 'INSERT') AS insert,
+              has_table_privilege(current_user, 'public.generation_usage_events', 'UPDATE') AS table_update,
+              has_table_privilege(current_user, 'public.generation_usage_events', 'DELETE') AS delete,
+              has_table_privilege(current_user, 'public.generation_usage_events', 'TRUNCATE') AS truncate,
+              has_table_privilege(current_user, 'public.generation_usage_events', 'REFERENCES') AS references,
+              has_table_privilege(current_user, 'public.generation_usage_events', 'TRIGGER') AS trigger,
+              has_any_column_privilege(current_user, 'public.generation_usage_events', 'UPDATE') AS any_column_update`,
+    );
+    expect(privileges.rows).toEqual([
+      { select: true, insert: true, table_update: false, delete: false, truncate: false, references: false, trigger: false, any_column_update: false },
+    ]);
+    await inRolledBackTransaction(clients.runtime, async () => {
+      const denied = { code: INSUFFICIENT_PRIVILEGE };
+      await expectSqlError(clients.runtime, "UPDATE generation_usage_events SET recorded_at = now()", [], denied);
+      await expectSqlError(clients.runtime, "DELETE FROM generation_usage_events", [], denied);
+      await expectSqlError(clients.runtime, "TRUNCATE generation_usage_events", [], denied);
+    });
+  });
+
   it("can insert and read audit events but never update, delete or truncate them", async () => {
     await inRolledBackTransaction(clients.runtime, async () => {
       const inserted = await clients.runtime.query<{ id: string }>(
@@ -240,6 +339,42 @@ describe("runtime role authority", () => {
       await expectSqlError(clients.runtime, "DELETE FROM audit_events WHERE id = $1", [id], denied);
       await expectSqlError(clients.runtime, "TRUNCATE audit_events", [], denied);
       expect((await clients.runtime.query("SELECT id FROM audit_events WHERE id = $1", [id])).rowCount).toBe(1);
+    });
+  });
+});
+
+describe("generation usage event immutability trigger", () => {
+  it("rejects UPDATE, DELETE and TRUNCATE even for the table owner", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const authorizationId = await insertClaimedUsageEventFixture();
+
+      for (const sql of [
+        "UPDATE generation_usage_events SET recorded_at = now() WHERE generation_authorization_id = $1",
+        "DELETE FROM generation_usage_events WHERE generation_authorization_id = $1",
+      ]) {
+        await clients.migrator.query("SAVEPOINT usage_event_trigger_probe");
+        await expect(clients.migrator.query(sql, [authorizationId])).rejects.toMatchObject({
+          code: INSUFFICIENT_PRIVILEGE,
+          message: expect.stringContaining("generation_usage_events is append-only"),
+        });
+        await clients.migrator.query("ROLLBACK TO SAVEPOINT usage_event_trigger_probe");
+      }
+
+      await clients.migrator.query("SAVEPOINT usage_event_trigger_probe");
+      await expect(clients.migrator.query("TRUNCATE generation_usage_events")).rejects.toMatchObject({
+        code: INSUFFICIENT_PRIVILEGE,
+        message: "generation_usage_events is append-only: TRUNCATE rejected",
+      });
+      await clients.migrator.query("ROLLBACK TO SAVEPOINT usage_event_trigger_probe");
+
+      expect(
+        (
+          await clients.migrator.query(
+            "SELECT generation_authorization_id FROM generation_usage_events WHERE generation_authorization_id = $1",
+            [authorizationId],
+          )
+        ).rowCount,
+      ).toBe(1);
     });
   });
 });

@@ -11959,4 +11959,833 @@ R44B11D_LIVE_PROVIDER_ENABLEMENT=NO
 R44B11D_FUTURE_SLICE_SUFFIXES_LOCKED=NO
 ```
 
+### R44B11E — ProviderConnection disconnect convergence, terminal usage evidence and deterministic credential cleanup
+
+**Locked decision (R44B11E; architecture and policy only, not yet
+implemented).** R44B11D completed and published the USER_BYO generation
+authorization claim boundary. R44B11E implements the next mandatory
+R44B11P1 lifecycle obligation: a ProviderConnection disconnect must converge
+already-issued and already-claimed pre-submission work to safe terminal
+states, record the required additive accounting/control-plane evidence, and
+destroy retained credentials when their final obligation closes without
+requiring another customer disconnect.
+
+R44B11E is not authorization-expiry convergence. Expiry convergence remains
+outside this revision because R44B11D already refuses an overdue `ISSUED`
+authorization at claim time and no current production consumer requires a
+persisted `EXPIRED` transition.
+
+**Discovery authority.** This contract is based on repository state
+`50ec91ec6a0d63a71e57c863e29080a1ffb5bff9`.
+
+Evidence:
+
+- disconnect-convergence discovery report SHA-256:
+  `80a7da0ea4361cf53145d5586778de909331c4b92b7ccab0c68ebee69a5067dc`;
+- disconnect pre-lock report SHA-256:
+  `ddff65a7986d397215616c5605de9f138ae4feff2cdd42f5aa69aae9a05f3cbd`;
+- final R44B11E pre-contract report SHA-256:
+  `fcb7e775b5e930d0cd919193e20365668cc186b6e5f1b0c0e192be587e20352b`.
+
+The discovery proved:
+
+- the existing customer disconnect transaction does not lock or mutate
+  execution jobs or attempts;
+- worker credential-grant and `SUBMITTING` barriers already reject a
+  disconnected ProviderConnection;
+- `QUEUED -> CANCELLED` and `LEASED -> CANCELLED` are already valid database
+  transitions;
+- `CANCELLED` closes the credential-retention obligation even when
+  `credential_granted_at` remains as immutable historical provenance;
+- no application cancellation writer or background disconnect reconciler
+  currently exists;
+- the runtime role already has the lifecycle UPDATE columns required for
+  generation authorization, execution job, execution attempt and credential
+  cleanup;
+- R44B11B explicitly deferred the storage representation of later additive
+  terminal/accounting evidence.
+
+#### Scope
+
+R44B11E is USER_BYO ProviderConnection disconnect convergence only.
+
+It covers:
+
+1. cancellation of still-`ISSUED` USER_BYO GenerationAuthorizations bound to
+   a disconnected ProviderConnection;
+2. cancellation of already-`CLAIMED` jobs whose current open attempt is still
+   safely pre-submission (`QUEUED` or `LEASED`);
+3. additive terminal accounting evidence for a claimed generation cancelled
+   before submission;
+4. control-plane audit evidence for those lifecycle transitions;
+5. deterministic post-cancellation credential-retention re-evaluation and
+   destruction;
+6. immediate best-effort convergence after the customer disconnect commit;
+7. periodic internal crash/restart convergence independent of another
+   customer request;
+8. the persistence/index substrate required to keep that reconciliation
+   bounded.
+
+R44B11E does not include:
+
+- GenerationAuthorization expiry convergence;
+- provider credential verification;
+- a customer generation/claim route;
+- Production provider/model enablement;
+- any worker protocol change;
+- any worker source change;
+- any provider-adapter change;
+- polling, output persistence or provider completion;
+- live-provider enablement.
+
+#### Primary customer disconnect transaction remains the lifecycle authority
+
+`disconnectProviderConnection()` keeps its established transaction and lock
+order:
+
+1. active PERSONAL Account `FOR NO KEY UPDATE`;
+2. exact ProviderConnection `FOR UPDATE`;
+3. that connection's non-destroyed ProviderCredentialVersion rows
+   `FOR UPDATE` in `credential_version` order;
+4. credential-obligation read after the version locks;
+5. ProviderConnection transition to `DISCONNECTED`;
+6. version-level `RETAINED_FOR_RECOVERY` or `DESTROYED` decision;
+7. existing disconnect/secret lifecycle audit;
+8. commit.
+
+The primary disconnect transaction must not add execution-attempt or
+execution-job locks. It must not wait for a row whose normal mutation path
+locks an attempt before the ProviderConnection or ProviderCredentialVersion.
+
+A narrow internal refactor may extract the existing credential
+retention/destruction logic for safe reuse, but the customer disconnect
+transaction's observable semantics, lock order and fail-closed secret
+destruction gate remain unchanged.
+
+The committed `DISCONNECTED` ProviderConnection is the durable lifecycle fact
+that stops future use immediately. Post-commit convergence does not make the
+disconnect authoritative; it converges dependent state after that authority
+already exists.
+
+#### System convergence identity
+
+Post-disconnect convergence is an internal commercial-api system operation.
+It does not require an active authenticated User and must not be blocked
+because an Account or User becomes disabled after the disconnect committed.
+
+The convergence path derives Account, ProviderConnection,
+GenerationAuthorization, job, attempt and credential-version identity only
+from database provenance. No customer-supplied account, authorization, job,
+attempt, credential version, event type, reason code, timestamp, actor or
+billing mode is trusted.
+
+System-created audit events use:
+
+- `actor_type = 'SYSTEM'`;
+- `actor_user_id = NULL`;
+- a server-generated correlation ID.
+
+The immediate post-disconnect pass may share the disconnect request's
+server-generated correlation ID. A periodic background pass generates its
+own server-side correlation ID for each connection convergence invocation.
+
+#### Connection discovery must not create the forbidden lock direction
+
+The periodic reconciler discovers candidate `DISCONNECTED`
+ProviderConnection IDs without locking those connection rows.
+
+Connection discovery must never hold a ProviderConnection or
+ProviderCredentialVersion lifecycle lock while waiting for a
+GenerationAuthorization or execution attempt.
+
+A candidate is returned only when residual work still exists for that
+disconnected connection:
+
+- an `ISSUED` USER_BYO GenerationAuthorization;
+- a `QUEUED` or `LEASED` USER_BYO attempt that remains pre-submission;
+- or a `RETAINED_FOR_RECOVERY` credential version.
+
+Completed disconnected connections with none of those residual conditions
+are not returned as convergence work.
+
+Discovery order is deterministic:
+
+1. `provider_connections.disconnected_at ASC`;
+2. `provider_connections.id ASC`.
+
+The discovery query is bounded. Numeric batch size and timer cadence are
+source-controlled operational constants, must be positive and bounded, and
+may be dependency-injected in tests. They are not customer input and are not
+environment-variable policy.
+
+#### Phase A — cancel still-ISSUED authorizations
+
+For a committed `DISCONNECTED` ProviderConnection, every exact USER_BYO
+GenerationAuthorization that remains `ISSUED` is eligible for disconnect
+cancellation.
+
+The transition is:
+
+`ISSUED -> CANCELLED`
+
+with:
+
+- `cancelled_at` from database time;
+- `updated_at` from database time;
+- no job creation;
+- no attempt creation;
+- no canonical usage-ledger row;
+- no terminal usage-event row;
+- no provider call.
+
+An `ISSUED` authorization cannot have a valid canonical
+`generation_usage_ledger` row. If such impossible composition is observed,
+the convergence transaction fails closed as an invariant violation; it does
+not repair or reinterpret the usage record.
+
+The cancellation transaction proves the bound ProviderConnection is already
+`DISCONNECTED` through a non-locking database read/join. It does not acquire
+the ProviderConnection lock.
+
+Targeted convergence may block on the exact authorization row with
+`FOR UPDATE`. Background convergence uses a bounded deterministic selection
+with `FOR UPDATE SKIP LOCKED`.
+
+Only a row still in `ISSUED` may be changed. `CLAIMED`, `EXPIRED` and already
+`CANCELLED` authorizations are not rewritten.
+
+The transition and its audit event are atomic. The audit event is:
+
+- event type: `generation_authorization.cancelled`;
+- resource: `generation_authorization`;
+- resource ID: the authorization ID;
+- actor: `SYSTEM`;
+- metadata: exactly the closed reason code
+  `PROVIDER_CONNECTION_DISCONNECTED`.
+
+A repeat after successful cancellation performs no lifecycle write and emits
+no duplicate lifecycle audit.
+
+#### Claim-versus-disconnect outcome remains serialized by the connection lock
+
+R44B11D's claim lock order remains authoritative: claim secures the
+ProviderConnection lifecycle before the final GenerationAuthorization
+lifecycle lock.
+
+Therefore exactly one result can become authoritative:
+
+- claim secures and commits first: the authorization is `CLAIMED`, and
+  disconnect convergence treats the resulting execution graph under the
+  claimed pre-submission rules below; or
+- disconnect commits first: the ProviderConnection is `DISCONNECTED`, new
+  claim refuses it, and any residual `ISSUED` authorization is later
+  converged to `CANCELLED`.
+
+R44B11E must not add a path that locks a GenerationAuthorization and then
+waits for the ProviderConnection.
+
+#### Phase B — claimed pre-submission execution cancellation
+
+A claimed generation is safely cancellable for disconnect only while its
+current open attempt is:
+
+- `QUEUED`; or
+- `LEASED`.
+
+`SUBMITTING` is the durable provider-call barrier and is not cancellable by
+this disconnect path. `SUBMITTING`, `SUBMITTED` and `OUTCOME_UNKNOWN` remain
+under the existing provider-recovery and credential-retention rules.
+
+For a `QUEUED` or `LEASED` attempt bound through immutable authorization
+provenance to the disconnected ProviderConnection, the convergence
+transaction locks:
+
+1. the execution attempt `FOR UPDATE` (or `FOR UPDATE SKIP LOCKED` in the
+   background path);
+2. then its execution job.
+
+It never locks the ProviderConnection or ProviderCredentialVersion in that
+transaction.
+
+After the attempt lock is acquired, eligibility is re-evaluated. If a worker
+already committed `LEASED -> SUBMITTING`, the disconnect cancellation loses
+that race and must not cancel the attempt.
+
+If disconnect cancellation locks the attempt first, a stale worker later
+fails the normal lease/state proof and cannot cross `SUBMITTING`.
+
+The successful transition is:
+
+- attempt: `QUEUED|LEASED -> CANCELLED`;
+- job: `QUEUED|RUNNING -> CANCELLED`;
+- attempt `failure_code = 'PROVIDER_CONNECTION_DISCONNECTED'`;
+- attempt `completed_at` from database time;
+- job `completed_at` from database time.
+
+The attempt's current live lease fields are cleared:
+
+- `lease_worker_principal_id`;
+- `lease_token_sha256`;
+- `leased_at`;
+- `lease_expires_at`;
+- `heartbeat_at`.
+
+The existing `lease_fencing_counter` is preserved.
+
+If `credential_granted_at` is already non-NULL, it is preserved as historical
+provenance. Cancellation closes the retention obligation because obligation
+authority is the attempt state; the timestamp is not erased to fabricate a
+history in which credential disclosure never occurred.
+
+No provider execution ID, submitted timestamp, recovery deadline or output
+identity may be created by disconnect cancellation.
+
+#### Claimed cancellation atomicity
+
+A successful claimed pre-submission cancellation atomically commits all of
+the following in one database transaction:
+
+1. attempt `-> CANCELLED`;
+2. job `-> CANCELLED`;
+3. exactly one `generation_usage_events` terminal accounting row;
+4. exactly one `execution_attempt.cancelled` audit event;
+5. commit.
+
+Failure of either evidence insert rolls back the attempt and job transitions.
+
+The audit event is:
+
+- event type: `execution_attempt.cancelled`;
+- resource: `execution_attempt`;
+- resource ID: attempt ID;
+- actor: `SYSTEM`;
+- metadata exactly:
+  - `attemptNumber`;
+  - `fencingCounter`;
+  - `failureCode = 'PROVIDER_CONNECTION_DISCONNECTED'`.
+
+The job state does not require a second lifecycle audit event. The attempt
+event plus atomic job transition is the control-plane cancellation evidence.
+
+A successfully committed cancellation is idempotent. Re-running convergence
+does not append another terminal usage event or another cancellation audit.
+
+A composition in which the attempt/job cancellation state exists but its
+required terminal usage event or required audit evidence is missing is an
+invariant violation. R44B11E does not silently repair malformed historical
+composition.
+
+#### Migration 0009 — terminal usage evidence
+
+R44B11E requires:
+
+`apps/commercial-api/migrations/0009_provider_connection_disconnect_convergence.sql`
+
+The migration adds an append-only `generation_usage_events` relation.
+
+The v1 columns are exactly:
+
+| Column | Contract |
+|---|---|
+| `generation_authorization_id` | `uuid NOT NULL` |
+| `event_type` | `text NOT NULL` |
+| `reason_code` | `text NOT NULL` |
+| `recorded_at` | `timestamptz NOT NULL DEFAULT clock_timestamp()` |
+
+There is no surrogate usage-event ID.
+
+The primary key is:
+
+`(generation_authorization_id, event_type)`
+
+The only R44B11E event type is:
+
+`CANCELLED_BEFORE_SUBMISSION`
+
+The only R44B11E reason code is:
+
+`PROVIDER_CONNECTION_DISCONNECTED`
+
+`generation_authorization_id` references the canonical
+`generation_usage_ledger(generation_authorization_id)` with `ON DELETE
+RESTRICT`. Therefore a terminal usage event cannot exist unless the canonical
+CLAIMED authorised-usage row already exists.
+
+The terminal event does not copy Account, Production, grant, billing mode,
+provider, model, ProviderConnection, ProviderCredentialVersion, generation
+request, worker, lease, fencing or provider execution identity. Those remain
+derivable from the canonical immutable relational graph.
+
+The event row is subordinate evidence for the existing generation
+authorization usage identity. It is not a second authorised-usage identity.
+
+A database INSERT guard owns `recorded_at` and overwrites any caller-supplied
+value with `clock_timestamp()`.
+
+The relation is append-only:
+
+- runtime SELECT: yes;
+- runtime INSERT: yes;
+- runtime UPDATE: no;
+- runtime DELETE: no;
+- runtime TRUNCATE: no;
+- owner/migrator UPDATE: rejected by trigger;
+- owner/migrator DELETE: rejected by trigger;
+- owner/migrator TRUNCATE: rejected by statement trigger.
+
+The canonical `generation_usage_ledger` row is never updated or replaced.
+
+`generation_usage_events` is accounting provenance, not entitlement
+consumption, quota, billing balance, provider-invoice truth or provider
+completion truth.
+
+An `ISSUED -> CANCELLED` authorization gets no terminal usage event because
+it never acquired canonical CLAIMED usage.
+
+#### Migration 0009 — convergence indexes
+
+R44B11E does not add redundant credential-version/attempt indexes already
+present in migrations 0002–0004.
+
+Existing authority reused:
+
+- `generation_authorizations_credential_version_ix`;
+- `execution_attempts_credential_version_ix
+  (provider_credential_version_id, state)`;
+- `provider_credential_versions_version_uq
+  (provider_connection_id, credential_version)`.
+
+Migration 0009 adds exactly the dedicated indexes needed by the new
+connection-level convergence scans.
+
+Disconnected connection discovery uses:
+
+`provider_connections_disconnected_convergence_ix`
+
+on:
+
+`(disconnected_at, id)`
+
+with predicate:
+
+`status = 'DISCONNECTED'`
+
+Still-issued authorization convergence uses:
+
+`generation_authorizations_disconnect_issued_ix`
+
+on:
+
+`(provider_connection_id, created_at, id)`
+
+with predicate equivalent to:
+
+`billing_mode = 'USER_BYO' AND status = 'ISSUED' AND provider_connection_id IS NOT NULL`
+
+The authorization index keys directly on immutable
+`provider_connection_id`. Disconnect convergence must not route this primary
+connection-scoped scan indirectly through whichever credential version is
+bound.
+
+No new generic attempt-version index is added.
+
+No extra retained-version index is required: cleanup is already scoped to one
+ProviderConnection and the existing connection/version index provides that
+bounded lookup.
+
+Migration 0009 adds no new lifecycle status and no mutable
+convergence-marker column.
+
+#### Runtime grants
+
+`RUNTIME_TABLE_PRIVILEGES` is extended only for the new terminal event
+relation:
+
+`generation_usage_events: SELECT + INSERT, no UPDATE columns`
+
+No existing table needs broader runtime privileges for R44B11E.
+
+#### Phase C — deterministic credential cleanup
+
+Execution cancellation and credential cleanup are separate transactions.
+
+A cancellation transaction must never continue from an attempt lock into
+ProviderConnection or ProviderCredentialVersion lifecycle locks.
+
+After cancellation work, cleanup re-enters the existing credential lifecycle
+lock domain:
+
+1. Account lifecycle row;
+2. exact ProviderConnection `FOR UPDATE`;
+3. that connection's non-destroyed ProviderCredentialVersion rows
+   `FOR UPDATE` in version order;
+4. credential-obligation read only after those version locks.
+
+System cleanup does not require the Account or User to remain active. The
+Account lock is serialization authority, not customer eligibility authority.
+
+The cleanup transaction revalidates that the connection is `DISCONNECTED`.
+
+For each retained/non-destroyed version, destruction is allowed only when the
+existing credential-obligation authority reports
+`blocksDestruction = false`.
+
+If an obligation remains open, sealed material remains retained exactly as
+required by the existing recovery rules.
+
+When destruction becomes legal, the existing irreversible destruction
+semantics apply:
+
+- status `DESTROYED`;
+- `destroyed_at` from database time;
+- `sealed_credential = NULL`;
+- fingerprint fields `NULL`;
+- no credential open/decrypt;
+- no provider call.
+
+A background destruction transition emits the existing
+`provider_connection.secret_destroyed` audit event with actor `SYSTEM`.
+
+A version already destroyed is not audited again.
+
+The existing customer disconnect path may still re-evaluate retained
+credentials when explicitly replayed, but a second customer request is never
+required for correctness or cleanup completion.
+
+#### Durable crash/restart convergence
+
+The durable recovery authority is:
+
+`DISCONNECTED ProviderConnection + residual child state`
+
+Residual child state means at least one of:
+
+- still-`ISSUED` authorization;
+- still-`QUEUED` or `LEASED` pre-submission attempt;
+- `RETAINED_FOR_RECOVERY` credential version.
+
+No process-local flag is authoritative.
+
+No durable "convergence in progress" row is required.
+
+A process crash may happen after any committed phase:
+
+- after primary disconnect but before authorization cancellation;
+- after authorization cancellation but before attempt cancellation;
+- after attempt cancellation but before credential cleanup;
+- during a later background pass.
+
+Every committed phase is forward-only and later convergence resumes from
+remaining database state.
+
+The system never rolls the ProviderConnection back out of `DISCONNECTED`
+because a later convergence phase failed.
+
+#### Immediate targeted convergence
+
+The customer disconnect application performs a bounded targeted convergence
+pass only after `disconnectProviderConnection()` has committed.
+
+The pass may block on exact authorization or attempt rows, but it may not
+hold the ProviderConnection lock while doing so.
+
+The targeted pass is best-effort lifecycle convergence. If it fails after the
+primary disconnect committed:
+
+- the disconnect remains authoritative;
+- the failure is reported only through the server-side failure sink;
+- the HTTP disconnect result is not changed from success to a false rollback
+  representation;
+- the periodic reconciler remains responsible for eventual completion.
+
+Repeating an already-successful customer disconnect may trigger another
+targeted convergence pass, but another request is not required.
+
+#### Periodic internal convergence
+
+The commercial-api process starts a periodic disconnect-convergence loop
+whenever the runtime database is configured and successfully verified. The
+loop does not depend on customer authentication or ProviderConnection route
+composition.
+
+The loop:
+
+- discovers a bounded set of disconnected connections without lifecycle
+  locks;
+- processes residual authorization cancellation;
+- processes residual pre-submission execution cancellation;
+- performs separate credential cleanup;
+- performs no provider network I/O;
+- never opens/decrypts a credential;
+- never performs a provider create;
+- does not change readiness merely because one convergence pass failed;
+- reports failures through the server-side failure sink;
+- retries residual state on later passes.
+
+Process-local re-entry of the same periodic loop is prohibited.
+
+Multiple commercial-api processes may run convergence concurrently.
+Correctness comes from PostgreSQL row locks, source-state predicates,
+append-only uniqueness and `SKIP LOCKED`, not from an in-memory singleton.
+
+No global leader election is required.
+
+Targeted and background convergence may overlap safely.
+
+On shutdown, no new periodic pass is scheduled. Process composition must
+provide a deterministic test seam for starting/stopping the loop and for
+injecting bounded cadence/batch policy.
+
+#### Exact idempotency and malformed composition
+
+R44B11E has no customer idempotency key. Idempotency follows immutable
+database identity plus source lifecycle state.
+
+- `ISSUED -> CANCELLED` happens at most once.
+- `QUEUED|LEASED -> CANCELLED` happens at most once.
+- `CANCELLED_BEFORE_SUBMISSION` usage evidence exists at most once per
+  generation authorization.
+- each lifecycle audit is emitted only by the first successful transition;
+- credential destruction happens at most once.
+
+A retry observes committed terminal state and performs no duplicate write.
+
+Missing canonical claim composition, cross-account provenance,
+job/authorization mismatch, impossible attempt/job state pair, missing
+terminal evidence for an already-committed R44B11E cancellation, or another
+database composition that cannot arise from the locked transactions is an
+invariant failure.
+
+R44B11E does not repair malformed historical state.
+
+#### Closed audit metadata
+
+For avoidance of ambiguity, the GenerationAuthorization cancellation audit
+metadata is the JSON object:
+
+`{"reasonCode":"PROVIDER_CONNECTION_DISCONNECTED"}`
+
+No other GenerationAuthorization cancellation metadata is introduced by this
+revision.
+
+The pre-submission attempt cancellation audit metadata contains exactly:
+
+- `attemptNumber`;
+- `fencingCounter`;
+- `failureCode`.
+
+Its `failureCode` value is exactly
+`PROVIDER_CONNECTION_DISCONNECTED`.
+
+No prompt, generation request, credential material, fingerprint, lease token,
+provider payload, provider execution ID, path or URL is written to these
+audit events.
+
+#### Failure code and external behavior
+
+The closed execution failure code introduced by this revision is:
+
+`PROVIDER_CONNECTION_DISCONNECTED`
+
+It means only that BusyBookie cancelled a still-pre-submission claimed
+generation because its immutable USER_BYO ProviderConnection was already
+disconnected.
+
+It is not a provider error, credential-verification result, worker fault or
+billing result.
+
+No provider error payload is stored in usage or audit evidence.
+
+#### Required PostgreSQL race proofs
+
+R44B11E implementation is not accepted without real PostgreSQL tests proving
+at least:
+
+1. claim commits before disconnect: authorization remains `CLAIMED` and its
+   safe pre-submission execution graph converges under R44B11E;
+2. disconnect commits before claim: claim refuses the connection and residual
+   `ISSUED` authorization converges to `CANCELLED`;
+3. disconnect cancellation locks a `LEASED` attempt before `SUBMITTING`:
+   cancellation commits and the stale worker cannot cross the barrier;
+4. `SUBMITTING` commits first: disconnect cancellation skips the attempt and
+   existing recovery rules remain authoritative;
+5. concurrent targeted and background cancellation cannot duplicate a
+   lifecycle transition, terminal usage event or audit;
+6. concurrent background processes using `SKIP LOCKED` do not process the
+   same selected child row twice;
+7. cancellation of a granted `LEASED` attempt preserves
+   `credential_granted_at`, clears the live lease, preserves the fencing
+   counter and closes the retention obligation through state;
+8. credential cleanup never destroys a version while an existing retention or
+   provider-recovery obligation remains open;
+9. once the final pre-submission obligation closes, cleanup destroys the
+   retained secret without another customer request;
+10. system convergence continues even if the owning User or Account becomes
+    disabled after disconnect;
+11. failure of terminal usage-event insertion rolls back job/attempt
+    cancellation;
+12. failure of cancellation audit insertion rolls back job/attempt
+    cancellation and terminal usage evidence;
+13. crash after primary disconnect is recoverable solely from durable state;
+14. crash after cancellation but before credential cleanup is recoverable
+    solely from durable state;
+15. repeating convergence after success performs no writes;
+16. no convergence path performs provider network I/O or credential open.
+
+#### Required migration and privilege tests
+
+Migration 0009 must prove:
+
+- `generation_usage_events` schema and closed vocabulary;
+- FK to canonical `generation_usage_ledger`;
+- database-authoritative `recorded_at`;
+- append-only UPDATE/DELETE/TRUNCATE rejection, including owner/migrator
+  paths;
+- runtime SELECT + INSERT only;
+- no runtime UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER authority;
+- exact new index definitions and predicates;
+- no unintended table or lifecycle-column change;
+- migration checksum/catalog/version coverage.
+
+#### Required orchestration tests
+
+The commercial-api process and application composition must prove:
+
+- immediate convergence starts only after primary disconnect commit;
+- an immediate convergence failure does not misrepresent the committed
+  disconnect as rolled back;
+- the failure is reported to the server-side failure sink;
+- periodic convergence starts only after a configured runtime database has
+  passed verification;
+- periodic convergence does not require customer authentication composition;
+- process-local overlapping timer ticks do not execute concurrently;
+- a later timer pass retries residual work after an earlier failure;
+- shutdown prevents scheduling of new passes;
+- multiple process instances can safely converge the same database using
+  PostgreSQL locking rather than process-local singleton authority.
+
+#### Expected implementation surfaces
+
+The implementation is expected to require:
+
+- NEW:
+  `apps/commercial-api/migrations/0009_provider_connection_disconnect_convergence.sql`;
+- NEW internal disconnect-convergence service under
+  `apps/commercial-api/src/providerConnections/`;
+- MODIFIED:
+  `apps/commercial-api/src/database/runtimeGrants.ts`;
+- MODIFIED ProviderConnection application composition for the immediate
+  post-commit pass;
+- MODIFIED commercial-api process composition for the periodic internal
+  reconciler;
+- a narrow ProviderConnection-service refactor only if required to reuse the
+  existing credential cleanup gate without changing its semantics;
+- dedicated non-database and PostgreSQL tests;
+- migration/catalog/runtime-privilege/boundary regression updates as required
+  by repository conventions.
+
+Exact implementation file scope is not locked by this architecture revision.
+Implementation discovery must determine it before source changes begin.
+
+#### R44B11E acceptance boundary
+
+R44B11E is complete only when:
+
+- migration 0009 and runtime privileges are validated;
+- disconnect convergence is implemented and composed;
+- immediate and periodic convergence are both proven;
+- the required real-PostgreSQL lifecycle races pass;
+- crash convergence does not require a second customer request;
+- terminal accounting evidence is append-only and does not create another
+  authorised-usage identity;
+- credential cleanup preserves the established lock order;
+- full commercial-api non-database and database regressions pass;
+- the production commercial-api build passes;
+- no provider network call occurs in convergence;
+- live provider submission remains disabled.
+
+```text
+R44B11E_DISCOVERY=PASS
+R44B11E_PRELOCK_SCREEN=PASS
+R44B11E_FINAL_PRECONTRACT_SCREEN=PASS
+R44B11E_CONTRACT_LOCKED=YES
+R44B11E_IMPLEMENTATION_STARTED=NO
+R44B11E_SCOPE=PROVIDER_CONNECTION_DISCONNECT_CONVERGENCE_TERMINAL_USAGE_EVIDENCE_AND_DETERMINISTIC_CREDENTIAL_CLEANUP
+R44B11E_DISCOVERY_BASE=50ec91ec6a0d63a71e57c863e29080a1ffb5bff9
+R44B11E_DISCONNECT_DISCOVERY_REPORT_SHA256=80a7da0ea4361cf53145d5586778de909331c4b92b7ccab0c68ebee69a5067dc
+R44B11E_PRELOCK_REPORT_SHA256=ddff65a7986d397215616c5605de9f138ae4feff2cdd42f5aa69aae9a05f3cbd
+R44B11E_FINAL_PRECONTRACT_REPORT_SHA256=fcb7e775b5e930d0cd919193e20365668cc186b6e5f1b0c0e192be587e20352b
+R44B11E_DATABASE_MIGRATION_REQUIRED=YES
+R44B11E_MIGRATION=0009_provider_connection_disconnect_convergence.sql
+R44B11E_MIGRATION_ADDS_LIFECYCLE_COLUMN=NO
+R44B11E_USAGE_EVENT_TABLE_REQUIRED=YES
+R44B11E_USAGE_EVENT_TABLE=generation_usage_events
+R44B11E_USAGE_EVENT_PARENT_IDENTITY=GENERATION_AUTHORIZATION_ID
+R44B11E_USAGE_EVENT_KEY=GENERATION_AUTHORIZATION_ID_PLUS_EVENT_TYPE
+R44B11E_USAGE_EVENT_TYPE=CANCELLED_BEFORE_SUBMISSION
+R44B11E_USAGE_EVENT_REASON_CODE=PROVIDER_CONNECTION_DISCONNECTED
+R44B11E_USAGE_EVENT_RECORDED_AT_AUTHORITY=DATABASE_CLOCK_TIMESTAMP
+R44B11E_USAGE_EVENT_APPEND_ONLY=YES
+R44B11E_USAGE_EVENT_REQUIRES_CANONICAL_USAGE_ROW=YES
+R44B11E_CANONICAL_USAGE_LEDGER_MUTATED=NO
+R44B11E_SECOND_AUTHORISED_USAGE_IDENTITY_CREATED=NO
+R44B11E_RUNTIME_GRANT_CHANGE_REQUIRED=YES
+R44B11E_RUNTIME_GRANT_CHANGE_SCOPE=GENERATION_USAGE_EVENTS_SELECT_INSERT_ONLY
+R44B11E_DISCONNECTED_CONNECTION_DISCOVERY_INDEX_REQUIRED=YES
+R44B11E_DISCONNECTED_CONNECTION_DISCOVERY_INDEX=provider_connections_disconnected_convergence_ix
+R44B11E_ISSUED_AUTH_PARTIAL_INDEX_REQUIRED=YES
+R44B11E_ISSUED_AUTH_PARTIAL_INDEX=generation_authorizations_disconnect_issued_ix
+R44B11E_ISSUED_AUTH_INDEX_PRIMARY_KEY=PROVIDER_CONNECTION_ID
+R44B11E_NEW_ATTEMPT_VERSION_STATE_INDEX_REQUIRED=NO
+R44B11E_NEW_GENERIC_AUTH_VERSION_INDEX_REQUIRED=NO
+R44B11E_RETAINED_VERSION_EXTRA_INDEX_REQUIRED=NO
+R44B11E_PRIMARY_DISCONNECT_TRANSACTION_PRESERVED=YES
+R44B11E_PRIMARY_DISCONNECT_EXECUTION_LOCKS_ALLOWED=NO
+R44B11E_SYSTEM_CONVERGENCE_REQUIRES_ACTIVE_PRINCIPAL=NO
+R44B11E_ISSUED_AUTH_SOURCE_STATUS=ISSUED
+R44B11E_ISSUED_AUTH_TARGET_STATUS=CANCELLED
+R44B11E_ISSUED_AUTH_USAGE_EVENT_REQUIRED=NO
+R44B11E_ISSUED_AUTH_AUDIT_EVENT=generation_authorization.cancelled
+R44B11E_PRE_SUBMISSION_SOURCE_ATTEMPT_STATES=QUEUED_OR_LEASED
+R44B11E_PRE_SUBMISSION_TARGET_ATTEMPT_STATE=CANCELLED
+R44B11E_PRE_SUBMISSION_TARGET_JOB_STATE=CANCELLED
+R44B11E_PRE_SUBMISSION_FAILURE_CODE=PROVIDER_CONNECTION_DISCONNECTED
+R44B11E_PRE_SUBMISSION_CLEARS_LIVE_LEASE=YES
+R44B11E_PRE_SUBMISSION_PRESERVES_FENCING_COUNTER=YES
+R44B11E_PRE_SUBMISSION_PRESERVES_CREDENTIAL_GRANTED_AT=YES
+R44B11E_PRE_SUBMISSION_USAGE_EVENT_REQUIRED=YES
+R44B11E_PRE_SUBMISSION_AUDIT_EVENT=execution_attempt.cancelled
+R44B11E_PRE_SUBMISSION_CANCELLATION_ATOMIC=YES
+R44B11E_SUBMITTING_OR_LATER_CANCELLED_BY_DISCONNECT=NO
+R44B11E_SUBMITTING_OR_LATER_RULE=EXISTING_RECOVERY_RULES
+R44B11E_CANCELLATION_LOCK_SURFACE=ATTEMPT_THEN_JOB
+R44B11E_CLEANUP_LOCK_SURFACE=ACCOUNT_THEN_CONNECTION_THEN_VERSIONS
+R44B11E_CANCELLATION_AND_CLEANUP_SAME_TRANSACTION=NO
+R44B11E_CLEANUP_REQUIRES_DISCONNECTED_CONNECTION=YES
+R44B11E_CLEANUP_USES_EXISTING_OBLIGATION_AUTHORITY=YES
+R44B11E_SECOND_CUSTOMER_DISCONNECT_REQUIRED=NO
+R44B11E_DURABLE_RECOVERY_AUTHORITY=DISCONNECTED_CONNECTION_PLUS_RESIDUAL_CHILD_STATE
+R44B11E_IMMEDIATE_TARGETED_CONVERGENCE_REQUIRED=YES
+R44B11E_PERIODIC_INTERNAL_SWEEP_REQUIRED=YES
+R44B11E_BACKGROUND_CONNECTION_DISCOVERY_LOCK=NONE
+R44B11E_BACKGROUND_CHILD_LOCK=FOR_UPDATE_SKIP_LOCKED
+R44B11E_TARGETED_CHILD_LOCK=FOR_UPDATE
+R44B11E_MULTI_PROCESS_SWEEP_OVERLAP_ALLOWED=YES
+R44B11E_GLOBAL_SINGLETON_REQUIRED=NO
+R44B11E_PROCESS_LOCAL_SWEEP_REENTRY_ALLOWED=NO
+R44B11E_TARGETED_BACKGROUND_OVERLAP_ALLOWED=YES
+R44B11E_CONVERGENCE_PROVIDER_NETWORK_ALLOWED=NO
+R44B11E_CONVERGENCE_CREDENTIAL_OPEN_ALLOWED=NO
+R44B11E_CONVERGENCE_FAILURE_REVERSES_DISCONNECT=NO
+R44B11E_EXPIRY_CONVERGENCE_INCLUDED=NO
+R44B11E_PROVIDER_VERIFICATION_INCLUDED=NO
+R44B11E_CUSTOMER_GENERATION_ROUTE_INCLUDED=NO
+R44B11E_PRODUCTION_PROVIDER_MODEL_ENABLEMENT_INCLUDED=NO
+R44B11E_WORKER_SOURCE_CHANGE_REQUIRED=NO
+R44B11E_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
+R44B11E_PROVIDER_ADAPTER_CHANGE_REQUIRED=NO
+R44B11E_LIVE_PROVIDER_ENABLEMENT=NO
+R44B11E_FUTURE_SLICE_SUFFIXES_LOCKED=NO
+```
+
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

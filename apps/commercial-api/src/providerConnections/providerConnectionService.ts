@@ -231,6 +231,119 @@ async function audit(
   await client.query(INSERT_AUDIT, [principal.accountId, principal.userId, eventType, connectionId, correlationId, JSON.stringify(metadata)]);
 }
 
+const INSERT_SYSTEM_AUDIT = `
+INSERT INTO audit_events (account_id, actor_type, actor_user_id, event_type, resource_type, resource_id, correlation_id, metadata)
+VALUES ($1, 'SYSTEM', NULL, $2, 'provider_connection', $3, $4, $5::jsonb)`;
+
+async function systemAudit(
+  client: RuntimeClient,
+  accountId: string,
+  eventType: string,
+  connectionId: string,
+  correlationId: string,
+  metadata: Readonly<{ provider: string; credentialVersion: number }>,
+): Promise<void> {
+  await client.query(INSERT_SYSTEM_AUDIT, [
+    accountId,
+    eventType,
+    connectionId,
+    correlationId,
+    JSON.stringify(metadata),
+  ]);
+}
+
+type CredentialLifecycleMode = "DISCONNECT" | "CLEANUP";
+
+type CredentialLifecycleChanges = Readonly<{
+  retained: readonly number[];
+  destroyed: readonly number[];
+}>;
+
+// Shared credential lifecycle authority for customer disconnect and R44B11E
+// system cleanup. The caller owns the Account -> ProviderConnection locks.
+// Version rows are locked in credential_version order before obligations
+// are read. No credential material is opened.
+async function reconcileDisconnectedCredentialVersions(
+  client: RuntimeClient,
+  accountId: string,
+  connectionId: string,
+  mode: CredentialLifecycleMode,
+): Promise<CredentialLifecycleChanges> {
+  const versions = await client.query<{
+    id: string;
+    credential_version: number;
+    status: string;
+  }>(
+    `SELECT id, credential_version, status
+       FROM provider_credential_versions
+      WHERE account_id = $1
+        AND provider_connection_id = $2
+        AND status <> 'DESTROYED'
+      ORDER BY credential_version
+        FOR UPDATE`,
+    [accountId, connectionId],
+  );
+
+  const obligations = await readCredentialObligations(
+    client,
+    accountId,
+    versions.rows.map((row) => row.id),
+  );
+
+  const retained = [];
+  const destroyed = [];
+
+  for (const version of versions.rows) {
+    const state = obligations.get(version.id);
+
+    if (state === undefined) {
+      throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
+    }
+
+    if (mode === "CLEANUP" && version.status !== "RETAINED_FOR_RECOVERY") {
+      throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
+    }
+
+    if (state.blocksDestruction) {
+      if (version.status !== "RETAINED_FOR_RECOVERY") {
+        await client.query(
+          `UPDATE provider_credential_versions
+              SET status = 'RETAINED_FOR_RECOVERY',
+                  retained_for_recovery_at = now(),
+                  updated_at = now()
+            WHERE id = $1
+              AND account_id = $2`,
+          [version.id, accountId],
+        );
+
+        retained.push(version.credential_version);
+      }
+
+      continue;
+    }
+
+    await client.query(
+      `UPDATE provider_credential_versions
+          SET status = 'DESTROYED',
+              destroyed_at = now(),
+              sealed_credential = NULL,
+              fingerprint_algorithm = NULL,
+              fingerprint_key_ref = NULL,
+              fingerprint_value = NULL,
+              updated_at = now()
+        WHERE id = $1
+          AND account_id = $2`,
+      [version.id, accountId],
+    );
+
+    destroyed.push(version.credential_version);
+  }
+
+  return Object.freeze({
+    retained: Object.freeze(retained),
+    destroyed: Object.freeze(destroyed),
+  });
+}
 async function readView(client: RuntimeClient, principal: TrustedPrincipal, connectionId: string): Promise<ProviderConnectionView> {
   const view = await getProviderConnectionForAccount(client, principal.accountId, connectionId);
   if (view === null) throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
@@ -554,47 +667,13 @@ export async function disconnectProviderConnection(
       );
     }
 
-    const versions = await client.query<{ id: string; credential_version: number; status: string }>(
-      `SELECT id, credential_version, status FROM provider_credential_versions
-        WHERE account_id = $1 AND provider_connection_id = $2 AND status <> 'DESTROYED'
-        ORDER BY credential_version
-          FOR UPDATE`,
-      [principal.accountId, connectionId],
-    );
-    const obligations = await readCredentialObligations(
-      client,
-      principal.accountId,
-      versions.rows.map((row) => row.id),
-    );
-
-    const retained: number[] = [];
-    const destroyed: number[] = [];
-    for (const version of versions.rows) {
-      const state = obligations.get(version.id);
-      if (state === undefined) throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
-      if (state.blocksDestruction) {
-        // Sealed material, fingerprint and identity stay exactly as they are.
-        if (version.status !== "RETAINED_FOR_RECOVERY") {
-          await client.query(
-            `UPDATE provider_credential_versions
-                SET status = 'RETAINED_FOR_RECOVERY', retained_for_recovery_at = now(), updated_at = now()
-              WHERE id = $1 AND account_id = $2`,
-            [version.id, principal.accountId],
-          );
-          retained.push(version.credential_version);
-        }
-      } else {
-        await client.query(
-          `UPDATE provider_credential_versions
-              SET status = 'DESTROYED', destroyed_at = now(), sealed_credential = NULL,
-                  fingerprint_algorithm = NULL, fingerprint_key_ref = NULL, fingerprint_value = NULL, updated_at = now()
-            WHERE id = $1 AND account_id = $2`,
-          [version.id, principal.accountId],
-        );
-        destroyed.push(version.credential_version);
-      }
-    }
-
+    const { retained, destroyed } =
+      await reconcileDisconnectedCredentialVersions(
+        client,
+        principal.accountId,
+        connectionId,
+        "DISCONNECT",
+      );
     if (!alreadyDisconnected) {
       await audit(client, principal, "provider_connection.disconnected", connectionId, correlationId, { provider: connection.provider });
     }
@@ -615,6 +694,102 @@ export async function disconnectProviderConnection(
       providerConnection: await readView(client, principal, connectionId),
       created: !alreadyDisconnected,
       credentialVersion: null,
+    });
+  });
+}
+
+export type ProviderConnectionCredentialCleanupResult = Readonly<{
+  destroyedCredentialVersions: readonly number[];
+}>;
+
+// R44B11E Phase C internal SYSTEM cleanup.
+// Account/User active eligibility is deliberately not required.
+// The Account row is serialization authority only.
+//
+// Lock order:
+//   Account FOR NO KEY UPDATE
+//   -> exact ProviderConnection FOR UPDATE
+//   -> non-destroyed credential versions FOR UPDATE in version order
+//   -> obligation read.
+//
+// No credential open/decrypt and no provider operation occurs.
+export async function cleanupDisconnectedProviderConnectionCredentials(
+  dependencies: Pick<ProviderConnectionServiceDependencies, "pool">,
+  connectionId: string,
+  options: MutationOptions = {},
+): Promise<ProviderConnectionCredentialCleanupResult> {
+  requireConnectionId(connectionId);
+  const correlationId = correlationIdFrom(options);
+
+  return withTransaction(dependencies.pool, async (client) => {
+    const discovered = await client.query<{ account_id: string }>(
+      "SELECT account_id FROM provider_connections WHERE id = $1",
+      [connectionId],
+    );
+
+    const accountId = discovered.rows[0]?.account_id;
+
+    if (accountId === undefined) {
+      throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
+    }
+
+    const account = await client.query<{ id: string }>(
+      "SELECT id FROM accounts WHERE id = $1 FOR NO KEY UPDATE",
+      [accountId],
+    );
+
+    if (account.rows.length !== 1) {
+      throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
+    }
+
+    const locked = await client.query<{
+      id: string;
+      account_id: string;
+      provider: string;
+      status: string;
+    }>(
+      `SELECT id, account_id, provider, status
+         FROM provider_connections
+        WHERE id = $1
+          AND account_id = $2
+        FOR UPDATE`,
+      [connectionId, accountId],
+    );
+
+    const connection = locked.rows[0];
+
+    if (
+      connection === undefined ||
+      connection.account_id !== accountId ||
+      connection.status !== "DISCONNECTED"
+    ) {
+      throw fail("PROVIDER_CONNECTION_INVARIANT_VIOLATION");
+    }
+
+    const { destroyed } =
+      await reconcileDisconnectedCredentialVersions(
+        client,
+        accountId,
+        connectionId,
+        "CLEANUP",
+      );
+
+    for (const credentialVersion of destroyed) {
+      await systemAudit(
+        client,
+        accountId,
+        "provider_connection.secret_destroyed",
+        connectionId,
+        correlationId,
+        {
+          provider: connection.provider,
+          credentialVersion,
+        },
+      );
+    }
+
+    return Object.freeze({
+      destroyedCredentialVersions: destroyed,
     });
   });
 }

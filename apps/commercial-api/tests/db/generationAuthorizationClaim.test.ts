@@ -26,6 +26,9 @@ import {
   type ClaimGenerationAuthorizationResult,
 } from "../../src/generationAuthorizations/generationAuthorizationClaimService.js";
 import {
+  convergeDisconnectedProviderConnectionPreSubmission,
+} from "../../src/providerConnections/disconnectConvergenceService.js";
+import {
   connectAs,
   openGuardedClients,
   prepareSchemaV1,
@@ -403,6 +406,20 @@ function claimAs(
     options.principal ?? principalOf(f),
     options.authorizationId ?? f.authorizationId,
     claimOptions,
+  );
+}
+
+async function convergeAfterDisconnect(
+  f: Fixture,
+) {
+  return convergeDisconnectedProviderConnectionPreSubmission(
+    pool,
+    f.connectionId,
+    {
+      correlationId: randomUUID(),
+      mode: "TARGETED",
+      childBatchSize: 10,
+    },
   );
 }
 
@@ -2224,17 +2241,71 @@ describe("H. real PostgreSQL lifecycle lock races", () => {
     ]);
   });
 
-  it("5. disconnect that owns the ProviderConnection lifecycle lock first makes claim refuse", async () => {
+  it("5. disconnect that owns the ProviderConnection lifecycle lock first makes claim refuse and R44B11E cancels the residual ISSUED authorization", async () => {
+    const f = await fixture(
+      "race-disconnect-first",
+    );
+
     await mutationWinsRefusal(
-      await fixture(
-        "race-disconnect-first",
-      ),
+      f,
       CONNECTION_DISCONNECT,
       "PROVIDER_CONNECTION_UNAVAILABLE",
     );
+
+    expect(
+      await authorizationLifecycle(
+        f.authorizationId,
+      ),
+    ).toMatchObject({
+      status: "ISSUED",
+      claimed_at: null,
+    });
+
+    expect(
+      await claimSideEffects(f),
+    ).toEqual(NO_CLAIM);
+
+    const convergence =
+      await convergeAfterDisconnect(f);
+
+    expect(convergence).toEqual({
+      cancelledAuthorizations: 1,
+      cancelledAttempts: 0,
+    });
+
+    expect(
+      await authorizationLifecycle(
+        f.authorizationId,
+      ),
+    ).toMatchObject({
+      status: "CANCELLED",
+      claimed_at: null,
+    });
+
+    const cancellationAudits =
+      await clients.migrator.query<{
+        count: number;
+      }>(
+        `SELECT count(*)::int AS count
+           FROM audit_events
+          WHERE account_id = $1
+            AND resource_type = 'generation_authorization'
+            AND resource_id = $2
+            AND event_type = 'generation_authorization.cancelled'
+            AND actor_type = 'SYSTEM'
+            AND actor_user_id IS NULL`,
+        [
+          f.accountId,
+          f.authorizationId,
+        ],
+      );
+
+    expect(
+      cancellationAudits.rows,
+    ).toEqual([{ count: 1 }]);
   });
 
-  it("6. claim holding the ProviderConnection lifecycle lock commits before a waiting disconnect", async () => {
+  it("6. claim holding the ProviderConnection lifecycle lock commits before a waiting disconnect and its pre-submission graph converges under R44B11E", async () => {
     const f = await fixture(
       "race-disconnect-held",
     );
@@ -2269,6 +2340,78 @@ describe("H. real PostgreSQL lifecycle lock races", () => {
     ).toMatchObject({
       status: "CLAIMED",
     });
+
+    expect(
+      await claimSideEffects(f),
+    ).toEqual(ONE_CLAIM);
+
+    const convergence =
+      await convergeAfterDisconnect(f);
+
+    expect(convergence).toEqual({
+      cancelledAuthorizations: 0,
+      cancelledAttempts: 1,
+    });
+
+    expect(
+      await authorizationLifecycle(
+        f.authorizationId,
+      ),
+    ).toMatchObject({
+      status: "CLAIMED",
+    });
+
+    const terminal =
+      await clients.migrator.query<{
+        job_status: string;
+        attempt_state: string;
+        failure_code: string | null;
+        usage_events: number;
+        cancellation_audits: number;
+      }>(
+        `SELECT
+           j.status AS job_status,
+           a.state AS attempt_state,
+           a.failure_code,
+           (
+             SELECT count(*)::int
+               FROM generation_usage_events ue
+              WHERE ue.generation_authorization_id = $1
+                AND ue.event_type = 'CANCELLED_BEFORE_SUBMISSION'
+           ) AS usage_events,
+           (
+             SELECT count(*)::int
+               FROM audit_events ae
+              WHERE ae.account_id = j.account_id
+                AND ae.resource_type = 'execution_attempt'
+                AND ae.resource_id = a.id
+                AND ae.event_type = 'execution_attempt.cancelled'
+                AND ae.actor_type = 'SYSTEM'
+                AND ae.actor_user_id IS NULL
+           ) AS cancellation_audits
+         FROM execution_jobs j
+         JOIN execution_attempts a
+           ON a.execution_job_id = j.id
+          AND a.generation_authorization_id =
+              j.generation_authorization_id
+        WHERE j.account_id = $2
+          AND j.generation_authorization_id = $1`,
+        [
+          f.authorizationId,
+          f.accountId,
+        ],
+      );
+
+    expect(terminal.rows).toEqual([
+      {
+        job_status: "CANCELLED",
+        attempt_state: "CANCELLED",
+        failure_code:
+          "PROVIDER_CONNECTION_DISCONNECTED",
+        usage_events: 1,
+        cancellation_audits: 1,
+      },
+    ]);
   });
 
   it("7. rotation that owns the ProviderConnection lifecycle lock first is admitted only through the locked SUPERSEDED exception", async () => {

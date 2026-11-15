@@ -51,13 +51,26 @@ const servers: RunningCommercialApiServer[] = [];
 let portA: number;
 let portB: number;
 
-async function composition(): Promise<number> {
+type ProviderApplicationOverrides = Pick<
+  Parameters<typeof createProviderConnectionApplication>[0],
+  "convergeAfterDisconnect" | "reportFailure"
+>;
+
+async function composition(
+  overrides: ProviderApplicationOverrides = {},
+): Promise<number> {
   const config = loadRuntimeDatabaseConfig({ COMMERCIAL_API_DATABASE_URL: clients.config.runtimeUrl, COMMERCIAL_API_DATABASE_POOL_MAX: "12" }, "development");
   const pool = await createRuntimePool(config!, () => {});
   pools.push(pool);
   const application = combineApplicationRouters(
     createCustomerApplication({ authentication: adapter, pool, reportFailure: () => {} }),
-    createProviderConnectionApplication({ authentication: adapter, pool, ...crypto, reportFailure: () => {} }),
+    createProviderConnectionApplication({
+      authentication: adapter,
+      pool,
+      ...crypto,
+      reportFailure: () => {},
+      ...overrides,
+    }),
   );
   const server = await startCommercialApiServer({ host: "127.0.0.1", port: 0, dependencies: { application, checkReadiness: async () => true } });
   servers.push(server);
@@ -451,6 +464,24 @@ describe("disconnect", () => {
   });
 });
 
+async function waitForR44B11EProcessStop(
+  stdout: readonly string[],
+): Promise<void> {
+  for (
+    let attempt = 0;
+    attempt < 200 &&
+    !stdout.includes("commercial-api: stopped\n");
+    attempt += 1
+  ) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, 10),
+    );
+  }
+
+  expect(stdout).toContain(
+    "commercial-api: stopped\n",
+  );
+}
 describe("process composition", () => {
   it("installs provider-connection routes only when they are injected in code", async () => {
     const run = async (withProviderConnections: boolean) => {
@@ -489,5 +520,357 @@ describe("process composition", () => {
     const created = await send(withRoutes.port, "POST", "/provider-connections", JSON.stringify({ provider: "TEST_PROVIDER", credential: newCredential() }), jsonAuth("process"));
     expect(created.status).toBe(201);
     await withRoutes.stop();
+  });
+});
+
+describe("R44B11E immediate targeted disconnect convergence", () => {
+  it("runs targeted convergence only after the primary disconnect committed and reuses its correlation identity", async () => {
+    let observed:
+      | {
+          connectionId: string;
+          mode: string;
+          correlationId: string;
+          databaseStatus: string;
+        }
+      | undefined;
+
+    const port = await composition({
+      convergeAfterDisconnect:
+        async (targetPool, connectionId, context) => {
+          const state =
+            await targetPool.query<{ status: string }>(
+              "SELECT status FROM provider_connections WHERE id = $1",
+              [connectionId],
+            );
+
+          observed = {
+            connectionId,
+            mode: context.mode,
+            correlationId: context.correlationId,
+            databaseStatus: state.rows[0]!.status,
+          };
+
+          return Object.freeze({
+            cancelledAuthorizations: 0,
+            cancelledAttempts: 0,
+            destroyedCredentialVersions: 0,
+          });
+        },
+    });
+
+    const connection = json(
+      await create("alice", {
+        provider: "TEST_PROVIDER",
+        credential: newCredential(),
+      }, port),
+    ).providerConnection;
+
+    const response =
+      await disconnect("alice", connection.id, port);
+
+    expect(response.status).toBe(200);
+    expect(json(response).providerConnection.status).toBe(
+      "DISCONNECTED",
+    );
+
+    expect(observed).toMatchObject({
+      connectionId: connection.id,
+      mode: "TARGETED",
+      databaseStatus: "DISCONNECTED",
+    });
+
+    expect(observed!.correlationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
+    );
+
+    const audit =
+      await clients.migrator.query<{
+        correlation_id: string;
+      }>(
+        `SELECT correlation_id
+           FROM audit_events
+          WHERE resource_type = 'provider_connection'
+            AND resource_id = $1
+            AND event_type = 'provider_connection.disconnected'`,
+        [connection.id],
+      );
+
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]!.correlation_id).toBe(
+      observed!.correlationId,
+    );
+  });
+
+  it("reports targeted convergence failure only to the server sink and preserves HTTP disconnect success", async () => {
+    const failures: string[] = [];
+
+    const port = await composition({
+      reportFailure: (text) => failures.push(text),
+      convergeAfterDisconnect: async () => {
+        throw new Error("fixture convergence failure");
+      },
+    });
+
+    const connection = json(
+      await create("alice", {
+        provider: "TEST_PROVIDER",
+        credential: newCredential(),
+      }, port),
+    ).providerConnection;
+
+    const response =
+      await disconnect("alice", connection.id, port);
+
+    expect(response.status).toBe(200);
+    expect(json(response).providerConnection.status).toBe(
+      "DISCONNECTED",
+    );
+
+    const state =
+      await clients.migrator.query<{ status: string }>(
+        "SELECT status FROM provider_connections WHERE id = $1",
+        [connection.id],
+      );
+
+    expect(state.rows).toEqual([
+      { status: "DISCONNECTED" },
+    ]);
+
+    expect(failures).toEqual([
+      "commercial-api: provider disconnect convergence failed (unexpected)\n",
+    ]);
+  });
+});
+
+describe("R44B11E periodic process orchestration", () => {
+  it("starts after verified database composition without customer routes and stops before HTTP shutdown", async () => {
+    const signals = new EventEmitter();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const events: string[] = [];
+
+    const writeStderr = (text: string) => {
+      stderr.push(text);
+    };
+
+    let startedPool:
+      | TransactionalPool
+      | undefined;
+
+    const policy = {
+      cadenceMs: 4_000,
+      connectionBatchSize: 6,
+      childBatchSize: 8,
+    } as const;
+
+    const running =
+      await runCommercialApiProcess({
+        environment: {
+          COMMERCIAL_API_DATABASE_URL:
+            clients.config.runtimeUrl,
+        },
+        onSignal: (signal, listener) => {
+          signals.once(signal, listener);
+        },
+        writeStdout: (text) =>
+          stdout.push(text),
+        writeStderr,
+        setExitCode: () => {},
+        startServer: async (options) => {
+          events.push(
+            "http-start",
+          );
+
+          const actual =
+            await startCommercialApiServer({
+              ...options,
+              port: 0,
+            });
+
+          return Object.freeze({
+            host: actual.host,
+            port: actual.port,
+            close: async () => {
+              events.push(
+                "http-close",
+              );
+              await actual.close();
+            },
+          });
+        },
+        disconnectConvergence: {
+          policy,
+          start: (options) => {
+            events.push(
+              "loop-start",
+            );
+
+            startedPool = options.pool;
+
+            expect(
+              options.reportFailure,
+            ).toBe(writeStderr);
+
+            expect(options.policy).toEqual(
+              policy,
+            );
+
+            return Object.freeze({
+              runNow: async () => {},
+              stop: () => {
+                events.push(
+                  "loop-stop",
+                );
+              },
+            });
+          },
+        },
+      });
+
+    expect(running).not.toBeNull();
+    expect(startedPool).toBeDefined();
+
+    expect(stdout).toContain(
+      "commercial-api: database verified\n",
+    );
+
+    expect(events).toEqual([
+      "loop-start",
+      "http-start",
+    ]);
+
+    // No authenticated application was supplied. Periodic convergence is
+    // therefore demonstrably independent of customer/provider route
+    // composition.
+    expect(
+      (
+        await send(
+          running!.port,
+          "GET",
+          "/provider-connections",
+        )
+      ).status,
+    ).toBe(404);
+
+    signals.emit("SIGTERM");
+
+    await waitForR44B11EProcessStop(
+      stdout,
+    );
+
+    expect(
+      events.indexOf("loop-stop"),
+    ).toBeGreaterThanOrEqual(0);
+
+    expect(
+      events.indexOf("http-close"),
+    ).toBeGreaterThan(
+      events.indexOf("loop-stop"),
+    );
+
+    expect(
+      events.filter((event) => event === "loop-stop"),
+    ).toHaveLength(1);
+
+    expect(stderr).toEqual([]);
+  });
+
+  it("does not start periodic convergence when no runtime database is configured", async () => {
+    const signals = new EventEmitter();
+    const stdout: string[] = [];
+    let loopStarts = 0;
+
+    const running =
+      await runCommercialApiProcess({
+        environment: {},
+        onSignal: (signal, listener) => {
+          signals.once(signal, listener);
+        },
+        writeStdout: (text) =>
+          stdout.push(text),
+        writeStderr: () => {},
+        setExitCode: () => {},
+        startServer: (options) =>
+          startCommercialApiServer({
+            ...options,
+            port: 0,
+          }),
+        disconnectConvergence: {
+          start: () => {
+            loopStarts += 1;
+
+            return Object.freeze({
+              runNow: async () => {},
+              stop: () => {},
+            });
+          },
+        },
+      });
+
+    expect(running).not.toBeNull();
+    expect(loopStarts).toBe(0);
+
+    expect(stdout).toContain(
+      "commercial-api: no database configured; /__ready reports not ready\n",
+    );
+
+    signals.emit("SIGTERM");
+
+    await waitForR44B11EProcessStop(
+      stdout,
+    );
+  });
+
+  it("does not start periodic convergence or HTTP listening when database verification fails", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const exitCodes: number[] = [];
+    let loopStarts = 0;
+    let serverStarts = 0;
+
+    const running =
+      await runCommercialApiProcess({
+        environment: {
+          COMMERCIAL_API_DATABASE_URL:
+            clients.config.runtimeUrl,
+        },
+        onSignal: () => {},
+        writeStdout: (text) =>
+          stdout.push(text),
+        writeStderr: (text) =>
+          stderr.push(text),
+        setExitCode: (code) =>
+          exitCodes.push(code),
+        verifyDatabase: async () => {
+          throw new Error("fixture verification failure");
+        },
+        startServer: async () => {
+          serverStarts += 1;
+          throw new Error("must not listen");
+        },
+        disconnectConvergence: {
+          start: () => {
+            loopStarts += 1;
+
+            return Object.freeze({
+              runNow: async () => {},
+              stop: () => {},
+            });
+          },
+        },
+      });
+
+    expect(running).toBeNull();
+    expect(loopStarts).toBe(0);
+    expect(serverStarts).toBe(0);
+    expect(exitCodes).toEqual([1]);
+
+    expect(stdout).not.toContain(
+      "commercial-api: database verified\n",
+    );
+
+    expect(stderr).toEqual([
+      "commercial-api: Database startup failed.\n",
+    ]);
   });
 });

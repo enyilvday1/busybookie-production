@@ -11,6 +11,10 @@ import { sendError, sendJson, type ErrorCode } from "../http/jsonResponse.js";
 import { MAX_CREDENTIAL_JSON_BODY_BYTES, readEmptyBody, readJsonObjectBody, RequestBodyError } from "../http/requestBody.js";
 import type { CredentialFingerprinter, CredentialSealer } from "commercial-worker-protocol";
 import type { ProviderCapabilityRegistry } from "../providerConnections/providerCapabilityRegistry.js";
+import {
+  convergeDisconnectedProviderConnection,
+  DisconnectConvergenceError,
+} from "../providerConnections/disconnectConvergenceService.js";
 import { ProviderConnectionError } from "../providerConnections/providerConnectionError.js";
 import {
   getProviderConnectionForAccount,
@@ -46,6 +50,8 @@ export type ProviderConnectionApplicationOptions = Readonly<{
   sealer: CredentialSealer;
   fingerprinter: CredentialFingerprinter;
   reportFailure?: (text: string) => void;
+  convergeAfterDisconnect?:
+    typeof convergeDisconnectedProviderConnection;
 }>;
 
 const COLLECTION_PATH = "/provider-connections";
@@ -128,6 +134,26 @@ export function createProviderConnectionApplication(options: ProviderConnectionA
     fingerprinter: options.fingerprinter,
   });
   const reportFailure = options.reportFailure ?? ((text: string) => process.stderr.write(text));
+  const convergeAfterDisconnect =
+    options.convergeAfterDisconnect ??
+    convergeDisconnectedProviderConnection;
+
+  const reportDisconnectConvergenceFailure =
+    (error: unknown): void => {
+      const code =
+        error instanceof DisconnectConvergenceError
+          ? error.code
+          : "unexpected";
+
+      try {
+        reportFailure(
+          `commercial-api: provider disconnect convergence failed (${code})\n`,
+        );
+      } catch {
+        // A broken diagnostics sink must not rewrite a disconnect that
+        // already committed successfully.
+      }
+    };
 
   const protectedRoute =
     (handler: (request: IncomingMessage, response: ServerResponse, identity: VerifiedIdentity) => Promise<void>) =>
@@ -196,8 +222,35 @@ export function createProviderConnectionApplication(options: ProviderConnectionA
       const principal = await principalFor(identity);
       requireConnectionId(connectionId);
       await readEmptyBody(request);
-      const result = await disconnectProviderConnection(services, principal, connectionId, { correlationId: randomUUID() });
-      sendJson(response, 200, { providerConnection: connectionDto(result.providerConnection) });
+
+      const correlationId = randomUUID();
+      const result = await disconnectProviderConnection(
+        services,
+        principal,
+        connectionId,
+        { correlationId },
+      );
+
+      // Primary disconnect is already committed. Convergence is bounded,
+      // best-effort follow-up and may never turn that committed success
+      // into a false HTTP rollback representation.
+      try {
+        await convergeAfterDisconnect(
+          pool,
+          connectionId,
+          {
+            correlationId,
+            mode: "TARGETED",
+          },
+        );
+      } catch (error) {
+        reportDisconnectConvergenceFailure(error);
+      }
+
+      sendJson(response, 200, {
+        providerConnection:
+          connectionDto(result.providerConnection),
+      });
     });
 
   const collection: ApplicationRoute = Object.freeze({

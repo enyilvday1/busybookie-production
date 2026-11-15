@@ -132,6 +132,7 @@ describe("boundary scanner", () => {
       "migrations/0006_submission_lease_epoch_provenance.sql",
       "migrations/0007_input_failure_provenance.sql",
       "migrations/0008_generation_usage_ledger.sql",
+      "migrations/0009_provider_connection_disconnect_convergence.sql",
     ]);
     expect(scannedFiles.map(label).some((path) => path.startsWith("tests/"))).toBe(false);
   });

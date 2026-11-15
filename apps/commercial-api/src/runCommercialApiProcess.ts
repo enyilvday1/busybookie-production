@@ -1,6 +1,11 @@
 import { combineApplicationRouters } from "./application/combineApplicationRouters.js";
 import { createCustomerApplication } from "./application/customerApplication.js";
 import { createProviderConnectionApplication } from "./application/providerConnectionApplication.js";
+import {
+  startDisconnectConvergenceLoop,
+  type DisconnectConvergenceLoopHandle,
+  type DisconnectConvergenceLoopPolicy,
+} from "./providerConnections/disconnectConvergenceLoop.js";
 import type { AuthenticationAdapter } from "./authentication/authenticationAdapter.js";
 import type { ProviderCapabilityRegistry } from "./providerConnections/providerCapabilityRegistry.js";
 import type { CredentialFingerprinter, CredentialSealer } from "commercial-worker-protocol";
@@ -51,6 +56,13 @@ export type CommercialApiProcessDependencies = Readonly<{
     sealer: CredentialSealer;
     fingerprinter: CredentialFingerprinter;
   }>;
+  // Code-level orchestration seam. Production defaults to the internal
+  // periodic convergence loop. Tests may inject only the scheduler owner
+  // and bounded policy; database state remains the durable authority.
+  disconnectConvergence?: Readonly<{
+    start?: typeof startDisconnectConvergenceLoop;
+    policy?: DisconnectConvergenceLoopPolicy;
+  }>;
   readinessTimeoutMs?: number;
   poolCloseTimeoutMs?: number;
 }>;
@@ -93,6 +105,11 @@ export async function runCommercialApiProcess(
   const loadMigrations = dependencies.loadMigrations ?? (() => discoverMigrations());
   const verifyDatabase = dependencies.verifyDatabase ?? verifyRuntimeDatabase;
   const poolCloseTimeoutMs = dependencies.poolCloseTimeoutMs ?? DEFAULT_POOL_CLOSE_TIMEOUT_MS;
+  const startDisconnectConvergence =
+    dependencies.disconnectConvergence?.start ??
+    startDisconnectConvergenceLoop;
+  const disconnectConvergencePolicy =
+    dependencies.disconnectConvergence?.policy;
 
   const failStartup = (message: string) => {
     dependencies.writeStderr(`commercial-api: ${message}\n`);
@@ -102,6 +119,9 @@ export async function runCommercialApiProcess(
   let pool: TransactionalPool | null = null;
   let application: ApplicationRouter | undefined;
   let poolClosing: Promise<boolean> | undefined;
+  let disconnectConvergenceLoop:
+    | DisconnectConvergenceLoopHandle
+    | undefined;
 
   // Idempotent and bounded; resolves false if the pool did not close cleanly in time.
   const closePool = (): Promise<boolean> => {
@@ -163,9 +183,20 @@ export async function runCommercialApiProcess(
                 }),
               );
       }
+
+      disconnectConvergenceLoop =
+        startDisconnectConvergence({
+          pool,
+          reportFailure: dependencies.writeStderr,
+          ...(disconnectConvergencePolicy === undefined
+            ? {}
+            : { policy: disconnectConvergencePolicy }),
+        });
+
       dependencies.writeStdout("commercial-api: database verified\n");
     }
   } catch (error) {
+    disconnectConvergenceLoop?.stop();
     await closePool();
     failStartup(describeStartupFailure(error));
     return null;
@@ -182,6 +213,7 @@ export async function runCommercialApiProcess(
       },
     });
   } catch (error) {
+    disconnectConvergenceLoop?.stop();
     await closePool();
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
     failStartup(`Could not listen on the configured host and port${typeof code === "string" ? ` (${code})` : ""}.`);
@@ -202,6 +234,7 @@ export async function runCommercialApiProcess(
       }
       shuttingDown = true;
       draining = true;
+      disconnectConvergenceLoop?.stop();
 
       dependencies.writeStdout(`commercial-api: ${signal} received, shutting down\n`);
       void running

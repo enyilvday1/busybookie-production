@@ -13545,6 +13545,191 @@ This architecture-only implementation-start transition authorises Phase 1.
 Migration/source implementation has not yet begun and may start only after
 this transition itself has passed review and publication.
 
+#### R44B11F Phase 3 result wire-contract amendment
+
+**Locked decision (R44B11F Phase 3 contract amendment; architecture only,
+precedes Phase 3 implementation).**
+
+Phase 3 implementation discovery found that the terminal result route's
+request vocabulary was not fully locked: the R44B11F contract fixed the three
+outcomes and the two `DEFINITIVE_FAILURE` reasons, but no `VERIFIED` reason,
+no worker-reportable `INCONCLUSIVE` reasons and no request member names. This
+amendment locks that wire contract. It changes no persistence, lifecycle,
+lock-order, aggregate-application or audit decision already locked above.
+
+##### Route and exact request body
+
+`POST /worker-control/v1/provider-verifications/:id/result`
+
+The JSON request body has exactly these four members:
+
+```text
+{ fencingCounter, leaseToken, outcome, reasonCode }
+```
+
+- `fencingCounter` is a positive JavaScript-safe integer.
+- `leaseToken` has the existing locked worker lease-token shape
+  (`WORKER_LEASE_TOKEN_PATTERN`).
+- `outcome` and `reasonCode` are strings from the closed vocabulary below.
+- Unknown or additional members are invalid.
+
+##### Closed worker-reportable outcomes and reasons
+
+```text
+VERIFIED
+  VERIFICATION_SUCCEEDED
+
+DEFINITIVE_FAILURE
+  CREDENTIAL_REJECTED
+  CREDENTIAL_NOT_AUTHORIZED
+
+INCONCLUSIVE
+  PROVIDER_BILLING_RESTRICTION
+  PROVIDER_RATE_OR_QUOTA_LIMITED
+  PROVIDER_UNAVAILABLE
+  PROVIDER_TIMEOUT
+  PROVIDER_NETWORK_FAILURE
+  PROVIDER_RESPONSE_MALFORMED
+  PROVIDER_RESPONSE_TOO_LARGE
+  PROVIDER_UNEXPECTED_STATUS
+  PROVIDER_OPERATION_DRIFT
+  VERIFICATION_AMBIGUOUS
+```
+
+No other reason is accepted from the worker.
+
+The Phase 4 reconciliation reasons
+
+```text
+WORKER_LOST_AFTER_CREDENTIAL_GRANT
+WORKER_LOST_DURING_VERIFYING
+```
+
+are written only by the reconciliation contract and are never
+worker-reportable.
+
+`VERIFIED` uses `VERIFICATION_SUCCEEDED`, not `CREDENTIAL_ACCEPTED`. The fixed
+metadata operation proves successful provider verification only; it does not
+establish that the credential is usable for generation. The existing
+invariant is preserved:
+
+```text
+provider verified != guaranteed usable for generation
+```
+
+##### Preserved classification semantics
+
+The locked provider classification is unchanged:
+
+- Runway HTTP 401 is `DEFINITIVE_FAILURE` / `CREDENTIAL_REJECTED`;
+- Google HTTP 401 authentication rejection is
+  `DEFINITIVE_FAILURE` / `CREDENTIAL_REJECTED`;
+- Google HTTP 403 permission rejection is
+  `DEFINITIVE_FAILURE` / `CREDENTIAL_NOT_AUTHORIZED`.
+
+Billing or payment state, rate or quota limitation, provider overload or
+unavailability, timeout, DNS/TLS/network failure, malformed response,
+oversized response, unexpected status, operation drift and every ambiguous or
+unknown behaviour remain `INCONCLUSIVE`.
+
+This amendment locks reason vocabulary only. Phase 6 remains responsible for
+the exact fixed-provider classifier implementation.
+
+##### Validation ordering
+
+Before any database work the router validates:
+
+- the exact member set;
+- primitive types and shapes;
+- a recognized `outcome`;
+- a recognized `reasonCode`.
+
+An unknown `outcome` or `reasonCode` is HTTP 400 `INVALID_REQUEST` and touches
+no lifecycle state.
+
+A recognized `outcome` and recognized `reasonCode` that form an invalid pair
+are not classified before authority is proven. Pair compatibility is
+evaluated inside the lifecycle service after the applicable worker and job
+authority has been established, following the existing submission-failed
+security ordering. A recognized-but-mismatched pair fails closed through the
+worker lease/conflict surface and performs no lifecycle mutation.
+
+##### First terminal transition authority
+
+A first worker-reported terminal result is accepted only from a job still in
+`VERIFYING`, and requires:
+
+- an authenticated `ACTIVE` worker principal;
+- a live, unexpired current verification lease;
+- the lease worker principal equal to the authenticated worker;
+- a matching lease-token verifier;
+- the exact current fencing counter;
+- the authenticated worker equal to `verifying_worker_principal_id`;
+- the fencing counter equal to `verifying_fencing_counter`.
+
+An expired `VERIFYING` lease is not worker-result authority. Expiry after
+`VERIFYING` belongs to the Phase 4 reconciliation contract.
+
+##### First terminal commit
+
+The first valid result transition is `VERIFYING -> COMPLETED`. It atomically
+stores the already-locked result provenance:
+
+- `result_outcome`;
+- `terminal_reason_code`;
+- `result_worker_principal_id`;
+- `result_fencing_counter`;
+- `completed_at`.
+
+The live lease ownership and proof fields are cleared as the migration 0010
+terminal-state constraints require. Immutable `VERIFYING` provenance and the
+monotonic fencing history are preserved.
+
+The corresponding ProviderConnection aggregate mutation and first-transition
+AuditEvent remain atomic with this commit, as already locked.
+
+##### Exact terminal replay authority
+
+After the first terminal commit the lease-token verifier is no longer stored,
+so an exact replay does not claim to revalidate the lease token. The request
+must still carry a syntactically valid `leaseToken` because it is part of the
+exact wire shape, but the token is not terminal-replay authority.
+
+For a `COMPLETED` job, replay authority requires all of:
+
+- the authenticated worker principal equals `verifying_worker_principal_id`;
+- the request `fencingCounter` equals `verifying_fencing_counter`;
+- `result_worker_principal_id` equals the authenticated worker;
+- `result_fencing_counter` equals the request `fencingCounter`;
+- the request `outcome` equals the stored `result_outcome`;
+- the request `reasonCode` equals the stored `terminal_reason_code`.
+
+Only that exact tuple replays successfully. An exact replay performs no
+UPDATE, no ProviderConnection aggregate mutation and no AuditEvent, and
+returns the previously committed result.
+
+A different outcome, reason code, worker principal or fencing epoch fails
+closed.
+
+A Phase 4 reconciliation terminal result does not become replay-authorised as
+a worker result merely because it retains worker provenance.
+
+##### Exact success response
+
+HTTP 200 with exactly these members:
+
+```text
+{ providerVerificationJobId, fencingCounter, state, outcome, reasonCode, completedAt }
+```
+
+- `state` is `COMPLETED` for this endpoint.
+- `completedAt` is the committed database timestamp.
+- An exact replay returns the same stored values.
+
+The response never exposes a lease token, token verifier, sealed credential,
+credential fingerprint, provider body, provider headers or account-wide
+secret data.
+
 #### R44B11F acceptance boundary
 
 R44B11F is complete only when:
@@ -13660,6 +13845,22 @@ R44B11F_PROVIDER_CONNECTION_CREATION_PRODUCTION_ENABLEMENT=NO
 R44B11F_CUSTOMER_GENERATION_ROUTE_INCLUDED=NO
 R44B11F_LIVE_PROVIDER_SUBMISSION_ENABLEMENT=NO
 R44B11F_FUTURE_SLICE_SUFFIXES_LOCKED=NO
+R44B11F_RESULT_CONTRACT_LOCKED=YES
+R44B11F_RESULT_ROUTE_BODY=fencingCounter,leaseToken,outcome,reasonCode
+R44B11F_RESULT_SUCCESS_HTTP_STATUS=200
+R44B11F_RESULT_SUCCESS_BODY=providerVerificationJobId,fencingCounter,state,outcome,reasonCode,completedAt
+R44B11F_RESULT_FIRST_TRANSITION_REQUIRES_LIVE_LEASE=YES
+R44B11F_RESULT_EXPIRED_VERIFYING_WORKER_AUTHORITY=NO
+R44B11F_RESULT_REPLAY_LEASE_TOKEN_AUTHORITY=NO
+R44B11F_RESULT_REPLAY_AUTHORITY=VERIFYING_PRINCIPAL_FENCE_PLUS_EXACT_TERMINAL_TUPLE
+R44B11F_RESULT_PAIR_CLASSIFICATION_BEFORE_AUTHORITY=NO
+R44B11F_RESULT_UNKNOWN_VOCABULARY_HTTP=400_INVALID_REQUEST
+R44B11F_RESULT_RECOGNIZED_PAIR_MISMATCH_FAILS_CLOSED=YES
+R44B11F_RESULT_VERIFIED_REASON=VERIFICATION_SUCCEEDED
+R44B11F_RESULT_DEFINITIVE_FAILURE_REASONS=CREDENTIAL_REJECTED,CREDENTIAL_NOT_AUTHORIZED
+R44B11F_RESULT_INCONCLUSIVE_REASONS=PROVIDER_BILLING_RESTRICTION,PROVIDER_RATE_OR_QUOTA_LIMITED,PROVIDER_UNAVAILABLE,PROVIDER_TIMEOUT,PROVIDER_NETWORK_FAILURE,PROVIDER_RESPONSE_MALFORMED,PROVIDER_RESPONSE_TOO_LARGE,PROVIDER_UNEXPECTED_STATUS,PROVIDER_OPERATION_DRIFT,VERIFICATION_AMBIGUOUS
+R44B11F_RESULT_PHASE4_REASONS_WORKER_REPORTABLE=NO
+R44B11F_PHASE_3_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

@@ -11961,8 +11961,8 @@ R44B11D_FUTURE_SLICE_SUFFIXES_LOCKED=NO
 
 ### R44B11E — ProviderConnection disconnect convergence, terminal usage evidence and deterministic credential cleanup
 
-**Locked decision (R44B11E; architecture and policy only, not yet
-implemented).** R44B11D completed and published the USER_BYO generation
+**Historical locked decision (R44B11E contract lock; not implemented at lock
+time).** R44B11D completed and published the USER_BYO generation
 authorization claim boundary. R44B11E implements the next mandatory
 R44B11P1 lifecycle obligation: a ProviderConnection disconnect must converge
 already-issued and already-claimed pre-submission work to safe terminal
@@ -12704,12 +12704,97 @@ R44B11E is complete only when:
 - no provider network call occurs in convergence;
 - live provider submission remains disabled.
 
+**Implemented and validated (R44B11E publication and closure sync).**
+
+The locked R44B11E contract is implemented, validated and published without
+reopening its lifecycle, accounting, locking or credential-destruction
+semantics.
+
+- Contract-lock commit:
+  `9a5d398b081eb52a16667bf7c75b96cedc7638a5`.
+- Persistence implementation commit:
+  `fff933517afa529f006358eedf73c848a076ec61`
+  (`feat(commercial): add R44B11E disconnect convergence persistence`).
+- Runtime/orchestration implementation commit:
+  `746aef0f2b6d183480f9121c23da4e4fc62ea166`
+  (`feat(commercial): implement R44B11E disconnect convergence`).
+
+The persistence publication added migration 0009, the append-only
+`generation_usage_events` terminal-evidence relation, the two bounded
+disconnect-convergence indexes and the runtime SELECT+INSERT privilege
+surface required by the locked contract.
+
+The runtime publication added the internal disconnect-convergence service,
+the bounded periodic convergence loop, immediate post-commit targeted
+convergence, deterministic credential cleanup and the required
+commercial-api orchestration/test integration. No worker source, shared
+worker protocol or provider adapter was changed by that runtime slice.
+
+Validation of the final published R44B11E implementation passed:
+
+- commercial-api TypeScript typecheck: PASS;
+- full commercial-api non-database suite: 1012/1012 across 24 files;
+- full commercial-api PostgreSQL suite: 761/761 across 24 files;
+- commercial-api production build: PASS;
+- required disconnect lifecycle, locking, rollback, idempotency, crash
+  convergence and multi-process `SKIP LOCKED` coverage: PASS;
+- immediate post-disconnect convergence orchestration: PASS;
+- periodic internal convergence orchestration and shutdown behavior: PASS;
+- exact tested-byte to staged-byte verification: PASS;
+- staged and committed `git diff --check`: PASS;
+- local, tracking and remote publication identity convergence: PASS.
+
+PostgreSQL validation used the dedicated PostgreSQL 16 commercial test
+database; no production database was used.
+
+The unrelated
+`docs/commercial/BUSYBOOKIE_FREE_BYO_HOSTED_TRIAL_BACKLOG.md`
+remained untracked and unchanged throughout R44B11E implementation,
+validation, staging, commit and publication.
+
+Disconnect convergence performs no provider network operation and never
+opens or decrypts a credential. Live provider submission remains disabled.
+
+**Current status (R44B11E docs sync).**
+
+- **R44B11A:** fully closed; unchanged.
+- **R44B11B:** fully closed; unchanged.
+- **R44B11C:** fully closed; unchanged.
+- **R44B11D:** fully closed; unchanged.
+- **R44B11E discovery:** PASS.
+- **R44B11E pre-lock screen:** PASS.
+- **R44B11E final pre-contract screen:** PASS.
+- **R44B11E contract lock:**
+  `9a5d398b081eb52a16667bf7c75b96cedc7638a5`.
+- **R44B11E persistence implementation:** PASS; published in
+  `fff933517afa529f006358eedf73c848a076ec61`.
+- **R44B11E runtime/orchestration implementation:** PASS; validated and
+  published in `746aef0f2b6d183480f9121c23da4e4fc62ea166`.
+- **R44B11E:** fully closed by this docs-sync revision.
+- **R44B11P1 implementation:** started, not complete.
+- **R44B11 parent implementation:** started, not complete.
+- **Remaining R44B11P1 work after R44B11E:** separate future discovery and
+  contract decisions remain required for:
+  - any expiry-convergence service that is still justified;
+  - the provider-verification capability required before customer
+    generation enablement;
+  - any customer generation route and production generation-policy
+    enablement justified after those gates.
+- Provider verification is the next currently identified customer-enablement
+  blocker; its revision suffix remains unlocked pending discovery.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
 ```text
 R44B11E_DISCOVERY=PASS
 R44B11E_PRELOCK_SCREEN=PASS
 R44B11E_FINAL_PRECONTRACT_SCREEN=PASS
 R44B11E_CONTRACT_LOCKED=YES
-R44B11E_IMPLEMENTATION_STARTED=NO
+R44B11E_IMPLEMENTATION_STARTED=YES
+R44B11E_IMPLEMENTATION_VALIDATED=YES
+R44B11E_IMPLEMENTATION_PUBLISHED=YES
+R44B11E_CONTRACT_LOCK_COMMIT=9a5d398b081eb52a16667bf7c75b96cedc7638a5
+R44B11E_PERSISTENCE_IMPLEMENTATION_COMMIT=fff933517afa529f006358eedf73c848a076ec61
+R44B11E_IMPLEMENTATION_COMMIT=746aef0f2b6d183480f9121c23da4e4fc62ea166
 R44B11E_SCOPE=PROVIDER_CONNECTION_DISCONNECT_CONVERGENCE_TERMINAL_USAGE_EVIDENCE_AND_DETERMINISTIC_CREDENTIAL_CLEANUP
 R44B11E_DISCOVERY_BASE=50ec91ec6a0d63a71e57c863e29080a1ffb5bff9
 R44B11E_DISCONNECT_DISCOVERY_REPORT_SHA256=80a7da0ea4361cf53145d5586778de909331c4b92b7ccab0c68ebee69a5067dc

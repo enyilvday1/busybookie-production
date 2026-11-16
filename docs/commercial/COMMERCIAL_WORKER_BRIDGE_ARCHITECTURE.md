@@ -12780,8 +12780,10 @@ opens or decrypts a credential. Live provider submission remains disabled.
     generation enablement;
   - any customer generation route and production generation-policy
     enablement justified after those gates.
-- Provider verification is the next currently identified customer-enablement
-  blocker; its revision suffix remains unlocked pending discovery.
+- Provider verification remains the next identified customer-enablement
+  blocker and is locked below as R44B11F after D1-D4 discovery, conflict,
+  pre-lock and final pre-contract screening.
+- Revision suffixes after R44B11F remain unlocked.
 - `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
 
 ```text
@@ -12871,6 +12873,659 @@ R44B11E_SHARED_PROTOCOL_CHANGE_REQUIRED=NO
 R44B11E_PROVIDER_ADAPTER_CHANGE_REQUIRED=NO
 R44B11E_LIVE_PROVIDER_ENABLEMENT=NO
 R44B11E_FUTURE_SLICE_SUFFIXES_LOCKED=NO
+```
+
+### R44B11F — ProviderConnection verification durable execution workflow
+
+**Locked decision (R44B11F; architecture and policy only, not yet implemented).**
+
+R44B11F implements the provider-verification prerequisite already required by
+R44B11P1 without reusing generation execution, granting the public API
+credential-opening authority, or enabling live generation submission.
+
+The customer request is control-plane work. The credential opening and the
+provider metadata request are execution-side work. The workflow therefore
+uses its own durable job identity and its own worker-control lifecycle.
+
+#### R44B11F scope and non-goals
+
+R44B11F includes:
+
+- durable provider-verification work;
+- exact credential-version binding;
+- authenticated worker leasing and fencing;
+- sealed-credential grant to the private worker;
+- a durable pre-provider `VERIFYING` barrier;
+- fixed provider-specific non-generating metadata operations;
+- exact terminal result provenance and replay;
+- aggregate ProviderConnection verification-state application;
+- rotation/disconnect race safety;
+- crash/lease-expiry convergence;
+- customer verification request composition;
+- verification observability in the customer-safe ProviderConnection view.
+
+R44B11F does not include:
+
+- generation execution;
+- customer generation-route enablement;
+- live provider generation enablement;
+- platform-hosted generation;
+- OAuth;
+- arbitrary customer-supplied verification URLs;
+- provider task creation;
+- provider polling or output recovery;
+- automatic commercial enablement of Google or Runway verification.
+
+#### Separate durable verification identity
+
+Migration `0010_provider_connection_verification_workflow.sql` adds
+`provider_verification_jobs`.
+
+A verification job is not an `execution_job`, is not an
+`execution_attempt`, and has no `generation_authorization_id`.
+
+Each job immutably binds at least:
+
+- Account ID;
+- ProviderConnection ID;
+- exact ProviderCredentialVersion ID;
+- the server-selected `verification_policy_id`;
+- requesting User ID;
+- creation time.
+
+The exact credential-version foreign key must prove that the version belongs
+to the same Account and ProviderConnection.
+
+The verification policy ID is immutable provenance. A registry change after
+job creation must never silently change the operation performed by an already
+queued job.
+
+#### One open verification job per current credential version
+
+At most one non-terminal verification job may exist for the same
+ProviderConnection and exact credential version.
+
+The database enforces this with a partial unique index over the open states.
+
+Repeated `POST /provider-connections/:id/verify` while that job remains open
+returns the same durable job identity and performs no second provider call.
+
+After a terminal job, a later customer request may create a new job for the
+same still-current credential version.
+
+No customer-provided idempotency key is required for the empty-body verify
+operation; durable open-job uniqueness is the idempotency authority.
+
+#### Verification job lifecycle
+
+The locked states are:
+
+```text
+QUEUED -> LEASED -> VERIFYING -> COMPLETED
+QUEUED -> CANCELLED
+LEASED -> CANCELLED
+```
+
+`COMPLETED` has exactly one terminal outcome:
+
+```text
+VERIFIED
+DEFINITIVE_FAILURE
+INCONCLUSIVE
+```
+
+`CANCELLED` means no provider verification operation was authorised for that
+job after the cancellation condition became authoritative.
+
+The job records a bounded safe reason code. Provider response bodies, API
+keys, sealed envelopes, fingerprints, credit balances, model lists and
+provider headers are never persisted in the job or AuditEvents.
+
+#### Lease and fencing
+
+Verification jobs use the existing authenticated worker-principal authority
+but do not reuse generation attempt rows.
+
+A lease contains:
+
+- worker principal identity;
+- a random lease token whose verifier is stored only as SHA-256;
+- a monotonically increasing fencing counter;
+- leased-at and lease-expiry database timestamps.
+
+The fencing counter never decreases and never exceeds the JavaScript safe
+integer boundary already used by execution attempts.
+
+Leasing uses bounded `FOR UPDATE SKIP LOCKED` selection so multiple worker
+processes may compete safely without a global singleton.
+
+The verification lease duration is 30 seconds.
+
+There is no heartbeat requirement for R44B11F. The provider request timeout
+is strictly shorter than the lease.
+
+#### Credential grant and retention obligation
+
+The verification lease response never contains a credential or sealed
+credential envelope.
+
+The worker requests the exact job credential through:
+
+`POST /worker-control/v1/provider-verifications/:id/credential-grant`.
+
+The grant transaction must validate the current authenticated worker
+principal, lease token and fencing counter.
+
+Before returning the sealed credential it must revalidate, under database
+locks, that:
+
+- the Account remains eligible for new customer work;
+- the ProviderConnection is not `DISCONNECTED` or `DISABLED`;
+- the job's exact credential version remains the connection's current
+  `ACTIVE` version;
+- the version is not `RETAINED_FOR_RECOVERY` or `DESTROYED`;
+- the immutable verification policy ID is still structurally valid.
+
+The grant stamps `credential_granted_at` from the database clock.
+
+The existing credential-retention authority is extended so that an
+R44B11F job blocks destruction while it is `LEASED` or `VERIFYING` after
+`credential_granted_at` has been stamped.
+
+Provider verification never creates a provider-recovery obligation.
+
+The grant transaction takes a conflicting lifecycle lock on the exact
+credential version before stamping the grant. Therefore disconnect cleanup
+cannot destroy the version concurrently with a committed verification
+grant.
+
+#### Durable VERIFYING barrier
+
+Receiving a sealed envelope is not authority to open it.
+
+Before credential opening or any provider network call, the worker must
+successfully invoke:
+
+`POST /worker-control/v1/provider-verifications/:id/verifying`.
+
+The transition `LEASED -> VERIFYING` requires:
+
+- the current authenticated worker principal;
+- the current lease token;
+- the exact fencing counter;
+- `credential_granted_at` already stamped;
+- the Account still eligible;
+- the connection still not `DISCONNECTED` or `DISABLED`;
+- the exact bound credential version still current and `ACTIVE`.
+
+The barrier atomically stamps immutable:
+
+- `verifying_at`;
+- `verifying_worker_principal_id`;
+- `verifying_fencing_counter`.
+
+Only after the barrier acknowledgement may the worker open the credential and
+perform the fixed metadata request.
+
+Rotation or disconnect that commits before the barrier therefore prevents the
+provider call.
+
+Rotation or disconnect that commits after the barrier does not pretend that
+the already-authorised metadata request never occurred, but its eventual
+result may not reactivate or verify a newer credential version.
+
+#### Fixed provider-verification policies
+
+R44B11F fixes these implementation policy IDs:
+
+```text
+GOOGLE_GENAI_MODELS_LIST_V1BETA
+RUNWAY_ORGANIZATION_GET_V1_2024_11_06
+```
+
+Google policy:
+
+- method: `GET`;
+- fixed origin: `https://generativelanguage.googleapis.com`;
+- fixed path: `/v1beta/models`;
+- fixed query: `pageSize=1`;
+- authentication: `x-goog-api-key`;
+- request body: none.
+
+Runway policy:
+
+- method: `GET`;
+- fixed origin: `https://api.dev.runwayml.com`;
+- fixed path: `/v1/organization`;
+- authentication: `Authorization: Bearer <API key>`;
+- required API-version header: `X-Runway-Version: 2024-11-06`;
+- request body: none.
+
+These calls use a dedicated verification HTTP transport with fixed origins.
+They do not use generation SDK create methods.
+
+Redirect following is prohibited.
+
+Automatic provider retry inside one lease is prohibited.
+
+The provider request timeout is 10 seconds.
+
+The verification response body is bounded to 65536 bytes and discarded after
+classification.
+
+A generation request is never a verification probe.
+
+#### Real-provider verification remains default-off
+
+Locking the two fixed metadata operations does not establish commercial
+cost approval.
+
+Current official documentation establishes that the operations are metadata
+reads and are separate from generation, but does not provide the explicit
+zero-cost guarantee required by BusyBookie's commercial policy.
+
+Therefore production real-provider verification remains disabled by default.
+
+A separate worker-side kill switch is required:
+
+`WORKER_LIVE_PROVIDER_VERIFICATION_ENABLED=NO`.
+
+It is independent from and does not modify:
+
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
+The customer ProviderConnection capability registry also remains default-off
+in production. Its verification capability must explicitly identify both
+`verificationEnabled=true` and the fixed verification policy ID before the
+customer route may create a job.
+
+Enabling either side alone is insufficient for production provider
+verification.
+
+#### Provider result classification
+
+A successful fixed metadata response with a structurally valid bounded
+response is `VERIFIED`.
+
+`DEFINITIVE_FAILURE` is intentionally narrow and may be produced only by an
+authentication/authorization response that current provider documentation
+unambiguously defines as rejecting that credential for the fixed operation.
+
+For the locked policies:
+
+- Runway HTTP 401 is `DEFINITIVE_FAILURE` / `CREDENTIAL_REJECTED`;
+- Google HTTP 401 authentication rejection is
+  `DEFINITIVE_FAILURE` / `CREDENTIAL_REJECTED`;
+- Google HTTP 403 permission rejection is
+  `DEFINITIVE_FAILURE` / `CREDENTIAL_NOT_AUTHORIZED`.
+
+Payment state, quota/rate limits, provider overload, timeout, DNS/TLS/network
+failure, malformed or oversized response, unexpected status, operation drift
+and every ambiguous failure are `INCONCLUSIVE`.
+
+No human-readable provider error message is durable classification authority.
+
+Unknown provider behaviour fails closed to `INCONCLUSIVE`, never
+`DEFINITIVE_FAILURE`.
+
+#### Terminal result endpoint and exact replay
+
+The worker reports the result through:
+
+`POST /worker-control/v1/provider-verifications/:id/result`.
+
+A provider-derived `VERIFIED` or `DEFINITIVE_FAILURE` result is accepted only
+from the exact worker principal and fencing epoch that crossed the immutable
+`VERIFYING` barrier.
+
+On first terminal transition the job stores immutable:
+
+- terminal outcome;
+- safe reason code;
+- result worker-principal ID;
+- result fencing counter;
+- completed-at database timestamp.
+
+Exact replay from the same worker principal and fencing epoch with the exact
+same outcome and reason returns the already-recorded result without another
+write or AuditEvent.
+
+A conflicting replay fails closed.
+
+A stale worker or fencing epoch can never overwrite the terminal result.
+
+#### Transaction atomicity and lock order
+
+Durable verification state and its corresponding control-plane audit evidence
+must never commit as separable partial facts.
+
+The customer verification-request transaction atomically:
+
+- locks the active Account;
+- locks the ProviderConnection;
+- identifies and locks the exact current `ACTIVE` credential version;
+- resolves an existing open verification job or inserts exactly one new job;
+- inserts `provider_connection.verification_requested` only for first
+  creation.
+
+A concurrent partial-unique conflict is resolved by reading and returning the
+already-created open job; it must not create a second AuditEvent.
+
+Worker grant, barrier, result and expiry-reconciliation transactions lock the
+verification job before taking ProviderConnection lifecycle locks. When
+lifecycle locks are needed, their order is:
+
+```text
+ProviderVerificationJob
+-> Account
+-> ProviderConnection
+-> exact ProviderCredentialVersion
+```
+
+No customer ProviderConnection lifecycle transaction may take a verification
+job row lock after holding the connection/version lifecycle locks. Open-job
+lookup from the customer route is therefore a non-locking read; database
+open-job uniqueness is the concurrency authority.
+
+The `LEASED -> VERIFYING` transaction atomically:
+
+- performs all lease/fencing and current-version revalidation;
+- stamps immutable verifying provenance;
+- stamps `last_verification_attempt_at` when aggregate eligibility still
+  matches the bound current version.
+
+The first terminal-result transaction atomically:
+
+- records immutable terminal job outcome/provenance;
+- applies any permitted same-current-version ProviderConnection aggregate
+  mutation;
+- inserts exactly one corresponding first-transition AuditEvent.
+
+Expiry reconciliation uses the same atomic terminal-write/audit rule.
+
+Provider network I/O and credential opening remain outside every database
+transaction.
+
+#### ProviderConnection aggregate application
+
+`provider_connections` remains the aggregate verification-state authority.
+
+A verification request by itself does not overwrite an existing verification
+result.
+
+`last_verification_attempt_at` is stamped from the database clock when the
+same-current-version job crosses the `VERIFYING` barrier.
+
+A `VERIFIED` result changes the aggregate only if the job still names the
+connection's same current `ACTIVE` credential version and the connection is
+not `DISCONNECTED` or `DISABLED`:
+
+```text
+status = ACTIVE
+verification_status = VERIFIED
+verified_at = database completion timestamp
+```
+
+A `DEFINITIVE_FAILURE` result under the same current-version condition sets:
+
+```text
+status = INVALID
+verification_status = FAILED
+verified_at = NULL
+```
+
+`INCONCLUSIVE` never invalidates a previously verified connection.
+
+For an unverified connection an inconclusive result leaves the connection
+unverified while retaining `last_verification_attempt_at` as evidence that an
+attempt occurred.
+
+If rotation, disconnect or another lifecycle change makes the job's version
+stale before terminal result application, the job still records its terminal
+history but performs no aggregate ProviderConnection mutation.
+
+A late result can therefore never verify a newly rotated credential and can
+never reactivate a disconnected or disabled connection.
+
+#### Customer route and safe observability
+
+R44B11F implements:
+
+`POST /provider-connections/:id/verify`
+
+with an empty request body.
+
+The route remains authenticated, Account-scoped, active-principal guarded and
+indistinguishable for missing versus foreign IDs.
+
+It accepts only connection states that may legitimately be verified:
+
+`PENDING_VERIFICATION`, `ACTIVE`, or `INVALID`.
+
+It binds the job to the one current `ACTIVE` credential version.
+
+A newly created or replayed open job is returned as `202 Accepted` with only
+safe job identity/state fields.
+
+The customer-safe ProviderConnection read model is extended with:
+
+- `verificationPending`;
+- `lastVerificationAttemptAt`;
+- `verifiedAt`.
+
+`verificationPending` is derived from existence of an open verification job;
+no secret or worker lease data is exposed.
+
+No separate customer endpoint exposes sealed credentials, worker principal
+data or provider response bodies.
+
+#### Audit semantics
+
+Exactly one first-transition AuditEvent is recorded for each material
+customer-visible verification event:
+
+- `provider_connection.verification_requested`;
+- `provider_connection.verified`;
+- `provider_connection.verification_failed`;
+- `provider_connection.verification_inconclusive`;
+- `provider_connection.verification_result_stale` when a terminal provider
+  result is recorded but cannot mutate the aggregate because the bound
+  credential version or connection lifecycle changed.
+
+Replay never duplicates an AuditEvent.
+
+Metadata is restricted to safe IDs, credential version numbers, fixed policy
+IDs, terminal outcome and safe reason codes.
+
+Credentials, sealed envelopes, fingerprints, provider response bodies and
+provider access data are prohibited from AuditEvents.
+
+#### Expiry and crash convergence
+
+Verification work must converge without another customer request.
+
+A bounded internal reconciliation pass handles expired verification leases:
+
+- expired `LEASED` before credential grant -> clear live lease and return the
+  same job to `QUEUED`, preserving the fencing counter;
+- expired `LEASED` after credential grant -> terminal `COMPLETED /
+  INCONCLUSIVE` with `WORKER_LOST_AFTER_CREDENTIAL_GRANT`;
+- expired `VERIFYING` -> terminal `COMPLETED / INCONCLUSIVE` with
+  `WORKER_LOST_DURING_VERIFYING`.
+
+The reconciler also cancels pre-barrier work whose bound connection/version
+is no longer eligible.
+
+It:
+
+- uses database server time;
+- uses bounded `FOR UPDATE SKIP LOCKED` work selection;
+- performs no provider network call;
+- opens no credential;
+- is safe under multiple commercial-api processes;
+- requires no leader election or global singleton;
+- forbids local overlapping passes;
+- starts only after runtime database configuration has been verified;
+- stops scheduling new passes during shutdown.
+
+A verification terminal transition closes its verification-specific
+credential-retention obligation.
+
+If disconnect cleanup retained a credential because verification had already
+received a grant, the existing R44B11E periodic disconnect convergence may
+destroy it after this obligation closes. No second customer disconnect is
+required.
+
+#### Rotation and disconnect races
+
+The existing ProviderConnection lifecycle lock remains authoritative.
+
+A rotation committed before the `VERIFYING` barrier makes the bound version
+non-current and therefore blocks the provider call.
+
+A disconnect committed before the barrier blocks the provider call.
+
+A rotation/disconnect committed after the barrier may race an already
+authorised metadata request, but its later result cannot mutate the newer or
+terminal connection lifecycle.
+
+Disconnect cleanup must extend `readCredentialObligations()` to include the
+verification-specific retention rule before migration 0010 can be considered
+complete.
+
+No verification lock order may require the existing disconnect transaction to
+wait on a provider network operation.
+
+Provider network I/O is always outside database transactions.
+
+#### Implementation boundary
+
+Expected implementation surfaces include:
+
+- migration 0010 plus catalog/runtime-grant tests;
+- provider-verification persistence/service modules in commercial-api;
+- worker-control verification lease/grant/barrier/result routes;
+- ProviderConnection verify-route composition and safe read-model fields;
+- credential-obligation integration;
+- bounded verification-expiry reconciliation;
+- shared provider-verification worker protocol types only where cross-app
+  contracts require them;
+- commercial-worker verification control client/run loop;
+- dedicated Google and Runway verification transports;
+- production configuration with live verification default-off;
+- non-database and real-PostgreSQL race/idempotency tests.
+
+Exact implementation file scope remains subject to implementation discovery.
+
+#### R44B11F acceptance boundary
+
+R44B11F is complete only when:
+
+- migration 0010 and runtime privileges pass catalog/privilege validation;
+- no generation job or generation authorization is created for verification;
+- the public API still cannot open stored credentials;
+- customer verify requests are exact-version bound and open-job idempotent;
+- worker lease/fencing and exact replay are proven;
+- no credential can be opened before the durable `VERIFYING` barrier;
+- rotation/disconnect-before-barrier races prove zero provider call;
+- late results cannot verify a newer version or reactivate disconnect;
+- verification retention prevents unsafe credential destruction;
+- crash and lease-expiry convergence close retention without another customer
+  request;
+- Google and Runway transports are fixed-origin, non-generating, bounded,
+  redirect-disabled and single-attempt;
+- real-provider verification remains production default-off;
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains unchanged;
+- full commercial-api and commercial-worker regressions pass;
+- production builds pass.
+
+```text
+R44B11F_DISCOVERY=PASS
+R44B11F_CONFLICT_SCREEN=PASS
+R44B11F_PRELOCK_SCREEN=PASS
+R44B11F_FINAL_PRECONTRACT_SCREEN=PASS
+R44B11F_CONTRACT_LOCKED=YES
+R44B11F_IMPLEMENTATION_STARTED=NO
+R44B11F_SCOPE=PROVIDER_CONNECTION_VERIFICATION_DURABLE_EXECUTION_WORKFLOW
+R44B11F_DISCOVERY_BASE=dfc68eb6ff13786b1ecdf30116d1da1efc0bd84e
+R44B11F_DISCOVERY_REPORT_SHA256=3978e826ba2137256679a4c41c1213a7310c682375ff991987ababa35ea594de
+R44B11F_CONFLICT_SCREEN_REPORT_SHA256=041eabfad4a45f270cc58530e99109695030931d54308244561770442b812ef0
+R44B11F_PRELOCK_REPORT_SHA256=c7cce5eb6debdd09807c310dafdee53b6032cfa8e65e3eee094d2aabec39c32c
+R44B11F_FINAL_PRECONTRACT_REPORT_SHA256=e9226e6fd3d2d66dd264a866a44598e30ff5596736e638522a2786549e7f10b3
+R44B11F_DATABASE_MIGRATION_REQUIRED=YES
+R44B11F_MIGRATION=0010_provider_connection_verification_workflow.sql
+R44B11F_VERIFICATION_TABLE=provider_verification_jobs
+R44B11F_REUSES_GENERATION_EXECUTION_JOBS=NO
+R44B11F_GENERATION_AUTHORIZATION_REQUIRED=NO
+R44B11F_PUBLIC_API_CREDENTIAL_OPEN_ALLOWED=NO
+R44B11F_NETWORK_CALL_LOCATION=COMMERCIAL_WORKER
+R44B11F_JOB_BINDS_EXACT_CREDENTIAL_VERSION=YES
+R44B11F_VERIFICATION_POLICY_ID_IMMUTABLE=YES
+R44B11F_ONE_OPEN_JOB_PER_CONNECTION_VERSION=YES
+R44B11F_CUSTOMER_REQUEST_IDEMPOTENCY=OPEN_JOB_UNIQUENESS
+R44B11F_JOB_STATES=QUEUED_LEASED_VERIFYING_COMPLETED_CANCELLED
+R44B11F_RESULT_OUTCOMES=VERIFIED_DEFINITIVE_FAILURE_INCONCLUSIVE
+R44B11F_LEASE_FENCING_REQUIRED=YES
+R44B11F_LEASE_SECONDS=30
+R44B11F_HEARTBEAT_REQUIRED=NO
+R44B11F_RESULT_WORKER_PROVENANCE_REQUIRED=YES
+R44B11F_RESULT_EXACT_IDEMPOTENT_REPLAY_REQUIRED=YES
+R44B11F_CUSTOMER_REQUEST_AUDIT_ATOMIC=YES
+R44B11F_VERIFYING_AND_LAST_ATTEMPT_ATOMIC=YES
+R44B11F_TERMINAL_RESULT_AGGREGATE_AUDIT_ATOMIC=YES
+R44B11F_WORKER_LIFECYCLE_LOCK_ORDER=VERIFICATION_JOB_ACCOUNT_CONNECTION_CREDENTIAL_VERSION
+R44B11F_CUSTOMER_LIFECYCLE_LOCK_ORDER=ACCOUNT_CONNECTION_CREDENTIAL_VERSION
+R44B11F_CUSTOMER_OPEN_JOB_LOOKUP_LOCKING=NO
+R44B11F_CREDENTIAL_OPEN_BEFORE_VERIFYING_BARRIER_ALLOWED=NO
+R44B11F_PROVIDER_CALL_BEFORE_VERIFYING_BARRIER_ALLOWED=NO
+R44B11F_CREDENTIAL_GRANT_OPENS_RETENTION_OBLIGATION=YES
+R44B11F_VERIFICATION_OPENS_PROVIDER_RECOVERY_OBLIGATION=NO
+R44B11F_ROTATION_REBINDS_VERIFICATION_JOB=NO
+R44B11F_DISCONNECT_REACTIVATION_ALLOWED=NO
+R44B11F_LATE_RESULT_MUTATES_NEW_CREDENTIAL_VERSION=NO
+R44B11F_EXPIRED_LEASE_BEFORE_GRANT=REQUEUE
+R44B11F_EXPIRED_LEASE_AFTER_GRANT=TERMINAL_INCONCLUSIVE
+R44B11F_EXPIRED_VERIFYING=TERMINAL_INCONCLUSIVE
+R44B11F_PERIODIC_EXPIRY_RECONCILIATION_REQUIRED=YES
+R44B11F_BACKGROUND_LOCK=FOR_UPDATE_SKIP_LOCKED
+R44B11F_MULTI_PROCESS_RECONCILIATION_ALLOWED=YES
+R44B11F_GLOBAL_SINGLETON_REQUIRED=NO
+R44B11F_AGGREGATE_STATE_TABLE=provider_connections
+R44B11F_SUCCESS_STATUS=ACTIVE
+R44B11F_SUCCESS_VERIFICATION_STATUS=VERIFIED
+R44B11F_DEFINITIVE_FAILURE_STATUS=INVALID
+R44B11F_DEFINITIVE_FAILURE_VERIFICATION_STATUS=FAILED
+R44B11F_INCONCLUSIVE_INVALIDATES_PRIOR_VERIFICATION=NO
+R44B11F_CUSTOMER_ROUTE=POST_/provider-connections/:id/verify
+R44B11F_CUSTOMER_ROUTE_BODY=EMPTY
+R44B11F_CUSTOMER_ROUTE_RESPONSE=202_ACCEPTED
+R44B11F_CUSTOMER_VIEW_VERIFICATION_PENDING=YES
+R44B11F_CUSTOMER_VIEW_LAST_VERIFICATION_ATTEMPT_AT=YES
+R44B11F_CUSTOMER_VIEW_VERIFIED_AT=YES
+R44B11F_WORKER_LEASE_ROUTE=POST_/worker-control/v1/provider-verifications/lease
+R44B11F_WORKER_GRANT_ROUTE=POST_/worker-control/v1/provider-verifications/:id/credential-grant
+R44B11F_WORKER_VERIFYING_ROUTE=POST_/worker-control/v1/provider-verifications/:id/verifying
+R44B11F_WORKER_RESULT_ROUTE=POST_/worker-control/v1/provider-verifications/:id/result
+R44B11F_WORKER_AUTHENTICATION=EXISTING_WORKER_PRINCIPAL_AUTHORITY
+R44B11F_GOOGLE_POLICY_ID=GOOGLE_GENAI_MODELS_LIST_V1BETA
+R44B11F_GOOGLE_OPERATION=GET_GENERATIVELANGUAGE_V1BETA_MODELS_PAGE_SIZE_1
+R44B11F_GOOGLE_AUTH_HEADER=X_GOOG_API_KEY
+R44B11F_RUNWAY_POLICY_ID=RUNWAY_ORGANIZATION_GET_V1_2024_11_06
+R44B11F_RUNWAY_OPERATION=GET_API_DEV_RUNWAYML_V1_ORGANIZATION
+R44B11F_RUNWAY_API_VERSION=2024-11-06
+R44B11F_RUNWAY_AUTH=BEARER_API_KEY
+R44B11F_PROVIDER_TRANSPORT=DEDICATED_FIXED_ORIGIN_HTTP
+R44B11F_PROVIDER_REDIRECTS_ALLOWED=NO
+R44B11F_PROVIDER_AUTOMATIC_RETRY_PER_LEASE=NO
+R44B11F_PROVIDER_TIMEOUT_MS=10000
+R44B11F_PROVIDER_RESPONSE_MAX_BYTES=65536
+R44B11F_REAL_PROVIDER_VERIFICATION_COMMERCIAL_ENABLEMENT=NO
+R44B11F_REAL_PROVIDER_COST_SIDE_EFFECT_APPROVAL_REQUIRED=YES
+R44B11F_WORKER_LIVE_PROVIDER_VERIFICATION_ENABLED=NO
+R44B11F_PROVIDER_CONNECTION_CREATION_PRODUCTION_ENABLEMENT=NO
+R44B11F_CUSTOMER_GENERATION_ROUTE_INCLUDED=NO
+R44B11F_LIVE_PROVIDER_SUBMISSION_ENABLEMENT=NO
+R44B11F_FUTURE_SLICE_SUFFIXES_LOCKED=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10

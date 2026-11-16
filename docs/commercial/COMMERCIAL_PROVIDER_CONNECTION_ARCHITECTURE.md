@@ -288,7 +288,14 @@ provider verified != guaranteed usable for generation
   side, never through routine public-API decryption.
 - Verification calls go only to fixed provider endpoints defined in code,
   never to customer-supplied URLs.
-- Exact verification endpoints remain open (section 30).
+- R44B11P1 resolves the former generation-eligibility question: an
+  unverified connection is not eligible for new generation authorization.
+- R44B11F fixes the implementation operations to the Google Gemini
+  `models.list` metadata operation and the Runway organisation-information
+  operation described in the R44B11F worker-bridge contract.
+- Fixing an operation does not commercially enable it. Real-provider
+  verification remains default-off until its cost, side effects and
+  production rollout have been explicitly approved.
 
 ---
 
@@ -586,9 +593,8 @@ BusyBookie invariants.
 - production key-management or secrets vendor;
 - hosting/cloud vendor;
 - region;
-- exact provider-verification endpoints and their confirmed cost and side
-  effects;
-- whether unverified connections can be used for generation;
+- commercial enablement approval for the fixed R44B11F provider-verification
+  operations after explicit cost and side-effect validation;
 - Runway recovery horizon;
 - provider-specific support for recovery with rotated credentials
   (section 16);

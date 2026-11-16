@@ -13415,7 +13415,135 @@ Expected implementation surfaces include:
 - production configuration with live verification default-off;
 - non-database and real-PostgreSQL race/idempotency tests.
 
-Exact implementation file scope remains subject to implementation discovery.
+D9-D11 implementation discovery has now resolved and locked the exact
+R44B11F implementation scope against published contract commit
+`5fe8ad00d38ca99bf548b9abd48ac152b662a37f`.
+
+The implementation-discovery evidence is identified by:
+
+```text
+D9_IMPLEMENTATION_DISCOVERY_SHA256=f6c8eb52f80f08d69d136371417044fe423c0b0144f80cba6cb21100d29571a4
+D10_SCOPE_RESOLUTION_SHA256=e40c3163624450273b07edf05c2a13196c1aa61b1233513f027f8714a23b0632
+D11_SCOPE_LOCK_SHA256=00807437fe77e04015d9507589b64c60172f2dc75e48f27a92821e610f306c95
+```
+
+Existing production files permitted to change under R44B11F:
+
+```text
+apps/commercial-api/src/database/runtimeGrants.ts
+apps/commercial-api/src/providerConnections/providerCapabilityRegistry.ts
+apps/commercial-api/src/providerConnections/providerConnectionReadModel.ts
+apps/commercial-api/src/providerConnections/credentialObligations.ts
+apps/commercial-api/src/application/providerConnectionApplication.ts
+apps/commercial-api/src/workerControl/workerControlApplication.ts
+apps/commercial-api/src/workerControl/workerSecurityEvents.ts
+apps/commercial-api/src/runCommercialApiProcess.ts
+apps/commercial-worker/src/workerControlClient.ts
+apps/commercial-worker/src/workerError.ts
+```
+
+New production files authorised under R44B11F:
+
+```text
+apps/commercial-api/migrations/0010_provider_connection_verification_workflow.sql
+apps/commercial-api/src/providerConnections/providerVerificationService.ts
+apps/commercial-api/src/providerConnections/providerVerificationReconciliationService.ts
+apps/commercial-api/src/providerConnections/providerVerificationReconciliationLoop.ts
+apps/commercial-api/src/workerControl/workerProviderVerificationLeaseService.ts
+apps/commercial-api/src/workerControl/workerProviderVerificationCredentialGrantService.ts
+apps/commercial-api/src/workerControl/workerProviderVerificationVerifyingService.ts
+apps/commercial-api/src/workerControl/workerProviderVerificationResultService.ts
+apps/commercial-worker/src/providerVerificationConfig.ts
+apps/commercial-worker/src/providerVerificationCredentialOpening.ts
+apps/commercial-worker/src/providerVerificationContract.ts
+apps/commercial-worker/src/providerVerificationTransport.ts
+apps/commercial-worker/src/googleProviderVerification.ts
+apps/commercial-worker/src/runwayProviderVerification.ts
+apps/commercial-worker/src/providerVerificationRun.ts
+```
+
+Existing test files permitted to change:
+
+```text
+apps/commercial-api/tests/database/migrationFiles.test.ts
+apps/commercial-api/tests/db/catalog.test.ts
+apps/commercial-api/tests/db/privileges.test.ts
+apps/commercial-api/tests/db/migrations.test.ts
+apps/commercial-api/tests/db/providerConnectionsApplication.test.ts
+apps/commercial-api/tests/providerConnections/providerConnectionUnit.test.ts
+apps/commercial-api/tests/providerConnections/disconnectConvergenceLoop.test.ts
+apps/commercial-api/tests/workerControl/workerControlUnit.test.ts
+apps/commercial-api/tests/lifecycle.test.ts
+apps/commercial-api/tests/boundary.test.ts
+apps/commercial-api/tests/support/testProviderRegistry.ts
+apps/commercial-worker/tests/boundary.test.ts
+```
+
+New test files authorised:
+
+```text
+apps/commercial-api/tests/db/providerVerification.test.ts
+apps/commercial-api/tests/db/workerProviderVerification.test.ts
+apps/commercial-api/tests/providerConnections/providerVerificationReconciliationLoop.test.ts
+apps/commercial-worker/tests/providerVerificationConfig.test.ts
+apps/commercial-worker/tests/providerVerificationClient.test.ts
+apps/commercial-worker/tests/providerVerificationCredentialOpening.test.ts
+apps/commercial-worker/tests/providerVerificationTransport.test.ts
+apps/commercial-worker/tests/googleProviderVerification.test.ts
+apps/commercial-worker/tests/runwayProviderVerification.test.ts
+apps/commercial-worker/tests/providerVerificationRun.test.ts
+apps/commercial-worker/tests/integration/providerVerificationExecution.test.ts
+```
+
+Protected production surfaces that R44B11F must not modify:
+
+```text
+packages/commercial-worker-protocol/src/index.ts
+packages/commercial-worker-protocol/src/credentialCrypto.ts
+packages/commercial-worker-protocol/src/credentialContext.ts
+packages/commercial-worker-protocol/package.json
+apps/commercial-api/src/providerConnections/providerConnectionError.ts
+apps/commercial-api/src/providerConnections/providerConnectionService.ts
+apps/commercial-api/src/http/jsonResponse.ts
+apps/commercial-api/src/config.ts
+apps/commercial-api/src/workerControl/workerLeasePolicy.ts
+apps/commercial-worker/src/workerConfig.ts
+apps/commercial-worker/src/providerEnvironment.ts
+apps/commercial-worker/src/credentialOpeningRun.ts
+apps/commercial-worker/src/googleProviderAdapter.ts
+apps/commercial-worker/src/runwayProviderAdapter.ts
+apps/commercial-worker/src/googleAttemptExecution.ts
+apps/commercial-worker/src/runwayAttemptExecution.ts
+apps/commercial-worker/src/attemptExecution.ts
+apps/commercial-worker/package.json
+apps/commercial-api/package.json
+```
+
+Any need to modify a protected file or an unlisted production file requires
+an explicit R44B11F scope-amendment gate before that byte changes.
+
+The scope lock specifically preserves:
+
+- no shared worker-protocol widening;
+- no worker-authentication mechanism change;
+- no ProviderConnection error-vocabulary or public HTTP error-vocabulary
+  change;
+- no existing worker-config change;
+- no generation credential-opening change;
+- no generation adapter or generation-attempt composer change;
+- no worker process entry point;
+- no package dependency change;
+- the existing provider-environment guard unchanged;
+- the existing generation lease policy unchanged except that its token
+  shape is reused by the independent 30-second verification lease.
+
+The separate verification kill switch belongs to
+`providerVerificationConfig.ts`. Real-provider verification remains
+default-off.
+
+This architecture-only implementation-start transition authorises Phase 1.
+Migration/source implementation has not yet begun and may start only after
+this transition itself has passed review and publication.
 
 #### R44B11F acceptance boundary
 
@@ -13445,7 +13573,13 @@ R44B11F_CONFLICT_SCREEN=PASS
 R44B11F_PRELOCK_SCREEN=PASS
 R44B11F_FINAL_PRECONTRACT_SCREEN=PASS
 R44B11F_CONTRACT_LOCKED=YES
-R44B11F_IMPLEMENTATION_STARTED=NO
+R44B11F_IMPLEMENTATION_STARTED=YES
+R44B11F_IMPLEMENTATION_SCOPE_LOCKED=YES
+R44B11F_IMPLEMENTATION_BASE=5fe8ad00d38ca99bf548b9abd48ac152b662a37f
+R44B11F_IMPLEMENTATION_DISCOVERY_REPORT_SHA256=f6c8eb52f80f08d69d136371417044fe423c0b0144f80cba6cb21100d29571a4
+R44B11F_IMPLEMENTATION_SCOPE_RESOLUTION_REPORT_SHA256=e40c3163624450273b07edf05c2a13196c1aa61b1233513f027f8714a23b0632
+R44B11F_IMPLEMENTATION_SCOPE_LOCK_REPORT_SHA256=00807437fe77e04015d9507589b64c60172f2dc75e48f27a92821e610f306c95
+R44B11F_PHASE_1_STATUS=AUTHORIZED_NEXT
 R44B11F_SCOPE=PROVIDER_CONNECTION_VERIFICATION_DURABLE_EXECUTION_WORKFLOW
 R44B11F_DISCOVERY_BASE=dfc68eb6ff13786b1ecdf30116d1da1efc0bd84e
 R44B11F_DISCOVERY_REPORT_SHA256=3978e826ba2137256679a4c41c1213a7310c682375ff991987ababa35ea594de

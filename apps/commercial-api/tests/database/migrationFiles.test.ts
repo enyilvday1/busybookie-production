@@ -125,7 +125,7 @@ describe("discoverMigrations", () => {
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
 
-  it("discovers 0001 to 0009 in order, contiguously, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0010 in order, contiguously, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
@@ -138,8 +138,9 @@ describe("committed migrations", () => {
       "0007_input_failure_provenance.sql",
       "0008_generation_usage_ledger.sql",
       "0009_provider_connection_disconnect_convergence.sql",
+      "0010_provider_connection_verification_workflow.sql",
     ]);
-    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
@@ -154,6 +155,7 @@ describe("committed migrations", () => {
       "ff12efddc15441e2c529796632ca3e1ad188ebb6c7df5ddfb1058426065934ec",
       "99121d3d19b6044b309be149c0d1376a79f55f4f52b34cd90930cc3664d2813a",
     ]);
+    expect(migrations[9]?.sha256).toBe("5edfa48f485bda7795ee10d1f6405bad407f289af2493a0fca2a9dbe1af82bea");
   });
 
   it("adds input-failure provenance in 0007 only: a uuid and a bigint column, no backfill, token verifier, table, role, grant, secret or provider brand", async () => {
@@ -268,6 +270,38 @@ describe("committed migrations", () => {
     expect("  ADD COLUMN submitting_fencing_counter bigint NULL;").toMatch(/ADD COLUMN (\w+) (\w+) (\w+)/);
   });
 
+  it("adds provider-verification persistence in 0010 only, without generation binding, provider brands or plaintext lease tokens", async () => {
+    const migrations = await discoverMigrations();
+    const verification = migrations[9]!;
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const statements = withoutComments(verification.sql);
+
+    expect(verification.fileName).toBe("0010_provider_connection_verification_workflow.sql");
+    expect(verification.sha256).toBe("5edfa48f485bda7795ee10d1f6405bad407f289af2493a0fca2a9dbe1af82bea");
+    expect([...statements.matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1])).toEqual([
+      "provider_verification_jobs",
+    ]);
+
+    expect(statements).not.toMatch(/generation_authorization_id|execution_job_id|execution_attempt_id/);
+    expect(verification.sql).not.toMatch(/runway|google|gemini|genai|veo/i);
+    expect(statements).not.toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b/im);
+
+    const PLAIN_TOKEN_COLUMN = /^\s+\w*lease_token\s+(text|jsonb|bytea)/im;
+    expect(statements).not.toMatch(PLAIN_TOKEN_COLUMN);
+    expect(statements).toMatch(/^\s+lease_token_sha256\s+text\s+NULL,/m);
+
+    expect(statements).toMatch(/CREATE UNIQUE INDEX provider_verification_jobs_one_open_per_version_uq/);
+    expect(statements).toMatch(/WHERE state IN \('QUEUED', 'LEASED', 'VERIFYING'\)/);
+    expect(statements).toMatch(/CREATE FUNCTION provider_verification_jobs_guard\(\) RETURNS trigger/);
+    expect(statements).toMatch(/CREATE TRIGGER provider_verification_jobs_guard/);
+
+    // Terminal history preserves credential_granted_at after the live lease is
+    // cleared; while leased, grant time must still be at or after leased_at.
+    expect(statements).toMatch(
+      /credential_granted_at IS NULL\s+OR leased_at IS NULL\s+OR credential_granted_at >= leased_at/,
+    );
+  });
+
   it("creates exactly the tables the runtime grant manifest covers", async () => {
     const migrations = await discoverMigrations();
     const created = migrations.flatMap((migration) => [...migration.sql.matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1])).sort();
@@ -284,6 +318,7 @@ describe("committed migrations", () => {
       "productions",
       "provider_connections",
       "provider_credential_versions",
+      "provider_verification_jobs",
       "users",
       "worker_principals",
     ]);

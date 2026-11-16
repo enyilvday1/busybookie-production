@@ -104,6 +104,31 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
       "updated_at",
     ],
   },
+  // R44B11F provider-verification lifecycle. Account/connection/version,
+  // verification policy, requester and creation provenance are immutable.
+  // The token column stores only SHA-256, never the plaintext lease token.
+  provider_verification_jobs: {
+    select: true,
+    insert: true,
+    updateColumns: [
+      "state",
+      "lease_worker_principal_id",
+      "lease_token_sha256",
+      "lease_fencing_counter",
+      "leased_at",
+      "lease_expires_at",
+      "credential_granted_at",
+      "verifying_at",
+      "verifying_worker_principal_id",
+      "verifying_fencing_counter",
+      "result_outcome",
+      "terminal_reason_code",
+      "result_worker_principal_id",
+      "result_fencing_counter",
+      "completed_at",
+      "updated_at",
+    ],
+  },
   audit_events: { select: true, insert: true, updateColumns: [] },
   // Append-only canonical CLAIMED usage: read and insert only. The insert
   // guard admits only the exact CLAIMED authorization and owns recorded_at;

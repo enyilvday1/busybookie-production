@@ -187,6 +187,37 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "execution_attempts_input_failed_code_ck",
     "execution_attempts_input_failed_epoch_ck",
   ],
+  provider_verification_jobs: [
+    "provider_verification_jobs_account_fk",
+    "provider_verification_jobs_connection_same_account_fk",
+    "provider_verification_jobs_credential_grant_state_ck",
+    "provider_verification_jobs_credential_grant_time_ck",
+    "provider_verification_jobs_credential_same_connection_fk",
+    "provider_verification_jobs_fencing_counter_ck",
+    "provider_verification_jobs_lease_complete_ck",
+    "provider_verification_jobs_lease_state_ck",
+    "provider_verification_jobs_lease_times_ck",
+    "provider_verification_jobs_lease_token_sha256_ck",
+    "provider_verification_jobs_lease_worker_fk",
+    "provider_verification_jobs_pk",
+    "provider_verification_jobs_policy_ck",
+    "provider_verification_jobs_requested_by_user_fk",
+    "provider_verification_jobs_result_fencing_ck",
+    "provider_verification_jobs_result_outcome_ck",
+    "provider_verification_jobs_result_pair_ck",
+    "provider_verification_jobs_result_requires_verifying_ck",
+    "provider_verification_jobs_result_worker_fk",
+    "provider_verification_jobs_state_ck",
+    "provider_verification_jobs_terminal_reason_ck",
+    "provider_verification_jobs_terminal_state_ck",
+    "provider_verification_jobs_terminal_time_ck",
+    "provider_verification_jobs_verifying_after_grant_ck",
+    "provider_verification_jobs_verifying_fencing_ck",
+    "provider_verification_jobs_verifying_pair_ck",
+    "provider_verification_jobs_verifying_presence_ck",
+    "provider_verification_jobs_verifying_state_ck",
+    "provider_verification_jobs_verifying_worker_fk",
+  ],
   generation_usage_events: [
     "generation_usage_events_event_type_ck",
     "generation_usage_events_pk",
@@ -196,8 +227,8 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
   generation_usage_ledger: ["generation_usage_ledger_authorization_same_production_fk", "generation_usage_ledger_pk"],
 };
 
-describe("schema catalog (migrations 0001 to 0009)", () => {
-  it("contains exactly the thirteen domain tables and schema_migrations", async () => {
+describe("schema catalog (migrations 0001 to 0010)", () => {
+  it("contains exactly the fourteen domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v', 'm', 'p', 'f') ORDER BY c.relname`,
@@ -215,6 +246,7 @@ describe("schema catalog (migrations 0001 to 0009)", () => {
         "productions",
         "provider_connections",
         "provider_credential_versions",
+        "provider_verification_jobs",
         "schema_migrations",
         "users",
         "worker_principals",
@@ -374,6 +406,36 @@ describe("schema catalog (migrations 0001 to 0009)", () => {
         indexname: "provider_credential_versions_rotation_idempotency_key_uq",
         indexdef:
           "CREATE UNIQUE INDEX provider_credential_versions_rotation_idempotency_key_uq ON public.provider_credential_versions USING btree (provider_connection_id, rotation_idempotency_key) WHERE (rotation_idempotency_key IS NOT NULL)",
+      },
+      {
+        indexname: "provider_verification_jobs_connection_ix",
+        indexdef:
+          "CREATE INDEX provider_verification_jobs_connection_ix ON public.provider_verification_jobs USING btree (account_id, provider_connection_id, created_at DESC, id)",
+      },
+      {
+        indexname: "provider_verification_jobs_credential_obligation_ix",
+        indexdef:
+          "CREATE INDEX provider_verification_jobs_credential_obligation_ix ON public.provider_verification_jobs USING btree (provider_credential_version_id, state) WHERE ((credential_granted_at IS NOT NULL) AND (state = ANY (ARRAY['LEASED'::text, 'VERIFYING'::text])))",
+      },
+      {
+        indexname: "provider_verification_jobs_lease_expiry_ix",
+        indexdef:
+          "CREATE INDEX provider_verification_jobs_lease_expiry_ix ON public.provider_verification_jobs USING btree (lease_expires_at, id) WHERE (state = ANY (ARRAY['LEASED'::text, 'VERIFYING'::text]))",
+      },
+      {
+        indexname: "provider_verification_jobs_one_open_per_version_uq",
+        indexdef:
+          "CREATE UNIQUE INDEX provider_verification_jobs_one_open_per_version_uq ON public.provider_verification_jobs USING btree (provider_connection_id, provider_credential_version_id) WHERE (state = ANY (ARRAY['QUEUED'::text, 'LEASED'::text, 'VERIFYING'::text]))",
+      },
+      {
+        indexname: "provider_verification_jobs_queue_ix",
+        indexdef:
+          "CREATE INDEX provider_verification_jobs_queue_ix ON public.provider_verification_jobs USING btree (created_at, id) WHERE (state = 'QUEUED'::text)",
+      },
+      {
+        indexname: "provider_verification_jobs_worker_lease_ix",
+        indexdef:
+          "CREATE INDEX provider_verification_jobs_worker_lease_ix ON public.provider_verification_jobs USING btree (lease_worker_principal_id, lease_expires_at) WHERE (state = ANY (ARRAY['LEASED'::text, 'VERIFYING'::text]))",
       },
     ]);
   });
@@ -743,7 +805,7 @@ describe("schema catalog (migrations 0001 to 0009)", () => {
     expect(insertGuard).not.toMatch(/\bnow\(\)|current_timestamp|transaction_timestamp|statement_timestamp/i);
 
     const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
-    expect(version).toEqual([{ version: 9, name: "provider_connection_disconnect_convergence" }]);
+    expect(version).toEqual([{ version: 10, name: "provider_connection_verification_workflow" }]);
   });
 
   it("stores no secret, sealed credential, fingerprint or plaintext lease token on worker-bridge tables", async () => {
@@ -874,9 +936,11 @@ describe("schema catalog (migrations 0001 to 0009)", () => {
       "SELECT conname, confdeltype FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace ORDER BY conname",
     );
     // 24 through 0004, plus execution_attempts_submitting_worker_fk (0005),
-    // execution_attempts_input_failed_worker_fk (0007), generation_usage_ledger_authorization_same_production_fk (0008), and
-    // generation_usage_events_usage_fk (0009).
-    expect(actions).toHaveLength(28);
+    // execution_attempts_input_failed_worker_fk (0007),
+    // generation_usage_ledger_authorization_same_production_fk (0008),
+    // generation_usage_events_usage_fk (0009), and seven restrictive
+    // provider_verification_jobs foreign keys (0010).
+    expect(actions).toHaveLength(35);
     for (const action of actions) {
       expect(action.confdeltype, action.conname).toBe("r");
     }
@@ -969,6 +1033,11 @@ describe("schema catalog (migrations 0001 to 0009)", () => {
         def: "CREATE TRIGGER provider_credential_versions_guard_update BEFORE UPDATE ON public.provider_credential_versions FOR EACH ROW EXECUTE FUNCTION provider_credential_versions_guard_update()",
       },
       {
+        relname: "provider_verification_jobs",
+        tgname: "provider_verification_jobs_guard",
+        def: "CREATE TRIGGER provider_verification_jobs_guard BEFORE INSERT OR UPDATE ON public.provider_verification_jobs FOR EACH ROW EXECUTE FUNCTION provider_verification_jobs_guard()",
+      },
+      {
         relname: "worker_principals",
         tgname: "worker_principals_guard_update",
         def: "CREATE TRIGGER worker_principals_guard_update BEFORE UPDATE ON public.worker_principals FOR EACH ROW EXECUTE FUNCTION worker_principals_guard_update()",
@@ -989,6 +1058,7 @@ describe("schema catalog (migrations 0001 to 0009)", () => {
       { proname: "generation_usage_ledger_guard_append_only", public_execute: false },
       { proname: "generation_usage_ledger_guard_insert", public_execute: false },
       { proname: "provider_credential_versions_guard_update", public_execute: false },
+      { proname: "provider_verification_jobs_guard", public_execute: false },
       { proname: "worker_principals_guard_update", public_execute: false },
     ]);
   });

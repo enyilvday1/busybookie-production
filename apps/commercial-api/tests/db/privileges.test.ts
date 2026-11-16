@@ -191,7 +191,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 9 }]);
+      expect(version.rows).toEqual([{ version: 10 }]);
     });
   });
 
@@ -279,6 +279,89 @@ describe("runtime role authority", () => {
       });
     },
   );
+
+  it("grants provider-verification lifecycle writes but never immutable provenance ownership (migration 0010)", async () => {
+    expect(RUNTIME_TABLE_PRIVILEGES.provider_verification_jobs).toEqual({
+      select: true,
+      insert: true,
+      updateColumns: [
+        "state",
+        "lease_worker_principal_id",
+        "lease_token_sha256",
+        "lease_fencing_counter",
+        "leased_at",
+        "lease_expires_at",
+        "credential_granted_at",
+        "verifying_at",
+        "verifying_worker_principal_id",
+        "verifying_fencing_counter",
+        "result_outcome",
+        "terminal_reason_code",
+        "result_worker_principal_id",
+        "result_fencing_counter",
+        "completed_at",
+        "updated_at",
+      ],
+    });
+
+    for (const column of [
+      "id",
+      "account_id",
+      "provider_connection_id",
+      "provider_credential_version_id",
+      "verification_policy_id",
+      "requested_by_user_id",
+      "created_at",
+    ]) {
+      expect(
+        await runtimeHas(
+          "SELECT has_column_privilege(current_user, 'public.provider_verification_jobs', $1, 'UPDATE') AS allowed",
+          [column],
+        ),
+        column,
+      ).toBe(false);
+    }
+
+    for (const column of [
+      "state",
+      "lease_worker_principal_id",
+      "lease_token_sha256",
+      "lease_fencing_counter",
+      "credential_granted_at",
+      "verifying_at",
+      "verifying_worker_principal_id",
+      "verifying_fencing_counter",
+      "result_outcome",
+      "terminal_reason_code",
+      "result_worker_principal_id",
+      "result_fencing_counter",
+      "completed_at",
+    ]) {
+      expect(
+        await runtimeHas(
+          "SELECT has_column_privilege(current_user, 'public.provider_verification_jobs', $1, 'UPDATE') AS allowed",
+          [column],
+        ),
+        column,
+      ).toBe(true);
+    }
+
+    expect(
+      await runtimeHas(
+        "SELECT has_table_privilege(current_user, 'public.provider_verification_jobs', 'DELETE') AS allowed",
+      ),
+    ).toBe(false);
+    expect(
+      await runtimeHas(
+        "SELECT has_table_privilege(current_user, 'public.provider_verification_jobs', 'TRUNCATE') AS allowed",
+      ),
+    ).toBe(false);
+    expect(
+      await runtimeHas(
+        "SELECT has_table_privilege(current_user, 'public.provider_verification_jobs', 'TRIGGER') AS allowed",
+      ),
+    ).toBe(false);
+  });
 
   it("holds only SELECT and INSERT on the generation usage ledger, with no updatable column (migration 0008)", async () => {
     expect(RUNTIME_TABLE_PRIVILEGES.generation_usage_ledger).toEqual({ select: true, insert: true, updateColumns: [] });

@@ -27,6 +27,10 @@ import {
   rotateProviderCredential,
   type ProviderConnectionServiceDependencies,
 } from "../providerConnections/providerConnectionService.js";
+import {
+  requestProviderVerification,
+  type ProviderVerificationJobView,
+} from "../providerConnections/providerVerificationService.js";
 import { PrincipalUnavailableError, resolveActivePrincipalForIdentity } from "./resolveActivePrincipal.js";
 
 // Authenticated ProviderConnection routes:
@@ -36,6 +40,12 @@ import { PrincipalUnavailableError, resolveActivePrincipalForIdentity } from "./
 //   GET  /provider-connections/:connectionId                get
 //   POST /provider-connections/:connectionId/credentials    rotate
 //   POST /provider-connections/:connectionId/disconnect     disconnect
+//   POST /provider-connections/:connectionId/verify         request verification (R44B11F)
+//
+// Verify takes an empty body and answers 202 with only the open
+// verification job's safe identity and state. It queues durable work and
+// performs no provider call; it creates work only for a provider whose
+// injected capability explicitly enables verification (default-off).
 //
 // The router exists only when a capability registry, a CredentialSealer and
 // a CredentialFingerprinter are injected in code. There is no production
@@ -58,6 +68,7 @@ const COLLECTION_PATH = "/provider-connections";
 const ITEM = /^\/provider-connections\/([^/]+)$/;
 const CREDENTIALS = /^\/provider-connections\/([^/]+)\/credentials$/;
 const DISCONNECT = /^\/provider-connections\/([^/]+)\/disconnect$/;
+const VERIFY = /^\/provider-connections\/([^/]+)\/verify$/;
 const CREATE_MEMBERS: ReadonlySet<string> = new Set(["provider", "label", "credential", "idempotencyKey"]);
 const ROTATE_MEMBERS: ReadonlySet<string> = new Set(["credential", "idempotencyKey"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -119,9 +130,22 @@ function connectionDto(view: ProviderConnectionView) {
     verificationStatus: view.verificationStatus,
     currentCredentialVersion: view.currentCredentialVersion,
     currentCredentialStatus: view.currentCredentialStatus,
+    verificationPending: view.verificationPending,
+    lastVerificationAttemptAt: view.lastVerificationAttemptAt === null ? null : view.lastVerificationAttemptAt.toISOString(),
+    verifiedAt: view.verifiedAt === null ? null : view.verifiedAt.toISOString(),
     disconnectedAt: view.disconnectedAt === null ? null : view.disconnectedAt.toISOString(),
     createdAt: view.createdAt.toISOString(),
     updatedAt: view.updatedAt.toISOString(),
+  };
+}
+
+function verificationJobDto(job: ProviderVerificationJobView) {
+  return {
+    id: job.id,
+    providerConnectionId: job.providerConnectionId,
+    credentialVersion: job.credentialVersion,
+    state: job.state,
+    createdAt: job.createdAt.toISOString(),
   };
 }
 
@@ -253,6 +277,15 @@ export function createProviderConnectionApplication(options: ProviderConnectionA
       });
     });
 
+  const verify = (connectionId: string) =>
+    protectedRoute(async (request, response, identity) => {
+      const principal = await principalFor(identity);
+      requireConnectionId(connectionId);
+      await readEmptyBody(request);
+      const result = await requestProviderVerification(services, principal, connectionId, { correlationId: randomUUID() });
+      sendJson(response, 202, { verificationJob: verificationJobDto(result.verificationJob) });
+    });
+
   const collection: ApplicationRoute = Object.freeze({
     methods: ["GET", "POST"],
     handle: (request: IncomingMessage, response: ServerResponse) => (request.method === "POST" ? create(request, response) : list(request, response)),
@@ -265,6 +298,8 @@ export function createProviderConnectionApplication(options: ProviderConnectionA
       if (credentials !== null) return Object.freeze({ methods: ["POST"], handle: rotate(credentials[1]!) });
       const disconnectMatch = DISCONNECT.exec(pathname);
       if (disconnectMatch !== null) return Object.freeze({ methods: ["POST"], handle: disconnect(disconnectMatch[1]!) });
+      const verifyMatch = VERIFY.exec(pathname);
+      if (verifyMatch !== null) return Object.freeze({ methods: ["POST"], handle: verify(verifyMatch[1]!) });
       const item = ITEM.exec(pathname);
       if (item !== null) return Object.freeze({ methods: ["GET"], handle: get(item[1]!) });
       return null;

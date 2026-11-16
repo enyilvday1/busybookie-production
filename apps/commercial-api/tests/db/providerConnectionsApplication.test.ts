@@ -9,7 +9,8 @@ import { createProviderConnectionApplication } from "../../src/application/provi
 import type { AuthenticationAdapter } from "../../src/authentication/authenticationAdapter.js";
 import type { VerifiedIdentity } from "../../src/authentication/verifiedIdentity.js";
 import { loadRuntimeDatabaseConfig } from "../../src/database/runtimeDatabaseConfig.js";
-import { createRuntimePool, type TransactionalPool } from "../../src/database/runtimePool.js";
+import { createRuntimePool, type RuntimeClient, type TransactionalPool } from "../../src/database/runtimePool.js";
+import { requestProviderVerification } from "../../src/providerConnections/providerVerificationService.js";
 import { PROVIDER_CREDENTIAL_PURPOSE } from "commercial-worker-protocol";
 import { runCommercialApiProcess, type ShutdownSignal } from "../../src/runCommercialApiProcess.js";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../../src/startCommercialApiServer.js";
@@ -51,10 +52,10 @@ const servers: RunningCommercialApiServer[] = [];
 let portA: number;
 let portB: number;
 
-type ProviderApplicationOverrides = Pick<
+type ProviderApplicationOverrides = Partial<Pick<
   Parameters<typeof createProviderConnectionApplication>[0],
-  "convergeAfterDisconnect" | "reportFailure"
->;
+  "convergeAfterDisconnect" | "reportFailure" | "registry"
+>>;
 
 async function composition(
   overrides: ProviderApplicationOverrides = {},
@@ -102,6 +103,7 @@ const create = (name: Name, body: Record<string, unknown>, port = portA) =>
 const rotate = (name: Name, id: string, body: Record<string, unknown>, port = portA) =>
   send(port, "POST", `/provider-connections/${id}/credentials`, JSON.stringify(body), jsonAuth(name));
 const disconnect = (name: Name, id: string, port = portA) => send(port, "POST", `/provider-connections/${id}/disconnect`, undefined, auth(name));
+const verify = (name: Name, id: string, port = portA) => send(port, "POST", `/provider-connections/${id}/verify`, undefined, auth(name));
 
 async function accountIdOf(name: Name): Promise<string> {
   const result = await clients.migrator.query<{ id: string }>(
@@ -156,10 +158,13 @@ const SAFE_DTO_KEYS = [
   "disconnectedAt",
   "id",
   "label",
+  "lastVerificationAttemptAt",
   "provider",
   "status",
   "updatedAt",
+  "verificationPending",
   "verificationStatus",
+  "verifiedAt",
 ];
 
 function expectNoSecret(response: TestResponse, secret: string) {
@@ -512,6 +517,8 @@ describe("process composition", () => {
 
     const without = await run(false);
     expect((await send(without.port, "GET", "/provider-connections", undefined, auth("alice"))).status).toBe(404);
+    // R44B11F: the default process composes no verification request route.
+    expect((await send(without.port, "POST", `/provider-connections/${randomUUID()}/verify`, undefined, auth("alice"))).status).toBe(404);
     expect((await send(without.port, "GET", "/productions", undefined, auth("alice"))).status).toBe(200);
     await without.stop();
 
@@ -872,5 +879,417 @@ describe("R44B11E periodic process orchestration", () => {
     expect(stderr).toEqual([
       "commercial-api: Database startup failed.\n",
     ]);
+  });
+});
+
+// R44B11F Phase 2: customer verification request, read model and
+// default-off capability. No provider network operation exists on this path;
+// the worker-side lease/grant/barrier/result lifecycle is simulated here only
+// with migrator SQL that satisfies the migration 0010 guard.
+describe("R44B11F customer verification request", () => {
+  const JOB_DTO_KEYS = ["createdAt", "credentialVersion", "id", "providerConnectionId", "state"];
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+  // Worker, lease, credential and internal-database vocabulary never leaves the API.
+  const INTERNAL =
+    /leasedAt|leaseExpiresAt|worker|fencing|token|sha256|granted|verifyingAt|verifying_|policy|sealed|envelope|fingerprint|keyRef|accountId|account_id|userId|requestedBy|credentialVersionId|provider_credential_version_id|result|completed|reason/i;
+
+  type JobRow = {
+    id: string;
+    account_id: string;
+    provider_connection_id: string;
+    provider_credential_version_id: string;
+    verification_policy_id: string;
+    requested_by_user_id: string;
+    state: string;
+  };
+
+  async function jobsFor(connectionId: string): Promise<JobRow[]> {
+    const result = await clients.migrator.query<JobRow>(
+      `SELECT id, account_id, provider_connection_id, provider_credential_version_id,
+              verification_policy_id, requested_by_user_id, state
+         FROM provider_verification_jobs WHERE provider_connection_id = $1 ORDER BY created_at, id`,
+      [connectionId],
+    );
+    return result.rows;
+  }
+
+  async function activeVersionId(connectionId: string): Promise<string> {
+    const result = await clients.migrator.query<{ id: string }>(
+      "SELECT id FROM provider_credential_versions WHERE provider_connection_id = $1 AND status = 'ACTIVE'",
+      [connectionId],
+    );
+    expect(result.rows).toHaveLength(1);
+    return result.rows[0]!.id;
+  }
+
+  async function principalOf(name: Name): Promise<{ userId: string; accountId: string }> {
+    const result = await clients.migrator.query<{ user_id: string; account_id: string }>(
+      `SELECT u.id AS user_id, a.id AS account_id FROM users u JOIN accounts a ON a.owner_user_id = u.id
+        WHERE u.idp_issuer = $1 AND u.idp_subject = $2`,
+      [identities[name].issuer, identities[name].subject],
+    );
+    return { userId: result.rows[0]!.user_id, accountId: result.rows[0]!.account_id };
+  }
+
+  const requestedAudits = async (connectionId: string) =>
+    (await auditsFor(connectionId)).filter((event) => event.event_type === "provider_connection.verification_requested");
+
+  async function workerPrincipal(): Promise<string> {
+    const result = await clients.migrator.query<{ id: string }>("INSERT INTO worker_principals (label) VALUES ($1) RETURNING id", [`pv-${randomUUID()}`]);
+    return result.rows[0]!.id;
+  }
+
+  async function leaseJob(jobId: string, workerId: string): Promise<void> {
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'LEASED', lease_worker_principal_id = $2, lease_token_sha256 = repeat('b', 64),
+              lease_fencing_counter = 1, leased_at = clock_timestamp(),
+              lease_expires_at = clock_timestamp() + interval '30 seconds', updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [jobId, workerId],
+    );
+  }
+
+  async function verifyingJob(jobId: string, workerId: string): Promise<void> {
+    await clients.migrator.query(
+      "UPDATE provider_verification_jobs SET credential_granted_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1",
+      [jobId],
+    );
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'VERIFYING', verifying_at = clock_timestamp(), verifying_worker_principal_id = $2,
+              verifying_fencing_counter = 1, updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [jobId, workerId],
+    );
+  }
+
+  async function completeJob(jobId: string, workerId: string): Promise<void> {
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'COMPLETED', lease_worker_principal_id = NULL, lease_token_sha256 = NULL,
+              leased_at = NULL, lease_expires_at = NULL, result_outcome = 'INCONCLUSIVE',
+              terminal_reason_code = 'PROVIDER_UNAVAILABLE', result_worker_principal_id = $2,
+              result_fencing_counter = 1, completed_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [jobId, workerId],
+    );
+  }
+
+  async function cancelJob(jobId: string): Promise<void> {
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'CANCELLED', terminal_reason_code = 'LIFECYCLE_NO_LONGER_ELIGIBLE',
+              completed_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [jobId],
+    );
+  }
+
+  const getConnection = async (name: Name, id: string, port = portA) =>
+    json(await send(port, "GET", `/provider-connections/${id}`, undefined, auth(name))).providerConnection as Record<string, unknown>;
+
+  type JobDto = { id: string; providerConnectionId: string; credentialVersion: number; state: string; createdAt: string };
+
+  function expectSafeJobResponse(response: TestResponse, credential: string): JobDto {
+    expect(response.status).toBe(202);
+    expectNoSecret(response, credential);
+    expect(INTERNAL.test(response.body)).toBe(false);
+    const body = json(response);
+    expect(Object.keys(body)).toEqual(["verificationJob"]);
+    expect(Object.keys(body.verificationJob).sort()).toEqual(JOB_DTO_KEYS);
+    expect(body.verificationJob.id).toMatch(UUID);
+    expect(Number.isNaN(Date.parse(body.verificationJob.createdAt))).toBe(false);
+    return body.verificationJob as JobDto;
+  }
+
+  it("queues exactly one job bound to the exact ACTIVE version of a PENDING_VERIFICATION connection, with one audit event", async () => {
+    const credential = newCredential();
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential })).providerConnection;
+    expect(connection).toMatchObject({ verificationPending: false, lastVerificationAttemptAt: null, verifiedAt: null });
+
+    const job = expectSafeJobResponse(await verify("alice", connection.id), credential);
+    expect(job).toMatchObject({ providerConnectionId: connection.id, credentialVersion: 1, state: "QUEUED" });
+
+    const principal = await principalOf("alice");
+    expect(await jobsFor(connection.id)).toEqual([
+      {
+        id: job.id,
+        account_id: principal.accountId,
+        provider_connection_id: connection.id,
+        provider_credential_version_id: await activeVersionId(connection.id),
+        verification_policy_id: "TEST_PROVIDER_METADATA_V1",
+        requested_by_user_id: principal.userId,
+        state: "QUEUED",
+      },
+    ]);
+
+    expect(await requestedAudits(connection.id)).toEqual([
+      {
+        event_type: "provider_connection.verification_requested",
+        actor_type: "USER",
+        metadata: { provider: "TEST_PROVIDER", credentialVersion: 1, verificationJobId: job.id, verificationPolicyId: "TEST_PROVIDER_METADATA_V1" },
+      },
+    ]);
+    expect(await plaintextOccurrences(credential)).toBe(0);
+
+    // The request alone changes no aggregate verification state.
+    const view = await getConnection("alice", connection.id, portB);
+    expect(view).toMatchObject({
+      status: "PENDING_VERIFICATION",
+      verificationStatus: "UNVERIFIED",
+      verificationPending: true,
+      lastVerificationAttemptAt: null,
+      verifiedAt: null,
+    });
+    expect(Object.keys(view).sort()).toEqual(SAFE_DTO_KEYS);
+    const listed = json(await send(portA, "GET", "/provider-connections", undefined, auth("alice"))).providerConnections as Record<string, unknown>[];
+    expect(listed.find((item) => item.id === connection.id)).toMatchObject({ verificationPending: true });
+  });
+
+  it.each([
+    ["ACTIVE", "VERIFIED", "verified_at = now(), last_verification_attempt_at = now()"],
+    ["INVALID", "FAILED", "last_verification_attempt_at = now()"],
+  ])("accepts an %s connection without overwriting its verification result", async (status, verificationStatus, stamps) => {
+    const credential = newCredential();
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential })).providerConnection;
+    await pools[0]!.query(`UPDATE provider_connections SET status = $2, verification_status = $3, ${stamps} WHERE id = $1`, [
+      connection.id,
+      status,
+      verificationStatus,
+    ]);
+    const stateSql = "SELECT status, verification_status, verified_at, last_verification_attempt_at FROM provider_connections WHERE id = $1";
+    const before = await clients.migrator.query<{ verified_at: Date | null; last_verification_attempt_at: Date }>(stateSql, [connection.id]);
+
+    const job = expectSafeJobResponse(await verify("alice", connection.id), credential);
+    expect(job).toMatchObject({ credentialVersion: 1, state: "QUEUED" });
+    expect((await jobsFor(connection.id)).map((row) => row.provider_credential_version_id)).toEqual([await activeVersionId(connection.id)]);
+    expect(await requestedAudits(connection.id)).toHaveLength(1);
+
+    expect((await clients.migrator.query(stateSql, [connection.id])).rows).toEqual(before.rows);
+
+    const view = await getConnection("alice", connection.id);
+    expect(view.verificationPending).toBe(true);
+    expect(view.lastVerificationAttemptAt).toBe(before.rows[0]!.last_verification_attempt_at.toISOString());
+    expect(view.verifiedAt).toBe(status === "ACTIVE" ? before.rows[0]!.verified_at!.toISOString() : null);
+  });
+
+  it("refuses DISABLED and DISCONNECTED connections with no job and no audit", async () => {
+    const disabled = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    await pools[0]!.query("UPDATE provider_connections SET status = 'DISABLED', disabled_at = now() WHERE id = $1", [disabled.id]);
+    const disconnected = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    expect((await disconnect("alice", disconnected.id)).status).toBe(200);
+
+    for (const id of [disabled.id, disconnected.id]) {
+      const response = await verify("alice", id);
+      expect(response.status).toBe(409);
+      expect(response.body).toBe('{"status":"error","code":"CONNECTION_STATE_CONFLICT"}\n');
+      expect(await jobsFor(id)).toEqual([]);
+      expect(await requestedAudits(id)).toEqual([]);
+      expect((await getConnection("alice", id)).verificationPending).toBe(false);
+    }
+  });
+
+  it("never reveals or touches another account's connection: foreign, missing and malformed IDs look identical", async () => {
+    const aliceConnection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    const foreign = await verify("bob", aliceConnection.id, portB);
+    const missing = await verify("bob", randomUUID(), portB);
+    const malformed = await verify("bob", "not-a-uuid", portB);
+    for (const response of [foreign, missing, malformed]) {
+      expect(response.status).toBe(404);
+      expect(response.body).toBe('{"status":"error","code":"NOT_FOUND"}\n');
+    }
+    expect(await jobsFor(aliceConnection.id)).toEqual([]);
+    expect(await auditsFor(aliceConnection.id)).toHaveLength(1);
+  });
+
+  it("requires an empty body, authentication and an active account", async () => {
+    const connection = json(await create("bob", { provider: "TEST_PROVIDER", credential: newCredential() }, portB)).providerConnection;
+    const withBody = await send(portA, "POST", `/provider-connections/${connection.id}/verify`, '{"credentialVersion":1}', jsonAuth("bob"));
+    expect(withBody.status).toBe(400);
+    expect((await send(portA, "POST", `/provider-connections/${connection.id}/verify`)).status).toBe(401);
+
+    const bob = await principalOf("bob");
+    await clients.migrator.query("UPDATE accounts SET status = 'DISABLED', disabled_at = now() WHERE id = $1", [bob.accountId]);
+    try {
+      const inactive = await verify("bob", connection.id);
+      expect(inactive.status).toBe(403);
+      expect(inactive.body).toBe('{"status":"error","code":"ACCOUNT_UNAVAILABLE"}\n');
+    } finally {
+      await clients.migrator.query("UPDATE accounts SET status = 'ACTIVE', disabled_at = NULL WHERE id = $1", [bob.accountId]);
+    }
+    expect(await jobsFor(connection.id)).toEqual([]);
+  });
+
+  it("binds the rotated current version, never the superseded one", async () => {
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    const first = expectSafeJobResponse(await verify("alice", connection.id), "unused-secret-marker");
+    expect(first.credentialVersion).toBe(1);
+    const v1 = (await jobsFor(connection.id))[0]!.provider_credential_version_id;
+
+    expect((await rotate("alice", connection.id, { credential: newCredential() })).status).toBe(201);
+    const v2 = await activeVersionId(connection.id);
+    expect(v2).not.toBe(v1);
+
+    const second = expectSafeJobResponse(await verify("alice", connection.id), "unused-secret-marker");
+    expect(second.id).not.toBe(first.id);
+    expect(second.credentialVersion).toBe(2);
+    expect((await jobsFor(connection.id)).map((row) => [row.id, row.provider_credential_version_id, row.state])).toEqual([
+      [first.id, v1, "QUEUED"],
+      [second.id, v2, "QUEUED"],
+    ]);
+    expect((await requestedAudits(connection.id)).map((event) => event.metadata.credentialVersion)).toEqual([1, 2]);
+  });
+
+  it("fails closed when an eligible connection has no ACTIVE credential version", async () => {
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    await clients.migrator.query(
+      "UPDATE provider_credential_versions SET status = 'SUPERSEDED', superseded_at = now(), updated_at = now() WHERE provider_connection_id = $1",
+      [connection.id],
+    );
+    const response = await verify("alice", connection.id);
+    expect(response.status).toBe(500);
+    expect(response.body).toBe('{"status":"error","code":"INTERNAL_ERROR"}\n');
+    expect(await jobsFor(connection.id)).toEqual([]);
+    expect(await requestedAudits(connection.id)).toEqual([]);
+  });
+
+  it("returns the same open job while QUEUED, LEASED and VERIFYING, with no second job or audit", async () => {
+    const credential = newCredential();
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential })).providerConnection;
+    const first = expectSafeJobResponse(await verify("alice", connection.id), credential);
+
+    expect(expectSafeJobResponse(await verify("alice", connection.id, portB), credential)).toEqual(first);
+
+    const workerId = await workerPrincipal();
+    await leaseJob(first.id, workerId);
+    const leasedResponse = await verify("alice", connection.id);
+    expect(expectSafeJobResponse(leasedResponse, credential)).toEqual({ ...first, state: "LEASED" });
+    expect(leasedResponse.body.includes(workerId)).toBe(false);
+
+    await verifyingJob(first.id, workerId);
+    const verifyingResponse = await verify("alice", connection.id, portB);
+    expect(expectSafeJobResponse(verifyingResponse, credential)).toEqual({ ...first, state: "VERIFYING" });
+    expect(verifyingResponse.body.includes(workerId)).toBe(false);
+    expect((await getConnection("alice", connection.id)).verificationPending).toBe(true);
+
+    expect(await jobsFor(connection.id)).toHaveLength(1);
+    expect(await requestedAudits(connection.id)).toHaveLength(1);
+
+    // Terminal: no longer pending, and an explicit new request creates fresh work.
+    await completeJob(first.id, workerId);
+    const terminalView = await getConnection("alice", connection.id);
+    expect(terminalView.verificationPending).toBe(false);
+    expect(INTERNAL.test(JSON.stringify(terminalView))).toBe(false);
+    const fresh = expectSafeJobResponse(await verify("alice", connection.id), credential);
+    expect(fresh.id).not.toBe(first.id);
+    expect(fresh).toMatchObject({ credentialVersion: 1, state: "QUEUED" });
+    expect(await jobsFor(connection.id)).toHaveLength(2);
+    expect(await requestedAudits(connection.id)).toHaveLength(2);
+  });
+
+  it("creates a fresh job after a CANCELLED job", async () => {
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    const first = expectSafeJobResponse(await verify("alice", connection.id), "unused-secret-marker");
+    await cancelJob(first.id);
+    expect((await getConnection("alice", connection.id)).verificationPending).toBe(false);
+
+    const second = expectSafeJobResponse(await verify("alice", connection.id), "unused-secret-marker");
+    expect(second.id).not.toBe(first.id);
+    expect((await jobsFor(connection.id)).map((row) => row.state)).toEqual(["CANCELLED", "QUEUED"]);
+    expect(await requestedAudits(connection.id)).toHaveLength(2);
+  });
+
+  it("converges concurrent requests across processes on one job and one audit event", async () => {
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    const responses = await Promise.all(Array.from({ length: 12 }, (_unused, index) => verify("alice", connection.id, index % 2 ? portA : portB)));
+    expect(responses.map((response) => response.status)).toEqual(Array.from({ length: 12 }, () => 202));
+    expect(new Set(responses.map((response) => json(response).verificationJob.id)).size).toBe(1);
+    expect(await jobsFor(connection.id)).toHaveLength(1);
+    expect(await requestedAudits(connection.id)).toHaveLength(1);
+  });
+
+  it("resolves an insert that loses the open-job unique race to the committed winner, without a second job or audit", async () => {
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    const principal = await principalOf("alice");
+    const winner = expectSafeJobResponse(await verify("alice", connection.id), "unused-secret-marker");
+
+    // Fault injection: the first non-locking open-job lookup reports nothing,
+    // as if it had run before the winner committed. Only the database partial
+    // unique index (the ON CONFLICT arbiter) then prevents a duplicate.
+    let hiddenLookups = 0;
+    let insertAttempts = 0;
+    const base = pools[0]!;
+    const racingPool: TransactionalPool = {
+      query: base.query,
+      end: base.end,
+      connect: async () => {
+        const client = await base.connect();
+        const wrapped: RuntimeClient = {
+          query: (async (sql: string, values?: unknown[]) => {
+            if (sql.includes("FROM provider_verification_jobs") && sql.includes("provider_credential_version_id = $3") && hiddenLookups === 0) {
+              hiddenLookups += 1;
+              return { rows: [], rowCount: 0 };
+            }
+            if (sql.includes("INSERT INTO provider_verification_jobs")) insertAttempts += 1;
+            return client.query(sql, values);
+          }) as RuntimeClient["query"],
+          release: (error?: Error) => client.release(error),
+        };
+        return wrapped;
+      },
+    };
+
+    const result = await requestProviderVerification({ pool: racingPool, registry: crypto.registry }, principal, connection.id);
+    expect(hiddenLookups).toBe(1);
+    expect(insertAttempts).toBe(1);
+    expect(result.created).toBe(false);
+    expect(result.verificationJob.id).toBe(winner.id);
+    expect(result.verificationJob.state).toBe("QUEUED");
+    expect(await jobsFor(connection.id)).toHaveLength(1);
+    expect(await requestedAudits(connection.id)).toHaveLength(1);
+  });
+
+  it.each([
+    ["verification is default-off", "UNVERIFIABLE_TEST_PROVIDER"],
+    ["a policy ID exists without explicit enablement", "POLICY_ONLY_TEST_PROVIDER"],
+    ["the policy ID is malformed", "MALFORMED_POLICY_TEST_PROVIDER"],
+    ["the policy ID is missing", "MISSING_POLICY_TEST_PROVIDER"],
+  ])("refuses to create work when %s", async (_label, provider) => {
+    const connection = json(await create("alice", { provider, credential: newCredential() })).providerConnection;
+    const response = await verify("alice", connection.id);
+    expect(response.status).toBe(400);
+    expect(response.body).toBe('{"status":"error","code":"PROVIDER_UNSUPPORTED"}\n');
+    expect(await jobsFor(connection.id)).toEqual([]);
+    expect(await requestedAudits(connection.id)).toEqual([]);
+  });
+
+  it("persists the exact locked verification policy IDs supplied by an explicitly composed registry", async () => {
+    const LOCKED = [
+      ["GOOGLE_GENAI", "GOOGLE_GENAI_MODELS_LIST_V1BETA"],
+      ["RUNWAY", "RUNWAY_ORGANIZATION_GET_V1_2024_11_06"],
+    ] as const;
+    const port = await composition({
+      registry: createTestProviderRegistry(
+        LOCKED.map(([provider, verificationPolicyId]) => ({
+          provider,
+          connectionCreationEnabled: true,
+          credentialKinds: ["API_KEY"],
+          verificationEnabled: true,
+          verificationPolicyId,
+        })),
+      ),
+    });
+
+    for (const [provider, policyId] of LOCKED) {
+      const credential = newCredential();
+      const connection = json(await create("alice", { provider, credential }, port)).providerConnection;
+      expectSafeJobResponse(await verify("alice", connection.id, port), credential);
+      expect((await jobsFor(connection.id)).map((row) => row.verification_policy_id)).toEqual([policyId]);
+      expect((await requestedAudits(connection.id))[0]!.metadata.verificationPolicyId).toBe(policyId);
+    }
+
+    // The default test composition does not enable these providers at all.
+    expect((await create("alice", { provider: "RUNWAY", credential: newCredential() })).status).toBe(400);
   });
 });

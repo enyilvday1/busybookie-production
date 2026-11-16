@@ -285,10 +285,13 @@ describe("disconnect gate", () => {
       "disconnectedAt",
       "id",
       "label",
+      "lastVerificationAttemptAt",
       "provider",
       "status",
       "updatedAt",
+      "verificationPending",
       "verificationStatus",
+      "verifiedAt",
     ]);
     const after = await versions(c);
     // SUPERSEDED -> RETAINED (v1, v3) and ACTIVE -> RETAINED (v5), byte-identical material.

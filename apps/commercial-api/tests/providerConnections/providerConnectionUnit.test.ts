@@ -1,5 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -7,7 +10,9 @@ import { createProviderConnectionApplication } from "../../src/application/provi
 import type { TransactionalPool } from "../../src/database/runtimePool.js";
 import { MAX_CREDENTIAL_JSON_BODY_BYTES, MAX_JSON_BODY_BYTES } from "../../src/http/requestBody.js";
 import { MAX_CREDENTIAL_BYTES } from "commercial-worker-protocol";
+import { isStructurallyValidVerificationPolicyId, resolveVerificationPolicyId } from "../../src/providerConnections/providerCapabilityRegistry.js";
 import { ProviderConnectionError } from "../../src/providerConnections/providerConnectionError.js";
+import { requestProviderVerification } from "../../src/providerConnections/providerVerificationService.js";
 import { validateCreateInput, validateRotateInput } from "../../src/providerConnections/providerConnectionService.js";
 import { runCommercialApiProcess, type ShutdownSignal } from "../../src/runCommercialApiProcess.js";
 import { startCommercialApiServer, type RunningCommercialApiServer } from "../../src/startCommercialApiServer.js";
@@ -132,6 +137,7 @@ describe("HTTP routing without a database", () => {
     ["GET", `/provider-connections/${id}`],
     ["POST", `/provider-connections/${id}/credentials`],
     ["POST", `/provider-connections/${id}/disconnect`],
+    ["POST", `/provider-connections/${id}/verify`],
   ])("%s %s requires authentication", async (method, path) => {
     const port = await start();
     const response = await send(port, method, path);
@@ -145,6 +151,8 @@ describe("HTTP routing without a database", () => {
     ["DELETE", `/provider-connections/${id}`, "GET"],
     ["GET", `/provider-connections/${id}/credentials`, "POST"],
     ["GET", `/provider-connections/${id}/disconnect`, "POST"],
+    ["GET", `/provider-connections/${id}/verify`, "POST"],
+    ["PUT", `/provider-connections/${id}/verify`, "POST"],
   ])("%s %s is 405 with Allow: %s", async (method, path, allow) => {
     const port = await start();
     const response = await send(port, method, path, undefined, AUTH);
@@ -152,8 +160,8 @@ describe("HTTP routing without a database", () => {
     expect(response.headers.allow).toBe(allow);
   });
 
-  it.each(["/provider-connections/", `/provider-connections/${id}/verify`, `/provider-connections/${id}/credentials/2`, "/provider-connections/a/b/c"])(
-    "%s is 404 (no verify or other routes)",
+  it.each(["/provider-connections/", `/provider-connections/${id}/verify/`, `/provider-connections/${id}/verify/now`, `/provider-connections/${id}/credentials/2`, "/provider-connections/a/b/c"])(
+    "%s is 404 (no other routes)",
     async (path) => {
       const port = await start();
       expect((await send(port, "POST", path, undefined, AUTH)).status).toBe(404);
@@ -166,11 +174,18 @@ describe("HTTP routing without a database", () => {
       ["GET", "/provider-connections/not-a-uuid"],
       ["POST", "/provider-connections/not-a-uuid/credentials"],
       ["POST", "/provider-connections/NOT-A-UUID/disconnect"],
+      ["POST", "/provider-connections/not-a-uuid/verify"],
     ] as const) {
       const response = await send(port, method, path, undefined, AUTH);
       expect(response.status).toBe(404);
       expect(response.body).toBe('{"status":"error","code":"NOT_FOUND"}\n');
     }
+  });
+
+  it("requires an empty verify body, rejected before any transaction", async () => {
+    const port = await start();
+    const response = await send(port, "POST", `/provider-connections/${id}/verify`, JSON.stringify({ credentialVersion: 1 }), { ...AUTH, "Content-Type": "application/json" });
+    expect(response.status).toBe(400);
   });
 
   it("returns 413 above the credential bound and never echoes the body", async () => {
@@ -190,6 +205,91 @@ describe("HTTP routing without a database", () => {
     });
     expect(response.status).toBe(400);
     expect(response.body).not.toContain(SECRET);
+  });
+});
+
+// R44B11F Phase 2: the verification capability is registry-supplied and
+// default-off; the request path is control-plane only.
+describe("R44B11F verification capability and request boundary", () => {
+  const SRC = fileURLToPath(new URL("../../src/", import.meta.url));
+  const withoutComments = (text: string) => text.replace(/^\s*\/\/.*$/gm, "");
+  const listSources = (directory: string): string[] =>
+    readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? listSources(join(directory, entry.name)) : [join(directory, entry.name)],
+    );
+
+  it("resolves a policy ID only for an explicitly enabled, structurally valid capability", () => {
+    const registry = createTestProviderRegistry([
+      { provider: "LOCKED_A", connectionCreationEnabled: false, credentialKinds: ["API_KEY"], verificationEnabled: true, verificationPolicyId: "GOOGLE_GENAI_MODELS_LIST_V1BETA" },
+      { provider: "LOCKED_B", connectionCreationEnabled: true, credentialKinds: ["API_KEY"], verificationEnabled: true, verificationPolicyId: "RUNWAY_ORGANIZATION_GET_V1_2024_11_06" },
+      { provider: "TOO_LONG", connectionCreationEnabled: true, credentialKinds: ["API_KEY"], verificationEnabled: true, verificationPolicyId: `A${"B".repeat(128)}` },
+    ]);
+    expect(resolveVerificationPolicyId(registry, "TEST_PROVIDER")).toBe("TEST_PROVIDER_METADATA_V1");
+    // Verification is independent of the connection-creation flag.
+    expect(resolveVerificationPolicyId(registry, "LOCKED_A")).toBe("GOOGLE_GENAI_MODELS_LIST_V1BETA");
+    expect(resolveVerificationPolicyId(registry, "LOCKED_B")).toBe("RUNWAY_ORGANIZATION_GET_V1_2024_11_06");
+    for (const provider of [
+      "UNVERIFIABLE_TEST_PROVIDER",
+      "POLICY_ONLY_TEST_PROVIDER",
+      "MALFORMED_POLICY_TEST_PROVIDER",
+      "MISSING_POLICY_TEST_PROVIDER",
+      "DISABLED_TEST_PROVIDER",
+      "TOO_LONG",
+      "UNKNOWN_PROVIDER",
+    ]) {
+      expect(resolveVerificationPolicyId(registry, provider), provider).toBeNull();
+    }
+    // A capability answering for a different provider fails closed.
+    const mismatched = Object.freeze({
+      resolve: () =>
+        Object.freeze({ provider: "OTHER", connectionCreationEnabled: true, credentialKinds: ["API_KEY"], verificationEnabled: true, verificationPolicyId: "OTHER_METADATA_V1" }),
+    });
+    expect(resolveVerificationPolicyId(mismatched, "TEST_PROVIDER")).toBeNull();
+    // A truthy non-boolean flag is not explicit enablement.
+    const truthy = Object.freeze({
+      resolve: () => ({ provider: "TEST_PROVIDER", connectionCreationEnabled: true, credentialKinds: ["API_KEY"], verificationEnabled: "true" as unknown as boolean, verificationPolicyId: "TEST_V1" }),
+    });
+    expect(resolveVerificationPolicyId(truthy, "TEST_PROVIDER")).toBeNull();
+
+    for (const valid of ["A", "GOOGLE_GENAI_MODELS_LIST_V1BETA", "RUNWAY_ORGANIZATION_GET_V1_2024_11_06", `A${"B".repeat(127)}`]) {
+      expect(isStructurallyValidVerificationPolicyId(valid), valid).toBe(true);
+    }
+    for (const invalid of ["", "lowercase", "_LEADING", "1LEADING", "HAS-DASH", "HAS SPACE", `A${"B".repeat(128)}`, null, 7]) {
+      expect(isStructurallyValidVerificationPolicyId(invalid), String(invalid)).toBe(false);
+    }
+  });
+
+  it("rejects a malformed connection ID before any database work", async () => {
+    const pool = {
+      query: async () => {
+        throw new Error("unexpected query");
+      },
+      end: async () => {},
+      connect: async () => {
+        throw new Error("unexpected transaction");
+      },
+    } as TransactionalPool;
+    await expect(
+      requestProviderVerification({ pool, registry: createTestProviderRegistry() }, { userId: randomUUID(), accountId: randomUUID() }, "not-a-uuid"),
+    ).rejects.toMatchObject({ code: "PROVIDER_CONNECTION_NOT_FOUND" });
+  });
+
+  it("keeps production source default-off: no capability enables verification and no provider policy ID is named", () => {
+    for (const path of listSources(SRC)) {
+      const code = withoutComments(readFileSync(path, "utf8"));
+      expect(/verificationEnabled\s*:\s*true/.test(code), path).toBe(false);
+      expect(/_V1BETA|_ORGANIZATION_GET_|generativelanguage|api\.dev\./i.test(code), path).toBe(false);
+    }
+  });
+
+  it("performs no provider network operation and never reads, opens or leaks credential or lease material", () => {
+    const service = withoutComments(readFileSync(join(SRC, "providerConnections", "providerVerificationService.ts"), "utf8"));
+    expect(/fetch\s*\(|node:https?|node:net|node:tls|node:dns|undici|https?:\/\/|XMLHttpRequest|WebSocket/.test(service)).toBe(false);
+    expect(/sealed|envelope|fingerprint|CredentialOpener|\.open\s*\(|commercial-worker-protocol|createDecipheriv/i.test(service)).toBe(false);
+    expect(/lease_|credential_granted_at|verifying_|result_|completed_at|terminal_reason_code/.test(service)).toBe(false);
+    // Guard the guards.
+    expect(/fetch\s*\(|node:https?/.test('await fetch("https://example.invalid")')).toBe(true);
+    expect(/lease_|credential_granted_at/.test("SET lease_token_sha256 = $1")).toBe(true);
   });
 });
 
@@ -235,6 +335,7 @@ describe("process composition", () => {
         expect((await send(running!.port, "GET", path, undefined, AUTH)).status).toBe(404);
       }
       expect((await send(running!.port, "POST", `/provider-connections/${randomUUID()}/disconnect`, undefined, AUTH)).status).toBe(404);
+      expect((await send(running!.port, "POST", `/provider-connections/${randomUUID()}/verify`, undefined, AUTH)).status).toBe(404);
     } finally {
       await running!.close();
     }

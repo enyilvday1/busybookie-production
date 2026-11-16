@@ -24,6 +24,12 @@ export type WorkerSecurityEventType =
   | "WORKER_SUBMITTED_REJECTED"
   | "WORKER_ACCEPTANCE_RECOVERY_REJECTED"
   | "WORKER_SUBMISSION_FAILURE_REJECTED"
+  // R44B11F Phase 3: provider-verification lease, grant, barrier and result
+  // refusals, one type per verification route.
+  | "WORKER_PROVIDER_VERIFICATION_LEASE_REJECTED"
+  | "WORKER_PROVIDER_VERIFICATION_GRANT_REJECTED"
+  | "WORKER_PROVIDER_VERIFICATION_VERIFYING_REJECTED"
+  | "WORKER_PROVIDER_VERIFICATION_RESULT_REJECTED"
   // R44B10P2: input-failed refusals (no migration; a union member only).
   | "WORKER_INPUT_FAILURE_REJECTED";
 
@@ -68,7 +74,30 @@ export type WorkerLeaseRejectionReason =
   | "FAILURE_CODE_OUTCOME_MISMATCH"
   // input-failed replay only (R44B10P2): the caller is not the recorded
   // input-failure reporter (or the attempt has none).
-  | "INPUT_FAILURE_PRINCIPAL_MISMATCH";
+  | "INPUT_FAILURE_PRINCIPAL_MISMATCH"
+  // R44B11F Phase 3 provider-verification routes only. The generic lease
+  // reasons above (NOT_LEASED, OTHER_WORKER, FENCING_MISMATCH, TOKEN_MISMATCH,
+  // LEASE_EXPIRED, CONNECTION_INELIGIBLE, CREDENTIAL_VERSION_INELIGIBLE,
+  // CREDENTIAL_NOT_GRANTED) are reused with their existing meaning.
+  | "UNKNOWN_VERIFICATION_JOB"
+  // The bound Account or its owner is no longer ACTIVE (grant and barrier).
+  | "ACCOUNT_INELIGIBLE"
+  // The immutable stored verification policy ID is not structurally valid.
+  | "VERIFICATION_POLICY_INVALID"
+  // Result route: the job is not VERIFYING (and not an exact terminal replay).
+  | "NOT_VERIFYING"
+  // Barrier and result routes: the caller or fence is not the one that
+  // crossed VERIFYING.
+  | "VERIFYING_PRINCIPAL_MISMATCH"
+  // Invariant failure, barrier replay only: an already-VERIFYING job's exact
+  // bound version is DESTROYED.
+  | "VERIFYING_VERSION_DESTROYED"
+  // Result route: a recognised outcome with a recognised but incompatible
+  // reason, classified only after authority is proven.
+  | "REASON_CODE_OUTCOME_MISMATCH"
+  // Result route: a COMPLETED job whose stored terminal tuple differs from
+  // the request, or a terminal result that is not worker-replayable.
+  | "VERIFICATION_RESULT_CONFLICT";
 
 export type WorkerSecurityEventReason = WorkerAuthenticationFailureReason | WorkerLeaseRejectionReason | "ORIGIN_PRESENT";
 
@@ -82,6 +111,9 @@ export type WorkerSecurityEvent = Readonly<{
   workerPrincipalId?: string;
   // Present only when the request named a syntactically valid attempt.
   executionAttemptId?: string;
+  // R44B11F: present only when the request named a syntactically valid
+  // provider-verification job.
+  providerVerificationJobId?: string;
 }>;
 
 export type WorkerSecurityEventSink = Readonly<{

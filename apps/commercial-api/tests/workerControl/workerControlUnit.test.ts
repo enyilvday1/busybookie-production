@@ -234,3 +234,121 @@ describe("worker-control request security", () => {
     expect(visible.includes(TOKEN)).toBe(false);
   });
 });
+
+// R44B11F Phase 3: provider-verification routes. Routing, request security and
+// the published result wire contract, without a database: the fake pool
+// throws on any transaction, so a 400 proves no lifecycle work happened.
+describe("R44B11F provider-verification worker routes", () => {
+  const job = randomUUID();
+  const LEASE_TOKEN = "B".repeat(43);
+  const leasePath = "/worker-control/v1/provider-verifications/lease";
+  const resultPath = `/worker-control/v1/provider-verifications/${job}/result`;
+  const json = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  const valid = { fencingCounter: 1, leaseToken: LEASE_TOKEN, outcome: "VERIFIED", reasonCode: "VERIFICATION_SUCCEEDED" };
+
+  it("answers only POST on the four verification paths, and 404 elsewhere", async () => {
+    const { port } = await start();
+    for (const path of [
+      leasePath,
+      `/worker-control/v1/provider-verifications/${job}/credential-grant`,
+      `/worker-control/v1/provider-verifications/${job}/verifying`,
+      resultPath,
+    ]) {
+      const response = await send(port, "GET", path);
+      expect(response.status).toBe(405);
+      expect(response.headers.allow).toBe("POST");
+    }
+    for (const path of [
+      "/worker-control/v1/provider-verifications",
+      "/worker-control/v1/provider-verifications/lease/x",
+      "/worker-control/v1/provider-verifications/leases",
+      `/worker-control/v1/provider-verifications/${job}`,
+      `/worker-control/v1/provider-verifications/${job}/heartbeat`,
+      `/worker-control/v1/provider-verifications/${job}/release`,
+      `/worker-control/v1/provider-verifications/${job}/open`,
+      `/worker-control/v1/provider-verifications/${job}/result/x`,
+      `/worker-control/v1/provider-verifications/${job.toUpperCase()}/result`,
+      "/worker-control/v1/provider-verifications/not-a-uuid/verifying",
+      `/worker-control/v1/attempts/${job}/verifying`,
+      `/worker-control/v1/attempts/${job}/result`,
+    ]) {
+      expect((await send(port, "POST", path, undefined, { Authorization: `Bearer ${TOKEN}` })).status).toBe(404);
+    }
+  });
+
+  it.each([
+    leasePath,
+    `/worker-control/v1/provider-verifications/${job}/credential-grant`,
+    `/worker-control/v1/provider-verifications/${job}/verifying`,
+    resultPath,
+  ])("%s requires worker authentication, refuses Origin first, and fails closed on a security-sink outage", async (path) => {
+    const { port, recording } = await start();
+    expect((await send(port, "POST", path)).status).toBe(401);
+    // A customer-style bearer that is not a worker credential is refused.
+    expect((await send(port, "POST", path, undefined, { Authorization: "Bearer fixture-alice" })).status).toBe(401);
+    const origin = await send(port, "POST", path, JSON.stringify(valid), { ...json, Origin: "https://app.example" });
+    expect(origin.status).toBe(403);
+    expect(origin.body).toBe('{"status":"error","code":"ORIGIN_NOT_ALLOWED"}\n');
+    expect(origin.headers["access-control-allow-origin"]).toBeUndefined();
+    expect(origin.headers["set-cookie"]).toBeUndefined();
+    const originEvent = recording.events.find((event) => event.type === "WORKER_ORIGIN_REJECTED");
+    expect(originEvent).toBeDefined();
+    expect(originEvent!.executionAttemptId).toBeUndefined();
+    expect(originEvent!.providerVerificationJobId).toBe(path === leasePath ? undefined : job);
+    recording.setFailing(true);
+    expect((await send(port, "POST", path)).status).toBe(503);
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["a missing fencingCounter", { leaseToken: LEASE_TOKEN, outcome: "VERIFIED", reasonCode: "VERIFICATION_SUCCEEDED" }],
+    ["a missing leaseToken", { fencingCounter: 1, outcome: "VERIFIED", reasonCode: "VERIFICATION_SUCCEEDED" }],
+    ["a missing outcome", { fencingCounter: 1, leaseToken: LEASE_TOKEN, reasonCode: "VERIFICATION_SUCCEEDED" }],
+    ["a missing reasonCode", { fencingCounter: 1, leaseToken: LEASE_TOKEN, outcome: "VERIFIED" }],
+    ["a zero fencingCounter", { ...valid, fencingCounter: 0 }],
+    ["a fractional fencingCounter", { ...valid, fencingCounter: 1.5 }],
+    ["an unsafe fencingCounter", { ...valid, fencingCounter: 2 ** 53 }],
+    ["a string fencingCounter", { ...valid, fencingCounter: "1" }],
+    ["a short leaseToken", { ...valid, leaseToken: "short" }],
+    ["a non-string leaseToken", { ...valid, leaseToken: 42 }],
+    ["an unknown outcome", { ...valid, outcome: "SUCCEEDED" }],
+    ["a lowercase outcome", { ...valid, outcome: "verified" }],
+    ["a COMPLETED outcome", { ...valid, outcome: "COMPLETED" }],
+    ["an unknown reasonCode", { ...valid, reasonCode: "PROVIDER_EXPLODED" }],
+    ["the rejected CREDENTIAL_ACCEPTED reason", { ...valid, reasonCode: "CREDENTIAL_ACCEPTED" }],
+    ["the reconciler-only WORKER_LOST_AFTER_CREDENTIAL_GRANT", { ...valid, outcome: "INCONCLUSIVE", reasonCode: "WORKER_LOST_AFTER_CREDENTIAL_GRANT" }],
+    ["the reconciler-only WORKER_LOST_DURING_VERIFYING", { ...valid, outcome: "INCONCLUSIVE", reasonCode: "WORKER_LOST_DURING_VERIFYING" }],
+    ["a non-string reasonCode", { ...valid, reasonCode: null }],
+    ["an extra providerVerificationJobId", { ...valid, providerVerificationJobId: job }],
+    ["an extra providerBody", { ...valid, providerBody: "{}" }],
+    ["an extra completedAt", { ...valid, completedAt: "2026-11-16T10:00:00.000Z" }],
+  ])("refuses a result with %s before any transaction", async (_label, body) => {
+    const { port, recording } = await start();
+    const response = await send(port, "POST", resultPath, JSON.stringify(body), json);
+    expect(response.status).toBe(400);
+    expect(response.body).toBe('{"status":"error","code":"INVALID_REQUEST"}\n');
+    expect(recording.events).toEqual([]);
+  });
+
+  it("passes a recognised but mismatched outcome/reason pair through to the lifecycle service instead of classifying it", async () => {
+    // The fake pool refuses transactions: reaching the service is a 503, not a 400.
+    const { port } = await start();
+    const response = await send(port, "POST", resultPath, JSON.stringify({ ...valid, reasonCode: "CREDENTIAL_REJECTED" }), json);
+    expect(response.status).toBe(503);
+  });
+
+  it.each([
+    [`/worker-control/v1/provider-verifications/${job}/credential-grant`],
+    [`/worker-control/v1/provider-verifications/${job}/verifying`],
+  ])("%s accepts only the exact two-member proof", async (path) => {
+    const { port } = await start();
+    for (const body of [{}, { fencingCounter: 1 }, { leaseToken: LEASE_TOKEN }, { fencingCounter: 1, leaseToken: LEASE_TOKEN, outcome: "VERIFIED" }]) {
+      expect((await send(port, "POST", path, JSON.stringify(body), json)).status).toBe(400);
+    }
+  });
+
+  it("requires an empty lease body", async () => {
+    const { port } = await start();
+    expect((await send(port, "POST", leasePath, JSON.stringify({ provider: "X" }), json)).status).toBe(400);
+  });
+});

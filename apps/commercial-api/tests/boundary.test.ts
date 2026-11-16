@@ -424,6 +424,9 @@ describe("worker-control boundary (lease foundation only)", () => {
   // confined to the credential-grant service.
   const GRANT_ONLY = /SET\s[^;`]*credential_granted_at\s*=|sealed_credential/i;
   const GRANT_SERVICE = "src/workerControl/workerCredentialGrantService.ts";
+  // R44B11F Phase 3: the one verification credential grant, which writes the
+  // grant timestamp of provider_verification_jobs only.
+  const VERIFICATION_GRANT_SERVICE = "src/workerControl/workerProviderVerificationCredentialGrantService.ts";
   // R44B6J: entering SUBMITTING is confined to the fenced acknowledgement service.
   // R44B6M narrows this to writes: the expired-SUBMITTING sweep may select
   // SUBMITTING rows, but never sets the state or the barrier timestamp.
@@ -447,6 +450,10 @@ describe("worker-control boundary (lease foundation only)", () => {
       "src/workerControl/workerInputFailedService.ts",
       "src/workerControl/workerLeasePolicy.ts",
       "src/workerControl/workerLeaseService.ts",
+      "src/workerControl/workerProviderVerificationCredentialGrantService.ts",
+      "src/workerControl/workerProviderVerificationLeaseService.ts",
+      "src/workerControl/workerProviderVerificationResultService.ts",
+      "src/workerControl/workerProviderVerificationVerifyingService.ts",
       "src/workerControl/workerSecurityEvents.ts",
       "src/workerControl/workerSubmissionFailedService.ts",
       "src/workerControl/workerSubmittedService.ts",
@@ -604,10 +611,16 @@ describe("worker-control boundary (lease foundation only)", () => {
     const CLEAR_GRANT = "credential_granted_at = NULL";
     const withoutAllowedClear = (path: string, text: string) => (path === SWEEP_SERVICE ? text.split(CLEAR_GRANT).join("") : text);
     const offenders = workerControl
-      .filter(({ path, text }) => path !== GRANT_SERVICE && GRANT_ONLY.test(withoutAllowedClear(path, code(text))))
+      .filter(({ path, text }) => ![GRANT_SERVICE, VERIFICATION_GRANT_SERVICE].includes(path) && GRANT_ONLY.test(withoutAllowedClear(path, code(text))))
       .map(({ path }) => path);
     expect(offenders).toEqual([]);
     expect(GRANT_ONLY.test(code(read(join(APP_ROOT, GRANT_SERVICE))))).toBe(true);
+    // R44B11F: the verification grant writes only the verification job's
+    // grant timestamp, never a generation attempt's.
+    const verificationGrant = code(read(join(APP_ROOT, VERIFICATION_GRANT_SERVICE)));
+    expect(GRANT_ONLY.test(verificationGrant)).toBe(true);
+    expect(verificationGrant).toMatch(/UPDATE provider_verification_jobs SET credential_granted_at = now\(\), updated_at = now\(\)/);
+    expect(/execution_attempts|execution_jobs|generation_authorizations/.test(verificationGrant)).toBe(false);
     const leaseService = code(read(join(APP_ROOT, SWEEP_SERVICE)));
     expect(leaseService.split(CLEAR_GRANT).length - 1).toBe(1);
     expect(/SET state = 'QUEUED', credential_granted_at = NULL,/.test(leaseService)).toBe(true);
@@ -623,6 +636,63 @@ describe("worker-control boundary (lease foundation only)", () => {
     for (const { text } of workerControl) {
       expect(code(text)).not.toMatch(/Access-Control-Allow|cookie|Set-Cookie|session/i);
     }
+  });
+});
+
+// R44B11F Phase 3: provider-verification worker-control services. They are
+// independent of generation execution, never call a provider or open a
+// credential, and each lifecycle write is confined to its one service.
+describe("R44B11F provider-verification worker-control boundary", () => {
+  const code = (text: string) => text.replace(/^\s*\/\/.*$/gm, "").replace(/\/\/.*$/gm, "");
+  const service = (name: string) => code(read(join(SRC_ROOT, "workerControl", name)));
+  const LEASE = "workerProviderVerificationLeaseService.ts";
+  const GRANT = "workerProviderVerificationCredentialGrantService.ts";
+  const VERIFYING = "workerProviderVerificationVerifyingService.ts";
+  const RESULT = "workerProviderVerificationResultService.ts";
+  const ALL = [LEASE, GRANT, VERIFYING, RESULT];
+  const NO_PROVIDER_CALL = /fetch\s*\(|https?:|node:https?|node:net|node:tls|undici|\.open\s*\(|createDecipheriv|CredentialOpener/;
+  const NO_GENERATION = /execution_attempts|execution_jobs|generation_authorizations/;
+
+  it("touches no generation execution and performs no provider call or credential opening", () => {
+    for (const name of ALL) {
+      const text = service(name);
+      expect({ name, provider: NO_PROVIDER_CALL.test(text), generation: NO_GENERATION.test(text) }).toEqual({ name, provider: false, generation: false });
+    }
+    // Guard the guards.
+    expect(NO_PROVIDER_CALL.test('await fetch("https://example.invalid")')).toBe(true);
+    expect(NO_GENERATION.test("UPDATE execution_attempts SET")).toBe(true);
+  });
+
+  it("confines each verification state write to its one service", () => {
+    const writes: Readonly<Record<string, RegExp>> = {
+      [LEASE]: /SET state = 'LEASED', lease_worker_principal_id = \$2, lease_token_sha256 = \$3,\s*lease_fencing_counter = lease_fencing_counter \+ 1/,
+      [VERIFYING]: /SET state = 'VERIFYING', verifying_at = now\(\), verifying_worker_principal_id = \$2,\s*verifying_fencing_counter = lease_fencing_counter/,
+      [RESULT]: /SET state = 'COMPLETED', lease_worker_principal_id = NULL, lease_token_sha256 = NULL,/,
+    };
+    const STATE_WRITE = /\bSET\s+state\s*=|verifying_at\s*=\s*now|result_outcome\s*=|last_verification_attempt_at\s*=|verification_status\s*=/;
+    for (const name of ALL) {
+      const text = service(name);
+      if (name in writes) expect(text, name).toMatch(writes[name]!);
+      else expect(STATE_WRITE.test(text), name).toBe(false);
+    }
+    // Only the barrier stamps the aggregate attempt; only the result applies it.
+    expect(service(VERIFYING)).toMatch(/UPDATE provider_connections SET last_verification_attempt_at = now\(\), updated_at = now\(\)/);
+    expect(/verification_status\s*=|verified_at\s*=/.test(service(VERIFYING))).toBe(false);
+    expect(/last_verification_attempt_at\s*=/.test(service(RESULT))).toBe(false);
+    // The lease stores only the token verifier, for exactly 30 seconds of database time.
+    expect(service(LEASE)).toMatch(/export const PROVIDER_VERIFICATION_LEASE_SECONDS = 30;/);
+    expect(service(LEASE)).toMatch(/FOR UPDATE OF j SKIP LOCKED/);
+    expect(service(LEASE)).toMatch(/sha256Hex\(leaseToken\)/);
+  });
+
+  it("accepts exactly the published worker-reportable result vocabulary", () => {
+    const result = service(RESULT);
+    expect(/WORKER_LOST_AFTER_CREDENTIAL_GRANT"|WORKER_LOST_DURING_VERIFYING"|CREDENTIAL_ACCEPTED/.test(result)).toBe(false);
+    expect(result).toMatch(/VERIFIED: Object\.freeze\(\["VERIFICATION_SUCCEEDED"\]\)/);
+    expect(result).toMatch(/DEFINITIVE_FAILURE: Object\.freeze\(\["CREDENTIAL_REJECTED", "CREDENTIAL_NOT_AUTHORIZED"\]\)/);
+    const application = code(read(join(SRC_ROOT, "workerControl", "workerControlApplication.ts")));
+    expect(application).toMatch(/const VERIFICATION_RESULT_MEMBERS: ReadonlySet<string> = new Set\(\["fencingCounter", "leaseToken", "outcome", "reasonCode"\]\);/);
+    expect(application).toMatch(/if \(!isProviderVerificationOutcome\(outcome\) \|\| !isWorkerReportableVerificationReason\(reasonCode\)\) throw new RequestBodyError\("INVALID_REQUEST"\);/);
   });
 });
 

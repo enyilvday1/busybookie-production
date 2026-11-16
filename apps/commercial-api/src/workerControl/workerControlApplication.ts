@@ -25,6 +25,14 @@ import { acknowledgeWorkerSubmitting } from "./workerSubmittingService.js";
 import { recoverWorkerAcceptance } from "./workerAcceptanceRecoveryService.js";
 import { isSubmissionFailureOutcome, isWorkerReportableFailureCode, reportWorkerSubmissionFailed } from "./workerSubmissionFailedService.js";
 import { isInputFailureCode, reportWorkerInputFailed } from "./workerInputFailedService.js";
+import { acquireProviderVerificationLease, type ProviderVerificationLease } from "./workerProviderVerificationLeaseService.js";
+import { grantProviderVerificationCredential } from "./workerProviderVerificationCredentialGrantService.js";
+import { acknowledgeProviderVerificationVerifying } from "./workerProviderVerificationVerifyingService.js";
+import {
+  isProviderVerificationOutcome,
+  isWorkerReportableVerificationReason,
+  reportProviderVerificationResult,
+} from "./workerProviderVerificationResultService.js";
 import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecurityEvents.js";
 
 // Private worker-control routes, machine-to-machine only:
@@ -38,6 +46,13 @@ import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecur
 //   POST /worker-control/v1/attempts/:attemptId/acceptance-recovery tokenless OUTCOME_UNKNOWN -> SUBMITTED (R44B6R)
 //   POST /worker-control/v1/attempts/:attemptId/submission-failed   SUBMITTING -> FAILED_BEFORE_SUBMISSION | OUTCOME_UNKNOWN (R44B6T)
 //   POST /worker-control/v1/attempts/:attemptId/input-failed        granted LEASED -> FAILED_BEFORE_SUBMISSION, pre-provider (R44B10P2)
+//
+// R44B11F Phase 3 provider verification, independent of generation attempts:
+//
+//   POST /worker-control/v1/provider-verifications/lease                 QUEUED -> LEASED (30 s, no credential)
+//   POST /worker-control/v1/provider-verifications/:jobId/credential-grant the exact bound sealed credential
+//   POST /worker-control/v1/provider-verifications/:jobId/verifying        durable LEASED -> VERIFYING barrier
+//   POST /worker-control/v1/provider-verifications/:jobId/result           VERIFYING -> COMPLETED (published wire contract)
 //
 // The router exists only when a WorkerAuthenticationAdapter, a
 // WorkerSecurityEventSink and the runtime pool are injected in code; the
@@ -72,6 +87,10 @@ const SUBMITTED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "lease
 const RECOVERY_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "providerExecutionId"]);
 const SUBMISSION_FAILED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "outcome", "failureCode"]);
 const INPUT_FAILED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "failureCode"]);
+const VERIFICATION_LEASE_PATH = `${WORKER_CONTROL_PREFIX}/provider-verifications/lease`;
+const VERIFICATION_ACTION =
+  /^\/worker-control\/v1\/provider-verifications\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(credential-grant|verifying|result)$/;
+const VERIFICATION_RESULT_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "outcome", "reasonCode"]);
 
 class HttpFailure extends Error {
   constructor(
@@ -92,6 +111,18 @@ function leaseDto(lease: WorkerLease) {
     generationRequest: lease.generationRequest,
     generationRequestSha256: lease.generationRequestSha256,
     expectedCostCap: lease.expectedCostCap,
+    leaseToken: lease.leaseToken,
+    fencingCounter: lease.fencingCounter,
+    leaseExpiresAt: lease.leaseExpiresAt.toISOString(),
+  };
+}
+
+// The verification lease never carries a credential or sealed envelope.
+function verificationLeaseDto(lease: ProviderVerificationLease) {
+  return {
+    providerVerificationJobId: lease.providerVerificationJobId,
+    provider: lease.provider,
+    verificationPolicyId: lease.verificationPolicyId,
     leaseToken: lease.leaseToken,
     fencingCounter: lease.fencingCounter,
     leaseExpiresAt: lease.leaseExpiresAt.toISOString(),
@@ -137,11 +168,18 @@ export function createWorkerControlApplication(options: WorkerControlApplication
         | "WORKER_ACCEPTANCE_RECOVERY_REJECTED"
         | "WORKER_SUBMISSION_FAILURE_REJECTED"
         | "WORKER_INPUT_FAILURE_REJECTED"
+        | "WORKER_PROVIDER_VERIFICATION_LEASE_REJECTED"
+        | "WORKER_PROVIDER_VERIFICATION_GRANT_REJECTED"
+        | "WORKER_PROVIDER_VERIFICATION_VERIFYING_REJECTED"
+        | "WORKER_PROVIDER_VERIFICATION_RESULT_REJECTED"
         | null = null,
+      // R44B11F: which identifier the route names in its security events.
+      target: "attempt" | "verification" = "attempt",
     ) =>
     async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
       const correlationId = randomUUID();
-      const attempt = attemptId === null ? {} : { executionAttemptId: attemptId };
+      const attempt =
+        attemptId === null ? {} : target === "verification" ? { providerVerificationJobId: attemptId } : { executionAttemptId: attemptId };
       try {
         if (request.headers.origin !== undefined) {
           await record({ type: "WORKER_ORIGIN_REJECTED", reason: "ORIGIN_PRESENT", correlationId, ...attempt });
@@ -316,6 +354,82 @@ export function createWorkerControlApplication(options: WorkerControlApplication
       "WORKER_SUBMISSION_FAILURE_REJECTED",
     );
 
+  // R44B11F Phase 3 provider verification. Every refusal is its route's own
+  // security event type; responses stay the uniform 401/409.
+  const verificationLease = route(
+    async (request, response, context) => {
+      await readEmptyBody(request);
+      const acquired = await acquireProviderVerificationLease(pool, context);
+      sendJson(response, 200, { lease: acquired === null ? null : verificationLeaseDto(acquired) });
+    },
+    null,
+    "WORKER_PROVIDER_VERIFICATION_LEASE_REJECTED",
+    "verification",
+  );
+
+  const verificationCredentialGrant = (jobId: string) =>
+    route(
+      async (request, response, context) => {
+        const proof = parseProof(await readJsonObjectBody(request, PROOF_MEMBERS));
+        const grant = await grantProviderVerificationCredential(pool, context, jobId, proof);
+        sendJson(response, 200, {
+          providerVerificationJobId: grant.providerVerificationJobId,
+          fencingCounter: grant.fencingCounter,
+          credentialGrantedAt: grant.credentialGrantedAt.toISOString(),
+          credential: { sealedEnvelope: grant.sealedEnvelope, openingContext: grant.openingContext },
+        });
+      },
+      jobId,
+      "WORKER_PROVIDER_VERIFICATION_GRANT_REJECTED",
+      "verification",
+    );
+
+  // The durable barrier a worker must receive before opening the credential.
+  const verificationVerifying = (jobId: string) =>
+    route(
+      async (request, response, context) => {
+        const proof = parseProof(await readJsonObjectBody(request, PROOF_MEMBERS));
+        const acknowledgement = await acknowledgeProviderVerificationVerifying(pool, context, jobId, proof);
+        sendJson(response, 200, {
+          providerVerificationJobId: acknowledgement.providerVerificationJobId,
+          fencingCounter: acknowledgement.fencingCounter,
+          state: acknowledgement.state,
+          verifyingAt: acknowledgement.verifyingAt.toISOString(),
+        });
+      },
+      jobId,
+      "WORKER_PROVIDER_VERIFICATION_VERIFYING_REJECTED",
+      "verification",
+    );
+
+  // The published result wire contract: exactly four members; an unknown
+  // outcome or reason (including the Phase 4 WORKER_LOST_* reasons) is 400
+  // and touches no state. A recognised but mismatched pair is classified by
+  // the service only after authority is proven.
+  const verificationResult = (jobId: string) =>
+    route(
+      async (request, response, context) => {
+        const body = await readJsonObjectBody(request, VERIFICATION_RESULT_MEMBERS);
+        const proof = parseProof(body);
+        const { outcome, reasonCode } = body;
+        if (!isProviderVerificationOutcome(outcome) || !isWorkerReportableVerificationReason(reasonCode)) throw new RequestBodyError("INVALID_REQUEST");
+        const result = await reportProviderVerificationResult(pool, context, jobId, proof, outcome, reasonCode);
+        sendJson(response, 200, {
+          providerVerificationJobId: result.providerVerificationJobId,
+          fencingCounter: result.fencingCounter,
+          state: result.state,
+          outcome: result.outcome,
+          reasonCode: result.reasonCode,
+          completedAt: result.completedAt.toISOString(),
+        });
+      },
+      jobId,
+      "WORKER_PROVIDER_VERIFICATION_RESULT_REJECTED",
+      "verification",
+    );
+
+  const verificationLeaseRoute: ApplicationRoute = Object.freeze({ methods: ["POST"], handle: verificationLease });
+
   // The input-failed report (section 18, R44B10P2). Exactly the five closed
   // input-failure codes; any other code, including a provider or storage
   // code, is 400 and touches no state.
@@ -341,6 +455,18 @@ export function createWorkerControlApplication(options: WorkerControlApplication
   return Object.freeze({
     route: (pathname: string): ApplicationRoute | null => {
       if (pathname === LEASES_PATH) return leasesRoute;
+      if (pathname === VERIFICATION_LEASE_PATH) return verificationLeaseRoute;
+      const verification = VERIFICATION_ACTION.exec(pathname);
+      if (verification !== null) {
+        const [, jobId, verificationAction] = verification as unknown as [string, string, "credential-grant" | "verifying" | "result"];
+        const handle =
+          verificationAction === "credential-grant"
+            ? verificationCredentialGrant(jobId)
+            : verificationAction === "verifying"
+              ? verificationVerifying(jobId)
+              : verificationResult(jobId);
+        return Object.freeze({ methods: ["POST"], handle });
+      }
       const match = ATTEMPT_ACTION.exec(pathname);
       if (match === null) return null;
       const [, attemptId, action] = match as unknown as [

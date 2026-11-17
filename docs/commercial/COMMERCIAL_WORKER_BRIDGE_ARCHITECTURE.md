@@ -13730,6 +13730,202 @@ The response never exposes a lease token, token verifier, sealed credential,
 credential fingerprint, provider body, provider headers or account-wide
 secret data.
 
+#### R44B11F Phase 4 expiry/crash-convergence contract amendment
+
+**Locked decision (R44B11F Phase 4 contract amendment; architecture only,
+precedes Phase 4 implementation).**
+
+Phase 4 closes the remaining verification expiry, crash-convergence and
+credential-retention contract gaps. Migration 0010 and the current runtime
+grants already support this slice; Phase 4 requires no new migration or grant
+change.
+
+##### Reconciliation scope
+
+The internal commercial-api reconciler considers only:
+
+- lifecycle-ineligible `QUEUED` verification jobs;
+- lifecycle-ineligible `LEASED` verification jobs;
+- expired `LEASED` verification jobs;
+- expired `VERIFYING` verification jobs.
+
+Lifecycle eligibility before the `VERIFYING` barrier requires:
+
+- ACTIVE Account and owner User;
+- ProviderConnection not `DISCONNECTED` or `DISABLED`;
+- exact bound credential version still latest and `ACTIVE`.
+
+The verification job is locked first. Required lifecycle locks follow:
+
+```text
+ProviderVerificationJob
+-> Account
+-> ProviderConnection
+-> exact ProviderCredentialVersion
+```
+
+Selection is bounded and uses `FOR UPDATE SKIP LOCKED`. Multiple API processes
+may reconcile concurrently. Local pass overlap is forbidden. PostgreSQL server
+time is authoritative.
+
+The reconciler performs no provider call, credential opening, generation
+operation or GenerationAuthorization creation.
+
+##### Pre-barrier cancellation
+
+For `QUEUED` or `LEASED` jobs, lifecycle ineligibility takes precedence over
+lease-expiry processing.
+
+The cancellation reason is:
+
+```text
+LIFECYCLE_NO_LONGER_ELIGIBLE
+```
+
+Allowed transitions are:
+
+```text
+QUEUED -> CANCELLED
+LEASED -> CANCELLED
+```
+
+Cancellation records the reason and database completion timestamp, clears any
+live lease fields, preserves the fencing counter and immutable historical
+grant timestamp, and stores no provider result outcome or result-worker
+provenance.
+
+A `LEASED` job remains pre-provider even after credential grant because
+provider-call authority begins only after the durable `VERIFYING` barrier.
+
+Phase 4 cancellation creates no new AuditEvent. The existing verification
+audit vocabulary is not widened by this slice.
+
+A `VERIFYING` job is never lifecycle-cancelled.
+
+##### Expired LEASED jobs
+
+An otherwise eligible expired `LEASED` job with no credential grant returns
+to:
+
+```text
+LEASED -> QUEUED
+```
+
+The live lease fields are cleared and the fencing counter is preserved. No
+terminal result or AuditEvent is written.
+
+An otherwise eligible expired `LEASED` job after credential grant becomes:
+
+```text
+LEASED -> COMPLETED
+outcome = INCONCLUSIVE
+reason = WORKER_LOST_AFTER_CREDENTIAL_GRANT
+```
+
+The expired lease worker and fencing epoch become terminal result provenance.
+The live lease fields are cleared. ProviderConnection verification state is
+not changed. Exactly one
+`provider_connection.verification_inconclusive` SYSTEM AuditEvent is written.
+
+The reconciliation-only reason remains non-worker-reportable and cannot gain
+Phase 3 exact worker-result replay authority.
+
+##### Expired VERIFYING jobs
+
+An expired `VERIFYING` job becomes:
+
+```text
+VERIFYING -> COMPLETED
+outcome = INCONCLUSIVE
+reason = WORKER_LOST_DURING_VERIFYING
+```
+
+The immutable verifying worker and fencing epoch become terminal result
+provenance. Live lease fields are cleared and verifying provenance is
+preserved.
+
+The existing aggregate-current rule applies. The atomic SYSTEM AuditEvent is:
+
+- `provider_connection.verification_inconclusive` when still current;
+- `provider_connection.verification_result_stale` otherwise.
+
+Both reconciliation-only reasons remain non-worker-reportable and never gain
+Phase 3 worker-result replay authority.
+
+##### Credential-retention integration
+
+For one exact credential version, verification opens credential retention when:
+
+```text
+credential_granted_at IS NOT NULL
+AND state IN ('LEASED', 'VERIFYING')
+```
+
+This is combined with the existing generation-attempt retention rule.
+
+Verification never creates a provider-recovery obligation.
+
+`COMPLETED` and `CANCELLED` verification jobs close the verification-specific
+retention obligation.
+
+Phase 4 does not itself destroy retained disconnected credentials. Existing
+R44B11E disconnect convergence performs later destruction after all
+obligations close.
+
+##### Scheduler policy
+
+The verification reconciliation loop uses:
+
+```text
+default cadence ms = 30000
+minimum cadence ms = 1000
+maximum cadence ms = 3600000
+default batch size = 25
+maximum batch size = 100
+```
+
+The first automatic pass is cadence-driven.
+
+A settled pass schedules exactly one later pass unless stopped. Discovery or
+reconciliation failure is reported without secret material and does not stop
+future retries.
+
+The loop starts only after runtime database verification and stops scheduling
+before database-pool shutdown.
+
+##### Phase 4 implementation authorization
+
+Phase 4 may modify:
+
+```text
+apps/commercial-api/src/providerConnections/credentialObligations.ts
+apps/commercial-api/src/runCommercialApiProcess.ts
+```
+
+and add:
+
+```text
+apps/commercial-api/src/providerConnections/providerVerificationReconciliationService.ts
+apps/commercial-api/src/providerConnections/providerVerificationReconciliationLoop.ts
+```
+
+Tests remain restricted to the already-published R44B11F authorised test
+surfaces.
+
+Phase 4 requires:
+
+```text
+new database migration = NO
+runtime-grant change = NO
+worker protocol change = NO
+worker authentication change = NO
+provider call = NO
+credential opening = NO
+new package dependency = NO
+```
+
+Anything outside this boundary requires a new scope-amendment gate.
+
 #### R44B11F acceptance boundary
 
 R44B11F is complete only when:
@@ -13861,6 +14057,36 @@ R44B11F_RESULT_DEFINITIVE_FAILURE_REASONS=CREDENTIAL_REJECTED,CREDENTIAL_NOT_AUT
 R44B11F_RESULT_INCONCLUSIVE_REASONS=PROVIDER_BILLING_RESTRICTION,PROVIDER_RATE_OR_QUOTA_LIMITED,PROVIDER_UNAVAILABLE,PROVIDER_TIMEOUT,PROVIDER_NETWORK_FAILURE,PROVIDER_RESPONSE_MALFORMED,PROVIDER_RESPONSE_TOO_LARGE,PROVIDER_UNEXPECTED_STATUS,PROVIDER_OPERATION_DRIFT,VERIFICATION_AMBIGUOUS
 R44B11F_RESULT_PHASE4_REASONS_WORKER_REPORTABLE=NO
 R44B11F_PHASE_3_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
+R44B11F_PHASE_4_CONTRACT_LOCKED=YES
+R44B11F_PHASE_4_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
+R44B11F_PHASE_4_SCOPE=VERIFICATION_EXPIRY_CRASH_CONVERGENCE_AND_RETENTION
+R44B11F_PHASE_4_CANCELLATION_REASON=LIFECYCLE_NO_LONGER_ELIGIBLE
+R44B11F_PHASE_4_LIFECYCLE_INELIGIBLE_PRECEDENCE=BEFORE_EXPIRY_FOR_QUEUED_OR_LEASED
+R44B11F_PHASE_4_VERIFYING_LIFECYCLE_CANCELLATION_ALLOWED=NO
+R44B11F_PHASE_4_EXPIRED_LEASE_BEFORE_GRANT=REQUEUE
+R44B11F_PHASE_4_EXPIRED_LEASE_AFTER_GRANT=COMPLETED_INCONCLUSIVE_WORKER_LOST_AFTER_CREDENTIAL_GRANT
+R44B11F_PHASE_4_EXPIRED_VERIFYING=COMPLETED_INCONCLUSIVE_WORKER_LOST_DURING_VERIFYING
+R44B11F_PHASE_4_CANCELLATION_AUDIT_EVENT=NONE
+R44B11F_PHASE_4_WORKER_LOSS_AUDIT=CURRENT_INCONCLUSIVE_ELSE_STALE
+R44B11F_PHASE_4_RETENTION_EXTENSION_REQUIRED=YES
+R44B11F_PHASE_4_PROVIDER_RECOVERY_OBLIGATION=NO
+R44B11F_PHASE_4_DEFAULT_CADENCE_MS=30000
+R44B11F_PHASE_4_MIN_CADENCE_MS=1000
+R44B11F_PHASE_4_MAX_CADENCE_MS=3600000
+R44B11F_PHASE_4_DEFAULT_BATCH_SIZE=25
+R44B11F_PHASE_4_MAX_BATCH_SIZE=100
+R44B11F_PHASE_4_FIRST_PASS=CADENCE_DRIVEN
+R44B11F_PHASE_4_BACKGROUND_LOCK=FOR_UPDATE_SKIP_LOCKED
+R44B11F_PHASE_4_MULTI_PROCESS_SAFE=YES
+R44B11F_PHASE_4_LOCAL_OVERLAP_ALLOWED=NO
+R44B11F_PHASE_4_START_AFTER_DATABASE_VERIFICATION=YES
+R44B11F_PHASE_4_STOP_ON_SHUTDOWN=YES
+R44B11F_PHASE_4_NEW_MIGRATION_REQUIRED=NO
+R44B11F_PHASE_4_RUNTIME_GRANT_CHANGE_REQUIRED=NO
+R44B11F_PHASE_4_PROVIDER_CALLS=NO
+R44B11F_PHASE_4_CREDENTIAL_OPEN=NO
+R44B11F_PHASE_4_PROTOCOL_CHANGE=NO
+R44B11F_PHASE_4_DEPENDENCY_CHANGE=NO
 ```
 
-COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_10
+COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_17

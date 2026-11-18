@@ -77,3 +77,34 @@
   font-size: var(--text-sm);
   white-space: nowrap;
 }
+
+.episodeButton {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent);
+  font: inherit;
+  font-family: var(--font-mono);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+.episodeButton:hover {
+  text-decoration-thickness: 2px;
+}
+
+.episodeButton:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+@media (pointer: coarse) {
+  .episodeButton {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch-target);
+  }
+}

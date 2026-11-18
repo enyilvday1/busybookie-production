@@ -27,16 +27,48 @@ function fakeClient() {
         pending.push({ signal, resolve });
       }),
   );
-  const client: OperatorClient = Object.freeze({ listEpisodes });
-  return { client, listEpisodes, pending };
+  const getEpisodeDetail = vi.fn(async () => {
+    throw new Error(
+      "Episode detail is not exercised by OverviewPage tests.",
+    );
+  });
+
+  const client: OperatorClient =
+    Object.freeze({
+      listEpisodes,
+      getEpisodeDetail,
+    });
+
+  return {
+    client,
+    listEpisodes,
+    getEpisodeDetail,
+    pending,
+  };
 }
 
 function renderOverview() {
   const fake = fakeClient();
   const onLock = vi.fn();
   const onUnauthorized = vi.fn();
-  const view = render(<OverviewPage client={fake.client} onLock={onLock} onUnauthorized={onUnauthorized} />);
-  return { ...fake, onLock, onUnauthorized, view };
+  const onOpenEpisode = vi.fn();
+
+  const view = render(
+    <OverviewPage
+      client={fake.client}
+      onLock={onLock}
+      onUnauthorized={onUnauthorized}
+      onOpenEpisode={onOpenEpisode}
+    />,
+  );
+
+  return {
+    ...fake,
+    onLock,
+    onUnauthorized,
+    onOpenEpisode,
+    view,
+  };
 }
 
 async function complete(entry: Pending | undefined, result: ListEpisodesResult) {
@@ -278,11 +310,51 @@ describe("request authority", () => {
 });
 
 describe("no inference beyond the D1 list", () => {
-  it("renders no links, detail affordances or production-truth wording", async () => {
+  it("adds detail buttons only to canonical VALID episodes and renders no inferred production truth", async () => {
     const { pending, view } = renderOverview();
-    await complete(pending[0], ok());
-    expect(screen.queryAllByRole("link")).toHaveLength(0);
-    expect(view.container.textContent).not.toMatch(
+
+    await complete(
+      pending[0],
+      ok(),
+    );
+
+    expect(
+      screen.queryAllByRole("link"),
+    ).toHaveLength(0);
+
+    expect(
+      screen.getByRole(
+        "button",
+        {
+          name:
+            "Open EP02 details",
+        },
+      ),
+    ).toBeTruthy();
+
+    expect(
+      screen.getByRole(
+        "button",
+        {
+          name:
+            "Open EP10 details",
+        },
+      ),
+    ).toBeTruthy();
+
+    expect(
+      screen.queryByRole(
+        "button",
+        {
+          name:
+            "Open EP03 details",
+        },
+      ),
+    ).toBeNull();
+
+    expect(
+      view.container.textContent,
+    ).not.toMatch(
       /ready|readiness|progress|complete|%|next action|health|confidence|generat|render|provider|shot state|status:/i,
     );
   });

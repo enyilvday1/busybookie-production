@@ -1,4 +1,11 @@
 import {
+  isCanonicalEpisodeId,
+  parseEpisodeDetail,
+  type CanonicalEpisodeId,
+  type EpisodeDetail,
+} from "./episodeDetailDtos";
+
+import {
   isDisplayableRequestId,
   isOperatorErrorCode,
   parseEpisodeList,
@@ -9,11 +16,19 @@ import {
 
 // The only module that talks to the operator API (Step 1018 section 7).
 // Same-origin relative URL, explicit bearer header, no cookies, no HTTP
-// cache, one fetch per call: no retry, no polling, no background requests.
+// cache, no retry, no polling and no background requests.
 
-export const EPISODE_LIST_PATH = "/api/v1/operator/episodes";
+const EPISODE_COLLECTION_PATH =
+  "/api/v1/operator/episodes";
 
-export const OPERATOR_REQUEST_TIMEOUT_MS = 30_000;
+export const EPISODE_LIST_PATH =
+  EPISODE_COLLECTION_PATH;
+
+export const EPISODE_DETAIL_PATH_PREFIX =
+  EPISODE_COLLECTION_PATH;
+
+export const OPERATOR_REQUEST_TIMEOUT_MS =
+  30_000;
 
 // ABORTED is the caller's own cancellation (Refresh, Lock, unmount) and is
 // never shown to the operator.
@@ -29,137 +44,472 @@ export type OperatorFailure =
   | "UNRECOGNIZED_DATA"
   | "ABORTED";
 
-export type ListEpisodesResult =
-  | Readonly<{ ok: true; episodes: readonly EpisodeListItem[] }>
-  | Readonly<{ ok: false; failure: OperatorFailure; code?: OperatorErrorCode; requestId?: string }>;
+export type OperatorFailureResult =
+  Readonly<{
+    ok: false;
+    failure: OperatorFailure;
+    code?: OperatorErrorCode;
+    requestId?: string;
+  }>;
 
-// The credential lives only in the closure behind listEpisodes; the client
-// object carries no token-bearing property.
-export type OperatorClient = Readonly<{
-  listEpisodes: (signal: AbortSignal) => Promise<ListEpisodesResult>;
-}>;
+export type ListEpisodesResult =
+  | Readonly<{
+      ok: true;
+      episodes: readonly EpisodeListItem[];
+    }>
+  | OperatorFailureResult;
+
+export type GetEpisodeDetailResult =
+  | Readonly<{
+      ok: true;
+      episode: EpisodeDetail;
+    }>
+  | OperatorFailureResult;
+
+// The credential lives only inside this closure. The returned object exposes
+// operations and carries no token-bearing property.
+export type OperatorClient =
+  Readonly<{
+    listEpisodes:
+      (
+        signal: AbortSignal,
+      ) => Promise<ListEpisodesResult>;
+
+    getEpisodeDetail:
+      (
+        episodeId: CanonicalEpisodeId,
+        signal: AbortSignal,
+      ) => Promise<GetEpisodeDetailResult>;
+  }>;
+
+type ParsedRequestSuccess<Value> =
+  Readonly<{
+    ok: true;
+    value: Value;
+    requestId?: string;
+  }>;
+
+type ParsedRequestResult<Value> =
+  | ParsedRequestSuccess<Value>
+  | OperatorFailureResult;
+
+type ResponseParser<Value> =
+  (
+    value: unknown,
+  ) => Value | null;
 
 function failed(
   failure: OperatorFailure,
-  extra: Readonly<{ code?: OperatorErrorCode | undefined; requestId?: string | undefined }> = {},
-): ListEpisodesResult {
+
+  extra:
+    Readonly<{
+      code?: OperatorErrorCode | undefined;
+      requestId?: string | undefined;
+    }> =
+    {},
+): OperatorFailureResult {
   return Object.freeze({
-    ok: false,
+    ok:
+      false,
+
     failure,
-    ...(extra.code === undefined ? {} : { code: extra.code }),
-    ...(extra.requestId === undefined ? {} : { requestId: extra.requestId }),
+
+    ...(extra.code === undefined
+      ? {}
+      : {
+          code:
+            extra.code,
+        }),
+
+    ...(extra.requestId === undefined
+      ? {}
+      : {
+          requestId:
+            extra.requestId,
+        }),
   });
 }
 
-function statusFailure(status: number): OperatorFailure {
-  if (status === 401) {
+function statusFailure(
+  status: number,
+): OperatorFailure {
+  if (
+    status ===
+    401
+  ) {
     return "UNAUTHORIZED";
   }
 
-  if (status === 403) {
+  if (
+    status ===
+    403
+  ) {
     return "FORBIDDEN";
   }
 
-  if (status === 503) {
+  if (
+    status ===
+    503
+  ) {
     return "STATE_UNAVAILABLE";
   }
 
-  return status >= 500 ? "SERVER_ERROR" : "UNEXPECTED_RESPONSE";
+  return status >=
+    500
+    ? "SERVER_ERROR"
+    : "UNEXPECTED_RESPONSE";
 }
 
-function parseJson(text: string): { value: unknown } | null {
+function parseJson(
+  text: string,
+): { value: unknown } | null {
   try {
-    return { value: JSON.parse(text) as unknown };
+    return {
+      value:
+        JSON.parse(
+          text,
+        ) as unknown,
+    };
   } catch {
     return null;
   }
 }
 
-export function createOperatorClient(token: string): OperatorClient {
-  const authorization = `Bearer ${token}`;
+export function createOperatorClient(
+  token: string,
+): OperatorClient {
+  const authorization =
+    `Bearer ${token}`;
 
-  async function listEpisodes(signal: AbortSignal): Promise<ListEpisodesResult> {
-    if (signal.aborted) {
-      return failed("ABORTED");
+  async function requestJson<Value>(
+    path: string,
+    signal: AbortSignal,
+    parser: ResponseParser<Value>,
+  ): Promise<ParsedRequestResult<Value>> {
+    if (
+      signal.aborted
+    ) {
+      return failed(
+        "ABORTED",
+      );
     }
 
-    const controller = new AbortController();
-    let timedOut = false;
-    const forwardAbort = () => controller.abort();
-    signal.addEventListener("abort", forwardAbort, { once: true });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, OPERATOR_REQUEST_TIMEOUT_MS);
+    const controller =
+      new AbortController();
+
+    let timedOut =
+      false;
+
+    const forwardAbort =
+      () =>
+        controller.abort();
+
+    signal.addEventListener(
+      "abort",
+      forwardAbort,
+      {
+        once:
+          true,
+      },
+    );
+
+    const timer =
+      setTimeout(
+        () => {
+          timedOut =
+            true;
+
+          controller.abort();
+        },
+        OPERATOR_REQUEST_TIMEOUT_MS,
+      );
 
     // A caller abort always wins: deliberate cancellation is never reported
-    // as a timeout or a network failure.
-    const interrupted = (): OperatorFailure => (signal.aborted ? "ABORTED" : timedOut ? "TIMEOUT" : "NETWORK");
+    // as a timeout or network failure.
+    const interrupted =
+      (): OperatorFailure =>
+        signal.aborted
+          ? "ABORTED"
+          : timedOut
+            ? "TIMEOUT"
+            : "NETWORK";
 
     try {
-      let response: Response;
+      let response:
+        Response;
 
       try {
-        response = await fetch(EPISODE_LIST_PATH, {
-          method: "GET",
-          mode: "same-origin",
-          credentials: "omit",
-          cache: "no-store",
-          redirect: "error",
-          referrerPolicy: "no-referrer",
-          headers: { Accept: "application/json", Authorization: authorization },
-          signal: controller.signal,
-        });
+        response =
+          await fetch(
+            path,
+            {
+              method:
+                "GET",
+
+              mode:
+                "same-origin",
+
+              credentials:
+                "omit",
+
+              cache:
+                "no-store",
+
+              redirect:
+                "error",
+
+              referrerPolicy:
+                "no-referrer",
+
+              headers: {
+                Accept:
+                  "application/json",
+
+                Authorization:
+                  authorization,
+              },
+
+              signal:
+                controller.signal,
+            },
+          );
       } catch {
-        return failed(interrupted());
+        return failed(
+          interrupted(),
+        );
       }
 
-      const headerRequestId = response.headers.get("X-Request-Id");
-      let text: string;
+      const headerRequestId =
+        response.headers.get(
+          "X-Request-Id",
+        );
+
+      let text:
+        string;
 
       try {
-        text = await response.text();
+        text =
+          await response.text();
       } catch {
-        const failure = interrupted();
-        return failed(failure === "NETWORK" ? "UNREADABLE_RESPONSE" : failure);
+        const failure =
+          interrupted();
+
+        return failed(
+          failure ===
+            "NETWORK"
+            ? "UNREADABLE_RESPONSE"
+            : failure,
+        );
       }
 
-      if (signal.aborted) {
-        return failed("ABORTED");
+      if (
+        signal.aborted
+      ) {
+        return failed(
+          "ABORTED",
+        );
       }
 
-      if (!response.ok) {
-        const parsed = parseJson(text);
-        const envelope = parsed === null ? null : parseErrorEnvelope(parsed.value);
-        const requestId = isDisplayableRequestId(headerRequestId)
-          ? headerRequestId
-          : isDisplayableRequestId(envelope?.requestId)
-            ? envelope.requestId
+      if (
+        !response.ok
+      ) {
+        const parsed =
+          parseJson(
+            text,
+          );
+
+        const envelope =
+          parsed === null
+            ? null
+            : parseErrorEnvelope(
+                parsed.value,
+              );
+
+        const requestId =
+          isDisplayableRequestId(
+            headerRequestId,
+          )
+            ? headerRequestId
+            : isDisplayableRequestId(
+                  envelope?.requestId,
+                )
+              ? envelope.requestId
+              : undefined;
+
+        const code =
+          isOperatorErrorCode(
+            envelope?.code,
+          )
+            ? envelope.code
             : undefined;
-        const code = isOperatorErrorCode(envelope?.code) ? envelope.code : undefined;
-        return failed(statusFailure(response.status), { code, requestId });
+
+        return failed(
+          statusFailure(
+            response.status,
+          ),
+          {
+            code,
+            requestId,
+          },
+        );
       }
 
-      const requestId = isDisplayableRequestId(headerRequestId) ? headerRequestId : undefined;
-      const contentType = response.headers.get("Content-Type") ?? "";
-      const parsed = contentType.toLowerCase().startsWith("application/json") ? parseJson(text) : null;
+      const requestId =
+        isDisplayableRequestId(
+          headerRequestId,
+        )
+          ? headerRequestId
+          : undefined;
 
-      if (parsed === null) {
-        return failed("UNREADABLE_RESPONSE", { requestId });
+      const contentType =
+        response.headers.get(
+          "Content-Type",
+        ) ??
+        "";
+
+      const parsed =
+        contentType
+          .toLowerCase()
+          .startsWith(
+            "application/json",
+          )
+          ? parseJson(
+              text,
+            )
+          : null;
+
+      if (
+        parsed ===
+        null
+      ) {
+        return failed(
+          "UNREADABLE_RESPONSE",
+          {
+            requestId,
+          },
+        );
       }
 
-      const episodes = parseEpisodeList(parsed.value);
+      const value =
+        parser(
+          parsed.value,
+        );
 
-      if (episodes === null) {
-        return failed("UNRECOGNIZED_DATA", { requestId });
+      if (
+        value ===
+        null
+      ) {
+        return failed(
+          "UNRECOGNIZED_DATA",
+          {
+            requestId,
+          },
+        );
       }
 
-      return Object.freeze({ ok: true, episodes });
+      return Object.freeze({
+        ok:
+          true,
+
+        value,
+
+        ...(requestId === undefined
+          ? {}
+          : {
+              requestId,
+            }),
+      });
     } finally {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", forwardAbort);
+      clearTimeout(
+        timer,
+      );
+
+      signal.removeEventListener(
+        "abort",
+        forwardAbort,
+      );
     }
   }
 
-  return Object.freeze({ listEpisodes });
+  async function listEpisodes(
+    signal: AbortSignal,
+  ): Promise<ListEpisodesResult> {
+    const result =
+      await requestJson(
+        EPISODE_LIST_PATH,
+        signal,
+        parseEpisodeList,
+      );
+
+    if (
+      !result.ok
+    ) {
+      return result;
+    }
+
+    return Object.freeze({
+      ok:
+        true,
+
+      episodes:
+        result.value,
+    });
+  }
+
+  async function getEpisodeDetail(
+    episodeId: CanonicalEpisodeId,
+    signal: AbortSignal,
+  ): Promise<GetEpisodeDetailResult> {
+    // Defence in depth: the branded type should originate only from this
+    // guard. Runtime validation occurs before request-path construction.
+    if (
+      !isCanonicalEpisodeId(
+        episodeId,
+      )
+    ) {
+      return failed(
+        "UNEXPECTED_RESPONSE",
+      );
+    }
+
+    const result =
+      await requestJson(
+        `${EPISODE_DETAIL_PATH_PREFIX}/${episodeId}`,
+        signal,
+        parseEpisodeDetail,
+      );
+
+    if (
+      !result.ok
+    ) {
+      return result;
+    }
+
+    // The requested identity and returned identity must be identical.
+    if (
+      result.value.episodeId !==
+      episodeId
+    ) {
+      return failed(
+        "UNRECOGNIZED_DATA",
+        {
+          requestId:
+            result.requestId,
+        },
+      );
+    }
+
+    return Object.freeze({
+      ok:
+        true,
+
+      episode:
+        result.value,
+    });
+  }
+
+  return Object.freeze({
+    listEpisodes,
+    getEpisodeDetail,
+  });
 }

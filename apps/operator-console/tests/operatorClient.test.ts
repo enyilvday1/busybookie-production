@@ -74,7 +74,10 @@ describe("operator client request", () => {
   it("exposes no token-bearing property and keeps the token out of results", async () => {
     stubFetch(async () => json(500, envelope("INTERNAL_ERROR")));
     const client = createOperatorClient(TOKEN);
-    expect(Object.keys(client)).toEqual(["listEpisodes"]);
+    expect(Object.keys(client)).toEqual([
+      "listEpisodes",
+      "getEpisodeDetail",
+    ]);
     expect(Object.isFrozen(client)).toBe(true);
     expect(JSON.stringify(client)).not.toContain(TOKEN);
     expect(JSON.stringify(await client.listEpisodes(new AbortController().signal))).not.toContain(TOKEN);

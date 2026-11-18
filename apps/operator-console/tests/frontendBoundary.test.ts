@@ -51,16 +51,27 @@ describe("frontend security boundary (D3B: one read-only API module)", () => {
     }
   });
 
-  it("lets the operator client make exactly one read-only request to the episode list", () => {
+  it("uses exactly one read-only transport for the episode list and canonical episode detail", () => {
     const client = stripComments(sourceOf(OPERATOR_CLIENT_PATH));
+
     expect(client.match(/\bfetch\s*\(/g)).toHaveLength(1);
     expect(client.match(/"\/api\/[^"]*"/g)).toEqual(['"/api/v1/operator/episodes"']);
+
     expect(client).toMatch(/credentials:\s*"omit"/);
     expect(client).toMatch(/cache:\s*"no-store"/);
     expect(client).toMatch(/mode:\s*"same-origin"/);
     expect(client).toMatch(/method:\s*"GET"/);
-    expect(client).not.toMatch(/XMLHttpRequest|WebSocket|EventSource|sendBeacon|axios|"(POST|PUT|PATCH|DELETE)"/);
-    expect(client).not.toMatch(/\/health|\/episodes\/|setTimeout\([^)]*fetch/);
+
+    expect(client).toMatch(/isCanonicalEpisodeId/);
+    expect(client).toMatch(/EPISODE_DETAIL_PATH_PREFIX/);
+
+    expect(client).not.toMatch(
+      /XMLHttpRequest|WebSocket|EventSource|sendBeacon|axios|"(POST|PUT|PATCH|DELETE)"/,
+    );
+
+    expect(client).not.toMatch(
+      /\/health|setInterval|setTimeout\([^)]*fetch/,
+    );
   });
 
   it("never touches browser storage or cookies", () => {
@@ -77,9 +88,11 @@ describe("frontend security boundary (D3B: one read-only API module)", () => {
     }
   });
 
-  it("never requests the health or episode-detail endpoints and embeds no token", () => {
+  it("never requests the health endpoint and embeds no token", () => {
     for (const [path, code] of CODE) {
-      expect(code, path).not.toMatch(/\/operator\/health|\/episodes\/|\b[0-9a-f]{64}\b/);
+      expect(code, path).not.toMatch(
+        /\/operator\/health|\b[0-9a-f]{64}\b/,
+      );
     }
   });
 

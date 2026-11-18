@@ -1,16 +1,20 @@
 import type { RuntimeClient } from "../database/runtimePool.js";
 
-// Credential obligations derived from execution-attempt state
-// (docs/commercial/COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE.md section 23;
-// migration 0004). Nothing is stored: for one exact credential version V,
+// Credential obligations derived from execution-attempt and provider-verification state
+// (docs/commercial/COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE.md section 23 and R44B11F Phase 4;
+// migrations 0004 and 0010). Nothing is stored: for one exact credential version V,
 //
 //   credential retention open := some attempt bound to V is
 //       LEASED with credential_granted_at set, or
 //       SUBMITTING, SUBMITTED or OUTCOME_UNKNOWN
+//   verification retention open := some verification job bound to V has
+//       credential_granted_at set while state is LEASED or VERIFYING
 //   provider recovery open    := some attempt bound to V is
 //       SUBMITTING, SUBMITTED or OUTCOME_UNKNOWN
 //
-// Every other state closes both. State is authoritative: a recorded
+// Other execution-attempt states close both attempt-derived obligations, while
+// COMPLETED/CANCELLED verification jobs close verification retention.
+// Verification never opens provider recovery. State is authoritative: a recorded
 // submitting_at on FAILED_BEFORE_SUBMISSION (a definitive provider rejection)
 // does not keep an obligation open, and a passed recovery_expires_at never
 // closes one; only an explicit terminal state such as ABANDONED does.
@@ -34,6 +38,13 @@ SELECT v.id,
          SELECT 1 FROM execution_attempts a
           WHERE a.account_id = v.account_id AND a.provider_credential_version_id = v.id
             AND ((a.state = 'LEASED' AND a.credential_granted_at IS NOT NULL) OR a.state IN ${RECOVERY_STATES})
+       )
+       OR EXISTS (
+         SELECT 1 FROM provider_verification_jobs j
+          WHERE j.account_id = v.account_id
+            AND j.provider_credential_version_id = v.id
+            AND j.credential_granted_at IS NOT NULL
+            AND j.state IN ('LEASED', 'VERIFYING')
        ) AS retention_open,
        EXISTS (
          SELECT 1 FROM execution_attempts a

@@ -445,6 +445,80 @@ describe("disconnect", () => {
     expect(rows.rows).toEqual([{ count: 1 }]);
   });
 
+  it("retains a granted verification credential through disconnect and destroys it after the verification job becomes terminal", async () => {
+    const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential: newCredential() })).providerConnection;
+    const request = await verify("alice", connection.id);
+    expect(request.status).toBe(202);
+    const verificationJobId = (json(request).verificationJob as { id: string }).id;
+
+    const worker = await clients.migrator.query<{ id: string }>(
+      "INSERT INTO worker_principals (label) VALUES ($1) RETURNING id",
+      [`verification-retention-${randomUUID()}`],
+    );
+    const workerId = worker.rows[0]!.id;
+
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'LEASED', lease_worker_principal_id = $2,
+              lease_token_sha256 = repeat('a', 64), lease_fencing_counter = 1,
+              leased_at = clock_timestamp(),
+              lease_expires_at = clock_timestamp() + interval '30 seconds',
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [verificationJobId, workerId],
+    );
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET credential_granted_at = clock_timestamp(),
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [verificationJobId],
+    );
+
+    const first = await disconnect("alice", connection.id);
+    expect(first.status).toBe(200);
+    const retained = await versionsOf(connection.id);
+    expect(retained).toHaveLength(1);
+    expect(retained[0]).toMatchObject({ status: "RETAINED_FOR_RECOVERY" });
+    expect(retained[0]!.sealed_credential).not.toBeNull();
+    expect((await auditsFor(connection.id)).map((event) => event.event_type)).toContain("provider_connection.secret_retained_for_recovery");
+
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'CANCELLED',
+              lease_worker_principal_id = NULL,
+              lease_token_sha256 = NULL,
+              leased_at = NULL,
+              lease_expires_at = NULL,
+              terminal_reason_code = 'LIFECYCLE_NO_LONGER_ELIGIBLE',
+              completed_at = clock_timestamp(),
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [verificationJobId],
+    );
+
+    const second = await disconnect("alice", connection.id, portB);
+    expect(second.status).toBe(200);
+    const destroyed = await versionsOf(connection.id);
+    expect(destroyed).toHaveLength(1);
+    expect(destroyed[0]).toMatchObject({
+      status: "DESTROYED",
+      sealed_credential: null,
+      fingerprint_value: null,
+      fingerprint_key_ref: null,
+      fingerprint_algorithm: null,
+    });
+    expect(destroyed[0]!.destroyed_at).not.toBeNull();
+    const audits = await auditsFor(connection.id);
+    expect(audits.map((event) => event.event_type)).toEqual([
+      "provider_connection.created",
+      "provider_connection.verification_requested",
+      "provider_connection.disconnected",
+      "provider_connection.secret_retained_for_recovery",
+      "provider_connection.secret_destroyed",
+    ]);
+  });
+
   it("lets a DISABLED connection be disconnected, and the same credential be connected again afterwards", async () => {
     const credential = newCredential();
     const connection = json(await create("alice", { provider: "TEST_PROVIDER", credential })).providerConnection;

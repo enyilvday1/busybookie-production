@@ -6,6 +6,11 @@ import {
   type DisconnectConvergenceLoopHandle,
   type DisconnectConvergenceLoopPolicy,
 } from "./providerConnections/disconnectConvergenceLoop.js";
+import {
+  startProviderVerificationReconciliationLoop,
+  type ProviderVerificationReconciliationLoopHandle,
+  type ProviderVerificationReconciliationLoopPolicy,
+} from "./providerConnections/providerVerificationReconciliationLoop.js";
 import type { AuthenticationAdapter } from "./authentication/authenticationAdapter.js";
 import type { ProviderCapabilityRegistry } from "./providerConnections/providerCapabilityRegistry.js";
 import type { CredentialFingerprinter, CredentialSealer } from "commercial-worker-protocol";
@@ -63,6 +68,13 @@ export type CommercialApiProcessDependencies = Readonly<{
     start?: typeof startDisconnectConvergenceLoop;
     policy?: DisconnectConvergenceLoopPolicy;
   }>;
+  // Code-level orchestration seam for verification expiry/crash
+  // convergence. Production defaults to the internal periodic loop;
+  // tests may inject only the loop owner and bounded policy.
+  providerVerificationReconciliation?: Readonly<{
+    start?: typeof startProviderVerificationReconciliationLoop;
+    policy?: ProviderVerificationReconciliationLoopPolicy;
+  }>;
   readinessTimeoutMs?: number;
   poolCloseTimeoutMs?: number;
 }>;
@@ -110,6 +122,11 @@ export async function runCommercialApiProcess(
     startDisconnectConvergenceLoop;
   const disconnectConvergencePolicy =
     dependencies.disconnectConvergence?.policy;
+  const startProviderVerificationReconciliation =
+    dependencies.providerVerificationReconciliation?.start ??
+    startProviderVerificationReconciliationLoop;
+  const providerVerificationReconciliationPolicy =
+    dependencies.providerVerificationReconciliation?.policy;
 
   const failStartup = (message: string) => {
     dependencies.writeStderr(`commercial-api: ${message}\n`);
@@ -121,6 +138,9 @@ export async function runCommercialApiProcess(
   let poolClosing: Promise<boolean> | undefined;
   let disconnectConvergenceLoop:
     | DisconnectConvergenceLoopHandle
+    | undefined;
+  let providerVerificationReconciliationLoop:
+    | ProviderVerificationReconciliationLoopHandle
     | undefined;
 
   // Idempotent and bounded; resolves false if the pool did not close cleanly in time.
@@ -193,9 +213,19 @@ export async function runCommercialApiProcess(
             : { policy: disconnectConvergencePolicy }),
         });
 
+      providerVerificationReconciliationLoop =
+        startProviderVerificationReconciliation({
+          pool,
+          reportFailure: dependencies.writeStderr,
+          ...(providerVerificationReconciliationPolicy === undefined
+            ? {}
+            : { policy: providerVerificationReconciliationPolicy }),
+        });
+
       dependencies.writeStdout("commercial-api: database verified\n");
     }
   } catch (error) {
+    providerVerificationReconciliationLoop?.stop();
     disconnectConvergenceLoop?.stop();
     await closePool();
     failStartup(describeStartupFailure(error));
@@ -213,6 +243,7 @@ export async function runCommercialApiProcess(
       },
     });
   } catch (error) {
+    providerVerificationReconciliationLoop?.stop();
     disconnectConvergenceLoop?.stop();
     await closePool();
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -234,6 +265,7 @@ export async function runCommercialApiProcess(
       }
       shuttingDown = true;
       draining = true;
+      providerVerificationReconciliationLoop?.stop();
       disconnectConvergenceLoop?.stop();
 
       dependencies.writeStdout(`commercial-api: ${signal} received, shutting down\n`);

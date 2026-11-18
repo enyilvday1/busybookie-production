@@ -166,18 +166,36 @@ application never creates the persistent-volume mount itself.
 
     /var/lib/busybookie/commercial-worker
 
-is reserved as the commercial worker's durable state root. Its future
-application configuration binding is:
+is reserved as the commercial worker's durable state root. Its application
+configuration binding is:
 
+    COMMERCIAL_WORKER_ENV=production
     COMMERCIAL_WORKER_STATE_ROOT=/var/lib/busybookie/commercial-worker
 
-This is a deployment-path reservation only. It does not mean that:
+The worker configuration and state-root binding are implemented
+(apps/commercial-worker/src/workerConfig.ts and workerStateRoot.ts). In
+production mode the worker accepts exactly this root and no other. The
+binding fails closed, before any control-plane request, unless the host is
+Linux and the root:
 
-- COMMERCIAL_WORKER_STATE_ROOT is implemented or read by any worker code;
-- a commercial-worker process exists or is deployed;
-- state-root application binding is complete;
-- the fake-provider gate is complete;
-- fake-provider or provider execution is enabled.
+- already exists (the worker never creates it);
+- is a directory and not a symbolic link;
+- is owned by the worker's effective UID;
+- grants no group or other permissions;
+- passes acceptance-journal preparation, including its managed
+  acceptance-journal descendants and required directory fsync.
+
+The operator must therefore pre-provision this root with that ownership and
+mode.
+
+This does not mean that:
+
+- a commercial-worker process exists or is deployed: the worker remains
+  library/composition code with no production process entry point and is
+  not started by default;
+- this runbook deploys, configures or starts a commercial-worker service;
+- commercial-worker fake-provider or live-provider execution is enabled on this host;
+- commercial SaaS operation is approved.
 
 The application contract that consumes this path is defined separately in
 docs/commercial/COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE.md.

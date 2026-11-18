@@ -24,11 +24,26 @@ import {
 import {
   BUSYBOOKIE_RELEASE_IDENTITY_FILE,
   rawSha256,
+  readBoundFile,
   readEpisodeRuntimeIdentity,
+  requireLinkSafeContainedPath,
 } from "../src/execution/episodeInputBinding.js";
+import {
+  PortableReleaseIdentityError,
+  requirePortableReleaseIdentity,
+} from "../src/execution/portableReleaseRuntimeIdentity.js";
 
 const REVIEWED_REVISION =
   "a15cb68ead89c969742a016d27daf235bf584a8b";
+
+const CONSOLE_INDEX =
+  "apps/operator-console/dist/index.html";
+
+const CONSOLE_SCRIPT =
+  "apps/operator-console/dist/assets/index-Abc123.js";
+
+const CONSOLE_STYLE =
+  "apps/operator-console/dist/assets/index-Def456.css";
 
 type ReleaseFileEntry =
   Readonly<{
@@ -232,6 +247,24 @@ async function createPortableFixture(): Promise<PortableFixture> {
         "package.json",
         "{\"name\":\"busybookie-portable-test\",\"type\":\"module\"}\n",
       ),
+
+      await writeReleaseFile(
+        releaseRoot,
+        CONSOLE_INDEX,
+        "<!doctype html><script type=\"module\" src=\"/assets/index-Abc123.js\"></script>\n",
+      ),
+
+      await writeReleaseFile(
+        releaseRoot,
+        CONSOLE_SCRIPT,
+        "console.log(\"reviewed console\");\n",
+      ),
+
+      await writeReleaseFile(
+        releaseRoot,
+        CONSOLE_STYLE,
+        "body{margin:0}\n",
+      ),
     ]);
 
   return Object.freeze({
@@ -249,11 +282,13 @@ async function writeManifest(
   files:
     readonly ReleaseFileEntry[] =
       fixture.files,
+
+  schemaVersion =
+    "2.0",
 ): Promise<void> {
   const manifest =
     Object.freeze({
-      schemaVersion:
-        "1.0",
+      schemaVersion,
 
       kind:
         "BUSYBOOKIE_PORTABLE_RELEASE_IDENTITY",
@@ -338,6 +373,9 @@ describe(
           ),
         ).toEqual([
           "RUNTIME_RELEASE_MANIFEST",
+          `RUNTIME:${CONSOLE_SCRIPT}`,
+          `RUNTIME:${CONSOLE_STYLE}`,
+          `RUNTIME:${CONSOLE_INDEX}`,
           "RUNTIME:dist/execution/episodeAutomationProcess.js",
           "RUNTIME:dist/execution/episodeInputBinding.js",
           "RUNTIME:package-lock.json",
@@ -465,3 +503,164 @@ describe(
     );
   },
 );
+
+describe("portable release identity schema 2.0: operator-console build", () => {
+  const at = (root: string, relativePath: string) =>
+    join(root, ...relativePath.split("/"));
+
+  const read = (fixture: PortableFixture) =>
+    readEpisodeRuntimeIdentity(fixture.releaseRoot, fixture.mediaRoot);
+
+  const dependencies = Object.freeze({ readBoundFile, requireLinkSafeContainedPath });
+
+  it("binds every operator-console file by exact byte length and SHA-256", async () => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+
+    const identity = await read(fixture);
+
+    for (const relativePath of [CONSOLE_INDEX, CONSOLE_SCRIPT, CONSOLE_STYLE]) {
+      const entry = fixture.files.find((file) => file.relativePath === relativePath)!;
+      const binding = identity.executableInputs.find((input) => input.role === `RUNTIME:${relativePath}`);
+
+      expect(binding).toMatchObject({ exists: true, bytes: entry.bytes, rawSha256: entry.sha256 });
+    }
+  });
+
+  it.each([
+    ["changed operator-console script", CONSOLE_SCRIPT, "console.log(\"tampered console\");\n"],
+    ["changed operator-console index.html", CONSOLE_INDEX, "<!doctype html><script type=\"module\" src=\"/assets/rogue.js\"></script>\n"],
+    ["changed operator-console stylesheet", CONSOLE_STYLE, "body{margin:1px}\n"],
+    ["changed root runtime JavaScript", "dist/execution/episodeInputBinding.js", "export const tampered = true;\n"],
+  ])("fails closed on a %s", async (_label, relativePath, content) => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+    await writeFile(at(fixture.releaseRoot, relativePath), content);
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+  });
+
+  it.each([CONSOLE_SCRIPT, CONSOLE_STYLE, CONSOLE_INDEX])("fails closed when %s is missing", async (relativePath) => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+    await rm(at(fixture.releaseRoot, relativePath));
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+  });
+
+  it.each([
+    "apps/operator-console/dist/assets/extra-Zz9.js",
+    "apps/operator-console/dist/assets/extra-Zz9.css",
+    "apps/operator-console/dist/assets/index-Abc123.js.map",
+    "apps/operator-console/dist/favicon.svg",
+    "apps/operator-console/dist/assets/nested/inner-Q1.js",
+  ])("fails closed on an unmanifested operator-console entry: %s", async (relativePath) => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+    await mkdir(dirname(at(fixture.releaseRoot, relativePath)), { recursive: true });
+    await writeFile(at(fixture.releaseRoot, relativePath), "x\n", { flag: "wx" });
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+  });
+
+  it("fails closed when the operator-console build is absent from the manifest", async () => {
+    const fixture = await createPortableFixture();
+    const rootOnly = fixture.files.filter((file) => !file.relativePath.startsWith("apps/"));
+
+    await writeManifest(fixture, rootOnly);
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+  });
+
+  it("fails closed when the operator-console build is absent from the release", async () => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+    await rm(at(fixture.releaseRoot, "apps"), { recursive: true, force: true });
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+  });
+
+  it.each([
+    ["the complete v2 file set", (files: readonly ReleaseFileEntry[]) => files],
+    ["a v1-shaped root-only file set", (files: readonly ReleaseFileEntry[]) => files.filter((file) => !file.relativePath.startsWith("apps/"))],
+  ])("rejects schema 1.0 with %s", async (_label, select) => {
+    const fixture = await createPortableFixture();
+
+    if (select(fixture.files).length !== fixture.files.length) {
+      await rm(at(fixture.releaseRoot, "apps"), { recursive: true, force: true });
+    }
+
+    await writeManifest(fixture, select(fixture.files), "1.0");
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+    await expect(requirePortableReleaseIdentity(fixture.releaseRoot, dependencies)).rejects.toMatchObject({
+      failure: "RELEASE_IDENTITY_INVALID",
+    });
+  });
+
+  it.each([
+    "apps/other-app/dist/index.html",
+    "apps/operator-console/src/main.js",
+    "apps/operator-console/dist/other.html",
+    "apps/operator-console/dist/assets/nested/inner-Q1.js",
+    "apps/operator-console/dist/assets/index-Abc123.js.map",
+    "apps/operator-console/dist/assets/index.min.js",
+    "apps/operator-console/dist/assets/index-Abc123.mjs",
+    "apps/operator-console/dist/assets/../index.html",
+    "apps/operator-console/dist/./index.html",
+    "apps/operator-console//dist/index.html",
+    "apps\\operator-console\\dist\\index.html",
+    "/apps/operator-console/dist/index.html",
+    "../apps/operator-console/dist/index.html",
+  ])("rejects the manifest path %s", async (relativePath) => {
+    const fixture = await createPortableFixture();
+    const files = sortEntries([
+      ...fixture.files,
+      Object.freeze({ relativePath, bytes: 2, sha256: "a".repeat(64) }),
+    ]);
+
+    await writeManifest(fixture, files);
+
+    await expect(read(fixture)).rejects.toMatchObject({ name: "BoundEpisodeError" });
+  });
+});
+
+describe("required portable release identity (production operator startup)", () => {
+  const dependencies = Object.freeze({ readBoundFile, requireLinkSafeContainedPath });
+
+  it("verifies the complete v2 inventory without a media root", async () => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+
+    const verified = await requirePortableReleaseIdentity(fixture.releaseRoot, dependencies);
+
+    expect(verified.reviewedRevision).toBe(REVIEWED_REVISION);
+    expect(verified.root).toBe(fixture.releaseRoot);
+    expect(verified.manifest.role).toBe("RUNTIME_RELEASE_MANIFEST");
+    expect(verified.files.map((file) => file.role)).toEqual(
+      fixture.files.map((file) => `RUNTIME:${file.relativePath}`),
+    );
+  });
+
+  it("refuses a release without an identity manifest instead of falling back to Git", async () => {
+    const fixture = await createPortableFixture();
+
+    const failure = await requirePortableReleaseIdentity(fixture.releaseRoot, dependencies).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PortableReleaseIdentityError);
+    expect(failure).toMatchObject({ failure: "RELEASE_IDENTITY_MISSING" });
+  });
+
+  it("reports a tampered release with one fixed message and no cause, path or hash", async () => {
+    const fixture = await createPortableFixture();
+    await writeManifest(fixture);
+    await writeFile(join(fixture.releaseRoot, ...CONSOLE_SCRIPT.split("/")), "console.log(\"tampered console\");\n");
+
+    const failure = await requirePortableReleaseIdentity(fixture.releaseRoot, dependencies).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PortableReleaseIdentityError);
+    expect(failure).toMatchObject({ failure: "RELEASE_IDENTITY_INVALID" });
+    expect((failure as Error).message).toBe("Portable release identity verification failed (RELEASE_IDENTITY_INVALID).");
+    expect((failure as Error).cause).toBeUndefined();
+  });
+});

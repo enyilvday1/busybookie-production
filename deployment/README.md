@@ -57,8 +57,8 @@ busybookie-release-identity.json at the application root.
 
 Generate the identity only from the clean approved Git checkout after
 npm run build has completed and after the portable release root contains
-the exact compiled dist, package.json, and package-lock.json that will be
-archived.
+the exact compiled dist, apps/operator-console/dist, package.json, and
+package-lock.json that will be archived.
 
 From the approved source checkout:
 
@@ -70,15 +70,35 @@ production host merely to support this command.
 
 The command fails closed when the reviewed source checkout is dirty, when
 untracked release-authority source files exist, when the portable release
-contains Git metadata, when executable inventory differs, when release
-runtime bytes differ from the reviewed build, or when an identity manifest
-already exists.
+contains Git metadata, when executable or operator-console inventory differs,
+when release runtime or operator-console bytes differ from the reviewed
+build, when the operator-console build is missing or malformed, or when an
+identity manifest already exists.
 
-The identity binds the approved 40-character Git revision plus every
-dist/**/*.js runtime file, package.json, and package-lock.json. TypeScript
-declarations and source maps are not runtime executable inputs. config,
-episodes, references, durable execution evidence, media, and FFprobe remain
-governed by their existing independent runtime/input-binding contracts.
+Portable Release Identity schema 2.0 binds the approved 40-character Git
+revision plus, each by byte length and SHA-256:
+
+- every root dist/**/*.js runtime file;
+- apps/operator-console/dist/index.html;
+- every apps/operator-console/dist/assets/*.js and *.css file;
+- package.json;
+- package-lock.json.
+
+A schema 1.0 manifest, which does not bind the operator-console build, is
+not accepted. TypeScript declarations and source maps are not runtime
+executable inputs. config, episodes, references, durable execution evidence,
+media, and FFprobe remain governed by their existing independent
+runtime/input-binding contracts.
+
+The compiled production operator entrypoint (npm start, which runs
+dist/operatorServer/operatorServerProcess.js) first requires the working
+directory to be exactly the application root that contains the executed
+entrypoint, then verifies this identity for that root, before it loads
+operator-console assets, listens, or prints the one-time token. A working
+directory other than the application root, or a missing, schema 1.0 or
+mismatched identity, stops startup with one path-free error line and a
+non-zero exit, and nothing listens. The source development command
+npm run operator:serve does not require a release identity.
 
 Generate the identity before locking the release archive and its SHA-256.
 Do not copy .git into a portable release and do not fabricate Git metadata

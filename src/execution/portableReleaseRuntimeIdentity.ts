@@ -10,17 +10,52 @@ import {
 export const BUSYBOOKIE_RELEASE_IDENTITY_FILE =
   "busybookie-release-identity.json";
 
-const PORTABLE_RELEASE_IDENTITY_KIND =
+export const PORTABLE_RELEASE_IDENTITY_KIND =
   "BUSYBOOKIE_PORTABLE_RELEASE_IDENTITY";
 
-const PORTABLE_RELEASE_IDENTITY_SCHEMA_VERSION =
-  "1.0";
+/*
+ * Schema 2.0 binds the deployable operator-console build in addition to the
+ * root runtime files bound by schema 1.0. A 1.0 manifest is not a valid
+ * portable production identity and is rejected rather than widened.
+ */
+export const PORTABLE_RELEASE_IDENTITY_SCHEMA_VERSION =
+  "2.0";
 
 const RELEASE_IDENTITY_MAX_BYTES =
   8 * 1024 * 1024;
 
 const RELEASE_RUNTIME_FILE_MAX_BYTES =
   64 * 1024 * 1024;
+
+/*
+ * The deployable operator-console build shape: exactly index.html plus flat
+ * assets/<safe-name>.js|css, mirroring the operator-console loader. Declared
+ * here rather than imported so execution code does not depend on operator
+ * server presentation code.
+ */
+const OPERATOR_CONSOLE_DIST_SEGMENTS =
+  Object.freeze(["apps", "operator-console", "dist"]);
+
+const OPERATOR_CONSOLE_DIST_PREFIX =
+  "apps/operator-console/dist/";
+
+const OPERATOR_CONSOLE_INDEX_FILE =
+  "index.html";
+
+const OPERATOR_CONSOLE_ASSETS_DIRECTORY =
+  "assets";
+
+const OPERATOR_CONSOLE_INDEX_PATH =
+  `${OPERATOR_CONSOLE_DIST_PREFIX}${OPERATOR_CONSOLE_INDEX_FILE}`;
+
+const OPERATOR_CONSOLE_ASSET_NAME_PATTERN =
+  /^[A-Za-z0-9_-]+\.(?:js|css)$/u;
+
+const OPERATOR_CONSOLE_ASSET_PATH_PATTERN =
+  /^apps\/operator-console\/dist\/assets\/[A-Za-z0-9_-]+\.(?:js|css)$/u;
+
+const OPERATOR_CONSOLE_SCRIPT_PATH_PATTERN =
+  /^apps\/operator-console\/dist\/assets\/[A-Za-z0-9_-]+\.js$/u;
 
 type BoundFileReader = (
   input: Readonly<{
@@ -51,8 +86,8 @@ type PortableReleaseFileEntry = Readonly<{
 }>;
 
 type PortableReleaseIdentityManifest = Readonly<{
-  schemaVersion: "1.0";
-  kind: "BUSYBOOKIE_PORTABLE_RELEASE_IDENTITY";
+  schemaVersion: typeof PORTABLE_RELEASE_IDENTITY_SCHEMA_VERSION;
+  kind: typeof PORTABLE_RELEASE_IDENTITY_KIND;
   reviewedRevision: string;
   files: readonly PortableReleaseFileEntry[];
 }>;
@@ -61,6 +96,31 @@ export type PortableReleaseRuntimeIdentityDependencies = Readonly<{
   readBoundFile: BoundFileReader;
   requireLinkSafeContainedPath: LinkSafePathValidator;
 }>;
+
+export type VerifiedPortableRelease = Readonly<{
+  reviewedRevision: string;
+  root: string;
+  manifest: FileBinding;
+  files: readonly FileBinding[];
+}>;
+
+export type PortableReleaseIdentityFailure =
+  | "RELEASE_ROOT_WORKING_DIRECTORY_MISMATCH"
+  | "RELEASE_IDENTITY_MISSING"
+  | "RELEASE_IDENTITY_INVALID";
+
+// Fixed, path-free message and no cause: manifest contents, hashes and
+// filesystem error messages (which carry absolute paths) must not reach a
+// launcher's output.
+export class PortableReleaseIdentityError extends Error {
+  readonly failure: PortableReleaseIdentityFailure;
+
+  constructor(failure: PortableReleaseIdentityFailure) {
+    super(`Portable release identity verification failed (${failure}).`);
+    this.name = "PortableReleaseIdentityError";
+    this.failure = failure;
+  }
+}
 
 function inputBindingDrift(cause?: unknown): BoundEpisodeError {
   return new BoundEpisodeError(
@@ -92,6 +152,14 @@ function comparePortablePaths(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function isRootRuntimeJavaScriptPath(value: string): boolean {
+  return value.startsWith("dist/") && value.endsWith(".js");
+}
+
+function isOperatorConsoleScriptPath(value: string): boolean {
+  return OPERATOR_CONSOLE_SCRIPT_PATH_PATTERN.test(value);
+}
+
 function parsePortableReleaseRelativePath(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -116,15 +184,17 @@ function parsePortableReleaseRelativePath(value: unknown): string {
     throw inputBindingDrift();
   }
 
-  if (value === "package.json" || value === "package-lock.json") {
+  if (
+    value === "package.json" ||
+    value === "package-lock.json" ||
+    value === OPERATOR_CONSOLE_INDEX_PATH ||
+    OPERATOR_CONSOLE_ASSET_PATH_PATTERN.test(value) ||
+    isRootRuntimeJavaScriptPath(value)
+  ) {
     return value;
   }
 
-  if (!value.startsWith("dist/") || !value.endsWith(".js")) {
-    throw inputBindingDrift();
-  }
-
-  return value;
+  throw inputBindingDrift();
 }
 
 function parsePortableReleaseIdentityManifest(
@@ -147,7 +217,7 @@ function parsePortableReleaseIdentityManifest(
     typeof value.reviewedRevision !== "string" ||
     !/^[a-f0-9]{40}$/u.test(value.reviewedRevision) ||
     !Array.isArray(value.files) ||
-    value.files.length < 3 ||
+    value.files.length < 5 ||
     value.files.length > 10000
   ) {
     throw inputBindingDrift();
@@ -203,11 +273,9 @@ function parsePortableReleaseIdentityManifest(
   if (
     !files.some(file => file.relativePath === "package.json") ||
     !files.some(file => file.relativePath === "package-lock.json") ||
-    !files.some(
-      file =>
-        file.relativePath.startsWith("dist/") &&
-        file.relativePath.endsWith(".js"),
-    )
+    !files.some(file => isRootRuntimeJavaScriptPath(file.relativePath)) ||
+    !files.some(file => file.relativePath === OPERATOR_CONSOLE_INDEX_PATH) ||
+    !files.some(file => isOperatorConsoleScriptPath(file.relativePath))
   ) {
     throw inputBindingDrift();
   }
@@ -244,46 +312,68 @@ function equalStringArrays(
   );
 }
 
-async function listPortableReleaseJavaScriptFiles(
+function portableRelativePath(root: string, candidate: string): string {
+  return relative(root, candidate)
+    .split(sep)
+    .join("/");
+}
+
+async function requireContained(
+  root: string,
+  candidate: string,
+  requireLinkSafeContainedPath: LinkSafePathValidator,
+): Promise<void> {
+  try {
+    await requireLinkSafeContainedPath(root, candidate);
+  } catch (cause) {
+    throw inputBindingDrift(cause);
+  }
+}
+
+async function readDirectoryEntries(
+  directory: string,
+): Promise<import("node:fs").Dirent<string>[]> {
+  try {
+    const entries = await readdir(directory, {
+      withFileTypes: true,
+      encoding: "utf8",
+    });
+
+    return entries.sort((left, right) =>
+      comparePortablePaths(left.name, right.name),
+    );
+  } catch (cause) {
+    throw inputBindingDrift(cause);
+  }
+}
+
+async function observeEntry(
+  candidate: string,
+): Promise<import("node:fs").Stats> {
+  try {
+    return await lstat(candidate);
+  } catch (cause) {
+    throw inputBindingDrift(cause);
+  }
+}
+
+async function listRootRuntimeJavaScript(
   root: string,
   requireLinkSafeContainedPath: LinkSafePathValidator,
 ): Promise<readonly string[]> {
   const distRoot = resolve(root, "dist");
 
-  try {
-    await requireLinkSafeContainedPath(root, distRoot);
-  } catch (cause) {
-    throw inputBindingDrift(cause);
-  }
+  await requireContained(root, distRoot, requireLinkSafeContainedPath);
 
   const files: string[] = [];
 
   async function visit(directory: string): Promise<void> {
-    let entries: import("node:fs").Dirent<string>[];
-
-    try {
-      entries = await readdir(directory, {
-        withFileTypes: true,
-        encoding: "utf8",
-      });
-    } catch (cause) {
-      throw inputBindingDrift(cause);
-    }
-
-    entries.sort((left, right) =>
-      comparePortablePaths(left.name, right.name),
-    );
-
-    for (const entry of entries) {
+    for (const entry of await readDirectoryEntries(directory)) {
       const candidate = resolve(directory, entry.name);
 
-      try {
-        await requireLinkSafeContainedPath(root, candidate);
-      } catch (cause) {
-        throw inputBindingDrift(cause);
-      }
+      await requireContained(root, candidate, requireLinkSafeContainedPath);
 
-      const metadata = await lstat(candidate);
+      const metadata = await observeEntry(candidate);
 
       if (metadata.isSymbolicLink()) {
         throw inputBindingDrift();
@@ -298,10 +388,7 @@ async function listPortableReleaseJavaScriptFiles(
         throw inputBindingDrift();
       }
 
-      const relativePath =
-        relative(root, candidate)
-          .split(sep)
-          .join("/");
+      const relativePath = portableRelativePath(root, candidate);
 
       if (relativePath.endsWith(".js")) {
         files.push(relativePath);
@@ -325,18 +412,125 @@ async function listPortableReleaseJavaScriptFiles(
 
   await visit(distRoot);
 
-  return Object.freeze(files.sort(comparePortablePaths));
+  if (files.length === 0) {
+    throw inputBindingDrift();
+  }
+
+  return Object.freeze(files);
 }
 
-export async function readPortableReleaseRuntimeIdentity(
-  input: Readonly<{
-    root: string;
-    mediaRoot: string;
-    ffprobeExecutable?: string;
-  }>,
+async function requireRegularFile(
+  root: string,
+  candidate: string,
+  requireLinkSafeContainedPath: LinkSafePathValidator,
+): Promise<void> {
+  await requireContained(root, candidate, requireLinkSafeContainedPath);
+
+  const metadata = await observeEntry(candidate);
+
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw inputBindingDrift();
+  }
+}
+
+/*
+ * The served operator-console build: exactly index.html and a flat assets/
+ * directory of <safe-name>.js|css regular files, with at least one script.
+ * Any other entry, nesting, link or file class fails closed.
+ */
+async function listOperatorConsoleBuild(
+  root: string,
+  requireLinkSafeContainedPath: LinkSafePathValidator,
+): Promise<readonly string[]> {
+  const consoleRoot = resolve(root, ...OPERATOR_CONSOLE_DIST_SEGMENTS);
+
+  await requireContained(root, consoleRoot, requireLinkSafeContainedPath);
+
+  const consoleMetadata = await observeEntry(consoleRoot);
+
+  if (consoleMetadata.isSymbolicLink() || !consoleMetadata.isDirectory()) {
+    throw inputBindingDrift();
+  }
+
+  const names =
+    (await readDirectoryEntries(consoleRoot)).map(entry => entry.name);
+
+  if (
+    !equalStringArrays(names, [
+      OPERATOR_CONSOLE_ASSETS_DIRECTORY,
+      OPERATOR_CONSOLE_INDEX_FILE,
+    ])
+  ) {
+    throw inputBindingDrift();
+  }
+
+  const indexPath = resolve(consoleRoot, OPERATOR_CONSOLE_INDEX_FILE);
+
+  await requireRegularFile(root, indexPath, requireLinkSafeContainedPath);
+
+  const assetsRoot = resolve(consoleRoot, OPERATOR_CONSOLE_ASSETS_DIRECTORY);
+
+  await requireContained(root, assetsRoot, requireLinkSafeContainedPath);
+
+  const assetsMetadata = await observeEntry(assetsRoot);
+
+  if (assetsMetadata.isSymbolicLink() || !assetsMetadata.isDirectory()) {
+    throw inputBindingDrift();
+  }
+
+  const files = [portableRelativePath(root, indexPath)];
+
+  for (const entry of await readDirectoryEntries(assetsRoot)) {
+    if (!OPERATOR_CONSOLE_ASSET_NAME_PATTERN.test(entry.name)) {
+      throw inputBindingDrift();
+    }
+
+    const candidate = resolve(assetsRoot, entry.name);
+
+    await requireRegularFile(root, candidate, requireLinkSafeContainedPath);
+
+    files.push(portableRelativePath(root, candidate));
+  }
+
+  if (!files.some(isOperatorConsoleScriptPath)) {
+    throw inputBindingDrift();
+  }
+
+  return Object.freeze(files);
+}
+
+/*
+ * The complete schema 2.0 inventory of a release root: root dist/**\/*.js,
+ * the operator-console build, package.json and package-lock.json, sorted.
+ * Shared by the packaging-time writer and runtime verification so both apply
+ * one inventory algorithm. Fails closed with INPUT_BINDING_DRIFT.
+ */
+export async function listPortableReleaseInventory(
+  rootInput: string,
+  requireLinkSafeContainedPath: LinkSafePathValidator,
+): Promise<readonly string[]> {
+  const root = resolve(rootInput);
+
+  return Object.freeze(
+    [
+      ...await listRootRuntimeJavaScript(root, requireLinkSafeContainedPath),
+      ...await listOperatorConsoleBuild(root, requireLinkSafeContainedPath),
+      "package-lock.json",
+      "package.json",
+    ].sort(comparePortablePaths),
+  );
+}
+
+/*
+ * Verifies the portable manifest and every bound file without a media root.
+ * Returns null only when no manifest exists; any present manifest must be a
+ * valid schema 2.0 identity whose inventory and bytes match exactly.
+ */
+async function verifyPortableReleaseIfPresent(
+  rootInput: string,
   dependencies: PortableReleaseRuntimeIdentityDependencies,
-): Promise<RuntimeIdentity | null> {
-  const root = resolve(input.root);
+): Promise<VerifiedPortableRelease | null> {
+  const root = resolve(rootInput);
   const manifestPath =
     resolve(root, BUSYBOOKIE_RELEASE_IDENTITY_FILE);
 
@@ -363,25 +557,17 @@ export async function readPortableReleaseRuntimeIdentity(
   const expectedInventory =
     manifest.files.map(file => file.relativePath);
 
-  const inventory = async () =>
-    [
-      ...await listPortableReleaseJavaScriptFiles(
-        root,
-        dependencies.requireLinkSafeContainedPath,
-      ),
-      "package-lock.json",
-      "package.json",
-    ].sort(comparePortablePaths);
+  const inventory = () =>
+    listPortableReleaseInventory(
+      root,
+      dependencies.requireLinkSafeContainedPath,
+    );
 
-  const actualInventoryBefore = await inventory();
-
-  if (!equalStringArrays(actualInventoryBefore, expectedInventory)) {
+  if (!equalStringArrays(await inventory(), expectedInventory)) {
     throw inputBindingDrift();
   }
 
-  const executableInputs: FileBinding[] = [
-    manifestRead.binding,
-  ];
+  const files: FileBinding[] = [];
 
   for (const file of manifest.files) {
     const absolutePath =
@@ -404,12 +590,12 @@ export async function readPortableReleaseRuntimeIdentity(
         expected,
       });
 
-    executableInputs.push(observed.binding);
+    files.push(observed.binding);
   }
 
   /*
-   * Re-observe both manifest and executable inventory after binding every
-   * runtime file so identity assembly cannot silently accept simple drift.
+   * Re-observe both manifest and the complete inventory after binding every
+   * file so identity assembly cannot silently accept simple drift.
    */
   await dependencies.readBoundFile({
     root,
@@ -419,10 +605,71 @@ export async function readPortableReleaseRuntimeIdentity(
     expected: manifestRead.binding,
   });
 
-  const actualInventoryAfter = await inventory();
-
-  if (!equalStringArrays(actualInventoryAfter, expectedInventory)) {
+  if (!equalStringArrays(await inventory(), expectedInventory)) {
     throw inputBindingDrift();
+  }
+
+  return Object.freeze({
+    reviewedRevision: manifest.reviewedRevision,
+    root,
+    manifest: manifestRead.binding,
+    files: Object.freeze(files),
+  });
+}
+
+/*
+ * Runtime inputs (episodes, config) resolve from the working directory, so a
+ * production process must run from the exact release root it verifies and
+ * executes from. Exact resolved-path equality only: no alias, realpath or
+ * case folding. Neither path is reported.
+ */
+export function requirePortableReleaseWorkingDirectory(
+  releaseRoot: string,
+  workingDirectory: string,
+): void {
+  if (resolve(releaseRoot) !== resolve(workingDirectory)) {
+    throw new PortableReleaseIdentityError(
+      "RELEASE_ROOT_WORKING_DIRECTORY_MISMATCH",
+    );
+  }
+}
+
+/*
+ * The production requirement: a portable release identity must exist and
+ * verify. Every failure becomes one fixed, path-free error.
+ */
+export async function requirePortableReleaseIdentity(
+  root: string,
+  dependencies: PortableReleaseRuntimeIdentityDependencies,
+): Promise<VerifiedPortableRelease> {
+  let verified: VerifiedPortableRelease | null;
+
+  try {
+    verified = await verifyPortableReleaseIfPresent(root, dependencies);
+  } catch {
+    throw new PortableReleaseIdentityError("RELEASE_IDENTITY_INVALID");
+  }
+
+  if (verified === null) {
+    throw new PortableReleaseIdentityError("RELEASE_IDENTITY_MISSING");
+  }
+
+  return verified;
+}
+
+export async function readPortableReleaseRuntimeIdentity(
+  input: Readonly<{
+    root: string;
+    mediaRoot: string;
+    ffprobeExecutable?: string;
+  }>,
+  dependencies: PortableReleaseRuntimeIdentityDependencies,
+): Promise<RuntimeIdentity | null> {
+  const verified =
+    await verifyPortableReleaseIfPresent(input.root, dependencies);
+
+  if (verified === null) {
+    return null;
   }
 
   let ffprobe: FileBinding | null = null;
@@ -444,11 +691,11 @@ export async function readPortableReleaseRuntimeIdentity(
   }
 
   return Object.freeze({
-    reviewedRevision: manifest.reviewedRevision,
-    repositoryRoot: root,
+    reviewedRevision: verified.reviewedRevision,
+    repositoryRoot: verified.root,
     mediaRoot: resolve(input.mediaRoot),
     physicalMediaRoot: resolve(input.mediaRoot),
-    executableInputs: Object.freeze(executableInputs),
+    executableInputs: Object.freeze([verified.manifest, ...verified.files]),
     ffprobe,
   });
 }

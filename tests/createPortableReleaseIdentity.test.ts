@@ -4,7 +4,9 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,6 +28,21 @@ import {
 } from "../src/execution/portableReleaseRuntimeIdentity.js";
 
 const temporaryRoots: string[] = [];
+
+const CONSOLE_INDEX =
+  "apps/operator-console/dist/index.html";
+
+const CONSOLE_SCRIPT =
+  "apps/operator-console/dist/assets/index-Abc123.js";
+
+const CONSOLE_STYLE =
+  "apps/operator-console/dist/assets/index-Def456.css";
+
+const CONSOLE_INDEX_HTML =
+  "<!doctype html>\n<html><head>" +
+  "<script type=\"module\" crossorigin src=\"/assets/index-Abc123.js\"></script>" +
+  "<link rel=\"stylesheet\" crossorigin href=\"/assets/index-Def456.css\">" +
+  "</head><body><div id=\"root\"></div></body></html>\n";
 
 afterEach(async () => {
   for (
@@ -228,6 +245,45 @@ async function createFixture() {
     "export const b = 2;\n",
   );
 
+  // The built console is ignored build output, as in the real repository.
+  await writeFile(
+    join(
+      sourceRoot,
+      ".gitignore",
+    ),
+    "apps/operator-console/dist/\n",
+  );
+
+  for (
+    const [relativePath, content]
+    of [
+      [CONSOLE_INDEX, CONSOLE_INDEX_HTML],
+      [CONSOLE_SCRIPT, "console.log(\"reviewed console\");\n"],
+      [CONSOLE_STYLE, "body{margin:0}\n"],
+    ] as const
+  ) {
+    const destination =
+      join(
+        sourceRoot,
+        ...relativePath.split("/"),
+      );
+
+    await mkdir(
+      join(
+        destination,
+        "..",
+      ),
+      {
+        recursive: true,
+      },
+    );
+
+    await writeFile(
+      destination,
+      content,
+    );
+  }
+
   for (
     const relativePath
     of [
@@ -237,6 +293,9 @@ async function createFixture() {
       "dist/nested/b.js",
       "package.json",
       "package-lock.json",
+      CONSOLE_INDEX,
+      CONSOLE_SCRIPT,
+      CONSOLE_STYLE,
     ]
   ) {
     await copyRuntimeFile(
@@ -273,6 +332,7 @@ async function createFixture() {
     sourceRoot,
     [
       "add",
+      ".gitignore",
       "src/main.ts",
       "package.json",
       "package-lock.json",
@@ -367,12 +427,24 @@ describe(
           parsed,
         ).toEqual({
           schemaVersion:
-            "1.0",
+            "2.0",
           kind:
             "BUSYBOOKIE_PORTABLE_RELEASE_IDENTITY",
           reviewedRevision:
             fixture.reviewedRevision,
           files: [
+            expect.objectContaining({
+              relativePath:
+                CONSOLE_SCRIPT,
+            }),
+            expect.objectContaining({
+              relativePath:
+                CONSOLE_STYLE,
+            }),
+            expect.objectContaining({
+              relativePath:
+                CONSOLE_INDEX,
+            }),
             expect.objectContaining({
               relativePath:
                 "dist/a.js",
@@ -394,7 +466,31 @@ describe(
 
         expect(
           first.fileCount,
-        ).toBe(4);
+        ).toBe(7);
+
+        // Console entries carry real byte length and SHA-256, not just names.
+        const consoleScript =
+          (parsed.files as { relativePath: string; bytes: number; sha256: string }[])
+            .find(
+              (entry) =>
+                entry.relativePath ===
+                CONSOLE_SCRIPT,
+            );
+
+        expect(
+          consoleScript,
+        ).toEqual({
+          relativePath:
+            CONSOLE_SCRIPT,
+          bytes:
+            Buffer.byteLength(
+              "console.log(\"reviewed console\");\n",
+            ),
+          sha256:
+            expect.stringMatching(
+              /^[a-f0-9]{64}$/u,
+            ),
+        });
 
         expect(
           first.reviewedRevision,
@@ -645,5 +741,101 @@ describe(
         ).toBe(false);
       },
     );
+  },
+);
+
+describe(
+  "portable release identity writer: operator-console build (schema 2.0)",
+  () => {
+    type Fixture = Awaited<ReturnType<typeof createFixture>>;
+
+    const at = (root: string, relativePath: string) =>
+      join(root, ...relativePath.split("/"));
+
+    async function expectRejected(fixture: Fixture, pattern: RegExp): Promise<void> {
+      await expect(
+        createPortableReleaseIdentity({
+          sourceRoot: fixture.sourceRoot,
+          releaseRoot: fixture.releaseRoot,
+        }),
+      ).rejects.toThrow(pattern);
+
+      expect(await exists(fixture.manifestPath)).toBe(false);
+    }
+
+    it("rejects changed operator-console script bytes under an unchanged name", async () => {
+      const fixture = await createFixture();
+      await writeFile(at(fixture.releaseRoot, CONSOLE_SCRIPT), "console.log(\"tampered console\");\n");
+      await expectRejected(fixture, /does not match the reviewed build/u);
+    });
+
+    it("rejects changed operator-console index.html bytes", async () => {
+      const fixture = await createFixture();
+      await writeFile(at(fixture.releaseRoot, CONSOLE_INDEX), CONSOLE_INDEX_HTML.replace("root", "rogue"));
+      await expectRejected(fixture, /does not match the reviewed build/u);
+    });
+
+    it("rejects a release without operator-console index.html", async () => {
+      const fixture = await createFixture();
+      await rm(at(fixture.releaseRoot, CONSOLE_INDEX));
+      await expectRejected(fixture, /release build is missing or has an invalid/u);
+    });
+
+    it("rejects a release missing an operator-console asset present in the reviewed build", async () => {
+      const fixture = await createFixture();
+      await rm(at(fixture.releaseRoot, CONSOLE_STYLE));
+      await expectRejected(fixture, /inventory does not match/u);
+    });
+
+    it("rejects a release without any operator-console script", async () => {
+      const fixture = await createFixture();
+      await rm(at(fixture.releaseRoot, CONSOLE_SCRIPT));
+      await expectRejected(fixture, /release build is missing or has an invalid/u);
+    });
+
+    it("rejects an unexpected additional allowed-class operator-console asset", async () => {
+      const fixture = await createFixture();
+      await writeFile(at(fixture.releaseRoot, "apps/operator-console/dist/assets/extra-Zz9.js"), "export {};\n", { flag: "wx" });
+      await expectRejected(fixture, /inventory does not match/u);
+    });
+
+    it.each([
+      "apps/operator-console/dist/favicon.svg",
+      "apps/operator-console/dist/assets/index-Abc123.js.map",
+      "apps/operator-console/dist/assets/nested/inner-Q1.js",
+    ])("rejects an unexpected console file class or nesting: %s", async (relativePath) => {
+      const fixture = await createFixture();
+      await mkdir(join(at(fixture.releaseRoot, relativePath), ".."), { recursive: true });
+      await writeFile(at(fixture.releaseRoot, relativePath), "x\n", { flag: "wx" });
+      await expectRejected(fixture, /release build is missing or has an invalid/u);
+    });
+
+    it("rejects a linked operator-console assets directory", async () => {
+      const fixture = await createFixture();
+      const assets = at(fixture.releaseRoot, "apps/operator-console/dist/assets");
+      const real = at(fixture.releaseRoot, "apps/operator-console/dist-real-assets");
+      await rename(assets, real);
+      // A junction needs no elevated privilege on Windows; elsewhere this is
+      // a directory symlink.
+      await symlink(real, assets, "junction");
+      await expectRejected(fixture, /release build is missing or has an invalid/u);
+    });
+
+    it("rejects a reviewed build whose index.html references an asset outside the inventory", async () => {
+      const fixture = await createFixture();
+      const html = CONSOLE_INDEX_HTML.replace(
+        "</head>",
+        "<link rel=\"modulepreload\" href=\"/assets/absent-Q9.js\"></head>",
+      );
+      await writeFile(at(fixture.sourceRoot, CONSOLE_INDEX), html);
+      await writeFile(at(fixture.releaseRoot, CONSOLE_INDEX), html);
+      await expectRejected(fixture, /references an asset that is not in the release inventory/u);
+    });
+
+    it("rejects a reviewed source checkout without an operator-console build", async () => {
+      const fixture = await createFixture();
+      await rm(at(fixture.sourceRoot, "apps/operator-console/dist"), { recursive: true, force: true });
+      await expectRejected(fixture, /source build is missing or has an invalid/u);
+    });
   },
 );

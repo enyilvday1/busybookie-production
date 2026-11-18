@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
-import { open, lstat, readdir } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { open, lstat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { rawSha256 } from "../src/execution/boundEpisodeProduction.types.js";
 import {
   BUSYBOOKIE_RELEASE_IDENTITY_FILE,
+  PORTABLE_RELEASE_IDENTITY_KIND,
+  PORTABLE_RELEASE_IDENTITY_SCHEMA_VERSION,
+  listPortableReleaseInventory,
 } from "../src/execution/portableReleaseRuntimeIdentity.js";
 import {
   readBoundFile,
@@ -14,10 +17,16 @@ import {
 } from "../src/execution/episodeInputBinding.js";
 
 const RELEASE_IDENTITY_KIND =
-  "BUSYBOOKIE_PORTABLE_RELEASE_IDENTITY";
+  PORTABLE_RELEASE_IDENTITY_KIND;
 
 const RELEASE_IDENTITY_SCHEMA_VERSION =
-  "1.0";
+  PORTABLE_RELEASE_IDENTITY_SCHEMA_VERSION;
+
+const OPERATOR_CONSOLE_INDEX_PATH =
+  "apps/operator-console/dist/index.html";
+
+const OPERATOR_CONSOLE_ASSETS_PREFIX =
+  "apps/operator-console/dist/assets/";
 
 const MAX_RUNTIME_FILE_BYTES =
   64 * 1024 * 1024;
@@ -58,10 +67,6 @@ export type PortableReleaseIdentityResult =
 
 function fail(message: string): Error {
   return new Error(message);
-}
-
-function comparePaths(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function normalizeRoot(path: string): string {
@@ -201,106 +206,77 @@ async function requireNoReleaseGitMetadata(
   );
 }
 
-async function listRuntimeJavaScript(
+/*
+ * The complete schema 2.0 inventory (root dist JavaScript, the
+ * operator-console build, package.json and package-lock.json), using the
+ * same inventory authority that runtime verification applies. Symlinks,
+ * non-regular entries, unexpected file classes, a missing index.html or a
+ * console build without a script all fail closed here.
+ */
+async function listReleaseInventory(
   root: string,
+  label: "source" | "release",
 ): Promise<readonly string[]> {
-  const distRoot =
-    resolve(
+  try {
+    return await listPortableReleaseInventory(
       root,
-      "dist",
+      requireLinkSafeContainedPath,
     );
-
-  await requireLinkSafeContainedPath(
-    root,
-    distRoot,
-  );
-
-  const result: string[] = [];
-
-  async function visit(directory: string): Promise<void> {
-    const entries =
-      await readdir(
-        directory,
-        {
-          withFileTypes: true,
-          encoding: "utf8",
-        },
-      );
-
-    entries.sort(
-      (left, right) =>
-        comparePaths(
-          left.name,
-          right.name,
-        ),
+  } catch (cause) {
+    throw new Error(
+      `Portable ${label} build is missing or has an invalid runtime or operator-console inventory.`,
+      { cause },
     );
+  }
+}
 
-    for (const entry of entries) {
-      const candidate =
-        resolve(
-          directory,
-          entry.name,
-        );
+/*
+ * Every /assets/ reference in the bound operator-console index.html must
+ * name a bound asset. Bytes are already proven equal to the reviewed build;
+ * this refuses a reviewed build whose own references are incomplete.
+ */
+function requireReferencedConsoleAssets(
+  indexBytes: Buffer,
+  inventory: readonly string[],
+): void {
+  const html =
+    indexBytes.toString("utf8");
 
-      await requireLinkSafeContainedPath(
-        root,
-        candidate,
-      );
+  const bound =
+    new Set(inventory);
 
-      const metadata =
-        await lstat(candidate);
+  let scripts =
+    0;
 
-      if (metadata.isSymbolicLink()) {
-        throw fail(
-          `Symlink found in runtime dist: ${candidate}`,
-        );
-      }
+  for (
+    const match
+    of html.matchAll(
+      /\b(?:src|href)\s*=\s*"\/assets\/([^"]*)"/giu,
+    )
+  ) {
+    const name =
+      match[1] ?? "";
 
-      if (metadata.isDirectory()) {
-        await visit(candidate);
-        continue;
-      }
-
-      if (!metadata.isFile()) {
-        throw fail(
-          `Non-regular entry found in runtime dist: ${candidate}`,
-        );
-      }
-
-      const relativePath =
-        relative(root, candidate)
-          .split(sep)
-          .join("/");
-
-      if (relativePath.endsWith(".js")) {
-        result.push(relativePath);
-        continue;
-      }
-
-      if (
-        relativePath.endsWith(".js.map") ||
-        relativePath.endsWith(".d.ts")
-      ) {
-        continue;
-      }
-
+    if (
+      !bound.has(
+        `${OPERATOR_CONSOLE_ASSETS_PREFIX}${name}`,
+      )
+    ) {
       throw fail(
-        `Unsupported runtime dist file class: ${relativePath}`,
+        "Operator-console index.html references an asset that is not in the release inventory.",
       );
+    }
+
+    if (name.endsWith(".js")) {
+      scripts += 1;
     }
   }
 
-  await visit(distRoot);
-
-  if (result.length === 0) {
+  if (scripts === 0) {
     throw fail(
-      "Portable release contains no compiled JavaScript.",
+      "Operator-console index.html references no bound script asset.",
     );
   }
-
-  return Object.freeze(
-    result.sort(comparePaths),
-  );
 }
 
 function sameInventory(
@@ -320,7 +296,10 @@ async function readRuntimeEntry(
   sourceRoot: string,
   releaseRoot: string,
   relativePath: string,
-): Promise<ReleaseIdentityEntry> {
+): Promise<Readonly<{
+  entry: ReleaseIdentityEntry;
+  bytes: Buffer;
+}>> {
   const source =
     await readBoundFile({
       root: sourceRoot,
@@ -352,6 +331,7 @@ async function readRuntimeEntry(
   if (
     !source.binding.exists ||
     !release.binding.exists ||
+    release.bytes === null ||
     source.binding.rawSha256 === null ||
     release.binding.rawSha256 === null ||
     source.binding.bytes !==
@@ -365,11 +345,16 @@ async function readRuntimeEntry(
   }
 
   return Object.freeze({
-    relativePath,
+    entry:
+      Object.freeze({
+        relativePath,
+        bytes:
+          release.binding.bytes,
+        sha256:
+          release.binding.rawSha256,
+      }),
     bytes:
-      release.binding.bytes,
-    sha256:
-      release.binding.rawSha256,
+      release.bytes,
   });
 }
 
@@ -421,22 +406,16 @@ export async function createPortableReleaseIdentity(
   );
 
   const sourceInventory =
-    [
-      ...await listRuntimeJavaScript(
-        sourceRoot,
-      ),
-      "package-lock.json",
-      "package.json",
-    ].sort(comparePaths);
+    await listReleaseInventory(
+      sourceRoot,
+      "source",
+    );
 
   const releaseInventory =
-    [
-      ...await listRuntimeJavaScript(
-        releaseRoot,
-      ),
-      "package-lock.json",
-      "package.json",
-    ].sort(comparePaths);
+    await listReleaseInventory(
+      releaseRoot,
+      "release",
+    );
 
   if (
     !sameInventory(
@@ -451,15 +430,41 @@ export async function createPortableReleaseIdentity(
 
   const files: ReleaseIdentityEntry[] = [];
 
+  let consoleIndexBytes:
+    Buffer | null =
+      null;
+
   for (const relativePath of sourceInventory) {
-    files.push(
+    const observed =
       await readRuntimeEntry(
         sourceRoot,
         releaseRoot,
         relativePath,
-      ),
+      );
+
+    files.push(
+      observed.entry,
+    );
+
+    if (
+      relativePath ===
+      OPERATOR_CONSOLE_INDEX_PATH
+    ) {
+      consoleIndexBytes =
+        observed.bytes;
+    }
+  }
+
+  if (consoleIndexBytes === null) {
+    throw fail(
+      "Portable release inventory has no operator-console index.html.",
     );
   }
+
+  requireReferencedConsoleAssets(
+    consoleIndexBytes,
+    sourceInventory,
+  );
 
   const manifest =
     Object.freeze({

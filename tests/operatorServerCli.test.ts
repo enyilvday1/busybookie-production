@@ -251,7 +251,10 @@ describe("D1 source boundary, package and portability", () => {
       "./operatorRequestSecurity.js",
     ],
     "src/operatorServer/operatorServerProcess.ts": [
+      "../execution/episodeInputBinding.js",
+      "../execution/portableReleaseRuntimeIdentity.js",
       "./cli/runOperatorServerCli.js",
+      "node:url",
     ],
     "src/operatorServer/cli/runOperatorServerCli.ts": [
       "../createOperatorServer.js",

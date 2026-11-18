@@ -133,6 +133,32 @@ const CONTRACTS =
 
     {
       productionName:
+        "production:episode:adopt-visual-evidence",
+
+      productionCommand:
+        "node dist/execution/visualEvidenceAdoptionProcess.js",
+
+      developmentName:
+        "episode:adopt-visual-evidence",
+
+      developmentCommand:
+        "tsx scripts/episode-adopt-visual-evidence.ts",
+
+      script:
+        "scripts/episode-adopt-visual-evidence.ts",
+
+      process:
+        "src/execution/visualEvidenceAdoptionProcess.ts",
+
+      oldImport:
+        "../src/execution/cli/runVisualEvidenceAdoptionCli.js",
+
+      newImport:
+        "./cli/runVisualEvidenceAdoptionCli.js",
+    },
+
+    {
+      productionName:
         "production:dialogue:authorize-visual",
 
       productionCommand:

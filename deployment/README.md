@@ -326,11 +326,38 @@ The private/staging production command surface is:
     npm run production:execution:status
     npm run production:episode:automate
     npm run production:episode:rough-cut
+    npm run production:episode:adopt-visual-evidence
     npm run production:dialogue:authorize-visual
     npm run production:dialogue:place
 
 These commands execute compiled JavaScript from dist and do not require tsx on
 the production host.
+
+production:episode:adopt-visual-evidence records a durable HUMAN_OPERATOR
+review of one VERIFIED COMPLETED visual output:
+
+    npm run production:episode:adopt-visual-evidence -- \
+      --episode <episodeId> --shot <shotId> \
+      --expected-manifest-sha256 <digest> \
+      --expected-observation-sha256 <digest> \
+      --confirm-adoption
+
+It re-verifies the current completed evidence locally, then creates one
+immutable receipt under the shot's generated-video directory in
+BUSYBOOKIE_MEDIA_ROOT. An existing receipt is never replaced. A later preflight
+binds the exact receipt bytes.
+
+The receipt is evidence only. The adoption command itself makes no provider
+call and does not execute or bypass generation or reconciliation controls.
+Reviewing an earlier completed shot may expose the next normal frontier in a
+fresh preflight; any later provider action still requires a fresh bound plan,
+the applicable explicit confirmation, episode guard ownership, and all normal
+admission checks.
+
+This command reads only BUSYBOOKIE_MEDIA_ROOT and the optional
+BUSYBOOKIE_FFPROBE_PATH from the process environment. It does not load a .env
+file and needs no provider credential, so export those two values in the
+attached operator shell before running it.
 
 Load only the credentials required by the operation being executed.
 

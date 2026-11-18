@@ -296,14 +296,20 @@ export function checkedEpisodeExecutionData(context: CheckedEpisodeExecutionCont
   if (!data) throw new BoundEpisodeError("OPERATING_CONDITION_UNESTABLISHED");
   return data;
 }
+// Media-root bindings: dialogue visual authorizations, the reference
+// registry and durable visual evidence adoption receipts. Everything else is
+// a repository input.
+function bindingFileRoot(role: string, runtimeIdentity: Readonly<{ mediaRoot: string; repositoryRoot: string }>): string {
+  return role.startsWith("AUTHORIZATION:") || role.startsWith("EVIDENCE_ADOPTION:") || role === "REFERENCE_REGISTRY"
+    ? runtimeIdentity.mediaRoot : runtimeIdentity.repositoryRoot;
+}
 export async function readCheckedEpisodeJson<T>(context: CheckedEpisodeExecutionContext, role: string,
   parse: (value: unknown) => T): Promise<T | null> {
   const data = checkedEpisodeExecutionData(context);
   const matches = data.plan.inputBinding.fileBindings.filter(file => file.role === role);
   if (matches.length !== 1) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
   const file = matches[0]!;
-  const root = role.startsWith("AUTHORIZATION:") || role === "REFERENCE_REGISTRY"
-    ? data.plan.inputBinding.runtimeIdentity.mediaRoot : data.plan.inputBinding.runtimeIdentity.repositoryRoot;
+  const root = bindingFileRoot(role, data.plan.inputBinding.runtimeIdentity);
   const read = await readBoundFile({ root, canonicalPath: file.canonicalPath, role, maxBytes: 1048576,
     optional: !file.exists, expected: file });
   return read.bytes === null ? null : parseBoundJson(read.bytes, parse);
@@ -313,8 +319,7 @@ export async function recheckEpisodeExecutionBindings(context: CheckedEpisodeExe
   const bundle = data.plan.inputBinding;
   await assertEpisodeGuardOwner(data.guard, bundle.runtimeIdentity.mediaRoot, data.plan.episodeId);
   for (const file of [...bundle.fileBindings, ...bundle.runtimeIdentity.executableInputs]) {
-    const root = file.role.startsWith("AUTHORIZATION:") || file.role === "REFERENCE_REGISTRY"
-      ? bundle.runtimeIdentity.mediaRoot : bundle.runtimeIdentity.repositoryRoot;
+    const root = bindingFileRoot(file.role, bundle.runtimeIdentity);
     await readBoundFile({ root, canonicalPath: file.canonicalPath, role: file.role, maxBytes: 32 * 1024 * 1024,
       optional: !file.exists, expected: file });
   }

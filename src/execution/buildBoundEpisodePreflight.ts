@@ -20,6 +20,9 @@ import { VisualReferenceAssetRegistrySchema } from "./visualReferenceAsset.schem
 import { verifyApprovedVisualReferenceAsset } from "./verifyApprovedVisualReferenceAsset.js";
 import { createDialogueVisualAuthorizationPath } from "./dialogueVisualAuthorizationPath.js";
 import { DialogueVisualAuthorizationSchema } from "./dialogueVisualAuthorization.schema.js";
+import { createVisualEvidenceAdoptionPath } from "./visualEvidenceAdoptionPath.js";
+import { VISUAL_EVIDENCE_ADOPTION_MAX_BYTES } from "./visualEvidenceAdoption.schema.js";
+import { parseVisualEvidenceAdoptionBytes } from "./readVisualEvidenceAdoption.js";
 import { createExecutionReservationPath } from "./executionReservationPath.js";
 import { createExecutionSubmissionPath } from "./executionSubmissionPath.js";
 import { createExecutionCompletionPath } from "./executionCompletionPath.js";
@@ -209,6 +212,28 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
     try { auth.set(target.shotId, await loadAuthorization(target.shotId)); }
     catch (error) { fatal.push(episodeIssue("INPUT_BINDING_DRIFT", target, "LOAD", error)); }
   }
+  // Durable HUMAN_OPERATOR review of a VERIFIED COMPLETED output: exactly one
+  // canonical receipt per current (target, raw manifest, observation), one
+  // bounded optional read, never a scan. A present receipt joins the input
+  // binding (its exact bytes are bound) and must be exact or fail closed.
+  // An absent receipt leaves the input binding unchanged, so a shot that an
+  // action has just completed does not drift the reviewed binding; its
+  // absence is still re-read below, and a receipt appearing later changes
+  // the binding of any plan built without it.
+  async function loadEvidenceAdoption(target: Target, manifestRawSha256: string, observationSha256: string): Promise<boolean> {
+    const role = `EVIDENCE_ADOPTION:${target.shotId}`;
+    const path = createVisualEvidenceAdoptionPath(input.mediaRoot, target.episodeId, target.shotId, manifestRawSha256, observationSha256);
+    const expected = input.expectedBinding?.fileBindings.find(file => file.role === role && file.canonicalPath === path);
+    const loaded = await dependencies.readFile({ root: input.mediaRoot, canonicalPath: path, role,
+      maxBytes: VISUAL_EVIDENCE_ADOPTION_MAX_BYTES, optional: true, ...(expected ? { expected } : {}) });
+    fileReads.push({ root: input.mediaRoot, binding: loaded.binding, maxBytes: VISUAL_EVIDENCE_ADOPTION_MAX_BYTES });
+    if (loaded.bytes === null) return false;
+    files.push(loaded.binding);
+    const record = parseVisualEvidenceAdoptionBytes(loaded.bytes, { episodeId: target.episodeId, shotId: target.shotId,
+      manifestRawSha256, observationSha256 });
+    if (bindingDigest(record.target) !== bindingDigest(target)) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
+    return true;
+  }
   const readAuthorization = async (_root: string, _episode: string, shotId: string) => {
     if (!auth.has(shotId)) throw new BoundEpisodeError("INPUT_BINDING_DRIFT");
     return auth.get(shotId) ?? null;
@@ -384,8 +409,17 @@ export async function buildBoundEpisodePreflight(input: BoundEpisodePreflightInp
     }
     if (c2.state === "ERROR" || c3.state === "ERROR") disposition = "ERROR";
     const manifestHash = files.find(file => file.role === "MANIFEST")?.rawSha256;
-    const adopted = input.evidenceAdoptions?.some(adoption => bindingDigest(adoption.target) === bindingDigest(target)
-      && adoption.manifestRawSha256 === manifestHash && adoption.observationSha256 === bindingDigest(observation)) ?? false;
+    let durablyAdopted = false;
+    if (lifecycle?.state === "COMPLETED" && verification === "VERIFIED" && typeof manifestHash === "string") {
+      try { durablyAdopted = await loadEvidenceAdoption(target, manifestHash, bindingDigest(observation)); }
+      catch (error) {
+        const issue = episodeIssue("INPUT_BINDING_DRIFT", target, "OBSERVATION", error);
+        fatal.push(issue); reasons.push(issue); disposition = "ERROR";
+      }
+    }
+    // The transient caller-supplied adoption remains an independent source.
+    const adopted = durablyAdopted || (input.evidenceAdoptions?.some(adoption => bindingDigest(adoption.target) === bindingDigest(target)
+      && adoption.manifestRawSha256 === manifestHash && adoption.observationSha256 === bindingDigest(observation)) ?? false);
     const durable = lifecycle?.state === "COMPLETED" || lifecycle?.state === "SUBMITTED";
     const precedence: readonly IssueCode[] = ["INPUT_BINDING_DRIFT", "INVALID_DURABLE_STATE", "LOCAL_COMPLETION_VERIFICATION_FAILED",
       "RESERVED_ONLY_MANUAL_ADJUDICATION", "SUBMITTED_RECOVERY_REQUIRED", "REFERENCE_DRIFT", "REFERENCE_UNAVAILABLE",

@@ -7,6 +7,7 @@
     "test": "vitest run --config vitest.config.ts",
     "build": "npm run clean && npm --prefix apps/operator-console run build && tsc -p tsconfig.build.json",
     "release:identity": "tsx scripts/create-portable-release-identity.ts",
+    "release:package": "tsx scripts/create-portable-release-package.ts",
     "start": "node dist/operatorServer/operatorServerProcess.js",
     "production:execution:reconcile": "node dist/execution/executionReconcileProcess.js",
     "production:execution:status": "node dist/execution/executionStatusProcess.js",

@@ -60,13 +60,18 @@ npm run build has completed and after the portable release root contains
 the exact compiled dist, apps/operator-console/dist, package.json, and
 package-lock.json that will be archived.
 
-From the approved source checkout:
+For identity-only inspection from the approved source checkout:
 
     npm run release:identity -- --release-root /absolute/path/to/release-root
 
-The release-identity command is a packaging-time authority. It must not be
-run on the deployed production host, and tsx must not be installed on the
-production host merely to support this command.
+The release-identity command is the lower-level identity-only authority.
+Normal portable archive creation must use the deterministic release-package
+command described below; do not create the identity first when using that
+command because release:package creates and binds the identity itself.
+
+Both packaging-time commands must run from the approved build environment,
+not on the deployed production host. tsx must not be installed on the
+production host merely to support either command.
 
 The command fails closed when the reviewed source checkout is dirty, when
 untracked release-authority source files exist, when the portable release
@@ -100,9 +105,59 @@ mismatched identity, stops startup with one path-free error line and a
 non-zero exit, and nothing listens. The source development command
 npm run operator:serve does not require a release identity.
 
-Generate the identity before locking the release archive and its SHA-256.
 Do not copy .git into a portable release and do not fabricate Git metadata
 on the deployment host.
+
+## Deterministic portable release package
+
+Normal portable archive creation is a single packaging operation:
+
+    npm run release:package -- \
+      --release-root /absolute/path/to/release-root \
+      --output-directory /absolute/path/to/output-directory
+
+The source root defaults to the current working directory. An explicit
+--source-root may be supplied when required, but it must resolve to the Git
+repository top level accepted by the release-identity authority.
+
+release:package:
+
+- requires an already assembled portable release root with no existing
+  busybookie-release-identity.json;
+- creates and verifies Portable Release Identity schema 2.0 against the
+  clean approved Git revision;
+- inventories every regular file in the complete portable release tree and
+  rejects Git metadata, node_modules, symbolic links, multiply-linked files
+  and other non-regular entries;
+- writes a whole-tree SHA-256 manifest whose member paths are the exact
+  archive file inventory;
+- creates the gzip-compressed tar archive with GNU tar and gzip using fixed
+  ownership, timestamp and gzip-name metadata;
+- emits regular-file archive members only; directory entries are not
+  separate archive members;
+- verifies exact archive-member inventory and independently streams every
+  archived member to prove its SHA-256 bytes match the whole-tree manifest;
+- re-inventories and re-hashes the portable release tree immediately before
+  publication so an in-flight tree mutation fails closed;
+- refuses an output directory inside the release root and refuses an output
+  directory inside the reviewed source checkout except beneath source .git;
+- refuses to overwrite final or temporary packaging artifacts; and
+- removes partial published artifacts, temporary artifacts and the identity
+  it created when packaging fails.
+
+The output names are bound to the approved 40-character Git revision:
+
+    busybookie-release-<revision>-tree.sha256
+    busybookie-release-<revision>.tar.gz
+
+The successful release:package process exit is the publication boundary.
+The manifest and archive are published by separate same-filesystem renames;
+consumers must not treat either file appearing alone while the command is
+still running as a completed package.
+
+GNU tar with the required deterministic options and gzip no-name mode are
+mandatory packaging-toolchain dependencies. They remain build/package-host
+requirements only and are not runtime dependencies of the deployed service.
 
 ## Environment contract
 

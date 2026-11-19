@@ -1,0 +1,3 @@
+# Root release-authority package files are byte-sensitive; keep LF on every platform.
+/package.json text eol=lf
+/package-lock.json text eol=lf

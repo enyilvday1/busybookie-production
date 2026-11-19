@@ -49,6 +49,14 @@ const SOURCE_UNTRACKED_GUARD_PATHS =
     "tsconfig.build.json",
   ]);
 
+const GIT_BLOB_AUTHORITY_RUNTIME_PATHS =
+  Object.freeze(
+    new Set([
+      "package-lock.json",
+      "package.json",
+    ]),
+  );
+
 type ReleaseIdentityEntry =
   Readonly<{
     relativePath: string;
@@ -97,6 +105,36 @@ async function git(
       },
     )
   ).stdout;
+}
+
+async function readReviewedGitBlob(
+  sourceRoot: string,
+  reviewedRevision: string,
+  relativePath: string,
+): Promise<Buffer> {
+  try {
+    const result =
+      await promisify(execFile)(
+        "git",
+        [
+          "cat-file",
+          "blob",
+          `${reviewedRevision}:${relativePath}`,
+        ],
+        {
+          cwd: sourceRoot,
+          windowsHide: true,
+          maxBuffer: MAX_RUNTIME_FILE_BYTES,
+          encoding: null,
+        },
+      );
+
+    return result.stdout;
+  } catch {
+    throw fail(
+      `Unable to read reviewed Git runtime blob: ${relativePath}`,
+    );
+  }
 }
 
 async function readReviewedRevision(
@@ -294,25 +332,61 @@ function sameInventory(
 
 async function readRuntimeEntry(
   sourceRoot: string,
+  reviewedRevision: string,
   releaseRoot: string,
   relativePath: string,
 ): Promise<Readonly<{
   entry: ReleaseIdentityEntry;
   bytes: Buffer;
 }>> {
-  const source =
-    await readBoundFile({
-      root: sourceRoot,
-      canonicalPath:
-        resolve(
-          sourceRoot,
-          ...relativePath.split("/"),
-        ),
-      role:
-        `SOURCE_RUNTIME:${relativePath}`,
-      maxBytes:
-        MAX_RUNTIME_FILE_BYTES,
-    });
+  let sourceBytes: Buffer;
+  let sourceSha256: string;
+
+  if (
+    GIT_BLOB_AUTHORITY_RUNTIME_PATHS.has(
+      relativePath,
+    )
+  ) {
+    sourceBytes =
+      await readReviewedGitBlob(
+        sourceRoot,
+        reviewedRevision,
+        relativePath,
+      );
+
+    sourceSha256 =
+      rawSha256(sourceBytes);
+  } else {
+    const source =
+      await readBoundFile({
+        root: sourceRoot,
+        canonicalPath:
+          resolve(
+            sourceRoot,
+            ...relativePath.split("/"),
+          ),
+        role:
+          `SOURCE_RUNTIME:${relativePath}`,
+        maxBytes:
+          MAX_RUNTIME_FILE_BYTES,
+      });
+
+    if (
+      !source.binding.exists ||
+      source.bytes === null ||
+      source.binding.rawSha256 === null
+    ) {
+      throw fail(
+        `Reviewed runtime file is unavailable: ${relativePath}`,
+      );
+    }
+
+    sourceBytes =
+      source.bytes;
+
+    sourceSha256 =
+      source.binding.rawSha256;
+  }
 
   const release =
     await readBoundFile({
@@ -329,14 +403,12 @@ async function readRuntimeEntry(
     });
 
   if (
-    !source.binding.exists ||
     !release.binding.exists ||
     release.bytes === null ||
-    source.binding.rawSha256 === null ||
     release.binding.rawSha256 === null ||
-    source.binding.bytes !==
+    sourceBytes.byteLength !==
       release.binding.bytes ||
-    source.binding.rawSha256 !==
+    sourceSha256 !==
       release.binding.rawSha256
   ) {
     throw fail(
@@ -438,6 +510,7 @@ export async function createPortableReleaseIdentity(
     const observed =
       await readRuntimeEntry(
         sourceRoot,
+        reviewedRevision,
         releaseRoot,
         relativePath,
       );

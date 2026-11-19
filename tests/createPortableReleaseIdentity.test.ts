@@ -532,6 +532,212 @@ describe(
     );
 
     it(
+      "binds tracked package runtime files to reviewed Git blobs instead of host-specific worktree EOL bytes",
+      async () => {
+        const fixture =
+          await createFixture();
+
+        const autocrlfSourceRoot =
+          join(
+            fixture.root,
+            "autocrlf-source",
+          );
+
+        await git(
+          fixture.root,
+          [
+            "-c",
+            "core.autocrlf=true",
+            "clone",
+            "-q",
+            fixture.sourceRoot,
+            autocrlfSourceRoot,
+          ],
+        );
+
+        await git(
+          autocrlfSourceRoot,
+          [
+            "config",
+            "core.autocrlf",
+            "true",
+          ],
+        );
+
+        for (
+          const relativePath
+          of [
+            "dist/a.js",
+            "dist/a.js.map",
+            "dist/a.d.ts",
+            "dist/nested/b.js",
+            CONSOLE_INDEX,
+            CONSOLE_SCRIPT,
+            CONSOLE_STYLE,
+          ]
+        ) {
+          await copyRuntimeFile(
+            fixture.sourceRoot,
+            autocrlfSourceRoot,
+            relativePath,
+          );
+        }
+
+        const eol =
+          await git(
+            autocrlfSourceRoot,
+            [
+              "ls-files",
+              "--eol",
+              "--",
+              "package.json",
+              "package-lock.json",
+            ],
+          );
+
+        const eolLines =
+          eol
+            .trim()
+            .split("\n");
+
+        expect(
+          eolLines,
+        ).toHaveLength(2);
+
+        expect(
+          eolLines.every(
+            line =>
+              line.includes("i/lf") &&
+              line.includes("w/crlf"),
+          ),
+        ).toBe(true);
+
+        expect(
+          (
+            await git(
+              autocrlfSourceRoot,
+              [
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+              ],
+            )
+          ).trim(),
+        ).toBe("");
+
+        const packageJsonWorktree =
+          await readFile(
+            join(
+              autocrlfSourceRoot,
+              "package.json",
+            ),
+          );
+
+        const packageLockWorktree =
+          await readFile(
+            join(
+              autocrlfSourceRoot,
+              "package-lock.json",
+            ),
+          );
+
+        const packageJsonRelease =
+          await readFile(
+            join(
+              fixture.releaseRoot,
+              "package.json",
+            ),
+          );
+
+        const packageLockRelease =
+          await readFile(
+            join(
+              fixture.releaseRoot,
+              "package-lock.json",
+            ),
+          );
+
+        expect(
+          packageJsonWorktree.equals(
+            packageJsonRelease,
+          ),
+        ).toBe(false);
+
+        expect(
+          packageLockWorktree.equals(
+            packageLockRelease,
+          ),
+        ).toBe(false);
+
+        const result =
+          await createPortableReleaseIdentity({
+            sourceRoot:
+              autocrlfSourceRoot,
+            releaseRoot:
+              fixture.releaseRoot,
+          });
+
+        expect(
+          result.reviewedRevision,
+        ).toBe(
+          fixture.reviewedRevision,
+        );
+
+        const manifest =
+          JSON.parse(
+            await readFile(
+              fixture.manifestPath,
+              "utf8",
+            ),
+          ) as {
+            files: Array<{
+              relativePath: string;
+              bytes: number;
+              sha256: string;
+            }>;
+          };
+
+        const packageJsonEntry =
+          manifest.files.find(
+            entry =>
+              entry.relativePath ===
+              "package.json",
+          );
+
+        const packageLockEntry =
+          manifest.files.find(
+            entry =>
+              entry.relativePath ===
+              "package-lock.json",
+          );
+
+        expect(
+          packageJsonEntry?.bytes,
+        ).toBe(
+          packageJsonRelease.byteLength,
+        );
+
+        expect(
+          packageLockEntry?.bytes,
+        ).toBe(
+          packageLockRelease.byteLength,
+        );
+
+        expect(
+          packageJsonEntry?.bytes,
+        ).not.toBe(
+          packageJsonWorktree.byteLength,
+        );
+
+        expect(
+          packageLockEntry?.bytes,
+        ).not.toBe(
+          packageLockWorktree.byteLength,
+        );
+      },
+    );
+
+    it(
       "rejects a dirty tracked source checkout before publishing a manifest",
       async () => {
         const fixture =

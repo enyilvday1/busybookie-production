@@ -110,15 +110,38 @@ on the deployment host.
 
 ## Deterministic portable release package
 
-Normal portable archive creation is a single packaging operation:
+Normal portable release creation is the high-level operation:
+
+    npm run release:create -- \
+      --output-directory /absolute/path/to/output-directory
+
+release:create:
+
+- requires the Git repository top level at a canonical reviewed HEAD;
+- requires clean tracked/staged source and rejects guarded untracked
+  release/build-authority source inputs;
+- runs the repository-authoritative npm run build from that reviewed checkout;
+- revalidates the same reviewed Git authority after the controlled build;
+- snapshots the fresh dist and apps/operator-console/dist build outputs with
+  mutation-sensitive checks;
+- assembles tracked release inputs from reviewed Git blob bytes rather than
+  working-tree bytes;
+- invokes the deterministic lower-level release:package primitive; and
+- removes its temporary assembly root on success or failure.
+
+The output directory for release:create must already exist, must be absolute,
+and must be outside the reviewed source checkout.
+
+The lower-level packaging operation remains available for an already assembled
+portable release root:
 
     npm run release:package -- \
       --release-root /absolute/path/to/release-root \
       --output-directory /absolute/path/to/output-directory
 
-The source root defaults to the current working directory. An explicit
---source-root may be supplied when required, but it must resolve to the Git
-repository top level accepted by the release-identity authority.
+For release:package, the source root defaults to the current working directory.
+An explicit --source-root may be supplied when required, but it must resolve to
+the Git repository top level accepted by the release-identity authority.
 
 release:package:
 

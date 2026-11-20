@@ -538,12 +538,14 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
     };
     expect(pkg.scripts["release:identity"]).toBe("tsx scripts/create-portable-release-identity.ts");
     expect(pkg.scripts["release:package"]).toBe("tsx scripts/create-portable-release-package.ts");
+    expect(pkg.scripts["release:create"]).toBe("tsx scripts/create-portable-release.ts");
     expect(pkg.scripts["episode:automate"]).toBe("tsx scripts/episode-automation.ts");
     expect(Object.keys(pkg.scripts)).toEqual([
       "test",
       "build",
       "release:identity",
       "release:package",
+      "release:create",
       "start",
       "production:execution:reconcile",
       "production:execution:status",

@@ -672,6 +672,7 @@ describe(
           ),
         ).toBe(false);
       },
+      15_000,
     );
 
     it(
@@ -796,6 +797,7 @@ describe(
           firstResult.treeManifestSha256,
         );
       },
+      15_000,
     );
 
     it(

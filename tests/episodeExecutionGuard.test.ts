@@ -95,7 +95,11 @@ describe("episode ownership and conservative allowance", () => {
       expect(results.filter(row => row.state === "OWNED")).toHaveLength(1);
       expect(results.filter(row => row.state === "CONFLICT")).toEqual([{ state: "CONFLICT", creates: 0 }]);
       expect(results.reduce((sum, row) => sum + row.creates, 0)).toBe(1);
-      for (const worker of workers) worker.child.stdin.end("release\n");
+      for (const [index, worker] of workers.entries()) {
+        if (results[index]?.state === "OWNED") {
+          worker.child.stdin.end("release\n");
+        }
+      }
       await Promise.all(workers.map(worker => worker.exited));
     } finally { for (const worker of workers) worker.child.kill(); await rm(mediaRoot, { recursive: true, force: true }); }
   }, 15000);

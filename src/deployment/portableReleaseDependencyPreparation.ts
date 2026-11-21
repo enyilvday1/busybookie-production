@@ -37,6 +37,11 @@ import {
   type PortableReleaseDependencyTreeManifest,
 } from "./portableReleaseDependencyTreeManifest.js";
 
+import {
+  createPortableReleaseDependencyInstallProvenance,
+  writePortableReleaseDependencyInstallProvenance,
+} from "./portableReleaseDependencyInstallProvenance.js";
+
 const execFileAsync =
   promisify(
     execFile,
@@ -57,6 +62,9 @@ const APP_DIRECTORY =
 const DEPENDENCY_WORK_PREFIX =
   ".dependency-install-";
 
+const NPM_EXECUTABLE =
+  "npm";
+
 export const PORTABLE_RELEASE_PRODUCTION_NPM_CI_ARGS =
   Object.freeze([
     "ci",
@@ -75,6 +83,21 @@ export type PortableReleaseDependencyInstallRunner =
       args: readonly string[];
     }>,
   ) => Promise<void>;
+
+export type PortableReleaseDependencyInstallProvenanceCollector =
+  (
+    input: Readonly<{
+      cwd: string;
+      npmExecutable: string;
+    }>,
+  ) => Promise<
+    Readonly<{
+      nodeVersion: string;
+      npmVersion: string;
+      platform: string;
+      arch: string;
+    }>
+  >;
 
 export type PortableReleaseDependencyPreparer =
   (
@@ -211,6 +234,72 @@ async function runPortableReleaseProductionNpmCi(
   }
 }
 
+export async function collectPortableReleaseDependencyInstallProvenance(
+  input: Readonly<{
+    cwd: string;
+    npmExecutable: string;
+  }>,
+): Promise<
+  Readonly<{
+    nodeVersion: string;
+    npmVersion: string;
+    platform: string;
+    arch: string;
+  }>
+> {
+  let stdout:
+    string;
+
+  try {
+    ({
+      stdout,
+    } =
+      await execFileAsync(
+        input.npmExecutable,
+        [
+          "--version",
+        ],
+        {
+          cwd:
+            input.cwd,
+
+          windowsHide:
+            true,
+
+          timeout:
+            60 * 1000,
+
+          maxBuffer:
+            64 * 1024,
+
+          encoding:
+            "utf8",
+        },
+      ));
+  } catch (cause) {
+    throw fail(
+      "npm version could not be collected for dependency-install provenance.",
+      {
+        cause,
+      },
+    );
+  }
+
+  return Object.freeze({
+    nodeVersion:
+      process.version,
+
+    npmVersion:
+      stdout.trim(),
+
+    platform:
+      process.platform,
+
+    arch:
+      process.arch,
+  });
+}
+
 export async function preparePortableReleaseProductionDependencies(
   input: Readonly<{
     revisionRoot: string;
@@ -222,6 +311,9 @@ export async function preparePortableReleaseProductionDependencies(
 
     createDependencyManifest?:
       typeof createPortableReleaseDependencyTreeManifest;
+
+    collectInstallProvenance?:
+      PortableReleaseDependencyInstallProvenanceCollector;
   }> = {},
 ): Promise<
   PortableReleaseDependencyTreeManifest
@@ -389,7 +481,7 @@ export async function preparePortableReleaseProductionDependencies(
         workRoot,
 
       executable:
-        "npm",
+        NPM_EXECUTABLE,
 
       args:
         PORTABLE_RELEASE_PRODUCTION_NPM_CI_ARGS,
@@ -452,6 +544,39 @@ export async function preparePortableReleaseProductionDependencies(
     await requireRealDirectory(
       workNodeModules,
       "Production dependency installation did not create a safe node_modules directory.",
+    );
+
+    const collectProvenance =
+      dependencies.collectInstallProvenance ??
+      collectPortableReleaseDependencyInstallProvenance;
+
+    const collectedProvenance =
+      await collectProvenance({
+        cwd:
+          workRoot,
+
+        npmExecutable:
+          NPM_EXECUTABLE,
+      });
+
+    const provenance =
+      createPortableReleaseDependencyInstallProvenance({
+        nodeVersion:
+          collectedProvenance.nodeVersion,
+
+        npmVersion:
+          collectedProvenance.npmVersion,
+
+        platform:
+          collectedProvenance.platform,
+
+        arch:
+          collectedProvenance.arch,
+      });
+
+    await writePortableReleaseDependencyInstallProvenance(
+      workNodeModules,
+      provenance,
     );
 
     const createManifest =

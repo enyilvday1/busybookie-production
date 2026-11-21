@@ -22,7 +22,10 @@ const fsModules = new Set(["fs", "node:fs", "fs/promises", "node:fs/promises"]);
 const loaderModules = new Set(["module", "process", "vm", "worker_threads", "inspector", "inspector/promises", "repl", "wasi"].flatMap(m => [m, `node:${m}`]));
 const dangerousRoots = new Set(["globalThis", "global", "eval", "Function", "require", "module", "exports"]);
 const reservedNames = new Set(["globalThis", "global", "eval", "Function", "require", "module", "exports", "process"]);
-const processMembers = new Set(["argv", "cwd", "env", "exitCode", "off", "once", "pid", "stderr", "stdout"]);
+// Closed allowlist: every other process member is rejected until reviewed. `platform`, `version` and `arch` were
+// explicitly reviewed as read-only primitive runtime/environment facts (strings); they grant no module-loader,
+// filesystem or native-binding capability.
+const processMembers = new Set(["argv", "cwd", "env", "exitCode", "off", "once", "pid", "stderr", "stdout", "platform", "version", "arch"]);
 const typeKeys = new Set(["typeAnnotation", "returnType", "typeParameters", "typeArguments", "superTypeArguments", "implements"]);
 const typeNodes = new Set(["TSInterfaceDeclaration", "TSTypeAliasDeclaration", "TSDeclareFunction", "TSIndexSignature", "TSTypeQuery"]);
 const bindingSlots: Record<string, string[]> = {
@@ -304,6 +307,9 @@ const allowedByCategory: ReadonlyArray<readonly [string, string]> = [
   ["G", 'process.once("SIGINT", f);'],
   ["G", 'process.off("SIGINT", f);'],
   ["G", "process?.env;"],
+  ["G", "process.platform;"],
+  ["G", "process.version;"],
+  ["G", "process.arch;"],
   ["N", '// globalThis.eval(process); require("fs")\nconst s = "globalThis.eval(process); module.require()";'],
   ["N", "const o = { globalThis: 1, eval: 2, process: 3, require: 4 }; o.eval; o.process; o.require; o.module;"],
   ["N", "({ eval: someValue });"],

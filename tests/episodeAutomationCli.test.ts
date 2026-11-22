@@ -539,6 +539,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
     expect(pkg.scripts["release:identity"]).toBe("tsx scripts/create-portable-release-identity.ts");
     expect(pkg.scripts["release:package"]).toBe("tsx scripts/create-portable-release-package.ts");
     expect(pkg.scripts["release:create"]).toBe("tsx scripts/create-portable-release.ts");
+    expect(pkg.scripts["release:install"]).toBe("tsx scripts/install-portable-release.ts");
     expect(pkg.scripts["episode:automate"]).toBe("tsx scripts/episode-automation.ts");
     expect(Object.keys(pkg.scripts)).toEqual([
       "test",
@@ -546,6 +547,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
       "release:identity",
       "release:package",
       "release:create",
+      "release:install",
       "start",
       "production:execution:reconcile",
       "production:execution:status",
@@ -554,6 +556,7 @@ describe("C7 CLI O-Q package, index and composition boundaries", () => {
       "production:episode:adopt-visual-evidence",
       "production:dialogue:authorize-visual",
       "production:dialogue:place",
+      "production:release:install",
       "typecheck",
       "test:watch",
       "validate:characters",

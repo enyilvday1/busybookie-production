@@ -1,0 +1,16 @@
+import {
+  formatInstallPortableReleaseCliError,
+  runInstallPortableReleaseCli,
+} from "./cli/runInstallPortableReleaseCli.js";
+
+runInstallPortableReleaseCli().catch(
+  (error: unknown) => {
+    process.stderr.write(
+      formatInstallPortableReleaseCliError(
+        error,
+      ),
+    );
+
+    process.exitCode = 1;
+  },
+);

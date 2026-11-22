@@ -208,6 +208,31 @@ const CONTRACTS =
       newImport:
         "./cli/runDialoguePlacementCli.js",
     },
+    {
+      productionName:
+        "production:release:install",
+
+      productionCommand:
+        "node dist/deployment/installPortableReleaseProcess.js",
+
+      developmentName:
+        "release:install",
+
+      developmentCommand:
+        "tsx scripts/install-portable-release.ts",
+
+      script:
+        "scripts/install-portable-release.ts",
+
+      process:
+        "src/deployment/installPortableReleaseProcess.ts",
+
+      oldImport:
+        "../src/deployment/cli/runInstallPortableReleaseCli.js",
+
+      newImport:
+        "./cli/runInstallPortableReleaseCli.js",
+    },
   ] as const;
 
 describe(

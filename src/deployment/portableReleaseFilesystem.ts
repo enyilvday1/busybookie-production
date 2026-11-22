@@ -1,13 +1,36 @@
 import {
+  randomBytes,
+} from "node:crypto";
+
+import {
   chmod,
   lstat,
+  mkdir,
   rename,
   stat,
 } from "node:fs/promises";
 
 import {
+  resolve,
+} from "node:path";
+
+import {
   portableReleaseInstallFailure as fail,
 } from "./portableReleaseInstallContract.js";
+
+import {
+  syncPortableReleaseDirectory,
+  type PortableReleaseDirectorySync,
+} from "./portableReleaseFilesystemDurability.js";
+
+const QUARANTINE_DIRECTORY =
+  ".quarantine";
+
+const REVISION_PATTERN =
+  /^[0-9a-f]{40}$/u;
+
+const QUARANTINE_SUFFIX_PATTERN =
+  /^[0-9a-z]+-[0-9a-f]{16}$/u;
 
 export async function portableReleasePathExists(
   path: string,
@@ -264,4 +287,214 @@ export async function publishPortableReleaseAtomically(
 
     throw cause;
   }
+}
+
+function createPortableReleaseQuarantineSuffix(): string {
+  return `${Date.now().toString(
+    36,
+  )}-${randomBytes(
+    8,
+  ).toString(
+    "hex",
+  )}`;
+}
+
+// Moves an uncommitted (receipt-less) release directory into releasesRoot/.quarantine as evidence only.
+// The move is one same-filesystem rename that never replaces existing evidence, and is made durable by
+// fsyncing both affected directories.
+export async function quarantinePortableRelease(
+  input: Readonly<{
+    releasesRoot: string;
+    reviewedRevision: string;
+    releaseRoot: string;
+  }>,
+  dependencies: Readonly<{
+    syncDirectory?:
+      PortableReleaseDirectorySync;
+
+    createQuarantineSuffix?:
+      () => string;
+  }> = {},
+): Promise<string> {
+  const releasesRoot =
+    resolve(
+      input.releasesRoot,
+    );
+
+  const quarantineRoot =
+    resolve(
+      releasesRoot,
+      QUARANTINE_DIRECTORY,
+    );
+
+  const syncDirectory =
+    dependencies.syncDirectory ??
+    syncPortableReleaseDirectory;
+
+  const createSuffix =
+    dependencies.createQuarantineSuffix ??
+    createPortableReleaseQuarantineSuffix;
+
+  if (
+    !REVISION_PATTERN.test(
+      input.reviewedRevision,
+    ) ||
+    resolve(
+      input.releaseRoot,
+    ) !==
+      resolve(
+        releasesRoot,
+        input.reviewedRevision,
+      )
+  ) {
+    throw fail(
+      "Portable release quarantine source must be the reviewed revision directory inside the releases root.",
+    );
+  }
+
+  try {
+    await mkdir(
+      quarantineRoot,
+    );
+  } catch (cause) {
+    if (
+      !(
+        cause instanceof Error &&
+        "code" in cause &&
+        cause.code ===
+          "EEXIST"
+      )
+    ) {
+      throw fail(
+        "Portable release quarantine directory could not be created.",
+        {
+          cause,
+        },
+      );
+    }
+  }
+
+  let metadata:
+    Awaited<
+      ReturnType<typeof lstat>
+    >;
+
+  try {
+    metadata =
+      await lstat(
+        quarantineRoot,
+      );
+  } catch (cause) {
+    throw fail(
+      "Portable release quarantine directory could not be inspected.",
+      {
+        cause,
+      },
+    );
+  }
+
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isDirectory()
+  ) {
+    throw fail(
+      "Portable release quarantine must be a safe real directory.",
+    );
+  }
+
+  let releasesDevice:
+    number;
+
+  let quarantineDevice:
+    number;
+
+  try {
+    [
+      releasesDevice,
+      quarantineDevice,
+    ] =
+      await Promise.all([
+        stat(
+          releasesRoot,
+        ).then(
+          value =>
+            value.dev,
+        ),
+        stat(
+          quarantineRoot,
+        ).then(
+          value =>
+            value.dev,
+        ),
+      ]);
+  } catch (cause) {
+    throw fail(
+      "Portable release quarantine filesystem identity could not be established.",
+      {
+        cause,
+      },
+    );
+  }
+
+  if (
+    releasesDevice !==
+      quarantineDevice
+  ) {
+    throw fail(
+      "Portable release quarantine must be on the same filesystem as the releases root.",
+    );
+  }
+
+  const suffix =
+    createSuffix();
+
+  if (
+    !QUARANTINE_SUFFIX_PATTERN.test(
+      suffix,
+    )
+  ) {
+    throw fail(
+      "Portable release quarantine destination name is invalid.",
+    );
+  }
+
+  const destination =
+    resolve(
+      quarantineRoot,
+      `${input.reviewedRevision}.${suffix}`,
+    );
+
+  if (
+    await portableReleasePathExists(
+      destination,
+    )
+  ) {
+    throw fail(
+      "Portable release quarantine destination already exists; existing evidence is never overwritten.",
+    );
+  }
+
+  try {
+    await rename(
+      input.releaseRoot,
+      destination,
+    );
+  } catch (cause) {
+    throw fail(
+      "Uncommitted portable release could not be moved into quarantine.",
+      {
+        cause,
+      },
+    );
+  }
+
+  await syncDirectory(
+    releasesRoot,
+  );
+
+  await syncDirectory(
+    quarantineRoot,
+  );
+
+  return destination;
 }

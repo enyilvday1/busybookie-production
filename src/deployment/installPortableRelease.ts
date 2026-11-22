@@ -3,6 +3,7 @@ import {
 } from "node:child_process";
 
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -10,8 +11,10 @@ import {
 } from "node:fs/promises";
 
 import {
+  dirname,
   join,
   resolve,
+  toNamespacedPath,
 } from "node:path";
 
 import {
@@ -54,6 +57,7 @@ import {
 
 import {
   createPortableReleaseInstallReceipt,
+  type PortableReleaseInstallReceipt,
 } from "./portableReleaseInstallReceipt.js";
 
 import {
@@ -64,12 +68,14 @@ import {
 
 import {
   syncPortableReleaseDirectory,
+  syncPortableReleaseTree,
 } from "./portableReleaseFilesystemDurability.js";
 
 import {
   enforcePortableReleasePrivateDirectoryMode,
   portableReleasePathExists,
   publishPortableReleaseAtomically,
+  quarantinePortableRelease,
   requirePortableReleaseSameFilesystem,
   type PortableReleasePrivateDirectoryGuard,
   type PortableReleaseSameFilesystemGuard,
@@ -172,6 +178,19 @@ export type PortableReleaseInstallationDependencies =
     acquireRevisionLock?: PortableReleaseRevisionLockAcquirer;
     platform?: string;
     acquireFlockRevisionLock?: PortableReleaseRevisionLockAcquirer;
+    writeInstallReceipt?: (
+      receiptPath: string,
+      receipt: PortableReleaseInstallReceipt,
+    ) => Promise<void>;
+    syncDirectory?: (
+      directory: string,
+    ) => Promise<void>;
+    syncReleaseTree?: (
+      input: Readonly<{
+        root: string;
+        files: readonly string[];
+      }>,
+    ) => Promise<void>;
   }>;
 
 async function extractArchive(
@@ -332,6 +351,181 @@ async function verifyPortableReleaseArtifactAuthority(
   });
 }
 
+// Only when this installer itself created releasesRoot (and possibly missing ancestors): every newly
+// created directory and the pre-existing parent of the first one are fsynced, deepest first, so the
+// releasesRoot entry cannot be lost after nested durable commits. A pre-existing root is left untouched.
+async function makeCreatedReleasesRootDurable(
+  input: Readonly<{
+    firstCreatedDirectory: string;
+    releasesRoot: string;
+    syncDirectory: (
+      directory: string,
+    ) => Promise<void>;
+  }>,
+): Promise<void> {
+  let metadata:
+    Awaited<
+      ReturnType<typeof lstat>
+    >;
+
+  try {
+    metadata =
+      await lstat(
+        input.releasesRoot,
+      );
+  } catch (cause) {
+    throw fail(
+      "Newly created releases root could not be inspected.",
+      {
+        cause,
+      },
+    );
+  }
+
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isDirectory()
+  ) {
+    throw fail(
+      "Newly created releases root must be a real directory.",
+    );
+  }
+
+  // mkdir may report the first created directory in namespaced form (\\?\ on Windows), so compare
+  // namespaced forms while syncing only paths derived from the resolved releases root.
+  const firstCreated =
+    toNamespacedPath(
+      resolve(
+        input.firstCreatedDirectory,
+      ),
+    );
+
+  const created:
+    string[] =
+      [];
+
+  let current =
+    input.releasesRoot;
+
+  for (;;) {
+    created.push(
+      current,
+    );
+
+    if (
+      toNamespacedPath(
+        current,
+      ) ===
+        firstCreated
+    ) {
+      break;
+    }
+
+    const parent =
+      dirname(
+        current,
+      );
+
+    if (
+      parent ===
+        current
+    ) {
+      throw fail(
+        "Newly created releases root is not below the first created directory.",
+      );
+    }
+
+    current =
+      parent;
+  }
+
+  for (
+    const directory
+    of [
+      ...created,
+      dirname(
+        current,
+      ),
+    ]
+  ) {
+    await input.syncDirectory(
+      directory,
+    );
+  }
+}
+
+// Runs under the revision lock after the release rename. The on-disk receipt path, not an in-memory
+// stage flag, decides: once a receipt exists (the commit point has passed) the release is never removed,
+// and an unreadable receipt state is treated as committed. Otherwise the uncommitted release is removed
+// and the removal is made durable; if that fails, the next invocation quarantines the RELEASE_ONLY residue.
+async function rollBackUncommittedRelease(
+  input: Readonly<{
+    cause: unknown;
+    finalReleaseRoot: string;
+    receiptPath: string;
+    releasesRoot: string;
+    syncDirectory: (
+      directory: string,
+    ) => Promise<void>;
+  }>,
+): Promise<void> {
+  let receiptExists:
+    boolean;
+
+  try {
+    receiptExists =
+      await portableReleasePathExists(
+        input.receiptPath,
+      );
+  } catch {
+    receiptExists =
+      true;
+  }
+
+  if (
+    receiptExists
+  ) {
+    return;
+  }
+
+  try {
+    if (
+      await portableReleasePathExists(
+        input.finalReleaseRoot,
+      )
+    ) {
+      await rm(
+        input.finalReleaseRoot,
+        {
+          recursive:
+            true,
+
+          force:
+            true,
+        },
+      );
+    }
+
+    await input.syncDirectory(
+      input.releasesRoot,
+    );
+  } catch (rollbackCause) {
+    throw fail(
+      "Uncommitted release rollback failed; the release-only residue will be quarantined by the next installation.",
+      {
+        cause:
+          new AggregateError(
+            [
+              input.cause,
+              rollbackCause,
+            ],
+            "Original installation failure and rollback failure.",
+          ),
+      },
+    );
+  }
+}
+
 export async function installPortableRelease(
   input: Readonly<{
     archivePath: string;
@@ -395,13 +589,31 @@ export async function installPortableRelease(
       reviewedRevision,
     );
 
-  await mkdir(
-    releasesRoot,
-    {
-      recursive:
-        true,
-    },
-  );
+  const syncDirectory =
+    dependencies.syncDirectory ??
+    syncPortableReleaseDirectory;
+
+  const firstCreatedReleasesDirectory =
+    await mkdir(
+      releasesRoot,
+      {
+        recursive:
+          true,
+      },
+    );
+
+  if (
+    firstCreatedReleasesDirectory !==
+      undefined
+  ) {
+    await makeCreatedReleasesRootDurable({
+      firstCreatedDirectory:
+        firstCreatedReleasesDirectory,
+
+      releasesRoot,
+      syncDirectory,
+    });
+  }
 
   await mkdir(
     stagingRoot,
@@ -414,6 +626,14 @@ export async function installPortableRelease(
   const platform =
     dependencies.platform ??
     process.platform;
+
+  const syncReleaseTree =
+    dependencies.syncReleaseTree ??
+    syncPortableReleaseTree;
+
+  const writeInstallReceipt =
+    dependencies.writeInstallReceipt ??
+    writePortableReleaseInstallReceipt;
 
   const flockRevisionLockAcquirer =
     dependencies.acquireFlockRevisionLock ??
@@ -481,7 +701,7 @@ export async function installPortableRelease(
       receiptExists
     ) {
       throw fail(
-        "Install receipt exists without its immutable release directory.",
+        "Committed install receipt exists but its immutable release directory is missing; automatic recovery is unsafe and operator intervention is required.",
       );
     }
 
@@ -604,28 +824,8 @@ export async function installPortableRelease(
       if (
         finalReleaseExists
       ) {
-        const artifactAuthority =
-          await verifyPortableReleaseArtifactAuthority({
-            artifactRoot:
-              finalArtifactRoot,
-
-            reviewedRevision,
-
-            manifest,
-            treeVerifier,
-            identityVerifier,
-
-            identityRootFailureMessage:
-              "Portable runtime identity root does not match the published release root.",
-          });
-
-        const dependencyManifest =
-          requirePortableReleaseDependencyManifestAuthority(
-            await dependencyManifestCreator(
-              finalDependencyRoot,
-            ),
-          );
-
+        // RELEASE_ONLY: no commit record exists, so this directory is uncommitted residue. It is
+        // quarantined as evidence only (never verified, trusted or reused) and a fresh install follows.
         if (
           await portableReleasePathExists(
             receiptPath,
@@ -636,8 +836,17 @@ export async function installPortableRelease(
           );
         }
 
-        throw fail(
-          "Missing install receipt cannot independently authorize the published dependency tree.",
+        await quarantinePortableRelease(
+          {
+            releasesRoot,
+            reviewedRevision,
+
+            releaseRoot:
+              finalReleaseRoot,
+          },
+          {
+            syncDirectory,
+          },
         );
       }
 
@@ -752,6 +961,25 @@ export async function installPortableRelease(
         );
       }
 
+      // Make every authoritative byte and directory entry of the private release durable before it
+      // becomes visible: app/ files, node_modules/ files, then their directories bottom-up, ending with
+      // app/, node_modules/ and the private release root.
+      await syncReleaseTree({
+        root:
+          privateInstallRoot,
+
+        files: [
+          ...artifactAuthority.treeVerification.files.map(
+            file =>
+              `app/${file}`,
+          ),
+          ...dependencyManifest.files.map(
+            file =>
+              `node_modules/${file.relativePath}`,
+          ),
+        ],
+      });
+
       if (
         await portableReleasePathExists(
           finalReleaseRoot,
@@ -782,6 +1010,15 @@ export async function installPortableRelease(
       privateInstallRoot =
         null;
 
+      // The rename is durable only once both its source parent and its destination parent are synced.
+      await syncDirectory(
+        stagingRoot,
+      );
+
+      await syncDirectory(
+        releasesRoot,
+      );
+
       const receipt =
         createPortableReleaseInstallReceipt({
           reviewedRevision,
@@ -808,39 +1045,12 @@ export async function installPortableRelease(
             dependencyManifest.totalBytes,
         });
 
-      try {
-        await writePortableReleaseInstallReceipt(
-          receiptPath,
-          receipt,
-        );
-
-        await syncPortableReleaseDirectory(
-          releasesRoot,
-        );
-      } catch (cause) {
-        if (
-          published &&
-          await portableReleasePathExists(
-            finalReleaseRoot,
-          )
-        ) {
-          await rm(
-            finalReleaseRoot,
-            {
-              recursive:
-                true,
-
-              force:
-                true,
-            },
-          );
-
-          published =
-            false;
-        }
-
-        throw cause;
-      }
+      // The receipt rename inside writeInstallReceipt is the commit point; its .receipts fsync makes the
+      // commit durable.
+      await writeInstallReceipt(
+        receiptPath,
+        receipt,
+      );
 
       return portableReleaseInstallationResultFromReceipt(
         finalArtifactRoot,
@@ -849,21 +1059,15 @@ export async function installPortableRelease(
       );
     } catch (cause) {
       if (
-        published &&
-        await portableReleasePathExists(
-          finalReleaseRoot,
-        )
+        published
       ) {
-        await rm(
+        await rollBackUncommittedRelease({
+          cause,
           finalReleaseRoot,
-          {
-            recursive:
-              true,
-
-            force:
-              true,
-          },
-        );
+          receiptPath,
+          releasesRoot,
+          syncDirectory,
+        });
       }
 
       throw cause;

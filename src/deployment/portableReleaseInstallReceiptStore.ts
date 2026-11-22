@@ -1,10 +1,12 @@
 import {
+  lstat,
   mkdir,
   mkdtemp,
   open,
   readFile,
   rename,
   rm,
+  type FileHandle,
 } from "node:fs/promises";
 
 import {
@@ -99,22 +101,112 @@ export async function readExactPortableReleaseInstallReceiptReplay(
   return receipt;
 }
 
+export type PortableReleaseInstallReceiptWriteDependencies =
+  Readonly<{
+    syncFile?:
+      (
+        handle: FileHandle,
+      ) => Promise<void>;
+
+    renameReceipt?:
+      (
+        source: string,
+        destination: string,
+      ) => Promise<void>;
+
+    syncDirectory?:
+      (
+        directory: string,
+      ) => Promise<void>;
+
+    removeTemporary?:
+      (
+        path: string,
+      ) => Promise<void>;
+  }>;
+
+async function removePortableReleaseReceiptTemporary(
+  path: string,
+): Promise<void> {
+  await rm(
+    path,
+    {
+      recursive:
+        true,
+
+      force:
+        true,
+    },
+  );
+}
+
+// Durable order: temp write -> temp fsync -> rename into .receipts (the commit point) -> fsync .receipts.
 export async function writePortableReleaseInstallReceipt(
   receiptPath: string,
   receipt: PortableReleaseInstallReceipt,
+  dependencies: PortableReleaseInstallReceiptWriteDependencies = {},
 ): Promise<void> {
   const receiptsRoot =
     dirname(
       receiptPath,
     );
 
-  await mkdir(
-    receiptsRoot,
-    {
-      recursive:
-        true,
-    },
-  );
+  const syncFile =
+    dependencies.syncFile ??
+    (
+      async (
+        handle: FileHandle,
+      ): Promise<void> => {
+        await handle.sync();
+      }
+    );
+
+  const renameReceipt =
+    dependencies.renameReceipt ??
+    rename;
+
+  const syncDirectory =
+    dependencies.syncDirectory ??
+    syncPortableReleaseDirectory;
+
+  const removeTemporary =
+    dependencies.removeTemporary ??
+    removePortableReleaseReceiptTemporary;
+
+  const createdReceiptsRoot =
+    await mkdir(
+      receiptsRoot,
+      {
+        recursive:
+          true,
+      },
+    );
+
+  const receiptsMetadata =
+    await lstat(
+      receiptsRoot,
+    );
+
+  if (
+    receiptsMetadata.isSymbolicLink() ||
+    !receiptsMetadata.isDirectory()
+  ) {
+    throw fail(
+      "Install receipt directory must be a safe real directory.",
+    );
+  }
+
+  if (
+    createdReceiptsRoot !==
+      undefined
+  ) {
+    // A newly created .receipts entry must itself be durable before any receipt inside it can be.
+    await syncDirectory(
+      dirname(
+        receiptsRoot,
+      ),
+    );
+  }
 
   const temporaryRoot =
     await mkdtemp(
@@ -153,7 +245,9 @@ export async function writePortableReleaseInstallReceipt(
         bytes,
       );
 
-      await handle.sync();
+      await syncFile(
+        handle,
+      );
     } finally {
       await handle.close();
     }
@@ -168,24 +262,17 @@ export async function writePortableReleaseInstallReceipt(
       );
     }
 
-    await rename(
+    await renameReceipt(
       temporaryPath,
       receiptPath,
     );
 
-    await syncPortableReleaseDirectory(
+    await syncDirectory(
       receiptsRoot,
     );
   } finally {
-    await rm(
+    await removeTemporary(
       temporaryRoot,
-      {
-        recursive:
-          true,
-
-        force:
-          true,
-      },
     );
   }
 }

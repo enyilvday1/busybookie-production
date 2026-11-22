@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -29,7 +30,105 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from "vitest";
+
+// Pass-through fault hooks: each fires only for one exact armed path, so every other filesystem call
+// behaves exactly as the real module.
+const filesystemFaults =
+  vi.hoisted(
+    () => ({
+      failRemovePath:
+        null as string | null,
+
+      failLstatPath:
+        null as string | null,
+    }),
+  );
+
+vi.mock(
+  "node:fs/promises",
+  async importOriginal => {
+    const actual =
+      await importOriginal<typeof import("node:fs/promises")>();
+
+    const rm =
+      (
+        async (
+          ...args: Parameters<typeof actual.rm>
+        ) => {
+          if (
+            filesystemFaults.failRemovePath !==
+              null &&
+            String(
+              args[0],
+            ) ===
+              filesystemFaults.failRemovePath
+          ) {
+            throw Object.assign(
+              new Error(
+                "synthetic-release-remove-failure",
+              ),
+              {
+                code:
+                  "EBUSY",
+              },
+            );
+          }
+
+          return actual.rm(
+            ...args,
+          );
+        }
+      ) as typeof actual.rm;
+
+    const lstat =
+      (
+        async (
+          ...args: Parameters<typeof actual.lstat>
+        ) => {
+          if (
+            filesystemFaults.failLstatPath !==
+              null &&
+            String(
+              args[0],
+            ) ===
+              filesystemFaults.failLstatPath
+          ) {
+            throw Object.assign(
+              new Error(
+                "synthetic-receipt-lstat-failure",
+              ),
+              {
+                code:
+                  "EIO",
+              },
+            );
+          }
+
+          return actual.lstat(
+            ...args,
+          );
+        }
+      ) as typeof actual.lstat;
+
+    return {
+      ...actual,
+      rm,
+      lstat,
+    };
+  },
+);
+
+afterEach(
+  () => {
+    filesystemFaults.failRemovePath =
+      null;
+
+    filesystemFaults.failLstatPath =
+      null;
+  },
+);
 
 import {
   installPortableRelease,
@@ -38,6 +137,19 @@ import {
 import {
   createPortableReleaseDependencyTreeManifest,
 } from "../src/deployment/portableReleaseDependencyTreeManifest.js";
+
+import {
+  publishPortableReleaseAtomically,
+} from "../src/deployment/portableReleaseFilesystem.js";
+
+import {
+  syncPortableReleaseDirectory,
+  syncPortableReleaseTree,
+} from "../src/deployment/portableReleaseFilesystemDurability.js";
+
+import {
+  writePortableReleaseInstallReceipt,
+} from "../src/deployment/portableReleaseInstallReceiptStore.js";
 
 const REVISION =
   "0ff4981807eb8db6a0aac73fefbd94292d7d12ef";
@@ -144,6 +256,57 @@ async function write(
       flag: "wx",
     },
   );
+}
+
+async function quarantineEntries(
+  releasesRoot: string,
+): Promise<string[]> {
+  const quarantineRoot =
+    join(
+      releasesRoot,
+      ".quarantine",
+    );
+
+  if (
+    !(
+      await exists(
+        quarantineRoot,
+      )
+    )
+  ) {
+    return [];
+  }
+
+  return readdir(
+    quarantineRoot,
+  );
+}
+
+function installRequest(
+  h: Harness,
+) {
+  return Object.freeze({
+    archivePath:
+      h.archivePath,
+
+    treeManifestPath:
+      h.treeManifestPath,
+
+    expectedArchiveSha256:
+      ARCHIVE_SHA,
+
+    expectedTreeManifestSha256:
+      TREE_MANIFEST_SHA,
+
+    expectedReviewedRevision:
+      REVISION,
+
+    releasesRoot:
+      h.releasesRoot,
+
+    stagingRoot:
+      h.stagingRoot,
+  });
 }
 
 type FakeVerifiedRelease =
@@ -791,7 +954,7 @@ describe(
     );
 
     it(
-      "refuses to overwrite an existing immutable revision directory",
+      "never overwrites an existing receipt-less revision directory and preserves it in quarantine",
       async () => {
         const h =
           await harness();
@@ -804,6 +967,14 @@ describe(
 
         await mkdir(
           finalRoot,
+        );
+
+        await write(
+          finalRoot,
+          "existing-evidence.txt",
+          Buffer.from(
+            "existing\n",
+          ),
         );
 
         await expect(
@@ -838,14 +1009,50 @@ describe(
               },
             ),
           ),
-        ).rejects.toThrow();
+        ).rejects.toThrow(
+          "whole-tree-failure",
+        );
 
         expect(
           h.events,
         ).toEqual([
           "verify-authority",
+          "extract",
           "verify-whole-tree",
         ]);
+
+        expect(
+          await exists(
+            finalRoot,
+          ),
+        ).toBe(
+          false,
+        );
+
+        const entries =
+          await quarantineEntries(
+            h.releasesRoot,
+          );
+
+        expect(
+          entries,
+        ).toHaveLength(
+          1,
+        );
+
+        expect(
+          await readFile(
+            join(
+              h.releasesRoot,
+              ".quarantine",
+              entries[0] ?? "",
+              "existing-evidence.txt",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "existing\n",
+        );
       },
     );
 
@@ -1233,6 +1440,10 @@ describe(
         h.events.length =
           0;
 
+        const forbidden:
+          string[] =
+            [];
+
         const second =
           await installPortableRelease(
             {
@@ -1257,9 +1468,47 @@ describe(
               stagingRoot:
                 h.stagingRoot,
             },
-            dependencies(
-              h,
-            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              prepareProductionDependencies:
+                async () => {
+                  forbidden.push(
+                    "prepare-dependencies",
+                  );
+
+                  throw new Error(
+                    "exact replay must not prepare dependencies",
+                  );
+                },
+
+              publishInstalledRelease:
+                async () => {
+                  forbidden.push(
+                    "publish",
+                  );
+
+                  throw new Error(
+                    "exact replay must not publish",
+                  );
+                },
+
+              syncReleaseTree:
+                async () => {
+                  forbidden.push(
+                    "sync-release-tree",
+                  );
+                },
+
+              writeInstallReceipt:
+                async () => {
+                  forbidden.push(
+                    "write-receipt",
+                  );
+                },
+            },
           );
 
         expect(
@@ -1290,6 +1539,12 @@ describe(
           h.events,
         ).not.toContain(
           "publish",
+        );
+
+        expect(
+          forbidden,
+        ).toEqual(
+          [],
         );
       },
     );
@@ -1602,7 +1857,7 @@ describe(
   "portable release installation crash recovery",
   () => {
     it(
-      "refuses a receipt-less published release even when artifact and dependency trees verify",
+      "quarantines a receipt-less published release even when its trees would verify, then installs fresh",
       async () => {
         const h =
           await harness();
@@ -1622,29 +1877,31 @@ describe(
         await mkdir(
           appRoot,
           {
-            recursive: true,
+            recursive:
+              true,
           },
         );
 
-        const copy = async (
-          relativePath: string,
-        ) => {
-          const source =
-            join(
-              h.extractedFixtureRoot,
-              ...relativePath.split(
-                "/",
+        const copy =
+          async (
+            relativePath: string,
+          ) => {
+            const source =
+              join(
+                h.extractedFixtureRoot,
+                ...relativePath.split(
+                  "/",
+                ),
+              );
+
+            await write(
+              appRoot,
+              relativePath,
+              await readFile(
+                source,
               ),
             );
-
-          await write(
-            appRoot,
-            relativePath,
-            await readFile(
-              source,
-            ),
-          );
-        };
+          };
 
         await copy(
           "package.json",
@@ -1670,128 +1927,189 @@ describe(
           finalRoot,
           "node_modules/busybookie-test-runtime/index.js",
           Buffer.from(
-            "export const busybookieTestRuntime = true;\n",
+            "export const busybookieTestRuntime = \"uncommitted-residue\";\n",
           ),
         );
 
-        await expect(
-          installPortableRelease(
-            {
-              archivePath:
-                h.archivePath,
+        const synced:
+          string[] =
+            [];
 
-              treeManifestPath:
-                h.treeManifestPath,
+        let preparations =
+          0;
 
-              expectedArchiveSha256:
-                ARCHIVE_SHA,
+        const base =
+          dependencies(
+            h,
+          );
 
-              expectedTreeManifestSha256:
-                TREE_MANIFEST_SHA,
-
-              expectedReviewedRevision:
-                REVISION,
-
-              releasesRoot:
-                h.releasesRoot,
-
-              stagingRoot:
-                h.stagingRoot,
-            },
-            dependencies(
+        const result =
+          await installPortableRelease(
+            installRequest(
               h,
             ),
-          ),
-        ).rejects.toThrow(
-          "Portable release installation failed: Missing install receipt cannot independently authorize the published dependency tree.",
-        );
+            {
+              ...base,
 
-        const receiptPath =
+              syncDirectory:
+                async directory => {
+                  synced.push(
+                    directory,
+                  );
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+
+              prepareProductionDependencies:
+                async input => {
+                  preparations +=
+                    1;
+
+                  return base.prepareProductionDependencies(
+                    input,
+                  );
+                },
+            },
+          );
+
+        const quarantineRoot =
           join(
             h.releasesRoot,
-            ".receipts",
-            `${REVISION}.json`,
+            ".quarantine",
+          );
+
+        const entries =
+          await quarantineEntries(
+            h.releasesRoot,
           );
 
         expect(
-          await exists(
-            receiptPath,
-          ),
-        ).toBe(
-          false,
+          entries,
+        ).toHaveLength(
+          1,
         );
 
         expect(
-          await exists(
-            appRoot,
+          entries[0],
+        ).toMatch(
+          new RegExp(
+            `^${REVISION}\\.[0-9a-z]+-[0-9a-f]{16}$`,
+            "u",
           ),
-        ).toBe(
-          true,
         );
 
+        const quarantined =
+          join(
+            quarantineRoot,
+            entries[0] ?? "",
+          );
+
         expect(
-          await exists(
+          await readFile(
             join(
-              finalRoot,
+              quarantined,
               "node_modules",
+              "busybookie-test-runtime",
+              "index.js",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "export const busybookieTestRuntime = \"uncommitted-residue\";\n",
+        );
+
+        expect(
+          await readFile(
+            join(
+              quarantined,
+              "app",
+              "package.json",
             ),
           ),
+        ).toEqual(
+          await readFile(
+            join(
+              h.extractedFixtureRoot,
+              "package.json",
+            ),
+          ),
+        );
+
+        expect(
+          synced.slice(
+            0,
+            2,
+          ),
+        ).toEqual([
+          h.releasesRoot,
+          quarantineRoot,
+        ]);
+
+        expect(
+          preparations,
         ).toBe(
-          true,
+          1,
         );
 
         expect(
           h.events,
         ).toEqual([
           "verify-authority",
+          "extract",
           "verify-whole-tree",
           "verify-runtime-identity",
         ]);
 
         expect(
-          h.events,
-        ).not.toContain(
-          "extract",
+          await readFile(
+            join(
+              finalRoot,
+              "node_modules",
+              "busybookie-test-runtime",
+              "index.js",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "export const busybookieTestRuntime = true;\n",
         );
 
         expect(
-          h.events,
-        ).not.toContain(
-          "publish",
+          result.dependencyManifestSha256,
+        ).toBe(
+          (
+            await createPortableReleaseDependencyTreeManifest(
+              join(
+                finalRoot,
+                "node_modules",
+              ),
+            )
+          ).manifestSha256,
+        );
+
+        expect(
+          await exists(
+            result.receiptPath,
+          ),
+        ).toBe(
+          true,
         );
       },
     );
 
     it(
-      "refuses to bless a changed dependency tree when the durable receipt is missing",
+      "quarantines a changed receipt-less dependency tree instead of blessing it, then reinstalls fresh dependencies",
       async () => {
         const h =
           await harness();
 
         const first =
           await installPortableRelease(
-            {
-              archivePath:
-                h.archivePath,
-
-              treeManifestPath:
-                h.treeManifestPath,
-
-              expectedArchiveSha256:
-                ARCHIVE_SHA,
-
-              expectedTreeManifestSha256:
-                TREE_MANIFEST_SHA,
-
-              expectedReviewedRevision:
-                REVISION,
-
-              releasesRoot:
-                h.releasesRoot,
-
-              stagingRoot:
-                h.stagingRoot,
-            },
+            installRequest(
+              h,
+            ),
             dependencies(
               h,
             ),
@@ -1803,14 +2121,6 @@ describe(
             force:
               true,
           },
-        );
-
-        expect(
-          await exists(
-            first.receiptPath,
-          ),
-        ).toBe(
-          false,
         );
 
         await writeFile(
@@ -1844,62 +2154,88 @@ describe(
         h.events.length =
           0;
 
-        await expect(
-          installPortableRelease(
-            {
-              archivePath:
-                h.archivePath,
-
-              treeManifestPath:
-                h.treeManifestPath,
-
-              expectedArchiveSha256:
-                ARCHIVE_SHA,
-
-              expectedTreeManifestSha256:
-                TREE_MANIFEST_SHA,
-
-              expectedReviewedRevision:
-                REVISION,
-
-              releasesRoot:
-                h.releasesRoot,
-
-              stagingRoot:
-                h.stagingRoot,
-            },
+        const second =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
             dependencies(
               h,
             ),
-          ),
-        ).rejects.toThrow(
-          "Portable release installation failed: Missing install receipt cannot independently authorize the published dependency tree.",
+          );
+
+        expect(
+          second.dependencyManifestSha256,
+        ).toBe(
+          first.dependencyManifestSha256,
         );
 
         expect(
-          await exists(
-            first.receiptPath,
-          ),
-        ).toBe(
-          false,
+          second.dependencyManifestSha256,
+        ).not.toBe(
+          tamperedManifest.manifestSha256,
         );
 
         expect(
           h.events,
-        ).not.toContain(
+        ).toContain(
           "extract",
         );
 
         expect(
-          h.events,
-        ).not.toContain(
-          "publish",
+          await readFile(
+            join(
+              h.releasesRoot,
+              REVISION,
+              "node_modules",
+              "busybookie-test-runtime",
+              "index.js",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "export const busybookieTestRuntime = true;\n",
+        );
+
+        const entries =
+          await quarantineEntries(
+            h.releasesRoot,
+          );
+
+        expect(
+          entries,
+        ).toHaveLength(
+          1,
+        );
+
+        expect(
+          await readFile(
+            join(
+              h.releasesRoot,
+              ".quarantine",
+              entries[0] ?? "",
+              "node_modules",
+              "busybookie-test-runtime",
+              "index.js",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "export const busybookieTestRuntime = \"tampered-after-publication\";\n",
+        );
+
+        expect(
+          await exists(
+            second.receiptPath,
+          ),
+        ).toBe(
+          true,
         );
       },
     );
 
     it(
-      "refuses crash recovery when the existing published release fails whole-tree verification",
+      "quarantines a receipt-less release without trusting it and still fails closed when the fresh tree fails whole-tree verification",
       async () => {
         const h =
           await harness();
@@ -1913,7 +2249,8 @@ describe(
         await mkdir(
           finalRoot,
           {
-            recursive: true,
+            recursive:
+              true,
           },
         );
 
@@ -1927,28 +2264,9 @@ describe(
 
         await expect(
           installPortableRelease(
-            {
-              archivePath:
-                h.archivePath,
-
-              treeManifestPath:
-                h.treeManifestPath,
-
-              expectedArchiveSha256:
-                ARCHIVE_SHA,
-
-              expectedTreeManifestSha256:
-                TREE_MANIFEST_SHA,
-
-              expectedReviewedRevision:
-                REVISION,
-
-              releasesRoot:
-                h.releasesRoot,
-
-              stagingRoot:
-                h.stagingRoot,
-            },
+            installRequest(
+              h,
+            ),
             dependencies(
               h,
               {
@@ -1957,14 +2275,25 @@ describe(
               },
             ),
           ),
-        ).rejects.toThrow();
+        ).rejects.toThrow(
+          "whole-tree-failure",
+        );
 
         expect(
           h.events,
         ).toEqual([
           "verify-authority",
+          "extract",
           "verify-whole-tree",
         ]);
+
+        expect(
+          await exists(
+            finalRoot,
+          ),
+        ).toBe(
+          false,
+        );
 
         expect(
           await exists(
@@ -1978,10 +2307,29 @@ describe(
           false,
         );
 
+        const entries =
+          await quarantineEntries(
+            h.releasesRoot,
+          );
+
         expect(
-          h.events,
-        ).not.toContain(
-          "extract",
+          entries,
+        ).toHaveLength(
+          1,
+        );
+
+        expect(
+          await readFile(
+            join(
+              h.releasesRoot,
+              ".quarantine",
+              entries[0] ?? "",
+              "package.json",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "tampered\n",
         );
 
         expect(
@@ -1993,7 +2341,7 @@ describe(
     );
 
     it(
-      "refuses crash recovery when runtime identity reports a different reviewed revision",
+      "quarantines a receipt-less release and still fails closed when the fresh tree reports a different reviewed revision",
       async () => {
         const h =
           await harness();
@@ -2007,34 +2355,16 @@ describe(
         await mkdir(
           finalRoot,
           {
-            recursive: true,
+            recursive:
+              true,
           },
         );
 
         await expect(
           installPortableRelease(
-            {
-              archivePath:
-                h.archivePath,
-
-              treeManifestPath:
-                h.treeManifestPath,
-
-              expectedArchiveSha256:
-                ARCHIVE_SHA,
-
-              expectedTreeManifestSha256:
-                TREE_MANIFEST_SHA,
-
-              expectedReviewedRevision:
-                REVISION,
-
-              releasesRoot:
-                h.releasesRoot,
-
-              stagingRoot:
-                h.stagingRoot,
-            },
+            installRequest(
+              h,
+            ),
             dependencies(
               h,
               {
@@ -2045,15 +2375,26 @@ describe(
               },
             ),
           ),
-        ).rejects.toThrow();
+        ).rejects.toThrow(
+          "Portable release installation failed: Portable runtime identity reviewed revision does not match the requested revision.",
+        );
 
         expect(
           h.events,
         ).toEqual([
           "verify-authority",
+          "extract",
           "verify-whole-tree",
           "verify-runtime-identity",
         ]);
+
+        expect(
+          await exists(
+            finalRoot,
+          ),
+        ).toBe(
+          false,
+        );
 
         expect(
           await exists(
@@ -2068,15 +2409,103 @@ describe(
         );
 
         expect(
-          h.events,
-        ).not.toContain(
-          "extract",
+          await quarantineEntries(
+            h.releasesRoot,
+          ),
+        ).toHaveLength(
+          1,
         );
 
         expect(
           h.events,
         ).not.toContain(
           "publish",
+        );
+      },
+    );
+
+    it(
+      "keeps RECEIPT_ONLY fail closed without deleting the receipt or reconstructing the release",
+      async () => {
+        const h =
+          await harness();
+
+        const first =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          );
+
+        const receiptBytes =
+          await readFile(
+            first.receiptPath,
+          );
+
+        await rm(
+          join(
+            h.releasesRoot,
+            REVISION,
+          ),
+          {
+            recursive:
+              true,
+
+            force:
+              true,
+          },
+        );
+
+        h.events.length =
+          0;
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          ),
+        ).rejects.toThrow(
+          "Portable release installation failed: Committed install receipt exists but its immutable release directory is missing; automatic recovery is unsafe and operator intervention is required.",
+        );
+
+        expect(
+          await readFile(
+            first.receiptPath,
+          ),
+        ).toEqual(
+          receiptBytes,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await quarantineEntries(
+            h.releasesRoot,
+          ),
+        ).toEqual(
+          [],
+        );
+
+        expect(
+          h.events,
+        ).toEqual(
+          [],
         );
       },
     );
@@ -3200,6 +3629,1317 @@ describe(
         ).toBe(
           false,
         );
+      },
+    );
+  },
+);
+
+async function privateInstallEntries(
+  h: Harness,
+): Promise<string[]> {
+  return (
+    await readdir(
+      h.stagingRoot,
+    )
+  ).filter(
+    name =>
+      name.startsWith(
+        `.${REVISION}.installing-`,
+      ),
+  );
+}
+
+describe(
+  "portable release installation durable commit ordering",
+  () => {
+    it(
+      "syncs the authoritative private tree, renames, syncs the source parent and releasesRoot, then writes the receipt",
+      async () => {
+        const h =
+          await harness();
+
+        const order:
+          string[] =
+            [];
+
+        let syncedTree:
+          Readonly<{
+            root: string;
+            files: readonly string[];
+          }> | null =
+            null;
+
+        const result =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncReleaseTree:
+                async input => {
+                  order.push(
+                    "sync-release-tree",
+                  );
+
+                  syncedTree =
+                    input;
+
+                  await syncPortableReleaseTree(
+                    input,
+                  );
+                },
+
+              publishInstalledRelease:
+                async input => {
+                  order.push(
+                    "publish",
+                  );
+
+                  await publishPortableReleaseAtomically(
+                    input,
+                  );
+                },
+
+              syncDirectory:
+                async directory => {
+                  order.push(
+                    directory ===
+                      h.stagingRoot
+                      ? "sync-source-parent"
+                      : directory ===
+                          h.releasesRoot
+                        ? "sync-releases-root"
+                        : `sync-unexpected:${directory}`,
+                  );
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+
+              writeInstallReceipt:
+                async (
+                  receiptPath,
+                  receipt,
+                ) => {
+                  order.push(
+                    "write-receipt",
+                  );
+
+                  await writePortableReleaseInstallReceipt(
+                    receiptPath,
+                    receipt,
+                  );
+                },
+            },
+          );
+
+        expect(
+          order,
+        ).toEqual([
+          "sync-release-tree",
+          "publish",
+          "sync-source-parent",
+          "sync-releases-root",
+          "write-receipt",
+        ]);
+
+        const tree =
+          syncedTree as
+            Readonly<{
+              root: string;
+              files: readonly string[];
+            }> | null;
+
+        expect(
+          tree?.root.startsWith(
+            join(
+              h.stagingRoot,
+              `.${REVISION}.installing-`,
+            ),
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          [
+            ...(
+              tree?.files ??
+              []
+            ),
+          ].sort(),
+        ).toEqual([
+          "app/apps/operator-console/dist/assets/index-Test.js",
+          "app/apps/operator-console/dist/index.html",
+          "app/dist/operatorServer/operatorServerProcess.js",
+          "app/package-lock.json",
+          "app/package.json",
+          "node_modules/busybookie-test-runtime/index.js",
+        ]);
+
+        expect(
+          await exists(
+            result.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+      },
+    );
+
+    it(
+      "publishes nothing and cleans private state when the durable tree sync fails before publication",
+      async () => {
+        const h =
+          await harness();
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncReleaseTree:
+                async () => {
+                  throw new Error(
+                    "synthetic-tree-sync-failure",
+                  );
+                },
+            },
+          ),
+        ).rejects.toThrow(
+          "synthetic-tree-sync-failure",
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await privateInstallEntries(
+            h,
+          ),
+        ).toEqual(
+          [],
+        );
+      },
+    );
+
+    it(
+      "publishes nothing and cleans private state when the publisher fails",
+      async () => {
+        const h =
+          await harness();
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+              {
+                failPublish:
+                  true,
+              },
+            ),
+          ),
+        ).rejects.toThrow(
+          "publish-failure",
+        );
+
+        expect(
+          h.events,
+        ).toContain(
+          "publish",
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              ".receipts",
+              `${REVISION}.json`,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await privateInstallEntries(
+            h,
+          ),
+        ).toEqual(
+          [],
+        );
+      },
+    );
+
+    it(
+      "rolls back the uncommitted release and syncs releasesRoot when the post-rename releasesRoot sync fails, then a retry installs",
+      async () => {
+        const h =
+          await harness();
+
+        const releasesRootSyncs:
+          string[] =
+            [];
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncDirectory:
+                async directory => {
+                  if (
+                    directory ===
+                      h.releasesRoot
+                  ) {
+                    releasesRootSyncs.push(
+                      directory,
+                    );
+
+                    if (
+                      releasesRootSyncs.length ===
+                        1
+                    ) {
+                      throw new Error(
+                        "synthetic-releases-root-fsync-failure",
+                      );
+                    }
+                  }
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+            },
+          ),
+        ).rejects.toThrow(
+          "synthetic-releases-root-fsync-failure",
+        );
+
+        expect(
+          releasesRootSyncs,
+        ).toHaveLength(
+          2,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              ".receipts",
+              `${REVISION}.json`,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        const retried =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          );
+
+        expect(
+          await exists(
+            retried.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          await quarantineEntries(
+            h.releasesRoot,
+          ),
+        ).toEqual(
+          [],
+        );
+      },
+    );
+
+    it(
+      "rolls back the uncommitted release and syncs releasesRoot when the receipt fails before its rename, then a retry installs",
+      async () => {
+        const h =
+          await harness();
+
+        const synced:
+          string[] =
+            [];
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncDirectory:
+                async directory => {
+                  synced.push(
+                    directory,
+                  );
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+
+              writeInstallReceipt:
+                async (
+                  receiptPath,
+                  receipt,
+                ) =>
+                  writePortableReleaseInstallReceipt(
+                    receiptPath,
+                    receipt,
+                    {
+                      renameReceipt:
+                        async () => {
+                          throw new Error(
+                            "synthetic-receipt-rename-failure",
+                          );
+                        },
+                    },
+                  ),
+            },
+          ),
+        ).rejects.toThrow(
+          "synthetic-receipt-rename-failure",
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              ".receipts",
+              `${REVISION}.json`,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          synced,
+        ).toEqual([
+          h.stagingRoot,
+          h.releasesRoot,
+          h.releasesRoot,
+        ]);
+
+        const retried =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          );
+
+        expect(
+          await exists(
+            retried.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+      },
+    );
+
+    it(
+      "never removes the release after the receipt rename when the .receipts fsync fails, and the next invocation exact-replays",
+      async () => {
+        const h =
+          await harness();
+
+        const receiptPath =
+          join(
+            h.releasesRoot,
+            ".receipts",
+            `${REVISION}.json`,
+          );
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              writeInstallReceipt:
+                async (
+                  path,
+                  receipt,
+                ) =>
+                  writePortableReleaseInstallReceipt(
+                    path,
+                    receipt,
+                    {
+                      syncDirectory:
+                        async directory => {
+                          if (
+                            directory ===
+                              dirname(
+                                path,
+                              )
+                          ) {
+                            throw new Error(
+                              "synthetic-receipts-directory-fsync-failure",
+                            );
+                          }
+
+                          await syncPortableReleaseDirectory(
+                            directory,
+                          );
+                        },
+                    },
+                  ),
+            },
+          ),
+        ).rejects.toThrow(
+          "synthetic-receipts-directory-fsync-failure",
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+              "app",
+              "package.json",
+            ),
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          await exists(
+            receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+
+        h.events.length =
+          0;
+
+        let preparations =
+          0;
+
+        const replayed =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              prepareProductionDependencies:
+                async () => {
+                  preparations +=
+                    1;
+
+                  throw new Error(
+                    "exact replay must not prepare dependencies",
+                  );
+                },
+            },
+          );
+
+        expect(
+          replayed.receiptPath,
+        ).toBe(
+          receiptPath,
+        );
+
+        expect(
+          preparations,
+        ).toBe(
+          0,
+        );
+
+        expect(
+          h.events,
+        ).not.toContain(
+          "extract",
+        );
+
+        expect(
+          await quarantineEntries(
+            h.releasesRoot,
+          ),
+        ).toEqual(
+          [],
+        );
+      },
+    );
+
+    it(
+      "never removes the release when temporary receipt cleanup fails after the durable commit, and the next invocation exact-replays",
+      async () => {
+        const h =
+          await harness();
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              writeInstallReceipt:
+                async (
+                  path,
+                  receipt,
+                ) =>
+                  writePortableReleaseInstallReceipt(
+                    path,
+                    receipt,
+                    {
+                      removeTemporary:
+                        async () => {
+                          throw new Error(
+                            "synthetic-receipt-temporary-cleanup-failure",
+                          );
+                        },
+                    },
+                  ),
+            },
+          ),
+        ).rejects.toThrow(
+          "synthetic-receipt-temporary-cleanup-failure",
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              REVISION,
+              "app",
+              "package.json",
+            ),
+          ),
+        ).toBe(
+          true,
+        );
+
+        h.events.length =
+          0;
+
+        const replayed =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          );
+
+        expect(
+          await exists(
+            replayed.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          h.events,
+        ).not.toContain(
+          "extract",
+        );
+      },
+    );
+  },
+);
+
+describe(
+  "portable release installation explicit failure paths",
+  () => {
+    it(
+      "reports both failures and leaves release-only residue when rollback removal fails, then the next invocation quarantines it and installs fresh",
+      async () => {
+        const h =
+          await harness();
+
+        const finalRoot =
+          join(
+            h.releasesRoot,
+            REVISION,
+          );
+
+        let observed:
+          unknown =
+            null;
+
+        try {
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              writeInstallReceipt:
+                async () => {
+                  filesystemFaults.failRemovePath =
+                    finalRoot;
+
+                  throw new Error(
+                    "synthetic-precommit-receipt-failure",
+                  );
+                },
+            },
+          );
+        } catch (cause) {
+          observed =
+            cause;
+        }
+
+        filesystemFaults.failRemovePath =
+          null;
+
+        expect(
+          observed,
+        ).toBeInstanceOf(
+          Error,
+        );
+
+        expect(
+          (
+            observed as Error
+          ).message,
+        ).toBe(
+          "Portable release installation failed: Uncommitted release rollback failed; the release-only residue will be quarantined by the next installation.",
+        );
+
+        const aggregate =
+          (
+            observed as Error
+          ).cause;
+
+        expect(
+          aggregate,
+        ).toBeInstanceOf(
+          AggregateError,
+        );
+
+        expect(
+          (
+            aggregate as AggregateError
+          ).errors.map(
+            error =>
+              (
+                error as Error
+              ).message,
+          ),
+        ).toEqual([
+          "synthetic-precommit-receipt-failure",
+          "synthetic-release-remove-failure",
+        ]);
+
+        expect(
+          await exists(
+            join(
+              finalRoot,
+              "app",
+              "package.json",
+            ),
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              ".receipts",
+              `${REVISION}.json`,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        h.events.length =
+          0;
+
+        const recovered =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          );
+
+        expect(
+          h.events,
+        ).toContain(
+          "extract",
+        );
+
+        const entries =
+          await quarantineEntries(
+            h.releasesRoot,
+          );
+
+        expect(
+          entries,
+        ).toHaveLength(
+          1,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              ".quarantine",
+              entries[0] ?? "",
+              "app",
+              "package.json",
+            ),
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          await exists(
+            recovered.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+      },
+    );
+
+    it(
+      "never deletes the published release when the receipt state is ambiguous during the rollback decision",
+      async () => {
+        const h =
+          await harness();
+
+        const finalRoot =
+          join(
+            h.releasesRoot,
+            REVISION,
+          );
+
+        const receiptPath =
+          join(
+            h.releasesRoot,
+            ".receipts",
+            `${REVISION}.json`,
+          );
+
+        let removals =
+          0;
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncDirectory:
+                async directory => {
+                  if (
+                    filesystemFaults.failLstatPath !==
+                      null &&
+                    directory ===
+                      h.releasesRoot
+                  ) {
+                    removals +=
+                      1;
+                  }
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+
+              writeInstallReceipt:
+                async () => {
+                  filesystemFaults.failLstatPath =
+                    receiptPath;
+
+                  throw new Error(
+                    "synthetic-precommit-failure-with-ambiguous-receipt",
+                  );
+                },
+            },
+          ),
+        ).rejects.toThrow(
+          "synthetic-precommit-failure-with-ambiguous-receipt",
+        );
+
+        filesystemFaults.failLstatPath =
+          null;
+
+        expect(
+          removals,
+        ).toBe(
+          0,
+        );
+
+        for (
+          const relativePath
+          of [
+            "package.json",
+            "package-lock.json",
+            "dist/operatorServer/operatorServerProcess.js",
+            "apps/operator-console/dist/index.html",
+            "apps/operator-console/dist/assets/index-Test.js",
+          ]
+        ) {
+          expect(
+            await readFile(
+              join(
+                finalRoot,
+                "app",
+                ...relativePath.split(
+                  "/",
+                ),
+              ),
+            ),
+          ).toEqual(
+            await readFile(
+              join(
+                h.extractedFixtureRoot,
+                ...relativePath.split(
+                  "/",
+                ),
+              ),
+            ),
+          );
+        }
+
+        expect(
+          await readFile(
+            join(
+              finalRoot,
+              "node_modules",
+              "busybookie-test-runtime",
+              "index.js",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          "export const busybookieTestRuntime = true;\n",
+        );
+
+        expect(
+          await exists(
+            receiptPath,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await quarantineEntries(
+            h.releasesRoot,
+          ),
+        ).toEqual(
+          [],
+        );
+      },
+    );
+
+    it.each([
+      "releases-root",
+      "quarantine",
+    ] as const)(
+      "keeps quarantined evidence and never reuses it when the post-rename %s fsync fails, then the next invocation installs fresh",
+      async failingSync => {
+        const h =
+          await harness();
+
+        const finalRoot =
+          join(
+            h.releasesRoot,
+            REVISION,
+          );
+
+        const quarantineRoot =
+          join(
+            h.releasesRoot,
+            ".quarantine",
+          );
+
+        await mkdir(
+          finalRoot,
+        );
+
+        await write(
+          finalRoot,
+          "existing-evidence.txt",
+          Buffer.from(
+            "existing\n",
+          ),
+        );
+
+        let failed =
+          false;
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncDirectory:
+                async directory => {
+                  const target =
+                    failingSync ===
+                      "releases-root"
+                      ? h.releasesRoot
+                      : quarantineRoot;
+
+                  if (
+                    !failed &&
+                    directory ===
+                      target
+                  ) {
+                    failed =
+                      true;
+
+                    throw new Error(
+                      `synthetic-quarantine-${failingSync}-fsync-failure`,
+                    );
+                  }
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+            },
+          ),
+        ).rejects.toThrow(
+          `synthetic-quarantine-${failingSync}-fsync-failure`,
+        );
+
+        expect(
+          h.events,
+        ).toEqual([
+          "verify-authority",
+        ]);
+
+        expect(
+          await exists(
+            finalRoot,
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await exists(
+            join(
+              h.releasesRoot,
+              ".receipts",
+              `${REVISION}.json`,
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        const entries =
+          await quarantineEntries(
+            h.releasesRoot,
+          );
+
+        expect(
+          entries,
+        ).toHaveLength(
+          1,
+        );
+
+        const evidencePath =
+          join(
+            quarantineRoot,
+            entries[0] ?? "",
+            "existing-evidence.txt",
+          );
+
+        expect(
+          await readFile(
+            evidencePath,
+            "utf8",
+          ),
+        ).toBe(
+          "existing\n",
+        );
+
+        h.events.length =
+          0;
+
+        const recovered =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            dependencies(
+              h,
+            ),
+          );
+
+        expect(
+          h.events,
+        ).toContain(
+          "extract",
+        );
+
+        expect(
+          await exists(
+            join(
+              finalRoot,
+              "existing-evidence.txt",
+            ),
+          ),
+        ).toBe(
+          false,
+        );
+
+        expect(
+          await quarantineEntries(
+            h.releasesRoot,
+          ),
+        ).toEqual(
+          entries,
+        );
+
+        expect(
+          await readFile(
+            evidencePath,
+            "utf8",
+          ),
+        ).toBe(
+          "existing\n",
+        );
+
+        expect(
+          await exists(
+            recovered.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+      },
+    );
+  },
+);
+
+describe(
+  "portable release installation releases-root provisioning durability",
+  () => {
+    it(
+      "fsyncs a releases root it creates, every created ancestor and the pre-existing parent before installing",
+      async () => {
+        const h =
+          await harness();
+
+        const createdParent =
+          join(
+            h.deploymentRoot,
+            "fresh-parent",
+          );
+
+        const releasesRoot =
+          join(
+            createdParent,
+            "releases",
+          );
+
+        const synced:
+          string[] =
+            [];
+
+        const result =
+          await installPortableRelease(
+            {
+              ...installRequest(
+                h,
+              ),
+
+              releasesRoot,
+            },
+            {
+              ...dependencies(
+                h,
+              ),
+
+              syncDirectory:
+                async directory => {
+                  synced.push(
+                    directory,
+                  );
+
+                  await syncPortableReleaseDirectory(
+                    directory,
+                  );
+                },
+            },
+          );
+
+        expect(
+          synced.slice(
+            0,
+            3,
+          ),
+        ).toEqual([
+          releasesRoot,
+          createdParent,
+          h.deploymentRoot,
+        ]);
+
+        expect(
+          await exists(
+            result.receiptPath,
+          ),
+        ).toBe(
+          true,
+        );
+      },
+    );
+
+    it(
+      "does not sync the parent of a pre-existing releases root",
+      async () => {
+        const h =
+          await harness();
+
+        const synced:
+          string[] =
+            [];
+
+        await installPortableRelease(
+          installRequest(
+            h,
+          ),
+          {
+            ...dependencies(
+              h,
+            ),
+
+            syncDirectory:
+              async directory => {
+                synced.push(
+                  directory,
+                );
+
+                await syncPortableReleaseDirectory(
+                  directory,
+                );
+              },
+          },
+        );
+
+        expect(
+          synced,
+        ).not.toContain(
+          h.deploymentRoot,
+        );
+
+        expect(
+          synced,
+        ).toEqual([
+          h.stagingRoot,
+          h.releasesRoot,
+        ]);
       },
     );
   },

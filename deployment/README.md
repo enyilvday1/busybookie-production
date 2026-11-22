@@ -9,7 +9,8 @@ or public API.
 - One Linux host.
 - Node.js 24.
 - FFmpeg and FFprobe.
-- One BusyBookie application root.
+- One BusyBookie application root (see Application root for installed
+  revisions).
 - One persistent block-backed data volume mounted at /var/lib/busybookie.
 - One persistent block-backed BUSYBOOKIE_MEDIA_ROOT at
   /var/lib/busybookie/media.
@@ -25,8 +26,16 @@ or public API.
 ## Application root
 
 The runtime application root must contain package.json, package-lock.json,
-busybookie-release-identity.json, root node_modules, dist,
-apps/operator-console/dist, config, and episodes.
+busybookie-release-identity.json, dist, apps/operator-console/dist, config,
+and episodes, and its production dependencies must resolve from it.
+
+For a release installed by production:release:install, the application root
+is <releases-root>/<revision>/app. Its production dependencies are the sibling
+<releases-root>/<revision>/node_modules, not a node_modules directory inside
+app/; Node.js resolves them through its normal parent-directory module lookup.
+Each immutable installed revision has its own application root.
+Transactional installation does not select or activate a revision. See
+Transactional portable release installation.
 
 BusyBookie resolves runtime inputs relative to process.cwd(), so production
 commands must run from the application root.
@@ -44,9 +53,15 @@ Build sequence:
     npm --prefix apps/operator-console ci
     npm run build
 
-For a clean runtime production-dependency install:
+In a source checkout or build environment, a production-only dependency
+install is:
 
     npm ci --omit=dev
+
+This is not the portable-release installation procedure. A deployed portable
+release receives its production dependencies only through
+production:release:install, which runs npm ci itself inside the transactional
+installer.
 
 tsx remains development-only and is not required on the production host.
 
@@ -179,8 +194,262 @@ consumers must not treat either file appearing alone while the command is
 still running as a completed package.
 
 GNU tar with the required deterministic options and gzip no-name mode are
-mandatory packaging-toolchain dependencies. They remain build/package-host
-requirements only and are not runtime dependencies of the deployed service.
+mandatory packaging-toolchain dependencies on the build/package host. They are
+not runtime dependencies of the deployed service, but the installation host
+also needs GNU tar and gzip because production:release:install extracts the
+archive with GNU tar.
+
+## Transactional portable release installation
+
+production:release:install installs one reviewed portable release, as
+produced by release:create, into an immutable revision directory on the
+deployed Linux host. The installer:
+
+- snapshots the release archive and whole-tree manifest and verifies them
+  against the expected SHA-256 values;
+- extracts the archive into a private staging directory, verifies the
+  extracted tree against the manifest, and verifies that the release identity
+  records the expected reviewed revision;
+- prepares production dependencies with npm ci from the verified
+  package.json and package-lock.json and records dependency-install
+  provenance;
+- makes the complete private release durable, then publishes it with one
+  atomic rename;
+- writes a durable install receipt, which is the commit record of the
+  installation;
+- replays an already committed installation exactly; and
+- fails closed on inconsistent committed state.
+
+Installation does not activate a release. It creates no current or previous
+pointer and starts no process.
+
+### Installation host requirements
+
+- Linux. The per-revision installation lock and the production npm runner
+  are Linux-only, and the installer refuses to run elsewhere.
+- Node.js 24 with its bundled npm on PATH, and access to the npm registry or
+  mirror/cache configured for the installing user, because dependency
+  preparation runs npm ci.
+- GNU tar and gzip, used to extract the archive.
+- flock (util-linux), used for the per-revision installation lock.
+
+tsx is not required.
+
+### Directory layout
+
+    <releases-root>/
+    |-- <revision>/                       immutable installed release
+    |   |-- app/                          application root (release archive)
+    |   `-- node_modules/                 production dependencies
+    |       `-- .busybookie-install-provenance.json
+    |-- .receipts/<revision>.json         install receipt (commit record)
+    |-- .install-locks/<revision>.lock    per-revision installation lock
+    `-- .quarantine/<revision>.<id>/      uncommitted residue, evidence only
+
+    <staging-root>/
+    `-- .<revision>.installing-<random>/  private installation work
+
+node_modules is a sibling of app/, not inside it. Production commands run from
+app/ (see Application root).
+
+The installer creates the releases root and the staging root when they are
+missing; a releases root it creates is fsynced into its parent. The staging
+root must be on the same filesystem as the releases root, because publication
+is an atomic rename, and the installer refuses otherwise. Keep both roots
+outside /var/lib/busybookie (see Persistent data volume).
+
+A second installation of the same revision waits up to 30 seconds for the
+per-revision lock and then fails.
+
+### Install command
+
+On the production host:
+
+    npm run production:release:install -- \
+      --archive /path/to/busybookie-release-<revision>.tar.gz \
+      --tree-manifest /path/to/busybookie-release-<revision>-tree.sha256 \
+      --expected-archive-sha256 <64-lowercase-hex> \
+      --expected-tree-manifest-sha256 <64-lowercase-hex> \
+      --reviewed-revision <40-lowercase-hex> \
+      --releases-root /srv/busybookie/releases \
+      --staging-root /srv/busybookie/staging
+
+The angle-bracket values are placeholders, not authority values.
+
+npm run production:release:install runs the compiled
+dist/deployment/installPortableReleaseProcess.js. Where no package script is
+available, run that file directly with node and the same flags (see First
+installation). From an approved source checkout,
+npm run release:install -- <flags> runs the same command through tsx, for
+development use only.
+
+All seven flags are required, each exactly once:
+
+- --archive
+- --tree-manifest
+- --expected-archive-sha256
+- --expected-tree-manifest-sha256
+- --reviewed-revision
+- --releases-root
+- --staging-root
+
+There are no defaults and no other flags. --reviewed-revision must be exactly
+40 lowercase hexadecimal characters, and both expected SHA-256 values must be
+exactly 64 lowercase hexadecimal characters. Path flags resolve against the
+current working directory, so prefer absolute paths. Take the expected values
+from the release:create result of the reviewed release, never from the files
+being installed.
+
+On success the command prints the installation result as JSON on stdout and
+exits 0. The result contains reviewedRevision, releaseRoot (the installed
+app/ directory), receiptPath, archiveSha256, treeManifestSha256,
+identityManifestSha256, installedFileCount, dependencyManifestSha256,
+dependencyFileCount and dependencyTotalBytes. A fresh installation and an
+exact replay print the same result. On failure the command prints one line
+beginning "Portable release installation failed:" on stderr, prints nothing
+on stdout, and exits 1.
+
+### First installation (bootstrap)
+
+The production host needs neither tsx nor a source checkout. Every release
+archive already contains the compiled dist/**/*.js, including
+dist/deployment/installPortableReleaseProcess.js, and package.json with
+"type": "module", and the installer needs no node_modules to run. Archives
+created from revisions that predate production:release:install do not contain
+the installer.
+
+Follow this order:
+
+1. Verify the archive before running anything from it:
+
+       sha256sum /path/to/busybookie-release-<revision>.tar.gz
+
+   The digest must equal the reviewed expected archive SHA-256. Stop on any
+   mismatch.
+
+2. Extract a bootstrap copy into a new, empty directory outside the releases
+   and staging roots:
+
+       mkdir /path/to/bootstrap
+       tar --extract --gzip \
+         --file /path/to/busybookie-release-<revision>.tar.gz \
+         --directory /path/to/bootstrap
+
+3. Run the compiled installer from that bootstrap copy, with the same seven
+   flags as above:
+
+       node /path/to/bootstrap/dist/deployment/installPortableReleaseProcess.js \
+         --archive /path/to/busybookie-release-<revision>.tar.gz \
+         ...
+
+4. The installer then performs the authoritative installation: it verifies
+   the archive again and verifies the tree manifest, extracts its own private
+   copy, and publishes the release under the releases root.
+
+The bootstrap copy is not the installed release and nothing reads it after
+the installer exits; remove it afterwards. Later installations may instead run
+the compiled installer from a previously installed, trusted release:
+
+    node <releases-root>/<installed-revision>/app/dist/deployment/installPortableReleaseProcess.js ...
+
+### Transaction model
+
+The install receipt is the commit record. Under the per-revision lock the
+installer classifies the existing state:
+
+- Release and receipt: a committed installation. The command performs an
+  exact replay (see Exact replay).
+- Release only: uncommitted residue of an interrupted installation. It is
+  moved atomically into .quarantine, and a fresh installation follows.
+- Receipt only: inconsistent committed state. Automatic recovery is refused
+  with "Committed install receipt exists but its immutable release directory
+  is missing; automatic recovery is unsafe and operator intervention is
+  required." See Receipt-only recovery.
+- Neither: a fresh installation.
+
+### Dependency preparation
+
+Dependency preparation copies the verified package.json and
+package-lock.json into a private work directory and runs:
+
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund --no-bin-links
+
+Both files must still be byte-identical to the verified copies afterwards.
+The preparer then runs npm --version with the same npm executable in the same
+work directory and writes node_modules/.busybookie-install-provenance.json,
+which records nodeVersion, npmVersion, platform and arch. That file is written
+before the dependency manifest is created, so it is bound into
+dependencyManifestSha256 like every other dependency file. The installer
+re-creates the dependency manifest itself before publication and requires it
+to match.
+
+### Durability and publication
+
+- Every file of the verified app/ tree and of node_modules, then their
+  directories and the private release root, are fsynced before publication.
+- The release is published with one atomic rename, after which both the
+  staging root and the releases root are fsynced.
+- The receipt is written to a temporary file and fsynced, then renamed into
+  .receipts. That rename is the commit point, and .receipts is fsynced after
+  it.
+- Before publication, failures clean up private staging state. If a failure
+  occurs after publication but before the receipt commit point, the installer
+  removes the published release when rollback is safe and fsyncs the releases
+  root. Anything left behind is handled as release-only residue by the next
+  installation.
+- Once the receipt exists, or when its presence cannot be determined, a
+  failure never removes the release. After the commit point the release is
+  never destructively rolled back; the next installation replays it.
+
+### Exact replay
+
+Rerunning the command for a committed revision verifies the archive and
+manifest inputs, the installed app/ tree, the release identity, the installed
+node_modules manifest and the receipt, then prints the stored result. It does
+not extract the archive, rerun npm or recapture provenance. Any change to the
+set of regular files in node_modules or to their bytes after the commit,
+including the provenance file, makes the replay fail closed. Permission,
+ownership and timestamp changes are not detected by the dependency manifest.
+
+### Receipt-only recovery
+
+Recovery from a receipt whose immutable release directory is missing is
+manual and fail-closed. No recovery command exists.
+
+- Stop automated and repeated installation attempts for that revision.
+- Preserve the receipt and the rest of the releases root.
+- Confirm that the receipt names the expected revision and the reviewed
+  archive, manifest and dependency authorities.
+- Determine why the immutable release directory disappeared.
+- Check whether a quarantined or externally moved copy of it exists.
+- Do not regenerate the release by rerunning npm, and do not delete the
+  receipt merely to unblock installation.
+- Escalate to an operator-reviewed manual recovery.
+
+### Quarantine
+
+Release-only residue is moved to <releases-root>/.quarantine/<revision>.<id>/
+with one same-filesystem rename that never replaces existing evidence.
+Quarantined bytes are evidence only: they are never trusted as installation
+authority, reused, copied into a new release or used to synthesize a receipt.
+The fresh installation starts again from the reviewed archive.
+
+Quarantine has no automatic retention or cleanup. Operators must manage its
+disk usage deliberately.
+
+### Stale private staging state
+
+A crash can leave .<revision>.installing-<random> directories in the staging
+root. They are never installation authority and do not block later
+installations, which always use new, uniquely named directories. Nothing
+sweeps them automatically; remove them during housekeeping while no
+installation is running.
+
+A crash or a cleanup failure can likewise leave private receipt-temporary
+state under .receipts, such as .receipts/.receipt-<revision>-<random>/. It is
+not the committed receipt and not installation authority, and exact replay
+ignores it. Nothing removes it automatically; it may need the same
+housekeeping.
 
 ## Environment contract
 
@@ -407,9 +676,14 @@ The private/staging production command surface is:
     npm run production:episode:adopt-visual-evidence
     npm run production:dialogue:authorize-visual
     npm run production:dialogue:place
+    npm run production:release:install
 
 These commands execute compiled JavaScript from dist and do not require tsx on
 the production host.
+
+production:release:install installs a reviewed portable release; see
+Transactional portable release installation for its flags, bootstrap and
+recovery rules.
 
 production:episode:adopt-visual-evidence records a durable HUMAN_OPERATOR
 review of one VERIFIED COMPLETED visual output:
@@ -478,7 +752,8 @@ Before any paid generation is attempted on the deployed host:
   reports /var/lib/busybookie (no nested mount);
 - verify neither data root is inside the Git checkout or release tree;
 - verify exactly one production writer of the media root is active;
-- install root production dependencies deterministically;
+- install the release with production:release:install, which prepares its
+  production dependencies transactionally, and keep the printed result;
 - run the production dependency audit;
 - verify all compiled production entrypoints exist;
 - verify busybookie-release-identity.json is present and readable;

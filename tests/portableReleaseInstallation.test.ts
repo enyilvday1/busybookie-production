@@ -151,6 +151,18 @@ import {
   writePortableReleaseInstallReceipt,
 } from "../src/deployment/portableReleaseInstallReceiptStore.js";
 
+import {
+  preparePortableReleaseProductionDependencies,
+  type PortableReleaseDependencyInstallProvenanceCollector,
+  type PortableReleaseDependencyInstallRunner,
+} from "../src/deployment/portableReleaseDependencyPreparation.js";
+
+import {
+  PORTABLE_RELEASE_DEPENDENCY_INSTALL_PROVENANCE_FILE,
+  createPortableReleaseDependencyInstallProvenance,
+  serializePortableReleaseDependencyInstallProvenance,
+} from "../src/deployment/portableReleaseDependencyInstallProvenance.js";
+
 const REVISION =
   "0ff4981807eb8db6a0aac73fefbd94292d7d12ef";
 
@@ -4940,6 +4952,410 @@ describe(
           h.stagingRoot,
           h.releasesRoot,
         ]);
+      },
+    );
+  },
+);
+
+describe(
+  "portable release installation with the real dependency preparer",
+  () => {
+    it(
+      "installs through the real preparer with real provenance, binds the published manifest in the receipt, replays exactly without re-preparing, and fails closed on post-commit tampering",
+      async () => {
+        const h =
+          await harness();
+
+        const provenanceInput =
+          Object.freeze({
+            nodeVersion:
+              "v24.11.0",
+
+            npmVersion:
+              "11.11.1",
+
+            platform:
+              "linux",
+
+            arch:
+              "x64",
+          });
+
+        const expectedProvenanceBytes =
+          serializePortableReleaseDependencyInstallProvenance(
+            createPortableReleaseDependencyInstallProvenance(
+              provenanceInput,
+            ),
+          );
+
+        const calls =
+          {
+            preparer:
+              0,
+
+            runner:
+              0,
+
+            collector:
+              0,
+          };
+
+        const runnerCwds:
+          string[] =
+            [];
+
+        const collectorCwds:
+          string[] =
+            [];
+
+        const runInstall:
+          PortableReleaseDependencyInstallRunner =
+            async input => {
+              calls.runner +=
+                1;
+
+              runnerCwds.push(
+                input.cwd,
+              );
+
+              expect(
+                input.executable,
+              ).toBe(
+                "npm",
+              );
+
+              await write(
+                input.cwd,
+                "node_modules/.package-lock.json",
+                Buffer.from(
+                  "{\"lockfileVersion\":3}\n",
+                ),
+              );
+
+              await write(
+                input.cwd,
+                "node_modules/alpha/package.json",
+                Buffer.from(
+                  "{\"name\":\"alpha\",\"version\":\"1.0.0\"}\n",
+                ),
+              );
+
+              await write(
+                input.cwd,
+                "node_modules/alpha/index.js",
+                Buffer.from(
+                  "export const alpha = true;\n",
+                ),
+              );
+            };
+
+        const collectInstallProvenance:
+          PortableReleaseDependencyInstallProvenanceCollector =
+            async input => {
+              calls.collector +=
+                1;
+
+              collectorCwds.push(
+                input.cwd,
+              );
+
+              expect(
+                input.npmExecutable,
+              ).toBe(
+                "npm",
+              );
+
+              return provenanceInput;
+            };
+
+        const realPreparerDependencies =
+          {
+            ...dependencies(
+              h,
+            ),
+
+            prepareProductionDependencies:
+              async (
+                input: Readonly<{
+                  revisionRoot: string;
+                  artifactRoot: string;
+                }>,
+              ) => {
+                calls.preparer +=
+                  1;
+
+                return preparePortableReleaseProductionDependencies(
+                  input,
+                  {
+                    runInstall,
+                    collectInstallProvenance,
+                  },
+                );
+              },
+          };
+
+        const result =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            realPreparerDependencies,
+          );
+
+        expect(
+          calls,
+        ).toEqual({
+          preparer:
+            1,
+
+          runner:
+            1,
+
+          collector:
+            1,
+        });
+
+        expect(
+          runnerCwds[0]?.includes(
+            ".dependency-install-",
+          ),
+        ).toBe(
+          true,
+        );
+
+        expect(
+          collectorCwds,
+        ).toEqual(
+          runnerCwds,
+        );
+
+        const publishedDependencyRoot =
+          join(
+            h.releasesRoot,
+            REVISION,
+            "node_modules",
+          );
+
+        const provenancePath =
+          join(
+            publishedDependencyRoot,
+            PORTABLE_RELEASE_DEPENDENCY_INSTALL_PROVENANCE_FILE,
+          );
+
+        expect(
+          PORTABLE_RELEASE_DEPENDENCY_INSTALL_PROVENANCE_FILE,
+        ).toBe(
+          ".busybookie-install-provenance.json",
+        );
+
+        expect(
+          await readFile(
+            provenancePath,
+          ),
+        ).toEqual(
+          expectedProvenanceBytes,
+        );
+
+        const publishedManifest =
+          await createPortableReleaseDependencyTreeManifest(
+            publishedDependencyRoot,
+          );
+
+        expect(
+          publishedManifest.files.map(
+            file =>
+              file.relativePath,
+          ),
+        ).toEqual([
+          ".busybookie-install-provenance.json",
+          ".package-lock.json",
+          "alpha/index.js",
+          "alpha/package.json",
+        ]);
+
+        const provenanceEntry =
+          publishedManifest.files.find(
+            file =>
+              file.relativePath ===
+              ".busybookie-install-provenance.json",
+          );
+
+        expect(
+          provenanceEntry?.bytes,
+        ).toBe(
+          expectedProvenanceBytes.length,
+        );
+
+        expect(
+          provenanceEntry?.sha256,
+        ).toBe(
+          sha256(
+            expectedProvenanceBytes,
+          ),
+        );
+
+        const receipt =
+          JSON.parse(
+            await readFile(
+              result.receiptPath,
+              "utf8",
+            ),
+          ) as Record<string, unknown>;
+
+        expect(
+          receipt.dependencyManifestSha256,
+        ).toBe(
+          publishedManifest.manifestSha256,
+        );
+
+        expect(
+          result.dependencyManifestSha256,
+        ).toBe(
+          publishedManifest.manifestSha256,
+        );
+
+        expect(
+          receipt.dependencyFileCount,
+        ).toBe(
+          4,
+        );
+
+        expect(
+          receipt.dependencyFileCount,
+        ).toBe(
+          publishedManifest.fileCount,
+        );
+
+        expect(
+          receipt.dependencyTotalBytes,
+        ).toBe(
+          publishedManifest.totalBytes,
+        );
+
+        expect(
+          publishedManifest.totalBytes,
+        ).toBe(
+          publishedManifest.files.reduce(
+            (
+              total,
+              file,
+            ) =>
+              total +
+              file.bytes,
+            0,
+          ),
+        );
+
+        h.events.length =
+          0;
+
+        const replayed =
+          await installPortableRelease(
+            installRequest(
+              h,
+            ),
+            realPreparerDependencies,
+          );
+
+        expect(
+          replayed,
+        ).toEqual(
+          result,
+        );
+
+        expect(
+          calls,
+        ).toEqual({
+          preparer:
+            1,
+
+          runner:
+            1,
+
+          collector:
+            1,
+        });
+
+        expect(
+          h.events,
+        ).not.toContain(
+          "extract",
+        );
+
+        const tamperedProvenanceBytes =
+          serializePortableReleaseDependencyInstallProvenance(
+            createPortableReleaseDependencyInstallProvenance({
+              ...provenanceInput,
+
+              npmVersion:
+                "11.11.2",
+            }),
+          );
+
+        await writeFile(
+          provenancePath,
+          tamperedProvenanceBytes,
+        );
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            realPreparerDependencies,
+          ),
+        ).rejects.toThrow(
+          "Portable release installation failed: Existing immutable release receipt does not match the requested release authorities.",
+        );
+
+        await writeFile(
+          provenancePath,
+          expectedProvenanceBytes,
+        );
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            realPreparerDependencies,
+          ),
+        ).resolves.toEqual(
+          result,
+        );
+
+        await writeFile(
+          join(
+            publishedDependencyRoot,
+            "alpha",
+            "index.js",
+          ),
+          "export const alpha = false;\n",
+        );
+
+        await expect(
+          installPortableRelease(
+            installRequest(
+              h,
+            ),
+            realPreparerDependencies,
+          ),
+        ).rejects.toThrow(
+          "Portable release installation failed: Existing immutable release receipt does not match the requested release authorities.",
+        );
+
+        expect(
+          calls,
+        ).toEqual({
+          preparer:
+            1,
+
+          runner:
+            1,
+
+          collector:
+            1,
+        });
       },
     );
   },

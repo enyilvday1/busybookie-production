@@ -176,10 +176,42 @@ const withoutGoogleContractIdentifiers = (text: string) =>
   GOOGLE_CONTRACT_IDENTIFIERS.reduce((remaining, token) => remaining.replace(new RegExp(`\\b${token}\\b`, "g"), ""), text);
 const withoutAllowedTokens = (path: string, text: string) =>
   (ALLOWED_TOKENS[path] ?? []).reduce((remaining, token) => remaining.split(token).join(""), text);
+// R44B11F Phase 5 (conflict repair C1): the verification contract names the
+// imported R44B11A provider constant RUNWAY_PROVIDER_ID and its two locked
+// policy IDs. Only these exact whole identifiers, only in that one file, are
+// removed before the brand and provider-variable rules run; a bare
+// "GOOGLE_GENAI" or "RUNWAY" literal, a near-miss such as RUNWAY_PROVIDER_IDS,
+// or the same tokens in any other file still fail. GOOGLE_PROVIDER_ID needs no
+// entry: it does not match the brand rule and is already a closed contract
+// identifier for the provider-variable rule.
+const VERIFICATION_CONTRACT = "src/providerVerificationContract.ts";
+const VERIFICATION_CONTRACT_IDENTIFIERS = Object.freeze(["RUNWAY_PROVIDER_ID", "GOOGLE_GENAI_MODELS_LIST_V1BETA", "RUNWAY_ORGANIZATION_GET_V1_2024_11_06"]);
+const withoutVerificationContractIdentifiers = (path: string, text: string) =>
+  path !== VERIFICATION_CONTRACT
+    ? text
+    : VERIFICATION_CONTRACT_IDENTIFIERS.reduce((remaining, token) => remaining.replace(new RegExp(`\\b${token}\\b`, "g"), ""), text);
+// R44B11F Phase 5 (conflict repair C2): the kill-switch key contains
+// LIVE_PROVIDER. Only this exact whole token, only in the configuration
+// module, is removed before the provider-selector guard runs. No prefix,
+// suffix, substring or case-folded spelling is removed, and no other file has
+// any allowance.
+const KILL_SWITCH_CONFIG = "src/providerVerificationConfig.ts";
+const withoutKillSwitchKey = (path: string, text: string) =>
+  path !== KILL_SWITCH_CONFIG ? text : text.replace(/\bCOMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION\b/g, "");
+// The provider-selector guard (R44B10B), unchanged.
+const PROVIDER_SELECTOR = /providerSelector|providerRegistry|selectProvider|providerFactory|ProviderPort|switch\s*\(\s*[A-Za-z.]*provider\b|REAL_PROVIDER_MODE|LIVE_PROVIDER/i;
 // The worker files that import the shared protocol package: the credential
-// and provider-execution re-exports, and (R44B11A) the two provider contracts
-// that adapt the shared generation-request authority.
-const PROTOCOL_IMPORTERS = new Set(["src/credentialContracts.ts", "src/googleProviderContract.ts", "src/providerExecutionContract.ts", "src/runwayProviderContract.ts"]);
+// and provider-execution re-exports, (R44B11A) the two provider contracts
+// that adapt the shared generation-request authority, and (R44B11F Phase 5,
+// conflict repair C1) the verification contract, solely to consume
+// GOOGLE_PROVIDER_ID and RUNWAY_PROVIDER_ID.
+const PROTOCOL_IMPORTERS = new Set([
+  "src/credentialContracts.ts",
+  "src/googleProviderContract.ts",
+  "src/providerExecutionContract.ts",
+  "src/providerVerificationContract.ts",
+  "src/runwayProviderContract.ts",
+]);
 
 describe("commercial-worker source boundary", () => {
   it("scans the worker source", () => {
@@ -204,6 +236,9 @@ describe("commercial-worker source boundary", () => {
       "src/preProviderOrchestration.ts",
       "src/providerEnvironment.ts",
       "src/providerExecutionContract.ts",
+      "src/providerVerificationConfig.ts",
+      "src/providerVerificationContract.ts",
+      "src/providerVerificationCredentialOpening.ts",
       "src/runwayAttemptExecution.ts",
       "src/runwayProviderAdapter.ts",
       "src/runwayProviderContract.ts",
@@ -237,14 +272,20 @@ describe("commercial-worker source boundary", () => {
     // refuses; it is exempt from the brand pattern only (checked below).
     const exempt = new Set([...(EXEMPTIONS[path] ?? []), ...(path === "src/providerEnvironment.ts" ? ["provider SDK or brand"] : [])]);
     const rules = FORBIDDEN.filter(({ label: name }) => !exempt.has(name));
-    const violations = rules.filter(({ pattern }) => pattern.test(withoutRunwayComposerIdentifiers(path, withoutAllowedTokens(path, code(text))))).map(({ label: name }) => name);
+    const violations = rules
+      .filter(({ pattern }) => pattern.test(withoutVerificationContractIdentifiers(path, withoutRunwayComposerIdentifiers(path, withoutAllowedTokens(path, code(text))))))
+      .map(({ label: name }) => name);
     expect({ path, violations }).toEqual({ path, violations: [] });
   });
 
   it("names provider-global variables only in the forbidden-environment module", () => {
     const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
     // R44B10A: only the exact closed contract identifiers are removed first.
-    expect(sources.filter(({ text }) => PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(text))).map(({ path }) => path)).toEqual([
+    // R44B11F Phase 5: and, in the verification contract only, its exact
+    // policy identifiers.
+    expect(
+      sources.filter(({ path, text }) => PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(withoutVerificationContractIdentifiers(path, text)))).map(({ path }) => path),
+    ).toEqual([
       "src/providerEnvironment.ts",
     ]);
     // Guard the guard: environment names and unapproved or near-miss GOOGLE_ names still fail.
@@ -1458,8 +1499,9 @@ describe("real Runway provider boundary (R44B10B)", () => {
     for (const text of [contract, adapter, composer]) {
       expect(/google|genai|gemini|interactions\./i.test(text)).toBe(false);
     }
-    const SELECTOR = /providerSelector|providerRegistry|selectProvider|providerFactory|ProviderPort|switch\s*\(\s*[A-Za-z.]*provider\b|REAL_PROVIDER_MODE|LIVE_PROVIDER/i;
-    for (const { path, text } of sources) expect(SELECTOR.test(code(text)), path).toBe(false);
+    const SELECTOR = PROVIDER_SELECTOR;
+    // R44B11F Phase 5 (C2): only the exact kill-switch key, only in its module.
+    for (const { path, text } of sources) expect(SELECTOR.test(withoutKillSwitchKey(path, code(text))), path).toBe(false);
     expect(SELECTOR.test("switch (lease.provider) {")).toBe(true);
     const scripts = (JSON.parse(read(join(APP_ROOT, "package.json"))) as { scripts: Record<string, string> }).scripts;
     expect(Object.values(scripts).some((command) => /runway/i.test(command))).toBe(false);
@@ -1716,6 +1758,213 @@ describe("shared generation-request authority (R44B11A)", () => {
     // No worker module keeps its own copy of the shared identities or request grammar.
     const COPY = /"GOOGLE_GENAI"|"gemini-omni-1\.1-flash"|"RUNWAY"|"gen4\.5"|"720p"|REQUEST_MEMBERS|"durationSeconds"/;
     expect(sources.filter(({ text }) => COPY.test(code(text))).map(({ path }) => path)).toEqual([]);
+  });
+});
+
+// R44B11F Phase 5 (architecture "R44B11F Phase 5 worker verification client,
+// configuration and credential-opening contract amendment"): the kill switch,
+// the pure verification contract, the separate verification client and the
+// VERIFYING binding owner. Library only: no caller, no transport, no run.
+describe("provider verification boundary (R44B11F Phase 5)", () => {
+  const CONFIG = KILL_SWITCH_CONFIG;
+  const CONTRACT = VERIFICATION_CONTRACT;
+  const OPENING = "src/providerVerificationCredentialOpening.ts";
+  const CLIENT = "src/workerControlClient.ts";
+  const PHASE_5_MODULES = [CONFIG, CONTRACT, OPENING];
+  const config = code(read(join(SRC_ROOT, "providerVerificationConfig.ts")));
+  const contract = code(read(join(SRC_ROOT, "providerVerificationContract.ts")));
+  const opening = code(read(join(SRC_ROOT, "providerVerificationCredentialOpening.ts")));
+  const textOf = (path: string) => code(read(join(APP_ROOT, path)));
+  const VERIFICATION_METHODS = [
+    "leaseProviderVerification",
+    "requestProviderVerificationCredentialGrant",
+    "acknowledgeProviderVerificationVerifying",
+    "reportProviderVerificationResult",
+  ] as const;
+  const brand = FORBIDDEN.find(({ label: name }) => name === "provider SDK or brand")!.pattern;
+  const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
+
+  it("adds exactly the three Phase 5 modules and none of the Phase 6 or Phase 7 files", () => {
+    const paths = sources.map(({ path }) => path);
+    for (const path of PHASE_5_MODULES) expect(paths).toContain(path);
+    for (const absent of ["providerVerificationTransport.ts", "googleProviderVerification.ts", "runwayProviderVerification.ts", "providerVerificationRun.ts"]) {
+      expect(existsSync(join(SRC_ROOT, absent)), absent).toBe(false);
+    }
+    expect(paths.filter((path) => /providerVerification|ProviderVerification/.test(path)).sort()).toEqual([...PHASE_5_MODULES].sort());
+  });
+
+  it("locks the exact import allowlists", () => {
+    // C1: the contract's only import is the two canonical R44B11A constants.
+    expect(importsOf(contract)).toEqual([PROTOCOL_PACKAGE]);
+    expect(contract.match(/\bimport\b/g)).toHaveLength(1);
+    expect(contract).toMatch(/^import \{ GOOGLE_PROVIDER_ID, RUNWAY_PROVIDER_ID \} from "commercial-worker-protocol";$/m);
+    expect(importsOf(config)).toEqual(["./workerError.js"]);
+    expect(importsOf(opening).sort()).toEqual([
+      "./credentialContracts.js",
+      "./providerEnvironment.js",
+      "./providerVerificationContract.js",
+      "./workerControlClient.js",
+      "./workerError.js",
+    ]);
+    // The client adds only the verification contract.
+    expect(importsOf(clientSource).sort()).toEqual(["./providerExecutionContract.js", "./providerVerificationContract.js", "./workerError.js"]);
+    // C1: exactly one new protocol importer, and no other verification module reaches the protocol.
+    expect(sources.filter(({ text }) => importsOf(text).includes(PROTOCOL_PACKAGE)).map(({ path }) => path).sort()).toEqual([...PROTOCOL_IMPORTERS].sort());
+  });
+
+  it("consumes the canonical provider identities and keeps no local provider literal (C1)", () => {
+    // The supported pairs name the imported constants as their provider values.
+    expect(contract).toMatch(/\{ provider: GOOGLE_PROVIDER_ID, verificationPolicyId: "GOOGLE_GENAI_MODELS_LIST_V1BETA" \}/);
+    expect(contract).toMatch(/\{ provider: RUNWAY_PROVIDER_ID, verificationPolicyId: "RUNWAY_ORGANIZATION_GET_V1_2024_11_06" \}/);
+    // No "GOOGLE_GENAI" or "RUNWAY" literal and no other spelling of either identity:
+    // once the imported constants and the policy IDs are removed, no brand text remains.
+    expect(/["'`](GOOGLE_GENAI|RUNWAY)["'`]/.test(contract)).toBe(false);
+    const residue = withoutVerificationContractIdentifiers(CONTRACT, contract).replace(/\bGOOGLE_PROVIDER_ID\b/g, "");
+    expect(/google|genai|gemini|runway/i.test(residue)).toBe(false);
+    // The R44B11A copy rule itself stays unweakened (its own test scans every
+    // worker source, this module included); the brand allowance never hides a copy.
+    for (const planted of ['provider: "RUNWAY"', 'provider: "GOOGLE_GENAI"', "const provider = 'RUNWAY';"]) {
+      expect(brand.test(withoutVerificationContractIdentifiers(CONTRACT, planted)), planted).toBe(true);
+    }
+  });
+
+  it("relaxes the brand and provider-variable rules only for exact whole tokens in the contract module", () => {
+    const allowed = 'import { RUNWAY_PROVIDER_ID } from "x"; const p = ["GOOGLE_GENAI_MODELS_LIST_V1BETA", "RUNWAY_ORGANIZATION_GET_V1_2024_11_06"];';
+    expect(brand.test(withoutVerificationContractIdentifiers(CONTRACT, allowed))).toBe(false);
+    expect(PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(withoutVerificationContractIdentifiers(CONTRACT, allowed)))).toBe(false);
+    // Guard the guard: near-miss identifiers still fail the brand rule in the allowed file.
+    for (const planted of [
+      "RUNWAY_PROVIDER_IDS",
+      "XRUNWAY_PROVIDER_ID",
+      "RUNWAY_PROVIDER",
+      "RUNWAY_ORGANIZATION_GET_V1_2024_11_06_V2",
+      "GOOGLE_GENAI_MODELS_LIST_V1BETA2",
+      "runway_provider_id",
+      "GOOGLE_GENAI",
+    ]) {
+      expect(brand.test(withoutVerificationContractIdentifiers(CONTRACT, planted)), planted).toBe(true);
+    }
+    // ...and the provider-variable rule.
+    for (const planted of ["GOOGLE_GENAI_MODELS_LIST_V1BETA_X", "XGOOGLE_GENAI_MODELS_LIST_V1BETA", "GOOGLE_GENAI_USE_VERTEXAI"]) {
+      expect(PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(withoutVerificationContractIdentifiers(CONTRACT, planted))), planted).toBe(true);
+    }
+    // The same exact tokens in any other file still fail.
+    for (const path of [CONFIG, OPENING, CLIENT, "src/googleProviderContract.ts"]) {
+      expect(brand.test(withoutVerificationContractIdentifiers(path, "RUNWAY_PROVIDER_ID")), path).toBe(true);
+      expect(brand.test(withoutVerificationContractIdentifiers(path, '"GOOGLE_GENAI_MODELS_LIST_V1BETA"')), path).toBe(true);
+      expect(PROVIDER_VARIABLE.test(withoutGoogleContractIdentifiers(withoutVerificationContractIdentifiers(path, "GOOGLE_GENAI_MODELS_LIST_V1BETA"))), path).toBe(true);
+    }
+    // GOOGLE_PROVIDER_ID needs no relaxation.
+    expect(brand.test("GOOGLE_PROVIDER_ID")).toBe(false);
+  });
+
+  it("allows the kill-switch key past the selector guard only as the exact whole token in its module (C2)", () => {
+    const KEY = "COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION";
+    // The key appears only in the configuration module, and the module passes.
+    expect(sources.filter(({ text }) => code(text).includes(KEY)).map(({ path }) => path)).toEqual([CONFIG]);
+    expect(PROVIDER_SELECTOR.test(config)).toBe(true);
+    expect(PROVIDER_SELECTOR.test(withoutKillSwitchKey(CONFIG, config))).toBe(false);
+    // The same exact token anywhere else still fails.
+    for (const path of [CONTRACT, OPENING, CLIENT, "src/workerConfig.ts"]) {
+      expect(PROVIDER_SELECTOR.test(withoutKillSwitchKey(path, `const key = "${KEY}";`)), path).toBe(true);
+    }
+    // Near-misses in the allowed module still fail: prefix, suffix, other LIVE_PROVIDER text, case-folded.
+    for (const planted of [
+      `const key = "X_${KEY}";`,
+      `const key = "${KEY}_ENABLED";`,
+      "const mode = environment.LIVE_PROVIDER_MODE;",
+      `const key = "${KEY.toLowerCase()}";`,
+      `const a = "${KEY}"; const b = "LIVE_PROVIDER";`,
+    ]) {
+      expect(PROVIDER_SELECTOR.test(withoutKillSwitchKey(CONFIG, planted)), planted).toBe(true);
+    }
+  });
+
+  it("keeps the configuration injected, disabled-only and independent of the submission switch", () => {
+    expect(config).toMatch(/export type ProviderVerificationConfig = Readonly<\{ liveVerification: "DISABLED" \}>;/);
+    expect(/ENABLED|"enabled"|liveVerification: "(?!DISABLED)/.test(config)).toBe(false);
+    expect(/WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED|COMMERCIAL_WORKER_ENV|STATE_ROOT|workerConfig/.test(config)).toBe(false);
+    expect(/\.trim\(|toLowerCase|toUpperCase/.test(config)).toBe(false);
+  });
+
+  it("has no process access, entry point, logging or network primitive in the Phase 5 modules", () => {
+    const NETWORK = /\bfetch\b|node:http\b|node:https\b|node:http2\b|node:net\b|node:tls\b|node:dgram\b|undici|WebSocket/;
+    for (const path of PHASE_5_MODULES) {
+      const text = textOf(path);
+      expect(NETWORK.test(text), path).toBe(false);
+      expect(/process\.|import\.meta\.main|require\.main|console\.|\blog\(/.test(text), path).toBe(false);
+    }
+    // The verification methods send only through the client's shared request path.
+    for (const name of VERIFICATION_METHODS) {
+      const method = methodSource(name);
+      expect(method.length, name).toBeGreaterThan(0);
+      expect(method.match(/\bpost\(/g), name).toHaveLength(1);
+      expect(NETWORK.test(method) || /\bsend\(/.test(method), name).toBe(false);
+      expect(FORBIDDEN_IN_PRIMITIVE.test(method), name).toBe(false);
+    }
+    // Guard the guard.
+    expect(NETWORK.test("await fetch(url)")).toBe(true);
+    expect(NETWORK.test('import https from "node:https";')).toBe(true);
+  });
+
+  it("keeps issued-object provenance in module-private WeakSets exposed only through read-only predicates", () => {
+    const verification = clientSource.slice(clientSource.indexOf("export type ProviderVerificationLease"));
+    expect(verification.match(/new WeakSet<object>\(\)/g)).toHaveLength(3);
+    expect(/new (Set|Map)\b/.test(verification)).toBe(false);
+    expect(/export (const|let) issued(Leases|Grants|VerifyingAcknowledgements)\b/.test(verification)).toBe(false);
+    for (const predicate of ["isIssuedProviderVerificationLease", "isIssuedProviderVerificationCredentialGrant", "isIssuedProviderVerificationVerifyingAcknowledgement"]) {
+      expect(verification).toMatch(new RegExp(`export const ${predicate} = `));
+      expect(sources.filter(({ path, text }) => path !== CLIENT && code(text).includes(predicate)).map(({ path }) => path), predicate).toEqual([OPENING]);
+    }
+    // The opening module never mutates the client's sets.
+    expect(/issued(Leases|Grants|VerifyingAcknowledgements)/.test(opening)).toBe(false);
+  });
+
+  it("locks the bound-acknowledgement record and the capability's runtime provenance", () => {
+    expect(opening.match(/new WeakSet\b/g)).toHaveLength(1);
+    expect(/new (Set|Map)\b|\[\]\s*;|\.push\(/.test(opening)).toBe(false);
+    // An unregistered, unexported construction token.
+    expect(opening).toMatch(/^const CONSTRUCTION_TOKEN: unique symbol = Symbol\("[^"]+"\);$/m);
+    expect(/Symbol\.for/.test(opening)).toBe(false);
+    expect(/export[^\n]*CONSTRUCTION_TOKEN|return CONSTRUCTION_TOKEN/.test(opening)).toBe(false);
+    expect(opening.match(/CONSTRUCTION_TOKEN/g)).toHaveLength(3);
+    // The class is not exported; only its type is.
+    expect(/export (default )?class\b/.test(opening)).toBe(false);
+    expect(opening).toMatch(/^export type \{ ProviderVerificationCredentialCapability \};$/m);
+    // The constructor's first statement is the token check; no field initializer runs before it.
+    expect(opening).toMatch(/constructor\(token: symbol,[^)]*\) \{\s*if \(token !== CONSTRUCTION_TOKEN\) throw new WorkerError\("PROVIDER_VERIFICATION_AUTHORITY_MISMATCH"\);/);
+    expect(/^\s*(readonly )?#\w+(: [^;=]+)? =/m.test(opening)).toBe(false);
+    // openOnceFor begins with the private-brand check, then consumption, and
+    // consumes before its first await.
+    const open = opening.slice(opening.indexOf("async openOnceFor<T>("), opening.indexOf("toJSON(): string"));
+    // (Whole-line comments are already stripped by code().)
+    expect(open).toMatch(/^async openOnceFor<T>\(binding: CapabilityBinding, use: [^\n]*\): Promise<T> \{\s*if \(typeof this !== "object" \|\| this === null \|\| !\(#used in this\)\) throw new WorkerError\("PROVIDER_VERIFICATION_AUTHORITY_MISMATCH"\);\s*if \(this\.#used\) throw/);
+    expect(open.indexOf("this.#used = true;")).toBeGreaterThan(0);
+    expect(open.indexOf("this.#used = true;")).toBeLessThan(open.indexOf("await"));
+    expect(/WeakSet/.test(open)).toBe(false);
+    // No plaintext, lease token or verifyingAt is held by the capability.
+    expect(/#(credential|plaintext|leaseToken|verifyingAt|secret)\b/.test(opening)).toBe(false);
+  });
+
+  it("opens a verification credential only in the opening module, with no caller and no generation reuse", () => {
+    expect(sources.filter(({ text }) => /\.open\(/.test(code(text))).map(({ path }) => path).sort()).toEqual(["src/credentialOpeningRun.ts", OPENING]);
+    // Library only: nothing in production calls the binding or the four client methods.
+    expect(sources.filter(({ path, text }) => path !== OPENING && /bindProviderVerificationCredential/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    for (const name of VERIFICATION_METHODS) {
+      expect(sources.filter(({ path, text }) => path !== CLIENT && new RegExp(`\\b${name}\\b`).test(code(text))).map(({ path }) => path), name).toEqual([]);
+    }
+    expect(sources.filter(({ path, text }) => path !== CLIENT && /createHttpProviderVerificationControlClient/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // The generation opening run imports no verification module.
+    expect(importsOf(code(read(join(SRC_ROOT, "credentialOpeningRun.ts")))).some((specifier) => /providerVerification/.test(specifier))).toBe(false);
+    // Verification modules import none of the journal or generation modules.
+    const GENERATION = /acceptanceJournal|startupJournalReconciliation|workerStateRoot|acceptanceRecoveryPolicy|credentialOpeningRun|preProviderOrchestration|inFlightHeartbeat|AttemptExecution|attemptExecution|ProviderAdapter/;
+    for (const path of PHASE_5_MODULES) {
+      expect(importsOf(textOf(path)).filter((specifier) => GENERATION.test(specifier)), path).toEqual([]);
+    }
+    expect(/SealedCredentialCapability|openLeasedCredentialOnce|WorkerLease\b|executionAttemptId/.test(opening)).toBe(false);
+    // The generation client surface is unchanged: no verification method on it.
+    const generation = clientSource.slice(clientSource.indexOf("export type WorkerControlClient = "), clientSource.indexOf("export type WorkerControlClientOptions"));
+    expect(/ProviderVerification|providerVerification/.test(generation)).toBe(false);
   });
 });
 

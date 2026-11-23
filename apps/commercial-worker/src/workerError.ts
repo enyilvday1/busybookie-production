@@ -67,7 +67,20 @@ export type WorkerErrorCode =
   | "OBJECT_STORAGE_ACCESS_DENIED"
   | "OBJECT_TOO_LARGE"
   | "OBJECT_INTEGRITY_MISMATCH"
-  | "OBJECT_MEDIA_TYPE_INVALID";
+  | "OBJECT_MEDIA_TYPE_INVALID"
+  // R44B11F Phase 5: provider verification (architecture "Worker error
+  // vocabulary"). The kill switch, the live gate, pre-grant admission, the
+  // four client routes and the VERIFYING binding.
+  | "PROVIDER_VERIFICATION_CONFIG_INVALID"
+  | "PROVIDER_VERIFICATION_DISABLED"
+  | "PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED"
+  | "PROVIDER_VERIFICATION_POLICY_UNSUPPORTED"
+  | "PROVIDER_VERIFICATION_REQUEST_INVALID"
+  | "PROVIDER_VERIFICATION_LEASE_REJECTED"
+  | "PROVIDER_VERIFICATION_GRANT_REJECTED"
+  | "PROVIDER_VERIFICATION_VERIFYING_REJECTED"
+  | "PROVIDER_VERIFICATION_RESULT_REJECTED"
+  | "PROVIDER_VERIFICATION_AUTHORITY_MISMATCH";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   STATE_ROOT_UNSUITABLE: "The worker state root is unsuitable for the acceptance journal.",
@@ -102,6 +115,16 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   OBJECT_TOO_LARGE: "The input media object exceeds the permitted size.",
   OBJECT_INTEGRITY_MISMATCH: "The input media object does not match its reference.",
   OBJECT_MEDIA_TYPE_INVALID: "The input media content does not match its declared type.",
+  PROVIDER_VERIFICATION_CONFIG_INVALID: "The provider verification configuration is invalid.",
+  PROVIDER_VERIFICATION_DISABLED: "Live provider verification is disabled.",
+  PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED: "The leased verification provider is not supported by this worker.",
+  PROVIDER_VERIFICATION_POLICY_UNSUPPORTED: "The leased verification policy is not supported by this worker.",
+  PROVIDER_VERIFICATION_REQUEST_INVALID: "The provider verification request is invalid and was not sent.",
+  PROVIDER_VERIFICATION_LEASE_REJECTED: "The worker-control API rejected the provider verification lease request.",
+  PROVIDER_VERIFICATION_GRANT_REJECTED: "The worker-control API rejected the provider verification credential grant.",
+  PROVIDER_VERIFICATION_VERIFYING_REJECTED: "The worker-control API rejected the VERIFYING acknowledgement.",
+  PROVIDER_VERIFICATION_RESULT_REJECTED: "The worker-control API rejected the provider verification result.",
+  PROVIDER_VERIFICATION_AUTHORITY_MISMATCH: "The provider verification authority does not match; the credential was not opened.",
 };
 
 export class WorkerError extends Error {

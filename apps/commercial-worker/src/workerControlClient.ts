@@ -1,4 +1,10 @@
 import { isProviderExecutionId } from "./providerExecutionContract.js";
+import {
+  isProviderVerificationResultReport,
+  type ProviderVerificationOutcome,
+  type ProviderVerificationReasonCode,
+  type ProviderVerificationResultReport,
+} from "./providerVerificationContract.js";
 import { WorkerError, type WorkerErrorCode } from "./workerError.js";
 
 // Outbound-only HTTP client for the commercial-api worker-control routes
@@ -432,7 +438,11 @@ function controlUrl(options: WorkerControlClientOptions): URL {
   return base;
 }
 
-export function createHttpWorkerControlClient(options: WorkerControlClientOptions): WorkerControlClient {
+// The shared outbound transport of every worker-control client in this
+// module (R44B11F Phase 5 shares it rather than copying it): base-URL and
+// machine-credential validation, the single Bearer-authenticated request with
+// redirects refused, and the status mapping.
+function controlTransport(options: WorkerControlClientOptions) {
   const base = controlUrl(options);
   const credential = options.machineCredential;
   if (typeof credential !== "string" || credential.length === 0 || credential.length > MAX_TOKEN_LENGTH || !TOKEN68.test(credential)) {
@@ -484,6 +494,12 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
     if (response.status >= 500) throw new WorkerError("CONTROL_API_UNAVAILABLE");
     throw malformed();
   }
+
+  return { send, readJson, post };
+}
+
+export function createHttpWorkerControlClient(options: WorkerControlClientOptions): WorkerControlClient {
+  const { send, readJson, post } = controlTransport(options);
 
   return Object.freeze({
     leaseNextAttempt: async () => parseLeaseResponse(await post("/worker-control/v1/leases", undefined, "LEASE_REJECTED")),
@@ -646,6 +662,253 @@ export function createHttpWorkerControlClient(options: WorkerControlClientOption
       if (response.status === 401 || response.status === 403) throw new WorkerError("WORKER_AUTHENTICATION_REJECTED");
       if (response.status >= 500) throw new WorkerError("CONTROL_API_UNAVAILABLE");
       throw malformed();
+    },
+  });
+}
+
+// R44B11F Phase 5: the provider-verification control client (architecture
+// "Client surface", "Worker-local wire types", "Issued-object provenance").
+// A separate client type, so generation composers and their
+// Pick<WorkerControlClient, ...> surfaces cannot reach verification methods.
+// It shares the transport above, sends exactly one request per invocation,
+// never retries and owns no timer, deadline or lease clock; the only deadline
+// is the caller's optional AbortSignal.
+
+export type ProviderVerificationLease = Readonly<{
+  providerVerificationJobId: string;
+  provider: string;
+  verificationPolicyId: string;
+  // Held in memory only, for the lifetime of this lease.
+  leaseToken: string;
+  fencingCounter: number;
+  leaseExpiresAt: Date;
+}>;
+
+// The envelope and context stay untrusted here; only the verification
+// credential-opening module validates them.
+export type ProviderVerificationCredentialGrant = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  credentialGrantedAt: Date;
+  sealedEnvelope: unknown;
+  openingContext: unknown;
+}>;
+
+export type ProviderVerificationVerifyingAcknowledgement = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  state: "VERIFYING";
+  verifyingAt: Date;
+}>;
+
+export type ProviderVerificationResultAcknowledgement = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  state: "COMPLETED";
+  outcome: ProviderVerificationOutcome;
+  reasonCode: ProviderVerificationReasonCode;
+  completedAt: Date;
+}>;
+
+export type ProviderVerificationControlClient = Readonly<{
+  leaseProviderVerification: (signal?: AbortSignal) => Promise<ProviderVerificationLease | null>;
+  requestProviderVerificationCredentialGrant: (
+    providerVerificationJobId: string,
+    proof: LeaseProof,
+    signal?: AbortSignal,
+  ) => Promise<ProviderVerificationCredentialGrant>;
+  acknowledgeProviderVerificationVerifying: (
+    providerVerificationJobId: string,
+    proof: LeaseProof,
+    signal?: AbortSignal,
+  ) => Promise<ProviderVerificationVerifyingAcknowledgement>;
+  reportProviderVerificationResult: (
+    providerVerificationJobId: string,
+    proof: LeaseProof,
+    report: ProviderVerificationResultReport,
+    signal?: AbortSignal,
+  ) => Promise<ProviderVerificationResultAcknowledgement>;
+}>;
+
+const VERIFICATION_POLICY_ID = /^[A-Z][A-Z0-9_]{0,127}$/;
+
+// A lease is parsed structurally only: whether its provider and policy are
+// supported is admission, not parsing, so an unsupported lease is returned.
+export function parseProviderVerificationLeaseResponse(body: unknown): ProviderVerificationLease | null {
+  const envelope = exactKeys(body, ["lease"]);
+  if (envelope.lease === null) return null;
+  const lease = exactKeys(envelope.lease, ["providerVerificationJobId", "provider", "verificationPolicyId", "leaseToken", "fencingCounter", "leaseExpiresAt"]);
+  return Object.freeze({
+    providerVerificationJobId: text(lease.providerVerificationJobId, UUID),
+    provider: text(lease.provider, PROVIDER),
+    verificationPolicyId: text(lease.verificationPolicyId, VERIFICATION_POLICY_ID),
+    leaseToken: text(lease.leaseToken, LEASE_TOKEN),
+    fencingCounter: positiveSafeInteger(lease.fencingCounter),
+    leaseExpiresAt: instant(lease.leaseExpiresAt),
+  });
+}
+
+// The grant must answer exactly the job and fencing generation asked for.
+export function parseProviderVerificationCredentialGrantResponse(
+  body: unknown,
+  expected: Readonly<{ providerVerificationJobId: string; fencingCounter: number }>,
+): ProviderVerificationCredentialGrant {
+  const grant = exactKeys(body, ["providerVerificationJobId", "fencingCounter", "credentialGrantedAt", "credential"]);
+  const credential = exactKeys(grant.credential, ["sealedEnvelope", "openingContext"]);
+  const providerVerificationJobId = text(grant.providerVerificationJobId, UUID);
+  const fencingCounter = positiveSafeInteger(grant.fencingCounter);
+  if (providerVerificationJobId !== expected.providerVerificationJobId || fencingCounter !== expected.fencingCounter) throw malformed();
+  return Object.freeze({
+    providerVerificationJobId,
+    fencingCounter,
+    credentialGrantedAt: instant(grant.credentialGrantedAt),
+    sealedEnvelope: credential.sealedEnvelope,
+    openingContext: credential.openingContext,
+  });
+}
+
+// The barrier acknowledgement must answer exactly the job and fencing
+// generation presented, in state VERIFYING, with a canonical server instant.
+export function parseProviderVerificationVerifyingResponse(
+  body: unknown,
+  expected: Readonly<{ providerVerificationJobId: string; fencingCounter: number }>,
+): ProviderVerificationVerifyingAcknowledgement {
+  const acknowledgement = exactKeys(body, ["providerVerificationJobId", "fencingCounter", "state", "verifyingAt"]);
+  const providerVerificationJobId = text(acknowledgement.providerVerificationJobId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (providerVerificationJobId !== expected.providerVerificationJobId || fencingCounter !== expected.fencingCounter || acknowledgement.state !== "VERIFYING") {
+    throw malformed();
+  }
+  return Object.freeze({ providerVerificationJobId, fencingCounter, state: "VERIFYING", verifyingAt: instant(acknowledgement.verifyingAt) });
+}
+
+// The result acknowledgement must answer exactly the job, fencing generation,
+// outcome and reason code reported, in state COMPLETED.
+export function parseProviderVerificationResultResponse(
+  body: unknown,
+  expected: Readonly<{ providerVerificationJobId: string; fencingCounter: number; report: ProviderVerificationResultReport }>,
+): ProviderVerificationResultAcknowledgement {
+  const acknowledgement = exactKeys(body, ["providerVerificationJobId", "fencingCounter", "state", "outcome", "reasonCode", "completedAt"]);
+  const providerVerificationJobId = text(acknowledgement.providerVerificationJobId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (
+    providerVerificationJobId !== expected.providerVerificationJobId ||
+    fencingCounter !== expected.fencingCounter ||
+    acknowledgement.state !== "COMPLETED" ||
+    acknowledgement.outcome !== expected.report.outcome ||
+    acknowledgement.reasonCode !== expected.report.reasonCode
+  ) {
+    throw malformed();
+  }
+  return Object.freeze({
+    providerVerificationJobId,
+    fencingCounter,
+    state: "COMPLETED",
+    outcome: expected.report.outcome,
+    reasonCode: expected.report.reasonCode,
+    completedAt: instant(acknowledgement.completedAt),
+  });
+}
+
+// Issued-object provenance: exact object identity. Only the frozen objects a
+// client method itself produced from a 200 response of the matching route are
+// registered; the exported parsers never register, and a copy or look-alike
+// is never in a set. Module-private and never exported or mutated elsewhere.
+const issuedLeases = new WeakSet<object>();
+const issuedGrants = new WeakSet<object>();
+const issuedVerifyingAcknowledgements = new WeakSet<object>();
+
+const issued = <T extends object>(registry: WeakSet<object>, value: T): T => {
+  registry.add(value);
+  return value;
+};
+
+export const isIssuedProviderVerificationLease = (value: unknown): value is ProviderVerificationLease =>
+  typeof value === "object" && value !== null && issuedLeases.has(value);
+export const isIssuedProviderVerificationCredentialGrant = (value: unknown): value is ProviderVerificationCredentialGrant =>
+  typeof value === "object" && value !== null && issuedGrants.has(value);
+export const isIssuedProviderVerificationVerifyingAcknowledgement = (value: unknown): value is ProviderVerificationVerifyingAcknowledgement =>
+  typeof value === "object" && value !== null && issuedVerifyingAcknowledgements.has(value);
+
+const invalidVerificationRequest = () => new WorkerError("PROVIDER_VERIFICATION_REQUEST_INVALID");
+
+// Nothing outside the contract is sent: a canonical lowercase job ID and a
+// proof of the existing shape, else PROVIDER_VERIFICATION_REQUEST_INVALID.
+// Each caller-supplied member is read exactly once into a local, the local is
+// validated, and only that validated local is ever sent, so an accessor cannot
+// answer validation and request construction differently.
+function verificationProof(providerVerificationJobId: unknown, proof: unknown): LeaseProof {
+  if (typeof providerVerificationJobId !== "string" || !UUID.test(providerVerificationJobId)) throw invalidVerificationRequest();
+  if (typeof proof !== "object" || proof === null) throw invalidVerificationRequest();
+  const fencingCounter: unknown = (proof as Record<string, unknown>).fencingCounter;
+  const leaseToken: unknown = (proof as Record<string, unknown>).leaseToken;
+  if (
+    typeof fencingCounter !== "number" ||
+    !Number.isSafeInteger(fencingCounter) ||
+    fencingCounter < 1 ||
+    typeof leaseToken !== "string" ||
+    !LEASE_TOKEN.test(leaseToken)
+  ) {
+    throw invalidVerificationRequest();
+  }
+  return Object.freeze({ fencingCounter, leaseToken });
+}
+
+// The same single read for the result pair: the frozen snapshot is validated
+// and is the only source of the sent outcome and reason code.
+function verificationReport(report: unknown): ProviderVerificationResultReport {
+  if (typeof report !== "object" || report === null || Array.isArray(report)) throw invalidVerificationRequest();
+  const outcome: unknown = (report as Record<string, unknown>).outcome;
+  const reasonCode: unknown = (report as Record<string, unknown>).reasonCode;
+  const snapshot = Object.freeze({ outcome, reasonCode });
+  if (!isProviderVerificationResultReport(snapshot)) throw invalidVerificationRequest();
+  return snapshot;
+}
+
+export function createHttpProviderVerificationControlClient(options: WorkerControlClientOptions): ProviderVerificationControlClient {
+  const { post } = controlTransport(options);
+
+  return Object.freeze({
+    leaseProviderVerification: async (signal?: AbortSignal) => {
+      const body = await post("/worker-control/v1/provider-verifications/lease", undefined, "PROVIDER_VERIFICATION_LEASE_REJECTED", signal);
+      const lease = parseProviderVerificationLeaseResponse(body);
+      return lease === null ? null : issued(issuedLeases, lease);
+    },
+    requestProviderVerificationCredentialGrant: async (providerVerificationJobId: string, proof: LeaseProof, signal?: AbortSignal) => {
+      const { fencingCounter, leaseToken } = verificationProof(providerVerificationJobId, proof);
+      const body = await post(
+        `/worker-control/v1/provider-verifications/${providerVerificationJobId}/credential-grant`,
+        { fencingCounter, leaseToken },
+        "PROVIDER_VERIFICATION_GRANT_REJECTED",
+        signal,
+      );
+      return issued(issuedGrants, parseProviderVerificationCredentialGrantResponse(body, { providerVerificationJobId, fencingCounter }));
+    },
+    acknowledgeProviderVerificationVerifying: async (providerVerificationJobId: string, proof: LeaseProof, signal?: AbortSignal) => {
+      const { fencingCounter, leaseToken } = verificationProof(providerVerificationJobId, proof);
+      const body = await post(
+        `/worker-control/v1/provider-verifications/${providerVerificationJobId}/verifying`,
+        { fencingCounter, leaseToken },
+        "PROVIDER_VERIFICATION_VERIFYING_REJECTED",
+        signal,
+      );
+      return issued(issuedVerifyingAcknowledgements, parseProviderVerificationVerifyingResponse(body, { providerVerificationJobId, fencingCounter }));
+    },
+    reportProviderVerificationResult: async (
+      providerVerificationJobId: string,
+      proof: LeaseProof,
+      report: ProviderVerificationResultReport,
+      signal?: AbortSignal,
+    ) => {
+      const { fencingCounter, leaseToken } = verificationProof(providerVerificationJobId, proof);
+      const fixed = verificationReport(report);
+      const body = await post(
+        `/worker-control/v1/provider-verifications/${providerVerificationJobId}/result`,
+        { fencingCounter, leaseToken, outcome: fixed.outcome, reasonCode: fixed.reasonCode },
+        "PROVIDER_VERIFICATION_RESULT_REJECTED",
+        signal,
+      );
+      return parseProviderVerificationResultResponse(body, { providerVerificationJobId, fencingCounter, report: fixed });
     },
   });
 }

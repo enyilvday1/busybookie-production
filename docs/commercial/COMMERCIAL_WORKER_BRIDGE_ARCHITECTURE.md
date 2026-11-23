@@ -13926,6 +13926,805 @@ new package dependency = NO
 
 Anything outside this boundary requires a new scope-amendment gate.
 
+#### R44B11F Phase 5 worker verification client, configuration and credential-opening contract amendment
+
+**Locked decision (R44B11F Phase 5 contract amendment; architecture only,
+precedes Phase 5 implementation).**
+
+Phase 5 discovery against `9b49032de0ebe228383cf32ce3fd9468f27fa6ba` found
+that the published R44B11F contract locks the control-plane side of
+verification completely (Phases 1 to 4 are implemented) but does not lock the
+worker side of Phase 5: the per-phase file subset, the worker client methods
+and signatures, the worker error vocabulary, the form of the worker kill
+switch, the worker-side owner of the `VERIFYING` barrier, pre-grant lease
+admission, unsupported provider or policy handling, and the applicability of
+the generation acceptance journal. This amendment locks exactly those items.
+It changes no migration, persistence, lifecycle, lock-order, aggregate,
+audit, route, wire or reconciliation decision already locked above.
+
+Precedence: this amendment refines the R44B11F contract and the Phase 3
+result wire-contract amendment for the worker side only. Where the earlier
+prose names `WORKER_LIVE_PROVIDER_VERIFICATION_ENABLED=NO`, that token remains
+the architecture lock flag; it is not an environment key. The environment key
+is locked below.
+
+##### Phase 5 file authorization
+
+The R44B11F implementation-scope lock (D11, SHA-256
+`00807437fe77e04015d9507589b64c60172f2dc75e48f27a92821e610f306c95`)
+remains the R44B11F-wide ceiling and is not modified. It lists files and phase
+names but assigns no files to phases. This amendment publishes the Phase 5
+subset.
+
+Phase 5 may modify:
+
+```text
+apps/commercial-worker/src/workerControlClient.ts
+apps/commercial-worker/src/workerError.ts
+```
+
+and add:
+
+```text
+apps/commercial-worker/src/providerVerificationConfig.ts
+apps/commercial-worker/src/providerVerificationContract.ts
+apps/commercial-worker/src/providerVerificationCredentialOpening.ts
+```
+
+Phase 5 tests may modify:
+
+```text
+apps/commercial-worker/tests/boundary.test.ts
+```
+
+and add:
+
+```text
+apps/commercial-worker/tests/providerVerificationConfig.test.ts
+apps/commercial-worker/tests/providerVerificationClient.test.ts
+apps/commercial-worker/tests/providerVerificationCredentialOpening.test.ts
+```
+
+No other path may change in Phase 5. In particular the 19 D11 protected files
+stay byte-identical, including `credentialOpeningRun.ts`, `workerConfig.ts`,
+`providerEnvironment.ts`, the shared protocol package and both
+`package.json` files. `apps/commercial-worker/tests/boundary.test.ts` is the
+only existing worker test file Phase 5 may modify; every other existing
+worker test must pass unmodified.
+
+##### Module roles
+
+```text
+providerVerificationConfig.ts              kill-switch configuration and the live gate
+providerVerificationContract.ts            pure worker-local vocabulary and admission classification
+workerControlClient.ts                     verification wire types, parsers and the four client methods
+providerVerificationCredentialOpening.ts   sole owner of verification credential opening and the VERIFYING binding
+workerError.ts                             the closed Phase 5 error codes
+```
+
+##### Client surface
+
+The existing `WorkerControlClient` type, `createHttpWorkerControlClient`, its
+methods, parsers and observable behaviour are unchanged. Verification gets a
+separate client type in the same module, so generation composers and their
+`Pick<WorkerControlClient, ...>` surfaces cannot reach verification methods
+and existing test fakes are unaffected:
+
+```text
+export type ProviderVerificationControlClient = Readonly<{
+  leaseProviderVerification:
+    (signal?: AbortSignal) => Promise<ProviderVerificationLease | null>;
+  requestProviderVerificationCredentialGrant:
+    (providerVerificationJobId: string, proof: LeaseProof, signal?: AbortSignal)
+      => Promise<ProviderVerificationCredentialGrant>;
+  acknowledgeProviderVerificationVerifying:
+    (providerVerificationJobId: string, proof: LeaseProof, signal?: AbortSignal)
+      => Promise<ProviderVerificationVerifyingAcknowledgement>;
+  reportProviderVerificationResult:
+    (providerVerificationJobId: string, proof: LeaseProof,
+     report: ProviderVerificationResultReport, signal?: AbortSignal)
+      => Promise<ProviderVerificationResultAcknowledgement>;
+}>;
+
+export function createHttpProviderVerificationControlClient(
+  options: WorkerControlClientOptions,
+): ProviderVerificationControlClient;
+```
+
+`LeaseProof` and `WorkerControlClientOptions` are the existing types. The
+factory applies the existing base-URL and machine-credential validation
+(`WORKER_CONFIGURATION_INVALID`) and shares the existing outbound request,
+Bearer authorization, `redirect: "error"` and status-mapping internals rather
+than copying them.
+
+| Method | HTTP | Path | Request body | 409 code |
+|---|---|---|---|---|
+| `leaseProviderVerification` | POST | `/worker-control/v1/provider-verifications/lease` | none | `PROVIDER_VERIFICATION_LEASE_REJECTED` |
+| `requestProviderVerificationCredentialGrant` | POST | `/worker-control/v1/provider-verifications/:id/credential-grant` | `{fencingCounter, leaseToken}` | `PROVIDER_VERIFICATION_GRANT_REJECTED` |
+| `acknowledgeProviderVerificationVerifying` | POST | `/worker-control/v1/provider-verifications/:id/verifying` | `{fencingCounter, leaseToken}` | `PROVIDER_VERIFICATION_VERIFYING_REJECTED` |
+| `reportProviderVerificationResult` | POST | `/worker-control/v1/provider-verifications/:id/result` | `{fencingCounter, leaseToken, outcome, reasonCode}` | `PROVIDER_VERIFICATION_RESULT_REJECTED` |
+
+Every method:
+
+- sends exactly one outbound request per invocation;
+- performs no automatic retry, backoff or second request of any kind;
+- owns no timeout, timer, cadence or lease clock; the only deadline mechanism
+  is the existing optional caller-supplied `AbortSignal`, whose abort is a
+  transport failure;
+- authenticates only through the existing `Authorization: Bearer` machine
+  credential, which never appears in a URL, body, log or error;
+- refuses to send anything outside the contract: a `providerVerificationJobId`
+  that is not a canonical lowercase UUID, a proof whose `fencingCounter` is not
+  a positive JavaScript-safe integer or whose `leaseToken` does not match the
+  existing 43-character lease-token shape, or a result report that is not a
+  valid outcome and reason pair, is `PROVIDER_VERIFICATION_REQUEST_INVALID`
+  and no request is sent.
+
+Status mapping is the existing one:
+
+```text
+200                      -> strict parse of the route's exact response
+401 or 403               -> WORKER_AUTHENTICATION_REJECTED
+409                      -> the route's code in the table above
+>= 500                   -> CONTROL_API_UNAVAILABLE
+transport failure/abort  -> CONTROL_API_UNAVAILABLE
+any other status         -> MALFORMED_CONTROL_RESPONSE
+```
+
+Any re-invocation is an explicit caller decision subject to the server's
+replay rules (grant replay under the same live lease, exact `VERIFYING`
+replay, exact terminal-result replay). The client never decides to repeat a
+request.
+
+##### Worker-local wire types
+
+The shared protocol package is not widened. The verification wire types are
+worker-local in `workerControlClient.ts`, the same placement as the
+generation wire types:
+
+```text
+ProviderVerificationLease = Readonly<{
+  providerVerificationJobId: string;   // canonical lowercase UUID
+  provider: string;                    // existing PROVIDER grammar
+  verificationPolicyId: string;        // ^[A-Z][A-Z0-9_]*$, at most 128 characters
+  leaseToken: string;                  // existing lease-token shape; memory only
+  fencingCounter: number;              // positive safe integer
+  leaseExpiresAt: Date;                // exact ISO instant
+}>
+
+ProviderVerificationCredentialGrant = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  credentialGrantedAt: Date;
+  sealedEnvelope: unknown;             // untrusted until the opening module validates it
+  openingContext: unknown;             // untrusted until the opening module validates it
+}>
+
+ProviderVerificationVerifyingAcknowledgement = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  state: "VERIFYING";
+  verifyingAt: Date;
+}>
+
+ProviderVerificationResultAcknowledgement = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  state: "COMPLETED";
+  outcome: ProviderVerificationOutcome;
+  reasonCode: ProviderVerificationReasonCode;
+  completedAt: Date;
+}>
+```
+
+`ProviderVerificationResultReport`, `ProviderVerificationOutcome` and
+`ProviderVerificationReasonCode` are defined in
+`providerVerificationContract.ts`.
+
+The sealed envelope and opening context stay `unknown` in the client, exactly
+as the generation grant does; the client is not a protocol-package importer.
+Only `providerVerificationCredentialOpening.ts` validates them into the
+existing `SealedCredentialEnvelope` and `CredentialSealingContext` through the
+existing `credentialContracts.ts` re-exports. Their existing format and
+purpose already fit; no protocol file changes.
+
+Parsing is strict: exact member sets (the lease response is exactly
+`{lease}` with `lease` null or the exact six members, and the grant
+`credential` is exactly `{sealedEnvelope, openingContext}`), canonical
+grammars and exact ISO instants. Each acknowledgement must answer what was
+asked:
+
+- the grant: the requested job ID and the proof's fencing counter;
+- `VERIFYING`: the requested job ID, the proof's fencing counter, state
+  `VERIFYING`;
+- the result: the requested job ID, the proof's fencing counter, state
+  `COMPLETED`, and exactly the sent outcome and reason code.
+
+Anything else is `MALFORMED_CONTROL_RESPONSE`. A lease is parsed structurally
+only; whether its provider and policy are supported is admission, not
+parsing, so an unsupported lease is still returned to the caller.
+
+##### Issued-object provenance
+
+`workerControlClient.ts` keeps three module-private `WeakSet`s and registers
+in them only the frozen lease, grant and `VERIFYING` acknowledgement objects
+that the client methods themselves produced from a `200` response of the
+matching route. Exported pure parsers, if any, never register. It exports
+read-only predicates:
+
+```text
+isIssuedProviderVerificationLease(value: unknown): value is ProviderVerificationLease
+isIssuedProviderVerificationCredentialGrant(value: unknown): value is ProviderVerificationCredentialGrant
+isIssuedProviderVerificationVerifyingAcknowledgement(value: unknown): value is ProviderVerificationVerifyingAcknowledgement
+```
+
+A structurally identical object literal is therefore never authority.
+Provenance is exact object identity. A spread, `Object.assign`,
+`structuredClone`, JSON round trip or any other copy or reconstruction of an
+issued object is a different object, is not in the `WeakSet`, and carries no
+provenance. A later explicit client call that receives the same server
+answer registers a new, distinct issued object; it never revives or aliases
+an earlier one.
+
+##### Closed vocabulary and pre-grant admission
+
+`providerVerificationContract.ts` is pure: no imports, no I/O, no
+environment, no network, no timer. It holds:
+
+- the worker copy of the Phase 3 worker-reportable outcome and reason
+  vocabulary, unchanged:
+
+```text
+VERIFIED            VERIFICATION_SUCCEEDED
+DEFINITIVE_FAILURE  CREDENTIAL_REJECTED | CREDENTIAL_NOT_AUTHORIZED
+INCONCLUSIVE        PROVIDER_BILLING_RESTRICTION | PROVIDER_RATE_OR_QUOTA_LIMITED |
+                    PROVIDER_UNAVAILABLE | PROVIDER_TIMEOUT | PROVIDER_NETWORK_FAILURE |
+                    PROVIDER_RESPONSE_MALFORMED | PROVIDER_RESPONSE_TOO_LARGE |
+                    PROVIDER_UNEXPECTED_STATUS | PROVIDER_OPERATION_DRIFT |
+                    VERIFICATION_AMBIGUOUS
+```
+
+  `WORKER_LOST_AFTER_CREDENTIAL_GRANT` and `WORKER_LOST_DURING_VERIFYING` are
+  not worker-reportable and are absent;
+- `ProviderVerificationResultReport = Readonly<{ outcome; reasonCode }>` and
+  a predicate accepting only a pair from the table above;
+- the fixed supported pairs, exactly:
+
+```text
+provider GOOGLE_GENAI  policy GOOGLE_GENAI_MODELS_LIST_V1BETA
+provider RUNWAY        policy RUNWAY_ORGANIZATION_GET_V1_2024_11_06
+```
+
+- the structural admission classifier:
+
+```text
+classifyProviderVerificationLease(
+  lease: Readonly<{ provider: string; verificationPolicyId: string }>,
+): ProviderVerificationAdmission
+
+ProviderVerificationAdmission =
+  | Readonly<{ status: "SUPPORTED"; provider: string; verificationPolicyId: string }>
+  | Readonly<{ status: "REFUSED"; reason: "UNSUPPORTED_PROVIDER" | "UNSUPPORTED_POLICY" | "PROVIDER_POLICY_MISMATCH" }>
+```
+
+  Precedence: a provider outside the supported set is `UNSUPPORTED_PROVIDER`;
+  otherwise a policy outside the supported set is `UNSUPPORTED_POLICY`;
+  otherwise a supported provider with the other provider's policy is
+  `PROVIDER_POLICY_MISMATCH`. Comparison is exact and case-sensitive. There is
+  no fake verification provider; `BUSYBOOKIE_FAKE` is unsupported.
+
+The vocabulary is exported as frozen data so tests can pin it, under exactly
+these names:
+
+```text
+PROVIDER_VERIFICATION_OUTCOMES              ["VERIFIED", "DEFINITIVE_FAILURE", "INCONCLUSIVE"]
+PROVIDER_VERIFICATION_REASONS_BY_OUTCOME    the outcome -> reasons table above, in that order
+SUPPORTED_PROVIDER_VERIFICATION_PAIRS       [{ provider: "GOOGLE_GENAI", verificationPolicyId: "GOOGLE_GENAI_MODELS_LIST_V1BETA" },
+                                             { provider: "RUNWAY", verificationPolicyId: "RUNWAY_ORGANIZATION_GET_V1_2024_11_06" }]
+```
+
+These literals stay worker-local in production. The contract module imports
+nothing, the shared protocol package is not widened, and no production
+import is added to avoid them. Drift against the canonical sources is caught
+by the vocabulary-drift tests in the Phase 5 test contract.
+
+Admission is structural only: it proves the lease names an operation the
+worker contract knows. It never authorizes execution. Execution additionally
+requires the live gate below, which no Phase 5 configuration can pass.
+
+##### Verification kill switch
+
+The single mechanism is an injected configuration value parsed by
+`providerVerificationConfig.ts` from an environment record passed in by the
+caller, in the same style as `workerConfig.ts`. No worker module reads the
+process environment for it; `workerConfig.ts` is not changed and is not
+imported.
+
+```text
+CONFIG_TYPE        ProviderVerificationConfig = Readonly<{ liveVerification: "DISABLED" }>
+LOADER             loadProviderVerificationConfig(environment: Readonly<Record<string, string | undefined>>): ProviderVerificationConfig
+ENVIRONMENT_KEY    COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION
+ACCEPTED_VALUES    exactly "disabled"
+DEFAULT            DISABLED
+MISSING            DISABLED
+INVALID            any other value, including "", "enabled", "true", "1" and "DISABLED",
+                   is WorkerError PROVIDER_VERIFICATION_CONFIG_INVALID; the value is never echoed
+LIVE_GATE          requireLiveProviderVerification(config: ProviderVerificationConfig): void
+                   throws PROVIDER_VERIFICATION_DISABLED for every Phase 5 configuration
+```
+
+The loader reads only its one key, exactly by name, with no trimming or case
+folding. In Phase 5 the configuration type has no enabled member, so no
+supported configuration permits a real provider call. Accepting an enabled
+value, widening the type, or making the live gate pass requires a later
+explicit live-enablement amendment together with the commercial cost and
+side-effect approval already required above.
+
+The configuration never reads, writes or depends on
+`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED`, `COMMERCIAL_WORKER_ENV`, the state
+root, or any provider variable.
+
+##### Worker-side VERIFYING barrier owner and credential capability
+
+`providerVerificationCredentialOpening.ts` is the only worker module that may
+open a verification credential, and the only one that may construct the
+verification credential capability. It does not import or reuse
+`credentialOpeningRun.ts`, its `SealedCredentialCapability`, its
+`openLeasedCredentialOnce`, or any generation lease, attempt or journal type.
+
+The locked order is:
+
+```text
+leaseProviderVerification
+-> requestProviderVerificationCredentialGrant
+-> acknowledgeProviderVerificationVerifying
+-> bindProviderVerificationCredential      (capability construction)
+-> capability.openOnceFor                  (the only credential open)
+```
+
+The binding function:
+
+```text
+bindProviderVerificationCredential(input: Readonly<{
+  environment: WorkerEnvironment;
+  opener: CredentialOpener;
+  lease: ProviderVerificationLease;
+  grant: ProviderVerificationCredentialGrant;
+  acknowledgement: ProviderVerificationVerifyingAcknowledgement;
+}>): ProviderVerificationCredentialCapability
+```
+
+is synchronous: it contains no `await` and returns no promise. It checks, in
+this order, and opens nothing:
+
+1. `assertNoProviderEnvironment(input.environment)` from the unchanged
+   `providerEnvironment.ts` (`FORBIDDEN_PROVIDER_ENVIRONMENT`);
+2. `lease`, `grant` and `acknowledgement` are each an issued object of the
+   matching kind, and this exact `acknowledgement` object is not in the
+   bound-acknowledgement record (`PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`);
+3. `classifyProviderVerificationLease(lease)` is `SUPPORTED`
+   (`UNSUPPORTED_PROVIDER` -> `PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED`;
+   `UNSUPPORTED_POLICY` or `PROVIDER_POLICY_MISMATCH` ->
+   `PROVIDER_VERIFICATION_POLICY_UNSUPPORTED`);
+4. `grant.providerVerificationJobId`, `acknowledgement.providerVerificationJobId`
+   and `lease.providerVerificationJobId` are equal; `grant.fencingCounter`,
+   `acknowledgement.fencingCounter` and `lease.fencingCounter` are equal; and
+   `acknowledgement.state` is `VERIFYING`
+   (`PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`);
+5. the grant's envelope parses with `parseSealedEnvelope` and its context
+   validates with `validateSealingContext` (`ENVELOPE_INVALID`);
+6. the validated context's `provider` equals `lease.provider`
+   (`ENVELOPE_INVALID`).
+
+Only after all six does it add the exact `acknowledgement` object to the
+bound-acknowledgement record and return the capability. A failed check adds
+nothing. A raw grant, a grant without an issued matching acknowledgement,
+or an acknowledgement for another job, fence or provider can never produce a
+capability.
+
+##### Bound-acknowledgement record and replay semantics
+
+`providerVerificationCredentialOpening.ts` owns one module-private,
+unexported `WeakSet` holding the `VERIFYING` acknowledgement objects that
+have already been successfully bound. It is the only record of binding:
+
+- an ordinary `Set`, `Map`, array or any other strongly retaining collection
+  is forbidden for this role, so this record never prolongs an
+  acknowledgement's lifetime;
+- a successful bind adds the exact acknowledgement object; a second bind of
+  that same object fails with `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`
+  and constructs nothing;
+- the client's issued-object `WeakSet`s are never mutated by the opening
+  module; the client exports read-only predicates only.
+
+Replay and object identity:
+
+- a later explicit, successful `acknowledgeProviderVerificationVerifying`
+  call (for example an exact server replay under the same live lease)
+  returns a new, distinct issued acknowledgement object;
+- that new object may itself be bound exactly once, if every check above
+  passes for it;
+- "one capability per acknowledgement" therefore means one capability per
+  exact issued acknowledgement object, not one per
+  `providerVerificationJobId` and `fencingCounter` tuple; whether to make
+  such a second call is a Phase 7 re-invocation decision;
+- a cloned, copied or reconstructed lease, grant or acknowledgement has no
+  issued-object provenance and never binds.
+
+##### Capability runtime provenance
+
+The capability type is `ProviderVerificationCredentialCapability`. Its class
+is not exported; only its type is. TypeScript visibility is not relied on at
+runtime, because the class remains reachable as `capability.constructor`.
+The normative runtime mechanism is a module-private construction token:
+
+- `providerVerificationCredentialOpening.ts` holds one unexported
+  `const` construction token, an unregistered `Symbol(...)` (never
+  `Symbol.for`) created at module load. It is never exported, returned,
+  stored on any object or passed outside the module;
+- the class constructor takes that token as its first parameter. Its first
+  constructor-body statement throws
+  `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` unless the argument is identical
+  (`===`) to the token. A throwing construction yields no object to any
+  caller, including a subclass constructor calling `super`;
+- `bindProviderVerificationCredential` is the only code that passes the
+  token, and only after all six checks pass;
+- `openOnceFor` begins with the private-brand check `#used in this`; an
+  object that did not come from a successful token-checked construction (for
+  example `Object.create(prototype)`, a plain object, or the prototype
+  method invoked with another receiver) fails with
+  `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` before any other step.
+
+No module-private `WeakSet` of capabilities is used; the construction token
+plus the private-brand check is the single normative mechanism. The
+invariant is: only a capability produced by
+`bindProviderVerificationCredential` after successful lease, grant and
+`VERIFYING` authority checks is accepted by `openOnceFor`.
+
+Its state is held in private fields only:
+
+```text
+#opener                  the injected CredentialOpener
+#envelope                the validated SealedCredentialEnvelope
+#context                 the validated CredentialSealingContext
+#providerVerificationJobId
+#provider
+#verificationPolicyId
+#fencingCounter
+#used                    single-use flag
+```
+
+It holds no plaintext, no lease token, no machine credential and no
+`verifyingAt` (no field that adds no binding). The lease token is not bound:
+no control-plane response echoes it, so it cannot be cross-checked, and
+keeping it longer only extends its exposure. The server already bound the
+token to the job and fence at both the grant and the barrier; the
+capability's correspondence is job ID, fencing counter, provider and policy.
+
+```text
+openOnceFor<T>(
+  binding: Readonly<{ providerVerificationJobId: string; provider: string;
+                      verificationPolicyId: string; fencingCounter: number }>,
+  use: (credential: string) => Promise<T> | T,
+): Promise<T>
+```
+
+`openOnceFor` performs these steps in exactly this order. Steps 1 to 4 run
+in the synchronous prefix of the call: no `await`, no promise-returning
+call and no callback precedes step 4.
+
+1. Runtime provenance: `#used in this`, else
+   `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`.
+2. Consumption: if `#used` is already `true`,
+   `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`.
+3. Binding authority: `binding` must equal the bound
+   `providerVerificationJobId`, `provider`, `verificationPolicyId` and
+   `fencingCounter` exactly; any difference is
+   `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` and does not consume the
+   capability.
+4. Consume: set `#used = true` synchronously.
+5. Only then call the `CredentialOpener`, the first `await` of the call.
+
+Consequences, all normative:
+
+- the opener is invoked at most once per capability, and exactly once for a
+  valid capability that reaches step 5;
+- a binding mismatch fails without consuming, so a later call with the
+  exact binding may still proceed;
+- once consumed, every later or concurrent call fails at step 2 without
+  invoking the opener; two concurrent calls cannot both pass step 2, because
+  the first call's step 4 completes before the second call starts;
+- an opener throw, a non-string or an empty plaintext is
+  `CREDENTIAL_OPEN_FAILED` with no cause, and the capability stays
+  consumed;
+- `use` is awaited inside the scope and the plaintext reference is dropped
+  in `finally` after `use` settles. Errors thrown by `use` propagate
+  unchanged, the capability stays consumed, and Phase 6 owns their closed
+  classification;
+- `toJSON()` returns the fixed marker
+  `"[provider verification credential capability]"`; the capability has no
+  enumerable own properties.
+
+At most one capability exists per exact issued `VERIFYING` acknowledgement
+object, as locked under the bound-acknowledgement record. Phase 5 makes no
+local lease-expiry decision; the server's barrier acknowledgement is the
+expiry authority at barrier time.
+
+##### Secret lifetime
+
+```text
+PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
+PLAINTEXT_SECRET_LOGGING=FORBIDDEN
+PLAINTEXT_SECRET_SERIALIZATION=FORBIDDEN
+PLAINTEXT_SECRET_ERROR_CAUSE=FORBIDDEN
+```
+
+Section 29 applies unchanged. Plaintext exists only in worker memory inside
+`openOnceFor` for the duration of `use`. The sealed envelope, opening
+context, lease token and machine credential are never logged, serialized,
+returned in an error or persisted. Phase 5 modules log nothing.
+
+##### Acceptance-journal rule
+
+Provider verification has no acceptance-journal gate, in Phase 5 or any later
+R44B11F phase, unless a later amendment says otherwise. Verification has no
+provider execution ID, no acceptance record and no provider-recovery
+obligation, and its expiry and crash convergence is server-owned by the
+Phase 4 reconciliation contract. Verification modules must not import
+`acceptanceJournal.ts`, `startupJournalReconciliation.ts`, `workerStateRoot.ts`,
+`acceptanceRecoveryPolicy.ts`, `credentialOpeningRun.ts`,
+`preProviderOrchestration.ts` or `inFlightHeartbeat.ts`.
+
+##### Unsupported provider or policy
+
+An unsupported or mismatched lease must never be granted, never cross
+`VERIFYING`, never be opened, never cause a provider call and never be
+reported through `/result`, which requires `VERIFYING`. The server has no
+legal terminal route for a verification job before `VERIFYING`; a lease
+that expires before the grant is requeued with its fencing counter
+preserved, so an unsupported lease can be reacquired indefinitely.
+
+No new route is introduced. Phase 5 only classifies. The run-level
+disposition of an unsupported lease is Phase 7 work and must be locked before
+any live enablement. A control-plane route for a pre-grant refusal would be a
+separate commercial-api amendment. In the Phase 5 state no worker leases at
+all, because the live gate refuses every configuration and Phase 7 must
+check that gate before calling `leaseProviderVerification`.
+
+##### Worker error vocabulary
+
+Phase 5 adds exactly these `WorkerErrorCode` members, each with fixed text
+and no retained cause:
+
+| Code | When used | Fixed message |
+|---|---|---|
+| `PROVIDER_VERIFICATION_CONFIG_INVALID` | the kill-switch key holds anything but `disabled` | The provider verification configuration is invalid. |
+| `PROVIDER_VERIFICATION_DISABLED` | the live gate refuses | Live provider verification is disabled. |
+| `PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED` | binding refuses an unsupported provider | The leased verification provider is not supported by this worker. |
+| `PROVIDER_VERIFICATION_POLICY_UNSUPPORTED` | binding refuses an unsupported or mismatched policy | The leased verification policy is not supported by this worker. |
+| `PROVIDER_VERIFICATION_REQUEST_INVALID` | a client argument is outside the contract; nothing sent | The provider verification request is invalid and was not sent. |
+| `PROVIDER_VERIFICATION_LEASE_REJECTED` | 409 from the lease route | The worker-control API rejected the provider verification lease request. |
+| `PROVIDER_VERIFICATION_GRANT_REJECTED` | 409 from the grant route | The worker-control API rejected the provider verification credential grant. |
+| `PROVIDER_VERIFICATION_VERIFYING_REJECTED` | 409 from the `VERIFYING` route | The worker-control API rejected the VERIFYING acknowledgement. |
+| `PROVIDER_VERIFICATION_RESULT_REJECTED` | 409 from the result route | The worker-control API rejected the provider verification result. |
+| `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` | lease, grant, acknowledgement or capability binding do not correspond, are not issued, or are reused | The provider verification authority does not match; the credential was not opened. |
+
+Existing codes reused unchanged: `WORKER_CONFIGURATION_INVALID`,
+`WORKER_AUTHENTICATION_REJECTED`, `CONTROL_API_UNAVAILABLE`,
+`MALFORMED_CONTROL_RESPONSE`, `FORBIDDEN_PROVIDER_ENVIRONMENT`,
+`ENVELOPE_INVALID` and `CREDENTIAL_OPEN_FAILED`. No existing code or message
+changes.
+
+##### Phase 5, 6 and 7 responsibilities
+
+```text
+PHASE 5  configuration and live gate; worker-local wire, vocabulary and admission types;
+         the four client methods; issued-object provenance; the error codes;
+         VERIFYING binding, the capability and credential-opening enforcement
+PHASE 6  the fixed-origin verification transport; the Google and Runway verification
+         operations; provider request and response mechanics, bounds and timeouts;
+         the provider classifier producing the Phase 3 outcome and reason pairs
+PHASE 7  library-only run composition: live-gate check before leasing, lease, admission
+         handling, grant, VERIFYING, binding, open, transport invocation, result report,
+         the 30-second no-heartbeat lease and deadline budget, explicit re-invocation
+         policy, the process-environment guard placement, and the run-level disposition
+         of an unsupported lease (required before live enablement)
+```
+
+No Phase 5 module contacts a provider, performs network I/O other than the
+client's control-plane requests, has a caller in production source, or is
+started by any process.
+
+Phase 5 network surface. Within the Phase 5 implementation surface,
+control-plane HTTP happens only through
+`apps/commercial-worker/src/workerControlClient.ts`.
+`providerVerificationConfig.ts`, `providerVerificationContract.ts` and
+`providerVerificationCredentialOpening.ts` use no `fetch` and no network
+primitive (`node:http`, `node:https`, `node:http2`, `node:net`, `node:tls`,
+`node:dgram`, `undici`, `WebSocket`). This rule is scoped to those three new
+modules and to the verification additions in `workerControlClient.ts`. It
+does not constrain the existing generation provider adapters, and it does
+not constrain the Phase 6 verification transport files
+(`providerVerificationTransport.ts`, `googleProviderVerification.ts`,
+`runwayProviderVerification.ts`), whose network rules belong to the Phase 6
+authorization.
+
+##### Phase 5 test contract
+
+`providerVerificationConfig.test.ts`:
+
+- missing key is `DISABLED`; exactly `disabled` is `DISABLED`;
+- `""`, `enabled`, `true`, `1`, `DISABLED`, `" disabled"` and other values
+  fail with `PROVIDER_VERIFICATION_CONFIG_INVALID`, without echoing the value;
+- `requireLiveProviderVerification` throws `PROVIDER_VERIFICATION_DISABLED`
+  for every configuration the loader returns;
+- only the injected record is read; other keys, including
+  `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED` and `COMMERCIAL_WORKER_ENV`, have
+  no effect.
+
+`providerVerificationClient.test.ts` (injected `fetchImpl` only):
+
+- the four exact method names, paths and request bodies, and the empty lease
+  body;
+- exact response member sets, grammars, instants and answer-what-was-asked
+  checks; every deviation is `MALFORMED_CONTROL_RESPONSE`;
+- Bearer authorization exactly as the existing client;
+- 401 and 403 are `WORKER_AUTHENTICATION_REJECTED`; each route's 409 is its own
+  code; 5xx, transport failure and abort are `CONTROL_API_UNAVAILABLE`; any
+  other status is `MALFORMED_CONTROL_RESPONSE`;
+- invalid job ID, proof or result pair is `PROVIDER_VERIFICATION_REQUEST_INVALID`
+  with zero requests;
+- exactly one request per invocation and zero automatic retries on every
+  failure class;
+- an unsupported-provider lease parses and is returned;
+- only client-produced objects satisfy the issued predicates; parser output
+  and look-alike literals do not, and neither does a spread, `Object.assign`,
+  `structuredClone` or JSON round-trip copy of an issued lease, grant or
+  acknowledgement;
+- two successful `VERIFYING` calls answering the same job and fence return
+  two distinct issued objects, both satisfying the predicate;
+- the existing `createHttpWorkerControlClient` surface is unchanged.
+
+Vocabulary drift (in `providerVerificationClient.test.ts`; test-only imports,
+no production import and no protocol change):
+
+1. the `GOOGLE_GENAI` provider in `SUPPORTED_PROVIDER_VERIFICATION_PAIRS`
+   equals `GOOGLE_PROVIDER_ID` imported from `commercial-worker-protocol`;
+2. the `RUNWAY` provider in `SUPPORTED_PROVIDER_VERIFICATION_PAIRS` equals
+   `RUNWAY_PROVIDER_ID` imported from `commercial-worker-protocol`;
+3. the worker `PROVIDER_VERIFICATION_OUTCOMES` exactly equals (same members,
+   same order) `PROVIDER_VERIFICATION_OUTCOMES` imported from
+   `apps/commercial-api/src/workerControl/workerProviderVerificationResultService.ts`;
+4. every reason in the worker `PROVIDER_VERIFICATION_REASONS_BY_OUTCOME`
+   satisfies `isWorkerReportableVerificationReason(reason) === true` from that
+   same commercial-api module, and the worker table exactly equals the
+   Phase 3 table in "Closed worker-reportable outcomes and reasons";
+5. `WORKER_LOST_AFTER_CREDENTIAL_GRANT` and `WORKER_LOST_DURING_VERIFYING`
+   each satisfy `isWorkerReportableVerificationReason(reason) === false` and
+   are absent from the worker table;
+6. the Google pair's `verificationPolicyId` equals the literal
+   `GOOGLE_GENAI_MODELS_LIST_V1BETA`. No runtime module exports the policy IDs
+   (commercial-api treats them as opaque). The authority is "Fixed
+   provider-verification policies" and the published flag
+   `R44B11F_GOOGLE_POLICY_ID`;
+7. the Runway pair's `verificationPolicyId` equals the literal
+   `RUNWAY_ORGANIZATION_GET_V1_2024_11_06`, on the same authority and the
+   published flag `R44B11F_RUNWAY_POLICY_ID`.
+
+`providerVerificationCredentialOpening.test.ts` (fake opener; leases, grants
+and acknowledgements produced through the real client with an injected
+`fetchImpl`):
+
+- a raw grant, a missing acknowledgement, or look-alike literals cannot bind;
+- a mismatched job, fence, provider or opening-context provider cannot bind;
+  unsupported provider and policy map to their codes;
+- a forbidden provider variable in the injected environment fails with
+  `FORBIDDEN_PROVIDER_ENVIRONMENT` before anything else;
+- a matching triple binds; `openOnceFor` with the exact binding calls the
+  opener exactly once and passes the plaintext to `use`;
+- a second open after a completed open fails with
+  `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` without calling the opener;
+- bound-acknowledgement record: a second bind of the same acknowledgement
+  object fails with `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`; a cloned or
+  copied lease, grant or acknowledgement cannot bind; a new issued
+  acknowledgement from a second successful `VERIFYING` call for the same job
+  and fence binds exactly once;
+- reflective construction: (1) create a legitimate capability; (2) obtain
+  `capability.constructor`; (3) attempt `new` with a forged token
+  (`undefined`, a fresh `Symbol`, and `Symbol.for` of any description),
+  which throws `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`; (4) call
+  `openOnceFor` with the legitimate exact binding on any resulting object, on
+  `Object.create(Object.getPrototypeOf(capability))` and on a plain object
+  through the prototype method; (5) every attempt fails with
+  `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` and the opener call count stays 0;
+- A, mismatch does not consume: `openOnceFor` with a binding differing in
+  each of the four fields fails with `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`
+  and 0 opener calls; a following call with the exact binding succeeds and
+  calls the opener exactly once;
+- B, opener failure consumes: a valid call whose opener throws is
+  `CREDENTIAL_OPEN_FAILED`; a retry with the same capability and exact binding
+  fails with `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` before the opener, and
+  the opener call count remains 1. The same holds for a non-string or empty
+  plaintext;
+- C, concurrent double open: `Promise.allSettled([capability.openOnceFor(b, use),
+  capability.openOnceFor(b, use)])` with the exact binding and an opener that
+  resolves only after both calls have started gives exactly one opener
+  invocation, one fulfilled result, and one rejection with
+  `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH`. The test also proves consumption
+  is synchronous: immediately after the first call returns its promise, and
+  before any await, a second call already rejects without calling the opener;
+- opener failure, non-string and empty plaintext are `CREDENTIAL_OPEN_FAILED`
+  with no cause;
+- the capability serializes only to its fixed marker, has no enumerable
+  fields, and no error message, `JSON.stringify` output or captured log
+  contains the plaintext, envelope, context, lease token or machine
+  credential;
+- `credentialOpeningRun.ts` and the acceptance journal are not used.
+
+`boundary.test.ts`:
+
+- the pinned worker source inventory gains exactly the three new Phase 5 files,
+  and the four Phase 6/7 files (`providerVerificationTransport.ts`,
+  `googleProviderVerification.ts`, `runwayProviderVerification.ts`,
+  `providerVerificationRun.ts`) are absent;
+- import allowlists: `providerVerificationContract.ts` imports nothing;
+  `providerVerificationConfig.ts` imports only `./workerError.js`;
+  `providerVerificationCredentialOpening.ts` imports exactly
+  `./credentialContracts.js`, `./providerEnvironment.js`,
+  `./providerVerificationContract.js`, `./workerControlClient.js` and
+  `./workerError.js`; `workerControlClient.ts` adds only
+  `./providerVerificationContract.js`;
+- no new dependency, no `package.json` change, no protocol change and no
+  provider SDK;
+- Phase 5 network surface, scoped exactly as locked above:
+  `providerVerificationConfig.ts`, `providerVerificationContract.ts` and
+  `providerVerificationCredentialOpening.ts` contain no `fetch` and import or
+  reference no `node:http`, `node:https`, `node:http2`, `node:net`,
+  `node:tls`, `node:dgram`, `undici` or `WebSocket`; the verification methods
+  in `workerControlClient.ts` send only through the client's existing shared
+  request path. The rule is not applied to existing generation adapters or
+  to Phase 6 files, with guard-the-guard cases;
+- `providerVerificationCredentialOpening.ts` declares its bound-acknowledgement
+  record with `new WeakSet` and contains no `new Set` or `new Map`; its
+  construction token is not exported, and the class constructor's first
+  statement is the token check;
+- no process access and no process entry point in any Phase 5 module;
+- the key `COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION` appears only in
+  `providerVerificationConfig.ts`;
+- the brand and provider-variable rules are relaxed only in
+  `providerVerificationContract.ts`, only for the exact whole literals
+  `GOOGLE_GENAI`, `RUNWAY`, `GOOGLE_GENAI_MODELS_LIST_V1BETA` and
+  `RUNWAY_ORGANIZATION_GET_V1_2024_11_06`, with guard-the-guard cases;
+- `.open(` on a credential opener appears only in `credentialOpeningRun.ts`
+  and `providerVerificationCredentialOpening.ts`; the issued predicates and
+  the capability are referenced only by the opening module;
+- no production module calls the four verification client methods, and
+  `credentialOpeningRun.ts` imports no `providerVerification*` module;
+- verification modules import none of the journal or generation modules
+  listed under the acceptance-journal rule.
+
+##### Phase 5 implementation authorization
+
+Phase 5 requires:
+
+```text
+new database migration = NO
+commercial-api change = NO
+runtime-grant change = NO
+worker protocol change = NO
+worker authentication change = NO
+existing worker configuration change = NO
+generation credential-opening change = NO
+provider call = NO
+provider transport = NO
+live verification enablement = NO
+live submission enablement = NO
+process entry point = NO
+new package dependency = NO
+```
+
+Anything outside this boundary requires a new scope-amendment gate.
+
 #### R44B11F acceptance boundary
 
 R44B11F is complete only when:
@@ -14087,6 +14886,72 @@ R44B11F_PHASE_4_PROVIDER_CALLS=NO
 R44B11F_PHASE_4_CREDENTIAL_OPEN=NO
 R44B11F_PHASE_4_PROTOCOL_CHANGE=NO
 R44B11F_PHASE_4_DEPENDENCY_CHANGE=NO
+R44B11F_PHASE_5_CONTRACT_LOCKED=YES
+R44B11F_PHASE_5_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
+R44B11F_PHASE_5_SCOPE=WORKER_CONTROL_CLIENT_CREDENTIAL_OPENING_CONFIG
+R44B11F_PHASE_5_DISCOVERY_BASE=9b49032de0ebe228383cf32ce3fd9468f27fa6ba
+R44B11F_PHASE_5_D11_SCOPE_LOCK_MODIFIED=NO
+R44B11F_PHASE_5_PRODUCTION_MODIFIED=apps/commercial-worker/src/workerControlClient.ts,apps/commercial-worker/src/workerError.ts
+R44B11F_PHASE_5_PRODUCTION_NEW=apps/commercial-worker/src/providerVerificationConfig.ts,apps/commercial-worker/src/providerVerificationContract.ts,apps/commercial-worker/src/providerVerificationCredentialOpening.ts
+R44B11F_PHASE_5_TEST_MODIFIED=apps/commercial-worker/tests/boundary.test.ts
+R44B11F_PHASE_5_TEST_NEW=apps/commercial-worker/tests/providerVerificationConfig.test.ts,apps/commercial-worker/tests/providerVerificationClient.test.ts,apps/commercial-worker/tests/providerVerificationCredentialOpening.test.ts
+R44B11F_PHASE_5_CLIENT_TYPE=ProviderVerificationControlClient
+R44B11F_PHASE_5_CLIENT_FACTORY=createHttpProviderVerificationControlClient
+R44B11F_PHASE_5_EXISTING_WORKER_CONTROL_CLIENT_TYPE_CHANGE=NO
+R44B11F_PHASE_5_CLIENT_METHODS=leaseProviderVerification,requestProviderVerificationCredentialGrant,acknowledgeProviderVerificationVerifying,reportProviderVerificationResult
+R44B11F_PHASE_5_CLIENT_REQUESTS_PER_INVOCATION=1
+R44B11F_PHASE_5_CLIENT_AUTOMATIC_RETRY=NO
+R44B11F_PHASE_5_CLIENT_OWN_TIMEOUT=NO
+R44B11F_PHASE_5_CLIENT_DEADLINE=CALLER_ABORT_SIGNAL
+R44B11F_PHASE_5_CLIENT_AUTHENTICATION=EXISTING_BEARER_MACHINE_CREDENTIAL
+R44B11F_PHASE_5_WIRE_TYPES=WORKER_LOCAL
+R44B11F_PHASE_5_SHARED_PROTOCOL_CHANGE=NO
+R44B11F_PHASE_5_ISSUED_OBJECT_PROVENANCE=MODULE_PRIVATE_WEAKSETS_EXACT_OBJECT_IDENTITY
+R44B11F_PHASE_5_NETWORK_SURFACE=WORKER_CONTROL_CLIENT_ONLY_WITHIN_PHASE_5_MODULES
+R44B11F_PHASE_5_409_CODES=PROVIDER_VERIFICATION_LEASE_REJECTED,PROVIDER_VERIFICATION_GRANT_REJECTED,PROVIDER_VERIFICATION_VERIFYING_REJECTED,PROVIDER_VERIFICATION_RESULT_REJECTED
+R44B11F_PHASE_5_NEW_WORKER_ERROR_CODES=PROVIDER_VERIFICATION_CONFIG_INVALID,PROVIDER_VERIFICATION_DISABLED,PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED,PROVIDER_VERIFICATION_POLICY_UNSUPPORTED,PROVIDER_VERIFICATION_REQUEST_INVALID,PROVIDER_VERIFICATION_LEASE_REJECTED,PROVIDER_VERIFICATION_GRANT_REJECTED,PROVIDER_VERIFICATION_VERIFYING_REJECTED,PROVIDER_VERIFICATION_RESULT_REJECTED,PROVIDER_VERIFICATION_AUTHORITY_MISMATCH
+R44B11F_PHASE_5_KILL_SWITCH_MECHANISM=INJECTED_ENVIRONMENT_RECORD
+R44B11F_PHASE_5_KILL_SWITCH_KEY=COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION
+R44B11F_PHASE_5_KILL_SWITCH_ACCEPTED_VALUES=disabled
+R44B11F_PHASE_5_KILL_SWITCH_DEFAULT=DISABLED
+R44B11F_PHASE_5_KILL_SWITCH_MISSING=DISABLED
+R44B11F_PHASE_5_KILL_SWITCH_INVALID=PROVIDER_VERIFICATION_CONFIG_INVALID
+R44B11F_PHASE_5_ENABLED_VALUE_ACCEPTED=NO
+R44B11F_PHASE_5_LIVE_GATE=ALWAYS_PROVIDER_VERIFICATION_DISABLED
+R44B11F_PHASE_5_CAN_ENABLE_LIVE_VERIFICATION=NO
+R44B11F_PHASE_5_VERIFYING_BARRIER_OWNER=apps/commercial-worker/src/providerVerificationCredentialOpening.ts
+R44B11F_PHASE_5_CAPABILITY_TYPE=ProviderVerificationCredentialCapability
+R44B11F_PHASE_5_CAPABILITY_CONSTRUCTOR=bindProviderVerificationCredential
+R44B11F_PHASE_5_CAPABILITY_MATCH_FIELDS=providerVerificationJobId,fencingCounter,provider,verificationPolicyId
+R44B11F_PHASE_5_CAPABILITY_BINDS_LEASE_TOKEN=NO
+R44B11F_PHASE_5_CAPABILITY_RUNTIME_PROVENANCE=MODULE_PRIVATE_CONSTRUCTION_TOKEN_AND_PRIVATE_BRAND_CHECK
+R44B11F_PHASE_5_CAPABILITY_SINGLE_USE=YES
+R44B11F_PHASE_5_CAPABILITY_CONSUME=SYNCHRONOUS_BEFORE_FIRST_AWAIT
+R44B11F_PHASE_5_CAPABILITY_MISMATCH_CONSUMES=NO
+R44B11F_PHASE_5_CAPABILITY_OPENER_FAILURE_CONSUMES=YES
+R44B11F_PHASE_5_CAPABILITIES_PER_ISSUED_ACKNOWLEDGEMENT_OBJECT=1
+R44B11F_PHASE_5_BOUND_ACKNOWLEDGEMENT_RECORD=OPENING_MODULE_PRIVATE_WEAKSET
+R44B11F_PHASE_5_GENERATION_CREDENTIAL_OPENING_REUSED=NO
+R44B11F_PHASE_5_PROVIDER_ENVIRONMENT_GUARD=INJECTED_ENVIRONMENT_UNCHANGED_GUARD
+R44B11F_PHASE_5_SUPPORTED_PAIRS=GOOGLE_GENAI:GOOGLE_GENAI_MODELS_LIST_V1BETA,RUNWAY:RUNWAY_ORGANIZATION_GET_V1_2024_11_06
+R44B11F_PHASE_5_ADMISSION=STRUCTURAL_CLASSIFICATION_ONLY
+R44B11F_PHASE_5_VOCABULARY_DRIFT_TESTS=PROVIDER_IDS,OUTCOMES,REASONS,POLICY_IDS
+R44B11F_PHASE_5_ADMISSION_REFUSALS=UNSUPPORTED_PROVIDER,UNSUPPORTED_POLICY,PROVIDER_POLICY_MISMATCH
+R44B11F_PHASE_5_UNSUPPORTED_LEASE_GRANT_ALLOWED=NO
+R44B11F_PHASE_5_UNSUPPORTED_LEASE_RESULT_REPORT_ALLOWED=NO
+R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION=PHASE_7_REQUIRED_BEFORE_LIVE_ENABLEMENT
+R44B11F_VERIFICATION_ACCEPTANCE_JOURNAL_GATE=NONE
+R44B11F_PHASE_5_LOCAL_LEASE_EXPIRY_DECISION=NO
+R44B11F_PHASE_5_PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
+R44B11F_PHASE_5_PLAINTEXT_SECRET_LOGGING=FORBIDDEN
+R44B11F_PHASE_5_PLAINTEXT_SECRET_SERIALIZATION=FORBIDDEN
+R44B11F_PHASE_5_PLAINTEXT_SECRET_ERROR_CAUSE=FORBIDDEN
+R44B11F_PHASE_5_PROVIDER_CALLS=NO
+R44B11F_PHASE_5_PROVIDER_TRANSPORT=NO
+R44B11F_PHASE_5_PROCESS_ENTRYPOINT=NO
+R44B11F_PHASE_5_MIGRATION_CHANGE=NO
+R44B11F_PHASE_5_COMMERCIAL_API_CHANGE=NO
+R44B11F_PHASE_5_DEPENDENCY_CHANGE=NO
 ```
 
-COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_17
+COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_23

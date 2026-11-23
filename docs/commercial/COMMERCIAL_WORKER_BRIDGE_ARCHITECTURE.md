@@ -14806,6 +14806,839 @@ new package dependency = NO
 
 Anything outside this boundary requires a new scope-amendment gate.
 
+#### R44B11F Phase 6 provider verification transport contract amendment
+
+**Locked decision (R44B11F Phase 6 contract amendment; architecture only,
+precedes Phase 6 implementation).**
+
+Phase 6 discovery against `563c0744b269362d703d48b511728691657062df` found no
+contradiction between the R44B11F contract, the Phase 3 and Phase 5
+amendments, R44B11A, D11 and the published Phase 5 implementation, but found
+that the worker side of Phase 6 was not locked: the Phase 6 file subset and
+its boundary rules, the structural meaning of a successful response, the full
+provider-condition-to-reason table, the Google authentication semantics,
+timeout, caller-abort and redirect semantics, the origin authority, and the
+throw-versus-return surface. This amendment locks exactly those items.
+
+It changes no migration, persistence, lifecycle, lock-order, aggregate,
+audit, route, wire, reconciliation, Phase 5 client, configuration, binding or
+capability decision already locked above. The two fixed operations, the
+10-second provider timeout, the 65536-byte bound, the redirect prohibition,
+the single-attempt rule and the definitive-failure set locked under "Fixed
+provider-verification policies" and "Provider result classification" are
+unchanged; this amendment only makes them exact. The result vocabulary is the
+Phase 3 vocabulary already held by `providerVerificationContract.ts`; no
+second result contract is created. R44B11A remains in force with no Phase 6
+exception.
+
+##### Phase 6 file authorization
+
+D11 remains the R44B11F-wide ceiling and is not modified. Phase 6 adds:
+
+```text
+apps/commercial-worker/src/providerVerificationTransport.ts
+apps/commercial-worker/src/googleProviderVerification.ts
+apps/commercial-worker/src/runwayProviderVerification.ts
+```
+
+Phase 6 tests add:
+
+```text
+apps/commercial-worker/tests/providerVerificationTransport.test.ts
+apps/commercial-worker/tests/googleProviderVerification.test.ts
+apps/commercial-worker/tests/runwayProviderVerification.test.ts
+```
+
+and may modify only:
+
+```text
+apps/commercial-worker/tests/boundary.test.ts
+```
+
+Phase 6 modifies no existing production file (`PRODUCTION_MODIFIED=NONE`);
+the existing worker error vocabulary is sufficient (below). No other path may
+change in Phase 6. The 19 D11 protected files, the Phase 5 modules,
+`workerControlClient.ts`, `workerError.ts`, the shared protocol package and
+both `package.json` files stay byte-identical, and every other existing worker
+test passes unmodified.
+
+Phase 6 does not create `providerVerificationRun.ts`, any Phase 7
+composition, a process entry point, a journal of any kind, a worker-control
+caller, a provider SDK wrapper, a migration or a package dependency.
+
+##### Module roles
+
+```text
+providerVerificationTransport.ts   the single provider verification entry point: local validation, pair dispatch,
+                                   the one fixed GET, the 10-second deadline, caller-abort composition and the
+                                   bounded body read; the provider-neutral raw outcome type
+googleProviderVerification.ts      the fixed Google request construction and the complete Google classifier
+runwayProviderVerification.ts      the fixed Runway request construction and the complete Runway classifier
+```
+
+The transport is provider-neutral apart from dispatch: it holds no origin,
+path, header name or provider status rule. Each provider module holds its own
+origin, path, headers and classification, and performs no I/O.
+
+##### Network ownership
+
+Within Phase 6, provider HTTP happens only in `providerVerificationTransport.ts`
+and only through the injected `fetchImpl` dependency:
+
+- raw injected `fetch`; there is no default provider transport, mirroring the
+  generation adapters' "required and explicit" rule. No global `fetch` call;
+- no provider SDK, and no change to the SDK-importer allowlist;
+- no `process.env` or other process access;
+- no worker-control request, client, method or route;
+- exactly one provider HTTP request per invocation, or none when local
+  validation fails or the caller signal is already aborted;
+- no automatic retry, backoff, polling, cadence or loop of any kind;
+- no redirect following.
+
+Redirect policy (locked): every request is sent with `redirect: "manual"`.
+`"manual"` never follows a redirect, exactly as `"error"` does, but keeps a
+redirect observable as a response, so a moved fixed operation is classified as
+`PROVIDER_OPERATION_DRIFT` instead of being indistinguishable from a network
+failure. The `Location` header is never read, and no second request is ever
+made. The worker-control client keeps `redirect: "error"`; the control plane
+has no drift reason, so the difference is intentional.
+
+##### Fixed requests
+
+Origin authority (locked, option B): each provider module holds its own
+fixed request literals. The generation contract constants
+(`GOOGLE_API_BASE_URL`, `GOOGLE_API_VERSION`, `RUNWAY_API_BASE_URL`,
+`RUNWAY_API_VERSION`) are generation authority, not verification authority,
+and are not imported: verification reuses no generation module, and a later
+generation origin change must never silently move a verification operation.
+Drift is caught by exact-value tests pinned to this section and by the
+single-occurrence boundary rule below.
+
+Google (`GOOGLE_GENAI_MODELS_LIST_V1BETA`):
+
+```text
+method        GET
+URL           https://generativelanguage.googleapis.com/v1beta/models?pageSize=1
+headers       x-goog-api-key: <credential>
+body          none
+other headers none set by Phase 6
+```
+
+Runway (`RUNWAY_ORGANIZATION_GET_V1_2024_11_06`):
+
+```text
+method        GET
+URL           https://api.dev.runwayml.com/v1/organization
+headers       Authorization: Bearer <credential>
+              X-Runway-Version: 2024-11-06
+body          none
+other headers none set by Phase 6
+```
+
+Both are metadata reads. Neither creates, polls or retrieves generated
+content, and no generation request is ever a verification probe. The URL
+strings are complete literals in their provider modules, never assembled
+from parts, configuration or input.
+
+##### Raw transport outcome
+
+The transport produces exactly one provider-neutral raw outcome:
+
+```text
+ProviderVerificationRawOutcome =
+  | Readonly<{ kind: "RESPONSE"; status: number; body: Uint8Array }>   complete body, at most 65536 bytes
+  | Readonly<{ kind: "BODY_TOO_LARGE" }>
+  | Readonly<{ kind: "TIMEOUT" }>
+  | Readonly<{ kind: "CALLER_ABORT" }>
+  | Readonly<{ kind: "NETWORK_FAILURE" }>
+```
+
+- `RESPONSE`: any response whose body was read completely within the bound,
+  for every status, including `0` (an opaque redirect) and `3xx`. A missing
+  body is an empty `Uint8Array`.
+- `BODY_TOO_LARGE`: the bound was exceeded (below), for any status.
+- `TIMEOUT`: the internal 10-second deadline fired while the operation was
+  still pending, before any caller abort.
+- `CALLER_ABORT`: the caller signal fired while the operation was still
+  pending, before the deadline, or was already aborted.
+- `NETWORK_FAILURE`: `fetchImpl` threw or rejected, the fulfilled value is not
+  a response with an integer `status` from 0 to 599, or the body read failed,
+  in each case with neither abort cause recorded.
+
+JSON decoding, malformed JSON and structural validation are not raw transport
+outcomes; they belong to the provider classifiers. The type is exported from
+the transport module only so the two provider modules can type their
+classifiers; no other module may reference it.
+
+##### Response body bound
+
+```text
+PROVIDER_VERIFICATION_RESPONSE_MAX_BYTES = 65536
+```
+
+- Declared size: if `Content-Length` is present and is a canonical
+  non-negative decimal integer greater than 65536, the body is cancelled
+  unread and the outcome is `BODY_TOO_LARGE`. An absent or non-canonical
+  `Content-Length` is ignored and the streamed count decides.
+- Streamed size: the body is read only through its stream reader, accumulating
+  a byte count; the read stops, the stream is cancelled and the outcome is
+  `BODY_TOO_LARGE` as soon as more than 65536 bytes have arrived.
+- `Response.json()`, `text()`, `arrayBuffer()`, `blob()` and `formData()` are
+  never used, because they are unbounded.
+- The bound applies to every status, and is checked before classification:
+  an oversized body of any status is `PROVIDER_RESPONSE_TOO_LARGE`.
+- The bytes live only in the invocation's local scope and the classifier's
+  arguments. They are never retained, returned, logged or persisted, and the
+  report carries none of their content.
+
+`Content-Type` is not inspected; JSON decoding is the authority.
+
+##### Deadline, caller abort and composition
+
+```text
+PROVIDER_VERIFICATION_TIMEOUT_MS = 10000
+```
+
+The 10-second deadline covers the whole provider HTTP operation: connection,
+TLS, request, response headers and the complete bounded body read. It is
+installed immediately before `fetchImpl` is called, as the last step of the
+start sequence below. Classification is synchronous after the body is
+acquired and consumes no separate budget.
+
+"Present" (locked): for the optional injected values of Phase 6, the caller
+`signal` and the `deadlineTimer` dependency, present means
+`value !== undefined`. Truthiness is never used; `null`, `false`, `0` or `""`
+is present and is then validated as the wrong type (`signal` gives
+`PROVIDER_VERIFICATION_REQUEST_INVALID`, `deadlineTimer` gives
+`WORKER_CONFIGURATION_INVALID`). This matches the Phase 5 client's
+`signal === undefined` convention.
+
+The transport accepts an optional caller `AbortSignal` (the Phase 7 lease
+budget). Composition, all locked:
+
+1. Exactly one internal `AbortController` per invocation; its signal is the
+   only signal given to `fetchImpl`, and it also governs the body read.
+2. If the caller signal is present and already aborted at invocation (after
+   local validation), no listener is installed, the deadline timer is not
+   called, no request is made and the outcome is `CALLER_ABORT`.
+3. Start sequence, with no other code between its steps:
+   a. if the caller signal is present, one caller `abort` listener (`once`)
+      is installed;
+   b. the deadline is installed by calling the timer;
+   c. if a cancellation cause was recorded during a or b, the invocation
+      ends with that cause's raw outcome and `fetchImpl` is never called;
+   d. otherwise `fetchImpl` is called, exactly once.
+4. Whichever cancellation trigger fires first records its cause (`TIMEOUT`
+   or `CALLER_ABORT`) in a local variable before aborting the internal
+   controller; a later trigger changes nothing.
+5. Classification of an aborted operation uses only the recorded cause, never
+   the thrown error's type or message, so timeout and caller abort are always
+   distinguishable.
+6. The deadline is cancelled and the caller listener removed on every
+   terminal path, including success, throw and abort.
+7. The timer is the injected `deadlineTimer` (shape
+   `(ms: number, onExpiry: () => void) => () => void`, the same shape as the
+   generation `DeadlineTimer`, declared locally because verification modules
+   must not import `preProviderOrchestration.ts`); the default uses
+   `setTimeout` and `clearTimeout`.
+8. Neither cause ever leads to a second request.
+
+Completion and cancellation (locked, observable behaviour):
+
+- Pending window: the cancellation-sensitive pending window begins at start
+  step 3a when a caller signal is present, otherwise at step 3b; it always
+  begins after all local validation and the already-aborted check, and
+  before `fetchImpl` is called. It ends when the first terminal raw outcome
+  is established: `RESPONSE`, `BODY_TOO_LARGE`, `TIMEOUT`, `CALLER_ABORT` or
+  `NETWORK_FAILURE`. Only while it is open may a cancellation cause be
+  recorded, and the first cause recorded (internal deadline or caller abort)
+  wins deterministically, before or after `fetchImpl` has started.
+- Cancellation before the request: a timer that calls `onExpiry`
+  synchronously during installation records `TIMEOUT`; a caller abort
+  recorded after the listener is installed but before `fetchImpl` is called
+  records `CALLER_ABORT`. In both cases `fetchImpl` is never called, no
+  provider request is sent, and the report is `INCONCLUSIVE` /
+  `PROVIDER_TIMEOUT` or `INCONCLUSIVE` / `VERIFICATION_AMBIGUOUS`
+  respectively.
+- Response completion: once the complete bounded body has been read, or the
+  bound has been exceeded, the invocation has reached its terminal raw
+  outcome (`RESPONSE` or `BODY_TOO_LARGE`). A deadline or caller abort
+  observed only after that point never replaces it.
+- No reliance on `fetchImpl`: correct deadline and cancellation behaviour
+  must not depend solely on `fetchImpl` or the body stream honouring the
+  internal signal. Every asynchronous wait that the provider HTTP operation
+  needs in order to complete, namely the `fetchImpl` result and each
+  body-reader read, settles no later than the moment a cancellation cause is
+  recorded: when a cause is recorded while such a wait is outstanding, the
+  invocation ends with that cause's raw outcome without waiting for the
+  outstanding promise. A late settlement or rejection of that promise is
+  observed and ignored (it never surfaces as an unhandled rejection), and the
+  transport attempts to cancel the body stream if one exists. The mechanism
+  is not prescribed.
+- Stream cancellation failure: if an attempted body-stream cancellation
+  throws synchronously or returns a promise that rejects, the failure is
+  caught or observed and ignored. It never changes the selected raw outcome,
+  never escapes as an exception or unhandled rejection, never triggers a
+  retry, and is never logged or carried in any error.
+- Cleanup: on reaching any terminal raw outcome (`RESPONSE`,
+  `BODY_TOO_LARGE`, `TIMEOUT`, `CALLER_ABORT` or `NETWORK_FAILURE`) the
+  deadline is cancelled and the caller listener removed, and no later
+  cancellation event, settlement or rejection can change that outcome.
+- Timer cleanup failure: if the cleanup function returned by the deadline
+  timer throws when called at terminal cleanup, the exception is swallowed.
+  It never replaces the selected outcome, never escapes the invocation and
+  never triggers a retry. It is cleanup behaviour, not
+  `WORKER_CONFIGURATION_INVALID`.
+- No retry: a cancellation or timeout never triggers a second request or any
+  other retry.
+
+These rules keep the locked mappings: a completed bounded response is
+classified from `RESPONSE`, a pending operation ended by the deadline is
+`INCONCLUSIVE` / `PROVIDER_TIMEOUT`, and one ended by the caller is
+`INCONCLUSIVE` / `VERIFICATION_AMBIGUOUS`.
+
+Deadline dependency (locked): `deadlineTimer` is a local injected
+dependency. When it is not present, the default `setTimeout` timer above is
+used. When present, it must be a function with the shape above; a present
+value that is not a function is `WORKER_CONFIGURATION_INVALID` during the
+dependency check, before anything else. The deadline is installed by calling
+the timer at start step 3b. If that call throws, or returns a value that is
+not a function (a runtime check on an injected value), the installation has
+failed: the invocation throws `WORKER_CONFIGURATION_INVALID` with no cause,
+removes any caller listener already installed, and never calls `fetchImpl`.
+Installation failure takes precedence over any cause recorded during the
+same call (for example a synchronous `onExpiry` followed by a throw), and it
+is never `TIMEOUT`. A timer that records `TIMEOUT` during installation and
+then returns a function has installed successfully, and start step 3c
+applies. `WORKER_CONFIGURATION_INVALID` from the timer arises only from a
+present non-function value, an installation call that throws, or an
+installation call that returns a non-function. It is a local dependency
+fault only: it never applies to a provider condition, which is still
+returned as a report.
+
+Caller-abort classification (locked): `CALLER_ABORT` is returned as
+`INCONCLUSIVE` / `VERIFICATION_AMBIGUOUS`, not thrown. Once the request has
+started the provider may or may not have received it, so the result is
+genuinely ambiguous; an abort before the request uses the same pair, so that
+one caller-abort result exists for every timing, and returning it keeps one
+uniform surface. It is distinct from the internal
+deadline, which is `INCONCLUSIVE` / `PROVIDER_TIMEOUT`. Whether to report the
+result after its own abort is a Phase 7 decision.
+
+##### Result classification
+
+Each provider module exports one complete, pure, synchronous classifier from
+`ProviderVerificationRawOutcome` to `ProviderVerificationResultReport`. It
+performs no I/O, reads no clock, keeps no state, returns a frozen
+`{ outcome, reasonCode }` pair accepted by `isProviderVerificationResultReport`
+and carries no retry, delay or re-invocation field. No human-readable
+provider message is inspected, matched or retained.
+
+Shared decoding (both providers): the body is decoded as UTF-8 with a fatal
+decoder and parsed with `JSON.parse`. A decoding or parse failure, or an empty
+body, is "not JSON".
+
+Status ranges used below: `3xx` is 300 to 399; `5xx` is 500 to 599; status
+`0` is an opaque redirect.
+
+Google classifier (`classifyGoogleVerificationOutcome`), first match wins:
+
+| Raw condition | Outcome | Reason code |
+|---|---|---|
+| `TIMEOUT` | `INCONCLUSIVE` | `PROVIDER_TIMEOUT` |
+| `CALLER_ABORT` | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| `NETWORK_FAILURE` | `INCONCLUSIVE` | `PROVIDER_NETWORK_FAILURE` |
+| `BODY_TOO_LARGE` | `INCONCLUSIVE` | `PROVIDER_RESPONSE_TOO_LARGE` |
+| 200, body not JSON | `INCONCLUSIVE` | `PROVIDER_RESPONSE_MALFORMED` |
+| 200, JSON that fails the Google success shape | `INCONCLUSIVE` | `PROVIDER_RESPONSE_MALFORMED` |
+| 200, JSON that passes the Google success shape | `VERIFIED` | `VERIFICATION_SUCCEEDED` |
+| 0 or 3xx | `INCONCLUSIVE` | `PROVIDER_OPERATION_DRIFT` |
+| 400 | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| 401 with a Google error envelope whose `error.status` is `UNAUTHENTICATED` | `DEFINITIVE_FAILURE` | `CREDENTIAL_REJECTED` |
+| 401 otherwise | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| 402 | `INCONCLUSIVE` | `PROVIDER_BILLING_RESTRICTION` |
+| 403 with a Google error envelope carrying an ErrorInfo `reason` of `BILLING_DISABLED` | `INCONCLUSIVE` | `PROVIDER_BILLING_RESTRICTION` |
+| 403 with a Google error envelope whose `error.status` is `PERMISSION_DENIED` | `DEFINITIVE_FAILURE` | `CREDENTIAL_NOT_AUTHORIZED` |
+| 403 otherwise | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| 404, 405 or 410 | `INCONCLUSIVE` | `PROVIDER_OPERATION_DRIFT` |
+| 429 | `INCONCLUSIVE` | `PROVIDER_RATE_OR_QUOTA_LIMITED` |
+| 5xx | `INCONCLUSIVE` | `PROVIDER_UNAVAILABLE` |
+| any other status (including 201 to 299, 406 to 409, 411 to 428 and 430 to 499) | `INCONCLUSIVE` | `PROVIDER_UNEXPECTED_STATUS` |
+
+Runway classifier (`classifyRunwayVerificationOutcome`), first match wins:
+
+| Raw condition | Outcome | Reason code |
+|---|---|---|
+| `TIMEOUT` | `INCONCLUSIVE` | `PROVIDER_TIMEOUT` |
+| `CALLER_ABORT` | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| `NETWORK_FAILURE` | `INCONCLUSIVE` | `PROVIDER_NETWORK_FAILURE` |
+| `BODY_TOO_LARGE` | `INCONCLUSIVE` | `PROVIDER_RESPONSE_TOO_LARGE` |
+| 200, body not JSON | `INCONCLUSIVE` | `PROVIDER_RESPONSE_MALFORMED` |
+| 200, JSON that fails the Runway success shape | `INCONCLUSIVE` | `PROVIDER_RESPONSE_MALFORMED` |
+| 200, JSON that passes the Runway success shape | `VERIFIED` | `VERIFICATION_SUCCEEDED` |
+| 0 or 3xx | `INCONCLUSIVE` | `PROVIDER_OPERATION_DRIFT` |
+| 400 | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| 401 | `DEFINITIVE_FAILURE` | `CREDENTIAL_REJECTED` |
+| 402 | `INCONCLUSIVE` | `PROVIDER_BILLING_RESTRICTION` |
+| 403 | `INCONCLUSIVE` | `VERIFICATION_AMBIGUOUS` |
+| 404, 405 or 410 | `INCONCLUSIVE` | `PROVIDER_OPERATION_DRIFT` |
+| 429 | `INCONCLUSIVE` | `PROVIDER_RATE_OR_QUOTA_LIMITED` |
+| 5xx | `INCONCLUSIVE` | `PROVIDER_UNAVAILABLE` |
+| any other status (including 201 to 299, 406 to 409, 411 to 428 and 430 to 499) | `INCONCLUSIVE` | `PROVIDER_UNEXPECTED_STATUS` |
+
+Definitive versus inconclusive (locked): `DEFINITIVE_FAILURE` is produced
+only by the three confirmed rows above (Google 401 confirmed
+`UNAUTHENTICATED`, Google 403 confirmed `PERMISSION_DENIED` without a billing
+reason, Runway 401). Every other condition, including every unknown,
+unparseable or unlisted one, is `INCONCLUSIVE`. This is the locked
+definitive set made exact, never widened. Phase 7 may decide whether to report
+or re-invoke; it never reclassifies a provider condition.
+
+##### Success shapes
+
+Validation is minimal and checks only what Phase 6 relies on. No field value
+is used, returned or retained.
+
+Google success shape: the parsed value is a non-null, non-array JSON object;
+it has no own `error` member; and if it has an own `models` member, that
+member is an array. `models` may be absent (an empty repeated field may be
+omitted from JSON), its elements are not inspected, and `nextPageToken` and
+every other member are ignored.
+
+Runway success shape: the parsed value is a non-null, non-array JSON object
+with no own `error` member. No member is required; organization fields such
+as credit balance or tier are neither validated nor read, and are never
+persisted.
+
+A 200 response with any other JSON value (array, string, number, boolean,
+`null`) or with an own `error` member is `PROVIDER_RESPONSE_MALFORMED`.
+
+##### Google authentication and authorization semantics
+
+Google errors use the structured Google API error envelope; only its
+machine-readable fields are read:
+
+```text
+envelope        the parsed body is a non-null, non-array object whose own member error is a non-null, non-array object
+error.status    a string; the canonical status name
+ErrorInfo       an element of error.details that is an object whose "@type" is
+                "type.googleapis.com/google.rpc.ErrorInfo" and whose reason is a string
+```
+
+- 401 is `CREDENTIAL_REJECTED` only when `error.status` is exactly
+  `UNAUTHENTICATED`. A 401 without a parseable envelope or with any other
+  `error.status` is `VERIFICATION_AMBIGUOUS`.
+- 403 is checked first for billing: any ErrorInfo `reason` exactly
+  `BILLING_DISABLED` gives `PROVIDER_BILLING_RESTRICTION`, because payment
+  state is locked as `INCONCLUSIVE`. Otherwise 403 is `CREDENTIAL_NOT_AUTHORIZED`
+  only when `error.status` is exactly `PERMISSION_DENIED`; any other 403 is
+  `VERIFICATION_AMBIGUOUS`.
+- 400 is always `VERIFICATION_AMBIGUOUS`, whatever its envelope says,
+  including an envelope that names an invalid API key. A 400 may mean a
+  rejected key or a rejected request, and the locked definitive set names
+  Google 401 and 403 only. Consequence, accepted: a Google key that the
+  provider rejects with 400 is reported `INCONCLUSIVE`, never
+  `DEFINITIVE_FAILURE`. That fails closed and never invalidates a connection.
+  Making it definitive would widen the locked set and requires a separate
+  amendment backed by provider documentation.
+- `error.message`, `error.code` text, ErrorInfo `domain` and `metadata`, and
+  every other member are never read.
+
+The structured fields only narrow the locked mapping (an unconfirmed 401 or
+403 falls back to `INCONCLUSIVE`); they can never produce a definitive result
+the status alone would not.
+
+##### Runway 401, 403 and 404 semantics
+
+- 401 is `DEFINITIVE_FAILURE` / `CREDENTIAL_REJECTED` on the status alone, as
+  locked. The body is read within the bound (so an oversized body is still
+  `PROVIDER_RESPONSE_TOO_LARGE`) but not otherwise inspected.
+- 403 is not in the locked definitive set and its meaning for this operation
+  is not established, so it is `INCONCLUSIVE` / `VERIFICATION_AMBIGUOUS`.
+- 404, 405 and 410 mean the fixed operation is not where it is fixed, so they
+  are `INCONCLUSIVE` / `PROVIDER_OPERATION_DRIFT`.
+
+##### Special reason codes
+
+All three are Phase 6 classifications, `INCONCLUSIVE` only, and apply to both
+providers as tabled. None is a Phase 7 decision.
+
+| Reason | Exact triggers |
+|---|---|
+| `PROVIDER_OPERATION_DRIFT` | status 0 or 3xx (a redirect, never followed); status 404, 405 or 410 |
+| `VERIFICATION_AMBIGUOUS` | `CALLER_ABORT`; status 400 (both); Google 401 or 403 without the confirming envelope; Runway 403 |
+| `PROVIDER_BILLING_RESTRICTION` | status 402 (both); Google 403 with ErrorInfo `reason` `BILLING_DISABLED` |
+
+No worker-reportable reason in the Phase 3 vocabulary is left without a
+locked trigger. The Phase 4 reasons remain reconciliation-only.
+
+##### Throw versus return
+
+Every provider condition, including timeout, caller abort, network failure,
+oversized, malformed and unexpected responses, is returned as a
+`ProviderVerificationResultReport`. The transport throws only for local
+faults detected before any request is sent; a throw means nothing was sent.
+Each throw is a closed `WorkerError` with fixed text and no cause.
+
+| Code | Disposition | Trigger |
+|---|---|---|
+| `WORKER_CONFIGURATION_INVALID` | ALLOWED | `dependencies` is not an object, `fetchImpl` is not a function, or `deadlineTimer` is present and not a function; or, when the deadline is installed immediately before the request, the `deadlineTimer` call throws or returns a value that is not a function (no request is sent) |
+| `PROVIDER_VERIFICATION_REQUEST_INVALID` | ALLOWED | `input` is not an object; `provider` or `verificationPolicyId` is not a string; `signal` is present and not an `AbortSignal`; or `credential` is not a string of 1 to 4096 visible ASCII characters (0x21 to 0x7E) |
+| `PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED` | ALLOWED | `classifyProviderVerificationLease` refuses with `UNSUPPORTED_PROVIDER` |
+| `PROVIDER_VERIFICATION_POLICY_UNSUPPORTED` | ALLOWED | `classifyProviderVerificationLease` refuses with `UNSUPPORTED_POLICY` or `PROVIDER_POLICY_MISMATCH` |
+| any other code | NOT_ALLOWED | — |
+
+Local checks run in exactly this order: dependencies; input shape; pair
+admission; credential shape; then the already-aborted caller signal, which is
+returned, not thrown; then start steps 3a and 3b, where a deadline
+installation failure is thrown as above. No provider request is sent before
+all of these have passed. Each caller-supplied input and dependency member is read
+exactly once into a local before any check (the Phase 5 read-once rule).
+
+Wording refinement: `PROVIDER_VERIFICATION_REQUEST_INVALID` was introduced in
+Phase 5 for a worker-control client argument outside the contract. Phase 6
+extends its documented use to a provider verification transport argument
+outside the contract. Its code, fixed message ("The provider verification
+request is invalid and was not sent.") and no-cause rule are unchanged, so
+`workerError.ts` does not change. No new `WorkerErrorCode` is required.
+
+##### Transport surface
+
+`providerVerificationTransport.ts` exports exactly:
+
+```text
+PROVIDER_VERIFICATION_TIMEOUT_MS          10000
+PROVIDER_VERIFICATION_RESPONSE_MAX_BYTES  65536
+
+type ProviderVerificationDeadlineTimer = (ms: number, onExpiry: () => void) => () => void;
+type ProviderVerificationRequest = Readonly<{ url: string; headers: Readonly<Record<string, string>> }>;
+type ProviderVerificationRawOutcome = (as locked above);
+type ProviderVerificationTransportDependencies = Readonly<{
+  fetchImpl: typeof fetch;
+  deadlineTimer?: ProviderVerificationDeadlineTimer;
+}>;
+type ProviderVerificationInput = Readonly<{
+  provider: string;
+  verificationPolicyId: string;
+  credential: string;
+  signal?: AbortSignal;
+}>;
+
+async function performProviderVerification(
+  input: ProviderVerificationInput,
+  dependencies: ProviderVerificationTransportDependencies,
+): Promise<ProviderVerificationResultReport>
+```
+
+`performProviderVerification` performs the local checks, dispatches the
+admitted pair (provider exactly `GOOGLE_PROVIDER_ID` to the Google module,
+exactly `RUNWAY_PROVIDER_ID` to the Runway module), builds the request,
+sends it once with method `GET`, no body, `redirect: "manual"` and the
+internal signal, produces the raw outcome and returns the provider
+classifier's report. It returns nothing else: no status, header, body, raw
+outcome or request object.
+
+`googleProviderVerification.ts` exports exactly:
+
+```text
+function buildGoogleVerificationRequest(credential: string): ProviderVerificationRequest
+function classifyGoogleVerificationOutcome(outcome: ProviderVerificationRawOutcome): ProviderVerificationResultReport
+```
+
+`runwayProviderVerification.ts` exports exactly:
+
+```text
+function buildRunwayVerificationRequest(credential: string): ProviderVerificationRequest
+function classifyRunwayVerificationOutcome(outcome: ProviderVerificationRawOutcome): ProviderVerificationResultReport
+```
+
+The builders are synchronous and pure and return a frozen request whose
+`headers` is a frozen plain object. Only the transport module calls them.
+Both provider modules import only types: the transport types from
+`./providerVerificationTransport.js` and `ProviderVerificationResultReport`
+from `./providerVerificationContract.js`. The type-only cycle between the
+transport and the provider modules is erased at runtime.
+
+The transport's imports are exactly:
+
+```text
+commercial-worker-protocol            GOOGLE_PROVIDER_ID, RUNWAY_PROVIDER_ID (named values only)
+./providerVerificationContract.js     classifyProviderVerificationLease and the report type
+./googleProviderVerification.js       buildGoogleVerificationRequest, classifyGoogleVerificationOutcome
+./runwayProviderVerification.js       buildRunwayVerificationRequest, classifyRunwayVerificationOutcome
+./workerError.js                      WorkerError
+```
+
+`providerVerificationTransport.ts` joins the worker protocol-importer set
+solely to consume the two existing R44B11A constants, exactly as conflict
+repair C1 did for the contract module. No protocol file, export, type or
+package dependency changes.
+
+The transport never receives a `ProviderVerificationCredentialCapability`,
+never calls `openOnceFor`, and imports nothing from
+`providerVerificationCredentialOpening.ts` or `workerControlClient.ts`.
+
+##### Credential ownership and secret lifetime
+
+Phase 7 calls `capability.openOnceFor(binding, use)`, and inside `use` calls
+`performProviderVerification` with the plaintext as `credential`. This is the
+only way Phase 6 receives a credential; there is no second credential
+authority path.
+
+```text
+PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
+PLAINTEXT_SECRET_LOGGING=FORBIDDEN
+PLAINTEXT_SECRET_SERIALIZATION=FORBIDDEN
+PLAINTEXT_SECRET_ERROR_CAUSE=FORBIDDEN
+```
+
+- the plaintext exists only for the duration of the `use` callback;
+- Phase 6 uses it only to build the one request's headers;
+- the request and header objects are local to the invocation and are never
+  stored on any module, global, closure that outlives the call, error or
+  result;
+- the credential is never logged, serialized, persisted, echoed in an error
+  or cause, or included in the result report;
+- no request structure is returned from `performProviderVerification`;
+- one invocation sends at most one request; a credential is never reused for
+  a retry, because Phase 6 has none;
+- Phase 6 modules log nothing.
+
+##### Phase 6 boundary rules
+
+`boundary.test.ts` changes only as follows, each with guard-the-guard cases:
+
+- inventory: the pinned worker source inventory gains exactly the three
+  Phase 6 modules; `providerVerificationRun.ts` stays absent. The Phase 5
+  test that asserts the three Phase 6 files are absent is narrowed to
+  `providerVerificationRun.ts` only, and its `providerVerification` path
+  list becomes the six Phase 5 and Phase 6 modules;
+- import allowlists: exactly the transport and provider-module imports
+  locked above;
+- protocol importers: `src/providerVerificationTransport.ts` joins the set
+  solely for `GOOGLE_PROVIDER_ID` and `RUNWAY_PROVIDER_ID`; no other new
+  importer; the protocol closure and package assertions are unchanged;
+- R44B11A: the copy rule (no `"GOOGLE_GENAI"` or `"RUNWAY"` literal in any
+  worker source) stays active and unweakened for every file, including the
+  three Phase 6 modules;
+- brand rule allowances, whole token only (word-bounded), only in the named
+  file, removed before the existing brand rule runs; any other brand text,
+  the same tokens in any other file, and near-misses (for example
+  `X-Runway-Versions`, `https://api.dev.runwayml.com/v1/organizations`,
+  `RUNWAY_PROVIDER_IDS`, `buildRunwayVerificationRequests`) still fail:
+
+```text
+src/runwayProviderVerification.ts    https://api.dev.runwayml.com/v1/organization
+                                     X-Runway-Version
+                                     buildRunwayVerificationRequest
+                                     classifyRunwayVerificationOutcome
+src/providerVerificationTransport.ts RUNWAY_PROVIDER_ID
+                                     runwayProviderVerification
+                                     buildRunwayVerificationRequest
+                                     classifyRunwayVerificationOutcome
+```
+
+  `googleProviderVerification.ts` needs no brand allowance (its origin,
+  header and names do not match the brand rule) and gets none;
+- provider-variable rule: no new allowance. `GOOGLE_PROVIDER_ID` is already
+  an allowed contract identifier; the Phase 6 modules name no policy ID and
+  no other `GOOGLE_` or `RUNWAYML_` identifier;
+- network surface: in the three Phase 6 modules, `fetch` appears only as the
+  `fetchImpl` dependency and its `typeof fetch` type in the transport; no
+  global `fetch(` call; no `node:http`, `node:https`, `node:http2`,
+  `node:net`, `node:tls`, `node:dgram`, `undici` or `WebSocket`; the provider
+  modules contain no `fetch` at all;
+- each fixed URL literal appears in exactly one worker source file, its own
+  provider module; `x-goog-api-key` only in the Google module;
+  `X-Runway-Version` only in the Runway module; the transport holds no origin,
+  path or provider header;
+- `redirect: "manual"` appears exactly once, in the transport;
+- no `Response.json()`, `text()`, `arrayBuffer()`, `blob()` or `formData()`
+  in the transport;
+- no provider SDK import and no change to the SDK-importer allowlist;
+- the existing provider-selector guard applies unchanged to every Phase 6
+  module: pair dispatch in the transport is by exact equality against the two
+  imported constants, never a `switch` on the provider, a registry, a factory
+  or a selector;
+- no `process.` access, entry point, `console.` or logging;
+- no `for`/`while` loop except the single bounded body-read loop in the
+  transport; no `setInterval`; `setTimeout` only in the transport's default
+  deadline timer;
+- no import of `workerControlClient.ts`, `providerVerificationCredentialOpening.ts`,
+  `providerVerificationConfig.ts`, `credentialOpeningRun.ts`,
+  `acceptanceJournal.ts`, `startupJournalReconciliation.ts`,
+  `workerStateRoot.ts`, `acceptanceRecoveryPolicy.ts`,
+  `preProviderOrchestration.ts`, `inFlightHeartbeat.ts`, any generation
+  adapter, contract or attempt composer, or `providerVerificationRun.ts`;
+  no `openOnceFor` and no `.open(`;
+- no production caller: no worker source outside the three Phase 6 modules
+  imports any of them, and only the transport imports the provider modules;
+- no verification journal or local persistence;
+- every existing rule, including the Phase 5 rules, stays unchanged
+  otherwise.
+
+##### Phase 6 test contract
+
+`googleProviderVerification.test.ts` and `runwayProviderVerification.test.ts`
+(each for its provider, through the real transport with an injected fake
+`fetchImpl`, plus direct classifier cases):
+
+- exact request: method `GET`, the exact URL, exactly the locked headers, no
+  body, `redirect: "manual"`, the internal signal;
+- exactly one `fetchImpl` call per invocation;
+- valid success, including Google without `models` and with an empty
+  `models` array;
+- every status row of its table, one case per named status (0, 300, 302,
+  399, 400, 401, 402, 403, 404, 405, 410, 429, 500, 503, 599, 201, 204, 406,
+  418, 451), including for Google the confirmed and unconfirmed 401 and 403
+  envelopes, the `BILLING_DISABLED` 403, and a 400 whose envelope names an
+  invalid key (still `VERIFICATION_AMBIGUOUS`);
+- malformed JSON, invalid UTF-8, an empty 200 body, and each structurally
+  invalid success (array, string, number, boolean, `null`, own `error`,
+  Google non-array `models`);
+- timeout, caller abort, network failure, declared-size and streamed-size
+  oversize, each mapped as tabled;
+- the `Location` header of a redirect is never read and no second request is
+  made;
+- the credential, request headers and response body never appear in the
+  report, an error, `JSON.stringify` output or captured console output;
+- the classifier is pure: the same input gives an equal frozen report, it
+  never calls `fetchImpl` or the timer, and the report has exactly the members
+  `outcome` and `reasonCode`;
+- table exhaustiveness: every Phase 3 worker-reportable reason that the
+  table names is produced by at least one case, and every report satisfies
+  `isProviderVerificationResultReport`.
+
+`providerVerificationTransport.test.ts`:
+
+- the 10-second deadline through an injected `deadlineTimer`, covering
+  headers and a body read that stalls after the headers arrive;
+- caller-signal composition: already aborted (no `fetchImpl` call), aborted
+  during the request, aborted during the body read; timeout and caller abort
+  are distinguished when both fire, first cause wins;
+- cleanup: the deadline is cancelled and the caller listener removed on
+  success, failure, timeout and abort;
+- exactly one request, no retry after any outcome;
+- the bounded read stops at 65536 + 1 bytes and cancels the stream; exactly
+  65536 bytes are accepted;
+- every local fault throws its locked code with no cause, in the locked
+  order, and makes no `fetchImpl` call; each input and dependency member is
+  read exactly once;
+- faulty timer value (local fault, not a provider result): a present
+  `deadlineTimer` that is not a function, including `null`, throws
+  `WORKER_CONFIGURATION_INVALID` at the dependency check;
+- timer installation matrix, one required case each, every case run with a
+  caller signal present (so a listener is installed) and asserting
+  `fetchImpl` called zero times, no retry, and no credential in any thrown
+  error, report, `JSON.stringify` output or captured console output:
+  - A. `onExpiry` not called, installation call throws:
+    `WORKER_CONFIGURATION_INVALID`, no cause, caller listener removed;
+  - B. `onExpiry` not called, installation call returns a non-function:
+    `WORKER_CONFIGURATION_INVALID`, no cause, caller listener removed;
+  - C. `onExpiry` called synchronously, then the installation call throws:
+    `WORKER_CONFIGURATION_INVALID`, no cause, caller listener removed; no
+    report is returned and the recorded `TIMEOUT` is not returned;
+  - D. `onExpiry` called synchronously, then the installation call returns a
+    non-function: `WORKER_CONFIGURATION_INVALID`, no cause, caller listener
+    removed; no report is returned and the recorded `TIMEOUT` is not
+    returned. This case protects the installation-failure precedence over a
+    cause recorded during the same call (the one exception to
+    first-cause-wins);
+  - E. `onExpiry` called synchronously, then the installation call returns a
+    valid cleanup function: installation succeeded and start step 3c
+    applies, so the invocation does not throw and returns `INCONCLUSIVE` /
+    `PROVIDER_TIMEOUT`; the returned cleanup function is called and the
+    caller listener removed;
+- "present" semantics: `signal: undefined` and `deadlineTimer: undefined`
+  behave as absent; `signal: null` is `PROVIDER_VERIFICATION_REQUEST_INVALID`;
+- caller abort before the request (the caller signal is aborted
+  synchronously during timer installation): `CALLER_ABORT`, reported as
+  `INCONCLUSIVE` / `VERIFICATION_AMBIGUOUS`, with `fetchImpl` called zero
+  times;
+- signal independence, each with a `fetchImpl` or body reader that ignores
+  every `AbortSignal`, and each asserting exactly one `fetchImpl` call, no
+  retry, that a late settlement or rejection of the abandoned promise is
+  ignored and does not surface as an unhandled rejection, and that the
+  deadline is cleared and the caller listener removed:
+  - `fetchImpl` never settles, the internal deadline fires: `TIMEOUT`;
+  - `fetchImpl` never settles, the caller aborts: `CALLER_ABORT`;
+  - a body-reader `read()` never settles, the internal deadline fires:
+    `TIMEOUT`, and stream cancellation is attempted;
+  - a body-reader `read()` never settles, the caller aborts:
+    `CALLER_ABORT`, and stream cancellation is attempted;
+- completion beats later cancellation: a complete bounded body is read, and
+  then the deadline callback and the caller abort both fire before the
+  invocation's promise is observed; the outcome stays `RESPONSE` and is
+  classified normally (the same for an oversized body staying
+  `BODY_TOO_LARGE`);
+- cleanup failures: an attempted stream cancellation that throws
+  synchronously and one that returns a rejecting promise, and a timer cleanup
+  function that throws, each leave the selected outcome unchanged, throw
+  nothing from the invocation, produce no unhandled rejection, make no second
+  request and log nothing;
+- unsupported provider, unsupported policy and mismatched pair use the
+  Phase 5 admission mapping;
+- the result carries no raw outcome, status, header or body;
+- credential integration: through a real issued lease, grant and `VERIFYING`
+  acknowledgement (fake `fetch` for the control plane and the provider), a
+  real capability's `openOnceFor` invokes the transport inside `use`; the
+  opener is called exactly once; the transport receives only the plaintext
+  string; no capability is passed to or reachable from the transport.
+
+##### Phase 5, 6 and 7 responsibilities (refined)
+
+```text
+PHASE 6 OWNS  request construction; the one provider request; the 10-second provider deadline;
+              caller-signal composition; the bounded response read; provider response decoding and
+              structural validation; provider result classification; returning the result report
+PHASE 7 OWNS  the live gate before leasing; lease acquisition; admission handling and the run-level
+              disposition of an unsupported lease; grant; VERIFYING acknowledgement; capability
+              binding; capability.openOnceFor; calling performProviderVerification inside use; the
+              30-second lease and deadline budget and the caller signal; reporting the result to the
+              control plane; the re-invocation policy; process-environment guard placement; process
+              integration
+```
+
+There is no overlap. Phase 6 never reports a result, opens a credential,
+reads configuration, checks the live gate or decides to re-invoke; Phase 7
+never constructs a provider request or classifies a provider condition.
+
+Phase 7 carry item (recorded, not resolved here): a stored credential can
+reach `openOnceFor` and `use` and then fail the Phase 6 credential shape.
+Phase 6 then throws `PROVIDER_VERIFICATION_REQUEST_INVALID` inside `use`,
+after `VERIFYING` has been acknowledged and with no provider request sent;
+the capability stays consumed. Phase 7 must lock, before live enablement,
+how that local failure is reflected in control-plane completion or
+reporting, and whether any re-invocation occurs. Phase 6 does not change the
+credential shape, the result vocabulary or this throw.
+
+##### Phase 6 implementation authorization
+
+Phase 6 requires:
+
+```text
+new database migration = NO
+commercial-api change = NO
+runtime-grant change = NO
+worker protocol change = NO
+worker authentication change = NO
+existing worker configuration change = NO
+existing worker production file change = NO
+new worker error code = NO
+generation credential-opening change = NO
+provider SDK use = NO
+provider call in tests = NO (injected fake fetch only)
+live verification enablement = NO
+live submission enablement = NO
+process entry point = NO
+new package dependency = NO
+```
+
+The live gate still refuses every configuration, so no Phase 6 code can be
+reached with a real credential in production until Phase 7 and a separate
+live-enablement amendment exist. Anything outside this boundary requires a
+new scope-amendment gate.
+
 #### R44B11F acceptance boundary
 
 R44B11F is complete only when:
@@ -15040,6 +15873,92 @@ R44B11F_PHASE_5_PROCESS_ENTRYPOINT=NO
 R44B11F_PHASE_5_MIGRATION_CHANGE=NO
 R44B11F_PHASE_5_COMMERCIAL_API_CHANGE=NO
 R44B11F_PHASE_5_DEPENDENCY_CHANGE=NO
+R44B11F_PHASE_6_CONTRACT_LOCKED=YES
+R44B11F_PHASE_6_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
+R44B11F_PHASE_6_SCOPE=PROVIDER_VERIFICATION_TRANSPORT_AND_CLASSIFICATION
+R44B11F_PHASE_6_DISCOVERY_BASE=563c0744b269362d703d48b511728691657062df
+R44B11F_PHASE_6_D11_SCOPE_LOCK_MODIFIED=NO
+R44B11F_PHASE_6_PRODUCTION_NEW=apps/commercial-worker/src/providerVerificationTransport.ts,apps/commercial-worker/src/googleProviderVerification.ts,apps/commercial-worker/src/runwayProviderVerification.ts
+R44B11F_PHASE_6_PRODUCTION_MODIFIED=NONE
+R44B11F_PHASE_6_TEST_NEW=apps/commercial-worker/tests/providerVerificationTransport.test.ts,apps/commercial-worker/tests/googleProviderVerification.test.ts,apps/commercial-worker/tests/runwayProviderVerification.test.ts
+R44B11F_PHASE_6_TEST_MODIFIED=apps/commercial-worker/tests/boundary.test.ts
+R44B11F_PHASE_6_RUN_MODULE_CREATED=NO
+R44B11F_PHASE_6_ENTRY_POINT=performProviderVerification
+R44B11F_PHASE_6_PROVIDER_EXPORTS=buildGoogleVerificationRequest,classifyGoogleVerificationOutcome,buildRunwayVerificationRequest,classifyRunwayVerificationOutcome
+R44B11F_PHASE_6_RESULT_TYPE=ProviderVerificationResultReport
+R44B11F_PHASE_6_SECOND_RESULT_CONTRACT=NO
+R44B11F_PHASE_6_TRANSPORT=RAW_INJECTED_FETCH_NO_DEFAULT
+R44B11F_PHASE_6_PROVIDER_SDK=NO
+R44B11F_PHASE_6_REQUESTS_PER_INVOCATION=AT_MOST_1
+R44B11F_PHASE_6_AUTOMATIC_RETRY=NO
+R44B11F_PHASE_6_POLLING=NO
+R44B11F_PHASE_6_REDIRECT_MODE=MANUAL_NEVER_FOLLOWED
+R44B11F_PHASE_6_REDIRECT_CLASSIFICATION=INCONCLUSIVE_PROVIDER_OPERATION_DRIFT
+R44B11F_PHASE_6_ORIGIN_AUTHORITY=PROVIDER_MODULE_LOCAL_LITERALS_NO_GENERATION_CONTRACT_IMPORT
+R44B11F_PHASE_6_GOOGLE_REQUEST=GET_https://generativelanguage.googleapis.com/v1beta/models?pageSize=1_X_GOOG_API_KEY_NO_BODY
+R44B11F_PHASE_6_RUNWAY_REQUEST=GET_https://api.dev.runwayml.com/v1/organization_BEARER_X_RUNWAY_VERSION_2024_11_06_NO_BODY
+R44B11F_PHASE_6_GOOGLE_SUCCESS_SHAPE=200_JSON_OBJECT_NO_OWN_ERROR_MODELS_ARRAY_IF_PRESENT
+R44B11F_PHASE_6_RUNWAY_SUCCESS_SHAPE=200_JSON_OBJECT_NO_OWN_ERROR
+R44B11F_PHASE_6_SUCCESS_STATUS=200_ONLY
+R44B11F_PHASE_6_CONTENT_TYPE_INSPECTED=NO
+R44B11F_PHASE_6_TIMEOUT_MS=10000
+R44B11F_PHASE_6_TIMEOUT_COVERS=CONNECTION_THROUGH_COMPLETE_BOUNDED_BODY_READ
+R44B11F_PHASE_6_RESPONSE_MAX_BYTES=65536
+R44B11F_PHASE_6_RESPONSE_BOUND_APPLIES=DECLARED_CONTENT_LENGTH_AND_STREAMED_COUNT_EVERY_STATUS
+R44B11F_PHASE_6_RESPONSE_READ=BOUNDED_STREAM_READER_ONLY_NO_RESPONSE_JSON_TEXT_ARRAYBUFFER_BLOB_FORMDATA
+R44B11F_PHASE_6_CALLER_SIGNAL=OPTIONAL_COMPOSED_ONE_INTERNAL_CONTROLLER_FIRST_CAUSE_WINS
+R44B11F_PHASE_6_CALLER_ABORT=RETURNED_INCONCLUSIVE_VERIFICATION_AMBIGUOUS
+R44B11F_PHASE_6_PRE_ABORTED_SIGNAL=NO_REQUEST_INCONCLUSIVE_VERIFICATION_AMBIGUOUS
+R44B11F_PHASE_6_OPTIONAL_PRESENT=VALUE_NOT_UNDEFINED_NO_TRUTHINESS
+R44B11F_PHASE_6_START_SEQUENCE=CALLER_LISTENER_THEN_DEADLINE_INSTALL_THEN_CAUSE_CHECK_THEN_ONE_FETCH
+R44B11F_PHASE_6_PENDING_WINDOW=FROM_LISTENER_OR_DEADLINE_INSTALL_BEFORE_FETCH_UNTIL_FIRST_TERMINAL_RAW_OUTCOME
+R44B11F_PHASE_6_CANCELLATION_BEFORE_FETCH=NO_REQUEST_FIRST_CAUSE_WINS
+R44B11F_PHASE_6_CANCELLATION_SIGNAL_INDEPENDENT=YES_FETCH_AND_BODY_READ_WAITS_END_ON_RECORDED_CAUSE
+R44B11F_PHASE_6_TERMINAL_OUTCOME_FINAL=RESPONSE_AND_BODY_TOO_LARGE_NOT_REPLACED_BY_LATER_CANCELLATION
+R44B11F_PHASE_6_TIMER_INSTALL_FAILURE=WORKER_CONFIGURATION_INVALID_NO_REQUEST_PRECEDES_RECORDED_CAUSE
+R44B11F_PHASE_6_LOCAL_CHECK_ORDER=DEPENDENCIES,INPUT_SHAPE,PAIR_ADMISSION,CREDENTIAL_SHAPE,PRE_ABORTED_SIGNAL,DEADLINE_INSTALL
+R44B11F_PHASE_6_STREAM_CANCEL_FAILURE=SWALLOWED_OUTCOME_UNCHANGED_NO_RETRY
+R44B11F_PHASE_6_TIMER_CLEANUP_FAILURE=SWALLOWED_OUTCOME_UNCHANGED_NO_RETRY
+R44B11F_PHASE_6_LATE_SETTLEMENT=OBSERVED_AND_IGNORED_NO_UNHANDLED_REJECTION
+R44B11F_CREDENTIAL_SHAPE_FAILURE_RUN_DISPOSITION=PHASE_7_REQUIRED_BEFORE_LIVE_ENABLEMENT
+R44B11F_PHASE_6_RAW_OUTCOMES=RESPONSE,BODY_TOO_LARGE,TIMEOUT,CALLER_ABORT,NETWORK_FAILURE
+R44B11F_PHASE_6_JSON_AND_SHAPE_OWNER=PROVIDER_CLASSIFIER
+R44B11F_PHASE_6_DEFINITIVE_SET=GOOGLE_401_UNAUTHENTICATED,GOOGLE_403_PERMISSION_DENIED_NOT_BILLING,RUNWAY_401
+R44B11F_PHASE_6_DEFINITIVE_SET_WIDENED=NO
+R44B11F_PHASE_6_GOOGLE_400=INCONCLUSIVE_VERIFICATION_AMBIGUOUS
+R44B11F_PHASE_6_GOOGLE_AUTH_FIELDS=ERROR_STATUS,ERRORINFO_REASON
+R44B11F_PHASE_6_PROVIDER_MESSAGE_TEXT_INSPECTED=NO
+R44B11F_PHASE_6_RUNWAY_403=INCONCLUSIVE_VERIFICATION_AMBIGUOUS
+R44B11F_PHASE_6_404_405_410=INCONCLUSIVE_PROVIDER_OPERATION_DRIFT
+R44B11F_PHASE_6_402=INCONCLUSIVE_PROVIDER_BILLING_RESTRICTION
+R44B11F_PHASE_6_429=INCONCLUSIVE_PROVIDER_RATE_OR_QUOTA_LIMITED
+R44B11F_PHASE_6_5XX=INCONCLUSIVE_PROVIDER_UNAVAILABLE
+R44B11F_PHASE_6_OTHER_STATUS=INCONCLUSIVE_PROVIDER_UNEXPECTED_STATUS
+R44B11F_PHASE_6_CLASSIFIER=PURE_SYNCHRONOUS_NO_RETRY_FIELD
+R44B11F_PHASE_6_PROVIDER_OUTCOMES_THROWN=NO
+R44B11F_PHASE_6_LOCAL_THROWS=WORKER_CONFIGURATION_INVALID,PROVIDER_VERIFICATION_REQUEST_INVALID,PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED,PROVIDER_VERIFICATION_POLICY_UNSUPPORTED
+R44B11F_PHASE_6_REQUEST_INVALID_WORDING_EXTENDED_TO_TRANSPORT=YES
+R44B11F_PHASE_6_NEW_WORKER_ERROR_CODES=NONE
+R44B11F_PHASE_6_INPUT_READ_ONCE=YES
+R44B11F_PHASE_6_CREDENTIAL_SHAPE=STRING_1_TO_4096_VISIBLE_ASCII_0X21_TO_0X7E
+R44B11F_PHASE_6_CREDENTIAL_SOURCE=PHASE_7_OPENONCEFOR_USE_CALLBACK_PLAINTEXT_ONLY
+R44B11F_PHASE_6_CAPABILITY_PASSED_TO_TRANSPORT=NO
+R44B11F_PHASE_6_PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
+R44B11F_PHASE_6_PLAINTEXT_SECRET_LOGGING=FORBIDDEN
+R44B11F_PHASE_6_PLAINTEXT_SECRET_SERIALIZATION=FORBIDDEN
+R44B11F_PHASE_6_PLAINTEXT_SECRET_ERROR_CAUSE=FORBIDDEN
+R44B11F_PHASE_6_PROTOCOL_IMPORTER_ADDED=apps/commercial-worker/src/providerVerificationTransport.ts
+R44B11F_PHASE_6_TRANSPORT_PROTOCOL_IMPORTS=commercial-worker-protocol:GOOGLE_PROVIDER_ID,RUNWAY_PROVIDER_ID
+R44B11F_PHASE_6_SHARED_PROTOCOL_PACKAGE_MODIFIED=NO
+R44B11F_PHASE_6_R44B11A_PROVIDER_IDENTITY_RULE=IN_FORCE_NO_EXCEPTION
+R44B11F_PHASE_6_BRAND_ALLOWANCE=EXACT_WHOLE_TOKENS_ONLY_IN_RUNWAY_MODULE_AND_TRANSPORT
+R44B11F_PHASE_6_PROVIDER_VARIABLE_ALLOWANCE_ADDED=NO
+R44B11F_PHASE_6_PROVIDER_CALLS_IN_TESTS=NO
+R44B11F_PHASE_6_LIVE_GATE_CHANGE=NO
+R44B11F_PHASE_6_PROCESS_ENTRYPOINT=NO
+R44B11F_PHASE_6_MIGRATION_CHANGE=NO
+R44B11F_PHASE_6_COMMERCIAL_API_CHANGE=NO
+R44B11F_PHASE_6_DEPENDENCY_CHANGE=NO
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_23

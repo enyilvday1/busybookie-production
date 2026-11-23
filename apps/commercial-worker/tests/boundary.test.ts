@@ -198,18 +198,47 @@ const withoutVerificationContractIdentifiers = (path: string, text: string) =>
 const KILL_SWITCH_CONFIG = "src/providerVerificationConfig.ts";
 const withoutKillSwitchKey = (path: string, text: string) =>
   path !== KILL_SWITCH_CONFIG ? text : text.replace(/\bCOMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION\b/g, "");
+// R44B11F Phase 6 (architecture "Phase 6 boundary rules"): the second-provider
+// verification module names its fixed origin, its version header and its two
+// exported functions; the transport names the imported RUNWAY_PROVIDER_ID,
+// that module's path and the same two functions. Only these exact whole
+// tokens, only in the named file, are removed before the brand rule runs. The
+// origin and header are removed only as complete double-quoted literals, so a
+// longer URL, a suffixed header or the same text unquoted still fails;
+// identifiers are removed only where no identifier character adjoins them.
+// The Google verification module needs no allowance and has none.
+const RUNWAY_VERIFICATION = "src/runwayProviderVerification.ts";
+const VERIFICATION_TRANSPORT = "src/providerVerificationTransport.ts";
+const PHASE_6_BRAND_TOKENS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  [RUNWAY_VERIFICATION]: Object.freeze([
+    '"https://api.dev.runwayml.com/v1/organization"',
+    '"X-Runway-Version"',
+    "buildRunwayVerificationRequest",
+    "classifyRunwayVerificationOutcome",
+  ]),
+  [VERIFICATION_TRANSPORT]: Object.freeze(["RUNWAY_PROVIDER_ID", "runwayProviderVerification", "buildRunwayVerificationRequest", "classifyRunwayVerificationOutcome"]),
+});
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+const withoutPhase6BrandTokens = (path: string, text: string) =>
+  (PHASE_6_BRAND_TOKENS[path] ?? []).reduce(
+    (remaining, token) =>
+      remaining.replace(token.startsWith('"') ? new RegExp(escapeRegExp(token), "g") : new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(token)}(?![A-Za-z0-9_$])`, "g"), ""),
+    text,
+  );
 // The provider-selector guard (R44B10B), unchanged.
 const PROVIDER_SELECTOR = /providerSelector|providerRegistry|selectProvider|providerFactory|ProviderPort|switch\s*\(\s*[A-Za-z.]*provider\b|REAL_PROVIDER_MODE|LIVE_PROVIDER/i;
 // The worker files that import the shared protocol package: the credential
 // and provider-execution re-exports, (R44B11A) the two provider contracts
 // that adapt the shared generation-request authority, and (R44B11F Phase 5,
 // conflict repair C1) the verification contract, solely to consume
-// GOOGLE_PROVIDER_ID and RUNWAY_PROVIDER_ID.
+// GOOGLE_PROVIDER_ID and RUNWAY_PROVIDER_ID. R44B11F Phase 6: the verification
+// transport, solely for the same two constants, to dispatch the admitted pair.
 const PROTOCOL_IMPORTERS = new Set([
   "src/credentialContracts.ts",
   "src/googleProviderContract.ts",
   "src/providerExecutionContract.ts",
   "src/providerVerificationContract.ts",
+  "src/providerVerificationTransport.ts",
   "src/runwayProviderContract.ts",
 ]);
 
@@ -228,6 +257,7 @@ describe("commercial-worker source boundary", () => {
       "src/googleAttemptExecution.ts",
       "src/googleProviderAdapter.ts",
       "src/googleProviderContract.ts",
+      "src/googleProviderVerification.ts",
       "src/hostFaultLatch.ts",
       "src/inFlightHeartbeat.ts",
       "src/inputMediaFailurePolicy.ts",
@@ -239,9 +269,11 @@ describe("commercial-worker source boundary", () => {
       "src/providerVerificationConfig.ts",
       "src/providerVerificationContract.ts",
       "src/providerVerificationCredentialOpening.ts",
+      "src/providerVerificationTransport.ts",
       "src/runwayAttemptExecution.ts",
       "src/runwayProviderAdapter.ts",
       "src/runwayProviderContract.ts",
+      "src/runwayProviderVerification.ts",
       "src/startupJournalReconciliation.ts",
       "src/workerConfig.ts",
       "src/workerControlClient.ts",
@@ -273,7 +305,9 @@ describe("commercial-worker source boundary", () => {
     const exempt = new Set([...(EXEMPTIONS[path] ?? []), ...(path === "src/providerEnvironment.ts" ? ["provider SDK or brand"] : [])]);
     const rules = FORBIDDEN.filter(({ label: name }) => !exempt.has(name));
     const violations = rules
-      .filter(({ pattern }) => pattern.test(withoutVerificationContractIdentifiers(path, withoutRunwayComposerIdentifiers(path, withoutAllowedTokens(path, code(text))))))
+      .filter(({ pattern }) =>
+        pattern.test(withoutPhase6BrandTokens(path, withoutVerificationContractIdentifiers(path, withoutRunwayComposerIdentifiers(path, withoutAllowedTokens(path, code(text)))))),
+      )
       .map(({ label: name }) => name);
     expect({ path, violations }).toEqual({ path, violations: [] });
   });
@@ -1784,13 +1818,17 @@ describe("provider verification boundary (R44B11F Phase 5)", () => {
   const brand = FORBIDDEN.find(({ label: name }) => name === "provider SDK or brand")!.pattern;
   const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
 
-  it("adds exactly the three Phase 5 modules and none of the Phase 6 or Phase 7 files", () => {
+  // R44B11F Phase 6 narrows the absence check to the Phase 7 run module; the
+  // verification path list becomes the three Phase 5 and three Phase 6 modules.
+  it("adds exactly the three Phase 5 modules and, with Phase 6, none of the Phase 7 files", () => {
     const paths = sources.map(({ path }) => path);
     for (const path of PHASE_5_MODULES) expect(paths).toContain(path);
-    for (const absent of ["providerVerificationTransport.ts", "googleProviderVerification.ts", "runwayProviderVerification.ts", "providerVerificationRun.ts"]) {
+    for (const absent of ["providerVerificationRun.ts"]) {
       expect(existsSync(join(SRC_ROOT, absent)), absent).toBe(false);
     }
-    expect(paths.filter((path) => /providerVerification|ProviderVerification/.test(path)).sort()).toEqual([...PHASE_5_MODULES].sort());
+    expect(paths.filter((path) => /providerVerification|ProviderVerification/.test(path)).sort()).toEqual(
+      [...PHASE_5_MODULES, "src/googleProviderVerification.ts", "src/providerVerificationTransport.ts", "src/runwayProviderVerification.ts"].sort(),
+    );
   });
 
   it("locks the exact import allowlists", () => {
@@ -1965,6 +2003,256 @@ describe("provider verification boundary (R44B11F Phase 5)", () => {
     // The generation client surface is unchanged: no verification method on it.
     const generation = clientSource.slice(clientSource.indexOf("export type WorkerControlClient = "), clientSource.indexOf("export type WorkerControlClientOptions"));
     expect(/ProviderVerification|providerVerification/.test(generation)).toBe(false);
+  });
+});
+
+// R44B11F Phase 6 (architecture "R44B11F Phase 6 provider verification
+// transport contract amendment", "Phase 6 boundary rules"): one transport and
+// two pure provider modules. Library only: no caller, no run, no journal.
+describe("provider verification transport boundary (R44B11F Phase 6)", () => {
+  const TRANSPORT = VERIFICATION_TRANSPORT;
+  const GOOGLE = "src/googleProviderVerification.ts";
+  const RUNWAY = RUNWAY_VERIFICATION;
+  const PHASE_6_MODULES = [TRANSPORT, GOOGLE, RUNWAY];
+  const textOf = (path: string) => code(read(join(APP_ROOT, path)));
+  const transport = textOf(TRANSPORT);
+  const google = textOf(GOOGLE);
+  const runway = textOf(RUNWAY);
+  const brand = FORBIDDEN.find(({ label: name }) => name === "provider SDK or brand")!.pattern;
+  const GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1";
+  const RUNWAY_URL = "https://api.dev.runwayml.com/v1/organization";
+  const NETWORK = /node:http\b|node:https\b|node:http2\b|node:net\b|node:tls\b|node:dgram\b|undici|WebSocket/;
+  const UNBOUNDED_READ = /\.json\s*\(|\.text\s*\(|\.arrayBuffer\s*\(|\.blob\s*\(|\.formData\s*\(/;
+  const LOOP = /\bfor\s*\(|\bwhile\s*\(|\bdo\s*\{/g;
+
+  it("adds exactly the three Phase 6 modules, keeps the run module absent and has no production caller", () => {
+    const paths = sources.map(({ path }) => path);
+    for (const path of PHASE_6_MODULES) expect(paths).toContain(path);
+    expect(existsSync(join(SRC_ROOT, "providerVerificationRun.ts"))).toBe(false);
+    // No worker source outside the three modules reaches any of them.
+    const PHASE_6_NAME = /providerVerificationTransport|googleProviderVerification|runwayProviderVerification|performProviderVerification|(build|classify)(Google|Runway)Verification/;
+    expect(sources.filter(({ path, text }) => !PHASE_6_MODULES.includes(path) && PHASE_6_NAME.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // Only the transport imports the provider modules, and only it calls their functions.
+    for (const name of ["googleProviderVerification", "runwayProviderVerification"]) {
+      expect(sources.filter(({ text }) => importsOf(text).some((specifier) => specifier.includes(name))).map(({ path }) => path), name).toEqual([TRANSPORT]);
+    }
+    // One builder call and one classifier selection per provider, in the transport only.
+    for (const name of ["buildGoogleVerificationRequest", "buildRunwayVerificationRequest"]) {
+      expect(transport.match(new RegExp(`\\b${name}\\(credential\\)`, "g")), name).toHaveLength(1);
+    }
+    for (const name of ["classifyGoogleVerificationOutcome", "classifyRunwayVerificationOutcome"]) {
+      expect(transport.match(new RegExp(`\\bclassify = ${name};`, "g")), name).toHaveLength(1);
+    }
+    expect(transport.match(/\bclassify\(/g)).toHaveLength(2);
+    expect(transport.match(/\bfetchImpl\(/g)).toHaveLength(1);
+  });
+
+  it("locks the exact import allowlists, with type-only provider-module imports", () => {
+    expect(importsOf(transport).sort()).toEqual([
+      "./googleProviderVerification.js",
+      "./providerVerificationContract.js",
+      "./runwayProviderVerification.js",
+      "./workerError.js",
+      PROTOCOL_PACKAGE,
+    ]);
+    expect(transport).toMatch(/^import \{ GOOGLE_PROVIDER_ID, RUNWAY_PROVIDER_ID \} from "commercial-worker-protocol";$/m);
+    expect(transport).toMatch(/^import \{ buildGoogleVerificationRequest, classifyGoogleVerificationOutcome \} from "\.\/googleProviderVerification\.js";$/m);
+    expect(transport).toMatch(/^import \{ buildRunwayVerificationRequest, classifyRunwayVerificationOutcome \} from "\.\/runwayProviderVerification\.js";$/m);
+    expect(transport).toMatch(/^import \{ classifyProviderVerificationLease, type ProviderVerificationResultReport \} from "\.\/providerVerificationContract\.js";$/m);
+    expect(transport).toMatch(/^import \{ WorkerError \} from "\.\/workerError\.js";$/m);
+    expect(transport.match(/^import\b/gm)).toHaveLength(5);
+    for (const text of [google, runway]) {
+      expect(importsOf(text).sort()).toEqual(["./providerVerificationContract.js", "./providerVerificationTransport.js"]);
+      expect(text.match(/^import\b/gm)).toHaveLength(2);
+      expect(text.match(/^import type \{[^}]+\} from "\.\/(providerVerificationContract|providerVerificationTransport)\.js";$/gm)).toHaveLength(2);
+    }
+    // The protocol set gains only the transport, and nothing else in Phase 6 reaches the protocol.
+    expect(PROTOCOL_IMPORTERS.has(TRANSPORT)).toBe(true);
+    expect([GOOGLE, RUNWAY].some((path) => PROTOCOL_IMPORTERS.has(path))).toBe(false);
+  });
+
+  it("exports exactly the locked surface", () => {
+    const exported = (text: string) => [...text.matchAll(/^export (?:async )?(?:const|function|type) ([A-Za-z0-9_]+)/gm)].map((match) => match[1]).sort();
+    expect(exported(transport)).toEqual([
+      "PROVIDER_VERIFICATION_RESPONSE_MAX_BYTES",
+      "PROVIDER_VERIFICATION_TIMEOUT_MS",
+      "ProviderVerificationDeadlineTimer",
+      "ProviderVerificationInput",
+      "ProviderVerificationRawOutcome",
+      "ProviderVerificationRequest",
+      "ProviderVerificationTransportDependencies",
+      "performProviderVerification",
+    ]);
+    expect(exported(google)).toEqual(["buildGoogleVerificationRequest", "classifyGoogleVerificationOutcome"]);
+    expect(exported(runway)).toEqual(["buildRunwayVerificationRequest", "classifyRunwayVerificationOutcome"]);
+    for (const text of [transport, google, runway]) expect(/^export (default|\{|\*|class|let|var)/m.test(text)).toBe(false);
+    expect(transport).toMatch(/^export const PROVIDER_VERIFICATION_TIMEOUT_MS = 10000;$/m);
+    expect(transport).toMatch(/^export const PROVIDER_VERIFICATION_RESPONSE_MAX_BYTES = 65536;$/m);
+  });
+
+  it("allows brand text only as the exact whole tokens in the second-provider module and the transport", () => {
+    // Each named module fails the brand rule without its allowance and passes with it.
+    for (const [path, text] of [
+      [RUNWAY, runway],
+      [TRANSPORT, transport],
+    ] as const) {
+      expect(brand.test(text), path).toBe(true);
+      expect(brand.test(withoutPhase6BrandTokens(path, text)), path).toBe(false);
+    }
+    // The Google module passes with no allowance at all.
+    expect(PHASE_6_BRAND_TOKENS[GOOGLE]).toBeUndefined();
+    expect(brand.test(google)).toBe(false);
+    // Near-misses in the allowed files still fail.
+    for (const planted of [
+      '"X-Runway-Versions"',
+      '"https://api.dev.runwayml.com/v1/organizations"',
+      '"https://api.dev.runwayml.com/v1/organization/tasks"',
+      '"https://api.dev.runwayml.com/v1/organization?x=1"',
+      "https://api.dev.runwayml.com/v1/organization",
+      "X-Runway-Version",
+      "buildRunwayVerificationRequests",
+      "xbuildRunwayVerificationRequest",
+      "classifyRunwayVerificationOutcome2",
+      'const provider = "RUNWAY";',
+      "runwayml",
+    ]) {
+      expect(brand.test(withoutPhase6BrandTokens(RUNWAY, planted)), planted).toBe(true);
+    }
+    for (const planted of ["RUNWAY_PROVIDER_IDS", "XRUNWAY_PROVIDER_ID", "runwayProviderVerification2", "$runwayProviderVerification", "RUNWAY", "@runwayml/sdk"]) {
+      expect(brand.test(withoutPhase6BrandTokens(TRANSPORT, planted)), planted).toBe(true);
+    }
+    // The transport may not name the origin or header, and neither allowance applies elsewhere.
+    expect(brand.test(withoutPhase6BrandTokens(TRANSPORT, '"X-Runway-Version"'))).toBe(true);
+    expect(brand.test(withoutPhase6BrandTokens(TRANSPORT, `"${RUNWAY_URL}"`))).toBe(true);
+    for (const path of [GOOGLE, "src/providerVerificationContract.ts", "src/runwayProviderContract.ts", "src/workerControlClient.ts"]) {
+      expect(brand.test(withoutPhase6BrandTokens(path, "RUNWAY_PROVIDER_ID")), path).toBe(true);
+      expect(brand.test(withoutPhase6BrandTokens(path, `"${RUNWAY_URL}"`)), path).toBe(true);
+      expect(brand.test(withoutPhase6BrandTokens(path, "buildRunwayVerificationRequest")), path).toBe(true);
+    }
+  });
+
+  it("adds no provider-variable allowance and names no policy ID or other provider variable", () => {
+    const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
+    for (const [path, text] of [
+      [TRANSPORT, transport],
+      [GOOGLE, google],
+      [RUNWAY, runway],
+    ] as const) {
+      expect(PROVIDER_VARIABLE.test(text.replace(/\bGOOGLE_PROVIDER_ID\b/g, "")), path).toBe(false);
+      expect(/GOOGLE_GENAI_MODELS_LIST_V1BETA|RUNWAY_ORGANIZATION_GET_V1_2024_11_06/.test(text), path).toBe(false);
+    }
+    expect(transport.match(/\bGOOGLE_PROVIDER_ID\b/g)).toHaveLength(2);
+    expect(transport.match(/\bRUNWAY_PROVIDER_ID\b/g)).toHaveLength(2);
+    expect(/GOOGLE_PROVIDER_ID|RUNWAY_PROVIDER_ID/.test(google + runway)).toBe(false);
+  });
+
+  it("dispatches by exact equality against the two imported constants, never a selector", () => {
+    expect(transport).toMatch(/if \(provider === GOOGLE_PROVIDER_ID\) \{/);
+    expect(transport).toMatch(/\} else if \(provider === RUNWAY_PROVIDER_ID\) \{/);
+    for (const text of [transport, google, runway]) {
+      expect(PROVIDER_SELECTOR.test(text)).toBe(false);
+      expect(/\bswitch\s*\(|new Map\b|Record<string, Classifier>|\[provider\]/.test(text)).toBe(false);
+    }
+    // Admission stays the Phase 5 contract's.
+    expect(transport.match(/classifyProviderVerificationLease\(/g)).toHaveLength(1);
+  });
+
+  it("reaches the network only through the injected fetchImpl in the transport", () => {
+    for (const text of [transport, google, runway]) expect(NETWORK.test(text)).toBe(false);
+    for (const text of [google, runway]) expect(/\bfetch\b/.test(text)).toBe(false);
+    // In the transport, fetch appears only as the dependency's type.
+    expect(transport.match(/\bfetch\b/g)).toHaveLength(transport.match(/typeof fetch\b/g)!.length);
+    expect(/(?<![A-Za-z.])fetch\s*\(|globalThis|\bself\.|\bwindow\.fetch/.test(transport)).toBe(false);
+    // Exactly one request site, with the locked options.
+    expect(transport).toMatch(/pending = fetchImpl\(request\.url, \{ method: "GET", headers: request\.headers, redirect: "manual", signal: inflight\.signal \}\);/);
+    expect(sources.filter(({ text }) => /redirect:\s*"manual"/.test(code(text))).map(({ path }) => path)).toEqual([TRANSPORT]);
+    expect(transport.match(/redirect:\s*"manual"/g)).toHaveLength(1);
+    // The Location header is never read.
+    expect(/location/i.test(transport + google + runway)).toBe(false);
+    // Guard the guards.
+    expect(NETWORK.test('import { request } from "node:https";')).toBe(true);
+    expect(NETWORK.test('import { fetch } from "undici";')).toBe(true);
+    expect(/(?<![A-Za-z.])fetch\s*\(/.test("const response = await fetch(url);")).toBe(true);
+  });
+
+  it("isolates each fixed URL and provider header in its own provider module", () => {
+    const occurrences = (literal: string) => sources.filter(({ text }) => code(text).includes(literal)).map(({ path }) => path);
+    expect(occurrences(GOOGLE_URL)).toEqual([GOOGLE]);
+    expect(occurrences(RUNWAY_URL)).toEqual([RUNWAY]);
+    expect(google.split(`"${GOOGLE_URL}"`).length - 1).toBe(1);
+    expect(runway.split(`"${RUNWAY_URL}"`).length - 1).toBe(1);
+    expect(occurrences("x-goog-api-key")).toEqual([GOOGLE]);
+    expect(occurrences("X-Runway-Version")).toEqual([RUNWAY]);
+    // (The control-plane client's machine Bearer header is outside Phase 6.)
+    expect(PHASE_6_MODULES.filter((path) => textOf(path).includes("Bearer "))).toEqual([RUNWAY]);
+    // The transport holds no origin, path or provider header; the URLs are never assembled.
+    expect(/https?:|googleapis|runwayml|x-goog|X-Runway|Authorization|Bearer|\/v1/i.test(transport)).toBe(false);
+    for (const text of [google, runway]) {
+      expect(text.match(/https:\/\//g)).toHaveLength(1);
+      expect(/new URL|URLSearchParams|\.concat\(|\+ "\/|`https/.test(text)).toBe(false);
+    }
+  });
+
+  it("reads the body only through the bounded stream reader", () => {
+    for (const text of [transport, google, runway]) expect(UNBOUNDED_READ.test(text)).toBe(false);
+    expect(transport.match(/\.getReader\(\)/g)).toHaveLength(1);
+    expect(/\.getReader\(/.test(google + runway)).toBe(false);
+    expect(transport).toMatch(/total > PROVIDER_VERIFICATION_RESPONSE_MAX_BYTES/);
+    expect(transport).toMatch(/Number\(declaredLength\) > PROVIDER_VERIFICATION_RESPONSE_MAX_BYTES/);
+    // Guard the guard.
+    for (const planted of ["await response.json()", "await response.text()", "await response.arrayBuffer()", "await response.blob()", "await response.formData()"]) {
+      expect(UNBOUNDED_READ.test(planted), planted).toBe(true);
+    }
+  });
+
+  it("protects the credential shape and holds no credential state", () => {
+    expect(transport).toMatch(/^const CREDENTIAL_SHAPE = \/\^\[!-~\]\{1,4096\}\$\/;$/m);
+    expect(transport.match(/CREDENTIAL_SHAPE\.test\(credential\)/g)).toHaveLength(1);
+    // No module-level mutable state, no plaintext retained beyond the invocation.
+    for (const text of [transport, google, runway]) {
+      expect(/^(let|var)\b/m.test(text)).toBe(false);
+      expect(/JSON\.stringify|\bcause\b/.test(text)).toBe(false);
+    }
+    // The provider modules use the credential only to build the header.
+    expect(google.match(/\bcredential\b/g)).toHaveLength(2);
+    expect(runway.match(/\bcredential\b/g)).toHaveLength(2);
+  });
+
+  it("has no process access, logging, retry, loop beyond the body read, interval or extra timer", () => {
+    for (const text of [transport, google, runway]) {
+      expect(/process\.|import\.meta\.main|require\.main|console\.|\blog\(|logger|retry|backoff|setInterval|Date\.now|new Date|performance\.now/i.test(text)).toBe(false);
+    }
+    expect(transport.match(LOOP)).toEqual(["for ("]);
+    expect(transport.match(/^ {2}for \(;;\) \{$/gm)).toHaveLength(1);
+    for (const text of [google, runway]) expect(text.match(LOOP)).toBeNull();
+    expect(transport.match(/\bsetTimeout\(/g)).toHaveLength(1);
+    expect(transport).toMatch(/const defaultDeadlineTimer: ProviderVerificationDeadlineTimer = \(ms, onExpiry\) => \{\s*const handle = setTimeout\(onExpiry, ms\);\s*return \(\) => clearTimeout\(handle\);\s*\};/);
+    for (const text of [google, runway]) expect(/setTimeout|clearTimeout|AbortController/.test(text)).toBe(false);
+    expect(transport.match(/new AbortController\(\)/g)).toHaveLength(1);
+    // Guard the guard.
+    expect("while (true) {}".match(LOOP)).toEqual(["while ("]);
+  });
+
+  it("imports no control-plane, opening, configuration, journal, generation or Phase 7 module", () => {
+    const FORBIDDEN_MODULE =
+      /workerControlClient|providerVerificationCredentialOpening|providerVerificationConfig|credentialOpeningRun|acceptanceJournal|startupJournalReconciliation|workerStateRoot|acceptanceRecoveryPolicy|preProviderOrchestration|inFlightHeartbeat|ProviderAdapter|ProviderContract|AttemptExecution|attemptExecution|providerVerificationRun|credentialContracts|providerEnvironment/;
+    for (const text of [transport, google, runway]) {
+      expect(importsOf(text).filter((specifier) => FORBIDDEN_MODULE.test(specifier))).toEqual([]);
+      expect(/openOnceFor|\.open\(|Capability|journal|persist|writeFile|localStorage/i.test(text)).toBe(false);
+    }
+    expect(FORBIDDEN_MODULE.test("./workerControlClient.js")).toBe(true);
+    expect(FORBIDDEN_MODULE.test("./providerVerificationRun.js")).toBe(true);
+  });
+
+  it("keeps the provider classifiers pure: no I/O, clock, state, message text or retry field", () => {
+    for (const text of [google, runway]) {
+      expect(/await|async|Promise|message|retryAfter|Retry-After|delay|reinvoke|re-invoke/i.test(text)).toBe(false);
+      expect(/^(let|var)\b/m.test(text)).toBe(false);
+    }
+    // Every report is frozen with exactly the two locked members.
+    for (const text of [google, runway]) {
+      expect(text.match(/: ProviderVerificationResultReport = Object\.freeze\(\{ outcome: "[A-Z_]+", reasonCode: "[A-Z_]+" \}\);/g)!.length).toBeGreaterThanOrEqual(12);
+    }
   });
 });
 

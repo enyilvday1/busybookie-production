@@ -13948,6 +13948,15 @@ prose names `WORKER_LIVE_PROVIDER_VERIFICATION_ENABLED=NO`, that token remains
 the architecture lock flag; it is not an environment key. The environment key
 is locked below.
 
+This amendment does not override, narrow or create an exception to the
+R44B11A provider-identity lock ("Shared generation-request contract and
+canonical-hash authority"). R44B11A remains authoritative: the `GOOGLE_GENAI`
+and `RUNWAY` provider identities move to
+`packages/commercial-worker-protocol/src/generationRequestContract.ts`; they
+are not copied, and no worker module keeps a second literal for them. Phase 5
+consumes the existing exported constants `GOOGLE_PROVIDER_ID` and
+`RUNWAY_PROVIDER_ID` (conflict repair C1, below).
+
 ##### Phase 5 file authorization
 
 The R44B11F implementation-scope lock (D11, SHA-256
@@ -13996,7 +14005,7 @@ worker test must pass unmodified.
 
 ```text
 providerVerificationConfig.ts              kill-switch configuration and the live gate
-providerVerificationContract.ts            pure worker-local vocabulary and admission classification
+providerVerificationContract.ts            pure verification vocabulary and admission classification; provider IDs from the protocol package
 workerControlClient.ts                     verification wire types, parsers and the four client methods
 providerVerificationCredentialOpening.ts   sole owner of verification credential opening and the VERIFYING binding
 workerError.ts                             the closed Phase 5 error codes
@@ -14168,8 +14177,16 @@ an earlier one.
 
 ##### Closed vocabulary and pre-grant admission
 
-`providerVerificationContract.ts` is pure: no imports, no I/O, no
-environment, no network, no timer. It holds:
+`providerVerificationContract.ts` is pure: no I/O, no environment, no
+network, no timer. Its only import is exactly
+
+```text
+import { GOOGLE_PROVIDER_ID, RUNWAY_PROVIDER_ID } from "commercial-worker-protocol";
+```
+
+(a named value import of the two existing exported R44B11A constants; no
+other protocol symbol, no type import, no worker module and no built-in). It
+holds:
 
 - the worker copy of the Phase 3 worker-reportable outcome and reason
   vocabulary, unchanged:
@@ -14188,11 +14205,12 @@ INCONCLUSIVE        PROVIDER_BILLING_RESTRICTION | PROVIDER_RATE_OR_QUOTA_LIMITE
   not worker-reportable and are absent;
 - `ProviderVerificationResultReport = Readonly<{ outcome; reasonCode }>` and
   a predicate accepting only a pair from the table above;
-- the fixed supported pairs, exactly:
+- the fixed supported pairs, exactly (provider by canonical constant, policy
+  by worker-local literal):
 
 ```text
-provider GOOGLE_GENAI  policy GOOGLE_GENAI_MODELS_LIST_V1BETA
-provider RUNWAY        policy RUNWAY_ORGANIZATION_GET_V1_2024_11_06
+provider GOOGLE_PROVIDER_ID  (value GOOGLE_GENAI)  policy GOOGLE_GENAI_MODELS_LIST_V1BETA
+provider RUNWAY_PROVIDER_ID  (value RUNWAY)        policy RUNWAY_ORGANIZATION_GET_V1_2024_11_06
 ```
 
 - the structural admission classifier:
@@ -14219,14 +14237,26 @@ these names:
 ```text
 PROVIDER_VERIFICATION_OUTCOMES              ["VERIFIED", "DEFINITIVE_FAILURE", "INCONCLUSIVE"]
 PROVIDER_VERIFICATION_REASONS_BY_OUTCOME    the outcome -> reasons table above, in that order
-SUPPORTED_PROVIDER_VERIFICATION_PAIRS       [{ provider: "GOOGLE_GENAI", verificationPolicyId: "GOOGLE_GENAI_MODELS_LIST_V1BETA" },
-                                             { provider: "RUNWAY", verificationPolicyId: "RUNWAY_ORGANIZATION_GET_V1_2024_11_06" }]
+SUPPORTED_PROVIDER_VERIFICATION_PAIRS       [{ provider: GOOGLE_PROVIDER_ID, verificationPolicyId: "GOOGLE_GENAI_MODELS_LIST_V1BETA" },
+                                             { provider: RUNWAY_PROVIDER_ID, verificationPolicyId: "RUNWAY_ORGANIZATION_GET_V1_2024_11_06" }]
 ```
 
-These literals stay worker-local in production. The contract module imports
-nothing, the shared protocol package is not widened, and no production
-import is added to avoid them. Drift against the canonical sources is caught
-by the vocabulary-drift tests in the Phase 5 test contract.
+Provider identities (conflict repair C1). The two provider values are the
+imported constants themselves, never local copies. The contract module
+contains no `"GOOGLE_GENAI"` or `"RUNWAY"` string literal and no other
+spelling of either provider identity. R44B11A remains in force with no
+Phase 5 exception, and its worker copy-detection rule stays active and
+unweakened, including for this module. Importing the two already-exported
+constants is consumption of existing authority, not protocol widening: no
+protocol file, export, type or package dependency changes.
+
+The outcome and reason vocabulary and the two policy IDs stay worker-local
+literals in production, because no existing runtime authority exports them
+to the worker: the commercial-api module is not a worker dependency, and no
+runtime module exports the policy IDs. No production import is added for
+them, and the shared protocol package is not widened. Their drift against the
+canonical sources is caught by the vocabulary-drift tests in the Phase 5 test
+contract.
 
 Admission is structural only: it proves the lease names an operation the
 worker contract knows. It never authorizes execution. Execution additionally
@@ -14263,6 +14293,17 @@ side-effect approval already required above.
 The configuration never reads, writes or depends on
 `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED`, `COMMERCIAL_WORKER_ENV`, the state
 root, or any provider variable.
+
+Selector-guard allowance (conflict repair C2). The key name contains
+`LIVE_PROVIDER`, which the existing worker provider-selector guard rejects in
+every worker source file. The key is kept unchanged. The guard is relaxed
+only by removing the exact whole token
+`COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION`, and only in
+`apps/commercial-worker/src/providerVerificationConfig.ts`, before the guard
+runs. There is no prefix, suffix, substring, case-folded or wildcard
+allowance, and no allowance in any other file. Everywhere else, including the
+other Phase 5 modules, the guard is unchanged, and any other `LIVE_PROVIDER`
+text in `providerVerificationConfig.ts` itself still fails.
 
 ##### Worker-side VERIFYING barrier owner and credential capability
 
@@ -14585,13 +14626,28 @@ authorization.
   two distinct issued objects, both satisfying the predicate;
 - the existing `createHttpWorkerControlClient` surface is unchanged.
 
+Provider identity (conflict repair C1). There is no literal-versus-constant
+provider drift test, because Phase 5 carries no local provider copy. The
+provider identity is locked structurally instead:
+
+1. `providerVerificationContract.ts` imports `GOOGLE_PROVIDER_ID` from
+   `commercial-worker-protocol` and uses it as the Google pair's `provider`
+   (source assertion in `boundary.test.ts`; at runtime, in
+   `providerVerificationClient.test.ts`, the Google pair's `provider` is
+   identical to the imported `GOOGLE_PROVIDER_ID`);
+2. the same for `RUNWAY_PROVIDER_ID` and the Runway pair;
+3. the Phase 5 contract module contains no `"GOOGLE_GENAI"` or `"RUNWAY"`
+   literal and no other duplicate provider-identity literal (the unweakened
+   R44B11A copy-detection rule plus a module-specific assertion in
+   `boundary.test.ts`).
+
 Vocabulary drift (in `providerVerificationClient.test.ts`; test-only imports,
 no production import and no protocol change):
 
-1. the `GOOGLE_GENAI` provider in `SUPPORTED_PROVIDER_VERIFICATION_PAIRS`
-   equals `GOOGLE_PROVIDER_ID` imported from `commercial-worker-protocol`;
-2. the `RUNWAY` provider in `SUPPORTED_PROVIDER_VERIFICATION_PAIRS` equals
-   `RUNWAY_PROVIDER_ID` imported from `commercial-worker-protocol`;
+1. (removed by conflict repair C1; replaced by the provider-identity checks
+   above);
+2. (removed by conflict repair C1; replaced by the provider-identity checks
+   above);
 3. the worker `PROVIDER_VERIFICATION_OUTCOMES` exactly equals (same members,
    same order) `PROVIDER_VERIFICATION_OUTCOMES` imported from
    `apps/commercial-api/src/workerControl/workerProviderVerificationResultService.ts`;
@@ -14667,7 +14723,9 @@ and acknowledgements produced through the real client with an injected
   and the four Phase 6/7 files (`providerVerificationTransport.ts`,
   `googleProviderVerification.ts`, `runwayProviderVerification.ts`,
   `providerVerificationRun.ts`) are absent;
-- import allowlists: `providerVerificationContract.ts` imports nothing;
+- import allowlists: `providerVerificationContract.ts` imports exactly
+  `commercial-worker-protocol` with exactly the named values
+  `GOOGLE_PROVIDER_ID` and `RUNWAY_PROVIDER_ID`, and nothing else;
   `providerVerificationConfig.ts` imports only `./workerError.js`;
   `providerVerificationCredentialOpening.ts` imports exactly
   `./credentialContracts.js`, `./providerEnvironment.js`,
@@ -14691,10 +14749,33 @@ and acknowledgements produced through the real client with an injected
 - no process access and no process entry point in any Phase 5 module;
 - the key `COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION` appears only in
   `providerVerificationConfig.ts`;
+- provider-selector guard (C2): the exact whole token
+  `COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION` is removed before the
+  existing selector guard runs, only for `providerVerificationConfig.ts`; the
+  guard pattern itself is unchanged. Guard-the-guard cases assert that the
+  allowed file passes; that the same token in any other worker source path
+  (for example `src/providerVerificationContract.ts` or
+  `src/workerControlClient.ts`) still fails; and that near-misses in the
+  allowed file (`COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION_ENABLED`,
+  `LIVE_PROVIDER_MODE`, `commercial_worker_live_provider_verification`) still
+  fail;
+- protocol importers (C1): `src/providerVerificationContract.ts` joins the
+  worker's protocol-importer set solely to consume `GOOGLE_PROVIDER_ID` and
+  `RUNWAY_PROVIDER_ID`; no other new protocol importer is added, and the
+  protocol closure and package manifest assertions are unchanged;
+- provider identity (C1): the existing R44B11A copy-detection rule (no
+  `"GOOGLE_GENAI"` or `"RUNWAY"` literal in any worker source) stays active
+  and unweakened for every file, including `providerVerificationContract.ts`;
+  the contract module's `SUPPORTED_PROVIDER_VERIFICATION_PAIRS` names the two
+  imported constants as its provider values;
 - the brand and provider-variable rules are relaxed only in
-  `providerVerificationContract.ts`, only for the exact whole literals
-  `GOOGLE_GENAI`, `RUNWAY`, `GOOGLE_GENAI_MODELS_LIST_V1BETA` and
-  `RUNWAY_ORGANIZATION_GET_V1_2024_11_06`, with guard-the-guard cases;
+  `providerVerificationContract.ts`, only for the exact whole tokens
+  `RUNWAY_PROVIDER_ID`, `GOOGLE_GENAI_MODELS_LIST_V1BETA` and
+  `RUNWAY_ORGANIZATION_GET_V1_2024_11_06`, with guard-the-guard cases (a
+  bare `"GOOGLE_GENAI"` or `"RUNWAY"` literal, a near-miss identifier, or the
+  same tokens in another file still fail). `GOOGLE_PROVIDER_ID` needs no new
+  relaxation: it is already an existing allowed contract identifier and does
+  not match the brand rule;
 - `.open(` on a credential opener appears only in `credentialOpeningRun.ts`
   and `providerVerificationCredentialOpening.ts`; the issued predicates and
   the capability are referenced only by the opening module;
@@ -14935,7 +15016,14 @@ R44B11F_PHASE_5_GENERATION_CREDENTIAL_OPENING_REUSED=NO
 R44B11F_PHASE_5_PROVIDER_ENVIRONMENT_GUARD=INJECTED_ENVIRONMENT_UNCHANGED_GUARD
 R44B11F_PHASE_5_SUPPORTED_PAIRS=GOOGLE_GENAI:GOOGLE_GENAI_MODELS_LIST_V1BETA,RUNWAY:RUNWAY_ORGANIZATION_GET_V1_2024_11_06
 R44B11F_PHASE_5_ADMISSION=STRUCTURAL_CLASSIFICATION_ONLY
-R44B11F_PHASE_5_VOCABULARY_DRIFT_TESTS=PROVIDER_IDS,OUTCOMES,REASONS,POLICY_IDS
+R44B11F_PHASE_5_VOCABULARY_DRIFT_TESTS=OUTCOMES,REASONS,POLICY_IDS
+R44B11F_PHASE_5_PROVIDER_ID_SOURCE=COMMERCIAL_WORKER_PROTOCOL_GOOGLE_PROVIDER_ID_RUNWAY_PROVIDER_ID
+R44B11F_PHASE_5_LOCAL_PROVIDER_ID_LITERALS=NO
+R44B11F_PHASE_5_R44B11A_PROVIDER_IDENTITY_RULE=IN_FORCE_NO_EXCEPTION
+R44B11F_PHASE_5_CONTRACT_MODULE_IMPORTS=commercial-worker-protocol:GOOGLE_PROVIDER_ID,RUNWAY_PROVIDER_ID
+R44B11F_PHASE_5_PROTOCOL_IMPORTER_ADDED=apps/commercial-worker/src/providerVerificationContract.ts
+R44B11F_PHASE_5_SHARED_PROTOCOL_PACKAGE_MODIFIED=NO
+R44B11F_PHASE_5_KILL_SWITCH_SELECTOR_ALLOWANCE=EXACT_WHOLE_TOKEN_ONLY_IN_PROVIDER_VERIFICATION_CONFIG
 R44B11F_PHASE_5_ADMISSION_REFUSALS=UNSUPPORTED_PROVIDER,UNSUPPORTED_POLICY,PROVIDER_POLICY_MISMATCH
 R44B11F_PHASE_5_UNSUPPORTED_LEASE_GRANT_ALLOWED=NO
 R44B11F_PHASE_5_UNSUPPORTED_LEASE_RESULT_REPORT_ALLOWED=NO

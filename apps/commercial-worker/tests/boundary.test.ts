@@ -269,6 +269,7 @@ describe("commercial-worker source boundary", () => {
       "src/providerVerificationConfig.ts",
       "src/providerVerificationContract.ts",
       "src/providerVerificationCredentialOpening.ts",
+      "src/providerVerificationRun.ts",
       "src/providerVerificationTransport.ts",
       "src/runwayAttemptExecution.ts",
       "src/runwayProviderAdapter.ts",
@@ -1818,16 +1819,21 @@ describe("provider verification boundary (R44B11F Phase 5)", () => {
   const brand = FORBIDDEN.find(({ label: name }) => name === "provider SDK or brand")!.pattern;
   const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
 
-  // R44B11F Phase 6 narrows the absence check to the Phase 7 run module; the
-  // verification path list becomes the three Phase 5 and three Phase 6 modules.
-  it("adds exactly the three Phase 5 modules and, with Phase 6, none of the Phase 7 files", () => {
+  // R44B11F Phase 6 narrowed the absence check to the Phase 7 run module;
+  // R44B11F Phase 7 turns it into a presence check. The verification path list
+  // is the three Phase 5, three Phase 6 and one Phase 7 modules.
+  it("adds exactly the three Phase 5 modules, with the three Phase 6 modules and the one Phase 7 run module", () => {
     const paths = sources.map(({ path }) => path);
     for (const path of PHASE_5_MODULES) expect(paths).toContain(path);
-    for (const absent of ["providerVerificationRun.ts"]) {
-      expect(existsSync(join(SRC_ROOT, absent)), absent).toBe(false);
-    }
+    expect(existsSync(join(SRC_ROOT, "providerVerificationRun.ts"))).toBe(true);
     expect(paths.filter((path) => /providerVerification|ProviderVerification/.test(path)).sort()).toEqual(
-      [...PHASE_5_MODULES, "src/googleProviderVerification.ts", "src/providerVerificationTransport.ts", "src/runwayProviderVerification.ts"].sort(),
+      [
+        ...PHASE_5_MODULES,
+        "src/googleProviderVerification.ts",
+        "src/providerVerificationTransport.ts",
+        "src/runwayProviderVerification.ts",
+        "src/providerVerificationRun.ts",
+      ].sort(),
     );
   });
 
@@ -1984,12 +1990,18 @@ describe("provider verification boundary (R44B11F Phase 5)", () => {
     expect(/#(credential|plaintext|leaseToken|verifyingAt|secret)\b/.test(opening)).toBe(false);
   });
 
-  it("opens a verification credential only in the opening module, with no caller and no generation reuse", () => {
+  it("opens a verification credential only in the opening module, called only by the Phase 7 run module, with no generation reuse", () => {
     expect(sources.filter(({ text }) => /\.open\(/.test(code(text))).map(({ path }) => path).sort()).toEqual(["src/credentialOpeningRun.ts", OPENING]);
-    // Library only: nothing in production calls the binding or the four client methods.
-    expect(sources.filter(({ path, text }) => path !== OPENING && /bindProviderVerificationCredential/.test(code(text))).map(({ path }) => path)).toEqual([]);
+    // R44B11F Phase 7 narrows the former "no caller" rule exactly: the binding
+    // and the four client methods are named outside their modules only by the
+    // library-only run module (which itself has no caller, checked below).
+    expect(sources.filter(({ path, text }) => path !== OPENING && /bindProviderVerificationCredential/.test(code(text))).map(({ path }) => path)).toEqual([
+      "src/providerVerificationRun.ts",
+    ]);
     for (const name of VERIFICATION_METHODS) {
-      expect(sources.filter(({ path, text }) => path !== CLIENT && new RegExp(`\\b${name}\\b`).test(code(text))).map(({ path }) => path), name).toEqual([]);
+      expect(sources.filter(({ path, text }) => path !== CLIENT && new RegExp(`\\b${name}\\b`).test(code(text))).map(({ path }) => path), name).toEqual([
+        "src/providerVerificationRun.ts",
+      ]);
     }
     expect(sources.filter(({ path, text }) => path !== CLIENT && /createHttpProviderVerificationControlClient/.test(code(text))).map(({ path }) => path)).toEqual([]);
     // The generation opening run imports no verification module.
@@ -2025,13 +2037,21 @@ describe("provider verification transport boundary (R44B11F Phase 6)", () => {
   const UNBOUNDED_READ = /\.json\s*\(|\.text\s*\(|\.arrayBuffer\s*\(|\.blob\s*\(|\.formData\s*\(/;
   const LOOP = /\bfor\s*\(|\bwhile\s*\(|\bdo\s*\{/g;
 
-  it("adds exactly the three Phase 6 modules, keeps the run module absent and has no production caller", () => {
+  it("adds exactly the three Phase 6 modules, reached from outside them only by the Phase 7 run module", () => {
     const paths = sources.map(({ path }) => path);
     for (const path of PHASE_6_MODULES) expect(paths).toContain(path);
-    expect(existsSync(join(SRC_ROOT, "providerVerificationRun.ts"))).toBe(false);
-    // No worker source outside the three modules reaches any of them.
+    expect(existsSync(join(SRC_ROOT, "providerVerificationRun.ts"))).toBe(true);
+    // R44B11F Phase 7 narrows the former "no caller" rule exactly: outside the
+    // three modules, only the run module names the transport module and
+    // performProviderVerification, and no worker source names either provider
+    // module or its functions.
     const PHASE_6_NAME = /providerVerificationTransport|googleProviderVerification|runwayProviderVerification|performProviderVerification|(build|classify)(Google|Runway)Verification/;
-    expect(sources.filter(({ path, text }) => !PHASE_6_MODULES.includes(path) && PHASE_6_NAME.test(code(text))).map(({ path }) => path)).toEqual([]);
+    const TRANSPORT_NAME = /providerVerificationTransport|performProviderVerification/;
+    const PROVIDER_MODULE_NAME = /googleProviderVerification|runwayProviderVerification|(build|classify)(Google|Runway)Verification/;
+    const outside = (pattern: RegExp) => sources.filter(({ path, text }) => !PHASE_6_MODULES.includes(path) && pattern.test(code(text))).map(({ path }) => path);
+    expect(outside(PHASE_6_NAME)).toEqual(["src/providerVerificationRun.ts"]);
+    expect(outside(TRANSPORT_NAME)).toEqual(["src/providerVerificationRun.ts"]);
+    expect(outside(PROVIDER_MODULE_NAME)).toEqual([]);
     // Only the transport imports the provider modules, and only it calls their functions.
     for (const name of ["googleProviderVerification", "runwayProviderVerification"]) {
       expect(sources.filter(({ text }) => importsOf(text).some((specifier) => specifier.includes(name))).map(({ path }) => path), name).toEqual([TRANSPORT]);
@@ -2253,6 +2273,307 @@ describe("provider verification transport boundary (R44B11F Phase 6)", () => {
     for (const text of [google, runway]) {
       expect(text.match(/: ProviderVerificationResultReport = Object\.freeze\(\{ outcome: "[A-Z_]+", reasonCode: "[A-Z_]+" \}\);/g)!.length).toBeGreaterThanOrEqual(12);
     }
+  });
+});
+
+// R44B11F Phase 7 (architecture "R44B11F Phase 7 library-only verification run
+// composition contract amendment", "Phase 7 boundary rules"): one library-only
+// run module. No caller, entry point, loop, process access, logging or state.
+describe("provider verification run boundary (R44B11F Phase 7)", () => {
+  const RUN = "src/providerVerificationRun.ts";
+  const run = code(read(join(SRC_ROOT, "providerVerificationRun.ts")));
+  // Import declarations removed, so counts and order see only the module body.
+  const bodyOf = (text: string) => text.replace(/^import\b[^;]*;$/gm, "");
+  const body = bodyOf(run);
+  const VERIFICATION_METHODS = [
+    "leaseProviderVerification",
+    "requestProviderVerificationCredentialGrant",
+    "acknowledgeProviderVerificationVerifying",
+    "reportProviderVerificationResult",
+  ] as const;
+  const NETWORK = /node:http\b|node:https\b|node:http2\b|node:net\b|node:tls\b|node:dgram\b|undici|WebSocket|globalThis/;
+  const LOOP = /\bfor\s*\(|\bwhile\s*\(|\bdo\s*\{|\bswitch\s*\(/;
+  // The first occurrences, in the locked order: the gate call, the
+  // environment guard, the lease method, admission, the grant method, the
+  // VERIFYING method, binding, openOnceFor, the transport and the result method.
+  const ORDER = [
+    "Reflect.apply(effectiveGate, ",
+    "assertNoProviderEnvironment(",
+    "Reflect.apply(leaseProviderVerification as ",
+    "classifyProviderVerificationLease(",
+    "Reflect.apply(requestProviderVerificationCredentialGrant as ",
+    "Reflect.apply(acknowledgeProviderVerificationVerifying as ",
+    "bindProviderVerificationCredential(",
+    "openOnceFor(",
+    "performProviderVerification(",
+    "Reflect.apply(reportProviderVerificationResult as ",
+  ];
+  const inLockedOrder = (text: string) => {
+    const positions = ORDER.map((token) => text.indexOf(token));
+    return positions.every((position) => position >= 0) && positions.every((position, index) => index === 0 || position > positions[index - 1]!);
+  };
+  // The inline use callback passed to the single openOnceFor call, by brace matching.
+  const useCallbackOf = (text: string) => {
+    const start = text.indexOf("openOnceFor(");
+    const open = text.indexOf("=> {", start) + 3;
+    let depth = 0;
+    let index = open;
+    for (; index < text.length; index += 1) {
+      if (text[index] === "{") depth += 1;
+      if (text[index] === "}") depth -= 1;
+      if (depth === 0) break;
+    }
+    return { header: text.slice(start, open + 1), callback: text.slice(open, index + 1) };
+  };
+  const importOf = (text: string, specifier: string) => {
+    const match = text.match(new RegExp(`^import (type )?\\{([^}]*)\\} from "${escapeRegExp(specifier)}";$`, "m"));
+    if (match === null) return null;
+    const typeOnly = match[1] !== undefined;
+    const names = match[2]!
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0);
+    return {
+      values: names.filter((name) => !typeOnly && !name.startsWith("type ")).sort(),
+      types: names
+        .filter((name) => typeOnly || name.startsWith("type "))
+        .map((name) => name.replace(/^type /, ""))
+        .sort(),
+    };
+  };
+
+  it("is the one Phase 7 production file, with no caller, no other liveGate holder and no Phase 8 file", () => {
+    expect(sources.map(({ path }) => path)).toContain(RUN);
+    expect(existsSync(join(APP_ROOT, "tests", "integration", "providerVerificationExecution.test.ts"))).toBe(false);
+    // No source imports the run module or names its entry point or constants.
+    expect(sources.filter(({ text }) => importsOf(text).some((specifier) => /providerVerificationRun/.test(specifier))).map(({ path }) => path)).toEqual([]);
+    expect(sources.filter(({ path, text }) => path !== RUN && /providerVerificationRun|runProviderVerification|PROVIDER_VERIFICATION_RUN_/.test(text)).map(({ path }) => path)).toEqual([]);
+    // The test seam token, comments included, exists only in the run module.
+    expect(sources.filter(({ text }) => /liveGate/.test(text)).map(({ path }) => path)).toEqual([RUN]);
+    // Guard the guard.
+    expect(/liveGate/.test("runProviderVerification(input, { ...deps, liveGate: pass });")).toBe(true);
+  });
+
+  it("locks the exact import allowlist", () => {
+    expect(importsOf(run).sort()).toEqual([
+      "./providerEnvironment.js",
+      "./providerVerificationConfig.js",
+      "./providerVerificationContract.js",
+      "./providerVerificationCredentialOpening.js",
+      "./providerVerificationTransport.js",
+      "./workerControlClient.js",
+      "./workerError.js",
+    ]);
+    expect(run.match(/^import\b/gm)).toHaveLength(7);
+    expect(importOf(run, "./providerVerificationConfig.js")).toEqual({ values: ["requireLiveProviderVerification"], types: ["ProviderVerificationConfig"] });
+    expect(importOf(run, "./providerVerificationCredentialOpening.js")).toEqual({ values: ["bindProviderVerificationCredential"], types: [] });
+    expect(importOf(run, "./workerError.js")).toEqual({ values: ["WorkerError"], types: ["WorkerErrorCode"] });
+    expect(importOf(run, "./providerEnvironment.js")).toEqual({ values: ["assertNoProviderEnvironment"], types: ["WorkerEnvironment"] });
+    const contract = importOf(run, "./providerVerificationContract.js")!;
+    expect(contract.values).toEqual(["classifyProviderVerificationLease"]);
+    for (const name of contract.types) expect(["ProviderVerificationOutcome", "ProviderVerificationReasonCode", "ProviderVerificationResultReport"]).toContain(name);
+    const transport = importOf(run, "./providerVerificationTransport.js")!;
+    expect(transport.values).toEqual(["performProviderVerification"]);
+    for (const name of transport.types) expect(["ProviderVerificationDeadlineTimer", "ProviderVerificationTransportDependencies"]).toContain(name);
+    // The client is imported for types only.
+    expect(run).toMatch(/^import type \{[^}]+\} from "\.\/workerControlClient\.js";$/m);
+    const client = importOf(run, "./workerControlClient.js")!;
+    expect(client.values).toEqual([]);
+    for (const name of client.types) {
+      expect([
+        "LeaseProof",
+        "ProviderVerificationControlClient",
+        "ProviderVerificationCredentialGrant",
+        "ProviderVerificationLease",
+        "ProviderVerificationResultAcknowledgement",
+        "ProviderVerificationVerifyingAcknowledgement",
+      ]).toContain(name);
+    }
+    // Nothing else: no protocol, credential contract, provider module, journal,
+    // state root, recovery, pre-provider, generation, adapter, node or SDK import.
+    expect(PROTOCOL_IMPORTERS.has(RUN)).toBe(false);
+    const FORBIDDEN_MODULE =
+      /commercial-worker-protocol|credentialContracts|googleProviderVerification|runwayProviderVerification|acceptanceJournal|startupJournalReconciliation|workerStateRoot|acceptanceRecoveryPolicy|credentialOpeningRun|preProviderOrchestration|inFlightHeartbeat|ProviderAdapter|ProviderContract|AttemptExecution|attemptExecution|workerConfig|^node:|undici|@google|@runwayml/;
+    expect(importsOf(run).filter((specifier) => FORBIDDEN_MODULE.test(specifier))).toEqual([]);
+    // Guard the guards.
+    for (const planted of ["./googleProviderVerification.js", "./credentialContracts.js", "node:https", "./inFlightHeartbeat.js", "./preProviderOrchestration.js", "commercial-worker-protocol"]) {
+      expect(FORBIDDEN_MODULE.test(planted), planted).toBe(true);
+    }
+    expect(importOf('import { performProviderVerification, googleFetch } from "./providerVerificationTransport.js";', "./providerVerificationTransport.js")!.values).toEqual([
+      "googleFetch",
+      "performProviderVerification",
+    ]);
+  });
+
+  it("exports exactly the locked surface: no skip, bypass or alternate gate", () => {
+    const exported = [...run.matchAll(/^export (?:async )?(?:const|function|type) ([A-Za-z0-9_]+)/gm)].map((match) => match[1]).sort();
+    expect(exported).toEqual(
+      [
+        "PROVIDER_VERIFICATION_RUN_CLOCK_MARGIN_MS",
+        "PROVIDER_VERIFICATION_RUN_CONTROL_DEADLINE_MS",
+        "PROVIDER_VERIFICATION_RUN_LEASE_MS",
+        "PROVIDER_VERIFICATION_RUN_PRE_GRANT_MIN_MS",
+        "PROVIDER_VERIFICATION_RUN_PRE_TRANSPORT_MIN_MS",
+        "PROVIDER_VERIFICATION_RUN_PRE_VERIFYING_MIN_MS",
+        "PROVIDER_VERIFICATION_RUN_RESULT_RESERVE_MS",
+        "PROVIDER_VERIFICATION_RUN_TRANSPORT_SETUP_MARGIN_MS",
+        "ProviderVerificationRunAbandonedStage",
+        "ProviderVerificationRunDependencies",
+        "ProviderVerificationRunInput",
+        "ProviderVerificationRunResult",
+        "ProviderVerificationRunStage",
+        "runProviderVerification",
+      ].sort(),
+    );
+    expect(/^export (default|\{|\*|class|let|var)/m.test(run)).toBe(false);
+    for (const [name, value] of [
+      ["LEASE_MS", 30000],
+      ["CLOCK_MARGIN_MS", 2000],
+      ["CONTROL_DEADLINE_MS", 3000],
+      ["RESULT_RESERVE_MS", 6000],
+      ["TRANSPORT_SETUP_MARGIN_MS", 250],
+      ["PRE_TRANSPORT_MIN_MS", 16250],
+      ["PRE_VERIFYING_MIN_MS", 19250],
+      ["PRE_GRANT_MIN_MS", 22250],
+    ] as const) {
+      expect(run).toMatch(new RegExp(`^export const PROVIDER_VERIFICATION_RUN_${name} = ${value};$`, "m"));
+    }
+    expect(/export[^\n]*(skip|bypass|ungated|unsafe|force|withoutGate)/i.test(run)).toBe(false);
+  });
+
+  it("defaults the live gate to requireLiveProviderVerification, with liveGate the only seam", () => {
+    expect(body.match(/\brequireLiveProviderVerification\b/g)).toHaveLength(1);
+    expect(run).toMatch(/const effectiveGate: unknown = liveGate === undefined \? requireLiveProviderVerification : liveGate;/);
+    expect(body.match(/Reflect\.apply\(effectiveGate, /g)).toHaveLength(1);
+    expect(run).toMatch(/^ {2}liveGate\?: \(config: ProviderVerificationConfig\) => void;$/m);
+    // The input carries the loaded configuration; the run reads no kill switch itself.
+    expect(/PROVIDER_VERIFICATION_CONFIG_KEY|loadProviderVerificationConfig|LIVE_PROVIDER/i.test(run)).toBe(false);
+  });
+
+  it("has no process access, logging, network primitive, loop, interval, module state or collection", () => {
+    expect(/process\.|import\.meta|require\.main|console\.|\blog\(|logger/i.test(run)).toBe(false);
+    expect(/\bfetch\b/.test(run)).toBe(false);
+    expect(NETWORK.test(run)).toBe(false);
+    expect(/setInterval/.test(run)).toBe(false);
+    expect(LOOP.test(run)).toBe(false);
+    expect(/^(let|var)\b/m.test(run)).toBe(false);
+    expect(/new (WeakSet|Set|Map|WeakMap)\b/.test(run)).toBe(false);
+    expect(/assertNoProviderProcessEnvironment|realDeadlineTimer|JSON\.stringify/.test(run)).toBe(false);
+    // Exactly the run controller and the per-attempt helper's controller.
+    expect(run.match(/new AbortController\(\)/g)).toHaveLength(2);
+    // The module-local default timer and clocks, once each.
+    expect(run.match(/\bsetTimeout\(/g)).toHaveLength(1);
+    expect(run.match(/\bclearTimeout\(/g)).toHaveLength(1);
+    expect(run).toMatch(/const defaultDeadlineTimer: ProviderVerificationDeadlineTimer = \(ms, onExpiry\) => \{\s*const handle = setTimeout\(onExpiry, ms\);\s*return \(\) => clearTimeout\(handle\);\s*\};/);
+    expect(run.match(/Date\.now/g)).toHaveLength(1);
+    expect(run.match(/performance\.now/g)).toHaveLength(1);
+    expect(run).toMatch(/const defaultWallClock = \(\): number => Date\.now\(\);/);
+    expect(run).toMatch(/const defaultMonotonicClock = \(\): number => performance\.now\(\);/);
+    // Guard the guards.
+    for (const planted of ["for (;;) {", "while (true) {", "do {", "switch (provider) {"]) expect(LOOP.test(planted), planted).toBe(true);
+    expect(/\bfetch\b/.test("await fetch(url)")).toBe(true);
+    expect(/^(let|var)\b/m.test("const a = 1;\nlet pending = null;")).toBe(true);
+  });
+
+  it("makes each step once: one lease, grant and VERIFYING call site, one bind, one openOnceFor and one transport inside use", () => {
+    expect(/\.open\(/.test(run)).toBe(false);
+    for (const [token, count] of [
+      ["openOnceFor(", 1],
+      ["performProviderVerification(", 1],
+      ["bindProviderVerificationCredential(", 1],
+      ["classifyProviderVerificationLease(", 1],
+      ["assertNoProviderEnvironment(", 1],
+    ] as const) {
+      expect(body.split(token).length - 1, token).toBe(count);
+    }
+    for (const method of VERIFICATION_METHODS) {
+      expect(body.match(new RegExp(`Reflect\\.apply\\(${method} as `, "g")), method).toHaveLength(1);
+      // Read once, from the client, during dependency validation.
+      expect(body.match(new RegExp(`= methods\\.${method};`, "g")), method).toHaveLength(1);
+    }
+    // The transport call is inside the inline use callback of the single
+    // openOnceFor call, and its first action is the recorded-cause check.
+    const { header, callback } = useCallbackOf(body);
+    expect(header).toMatch(/^openOnceFor\(binding, async \(credential: string\): Promise<ProviderVerificationResultReport \| null> => \{$/);
+    expect(callback).toMatch(/^\{\s*if \(currentCause\(\) !== null\) return null;/);
+    expect(callback).toContain("return performProviderVerification({ provider, verificationPolicyId, credential, signal: runSignal }, transportDependencies);");
+    expect(body.indexOf("performProviderVerification(")).toBeGreaterThan(body.indexOf("openOnceFor("));
+    // The plaintext parameter is named nowhere else.
+    expect(body.match(/\bcredential\b/g)!.length).toBe(callback.match(/\bcredential\b/g)!.length + 1);
+    // Guard the guard: a transport call after the callback closes is outside it.
+    const planted = useCallbackOf("x.openOnceFor(binding, async (credential: string): Promise<R> => { return null; }); performProviderVerification(a, b);");
+    expect(planted.callback).not.toContain("performProviderVerification(");
+  });
+
+  it("orders the gate, environment guard, lease, admission, grant, VERIFYING, bind, open, transport and result as locked", () => {
+    expect(inLockedOrder(body)).toBe(true);
+    // The shutdown link precedes the lease; the first pre-grant checkpoint and
+    // the budget timer precede the first grant request.
+    const at = (token: string) => body.indexOf(token);
+    expect(at('externalSignal.addEventListener("abort", onShutdown, { once: true });')).toBeGreaterThan(at("assertNoProviderEnvironment("));
+    expect(at('externalSignal.addEventListener("abort", onShutdown, { once: true });')).toBeLessThan(at("Reflect.apply(leaseProviderVerification as "));
+    expect(at("checkpoint(PROVIDER_VERIFICATION_RUN_PRE_GRANT_MIN_MS)")).toBeGreaterThan(at("classifyProviderVerificationLease("));
+    expect(at('() => record("LEASE_BUDGET"));')).toBeLessThan(at("Reflect.apply(requestProviderVerificationCredentialGrant as "));
+    expect(at("checkpoint(PROVIDER_VERIFICATION_RUN_PRE_VERIFYING_MIN_MS)")).toBeLessThan(at("Reflect.apply(acknowledgeProviderVerificationVerifying as "));
+    // Guard the guard: each locked inversion fails.
+    const inOrder = ORDER.join("x;\n");
+    expect(inLockedOrder(inOrder)).toBe(true);
+    for (const [first, second] of [
+      [0, 2],
+      [3, 4],
+      [5, 6],
+      [6, 7],
+      [8, 9],
+    ] as const) {
+      const swapped = [...ORDER];
+      [swapped[first], swapped[second]] = [swapped[second]!, swapped[first]!];
+      expect(inLockedOrder(swapped.join("x;\n")), `${first}<->${second}`).toBe(false);
+    }
+  });
+
+  it("locks the anchored budget model, the single wall-clock read and the >= checkpoints", () => {
+    expect(run).toMatch(/const leaseSentMono = readClock\(mono\);/);
+    expect(body.indexOf("const leaseSentMono = readClock(mono);")).toBeLessThan(body.indexOf("Reflect.apply(leaseProviderVerification as "));
+    expect(run).toMatch(/const localLeaseCapEnd = leaseSentMono \+ PROVIDER_VERIFICATION_RUN_LEASE_MS;/);
+    expect(run).toMatch(/const serverExpiryProjectedEnd = receiptMono \+ \(expiresAtMs - receiptWallMs\);/);
+    expect(run).toMatch(/const budgetEnd = Math\.min\(localLeaseCapEnd, serverExpiryProjectedEnd\) - PROVIDER_VERIFICATION_RUN_CLOCK_MARGIN_MS;/);
+    expect(run).toMatch(/const budgetAbortAt = budgetEnd - PROVIDER_VERIFICATION_RUN_RESULT_RESERVE_MS;/);
+    expect(run).toMatch(/timer\(Math\.max\(0, budgetAbortAt - installedAt\), \(\) => record\("LEASE_BUDGET"\)\)/);
+    expect(body.match(/readClock\(wall\)/g)).toHaveLength(1);
+    expect(body.match(/\bwall\b/g)).toHaveLength(2);
+    expect(run).toMatch(/if \(budgetEnd - now >= minimum\) return null;/);
+    expect(run).toMatch(/if \(!\(budgetEnd - now >= PROVIDER_VERIFICATION_RUN_PRE_TRANSPORT_MIN_MS\)\) \{/);
+    expect(/budgetEnd - now > /.test(run)).toBe(false);
+  });
+
+  it("passes only the internal run signal to Phase 6 and never forwards the external signal", () => {
+    expect(run).toMatch(/const runController = new AbortController\(\);\s*const runSignal = runController\.signal;/);
+    expect(run).toMatch(/shutdownSignal = input\.shutdownSignal;/);
+    expect(run).toMatch(/const externalSignal = shutdownSignal as AbortSignal \| undefined;/);
+    // The external signal is only read, linked and unlinked.
+    const uses = [...body.matchAll(/\bexternalSignal\b(\.[A-Za-z]+)?/g)].map((match) => match[1] ?? "");
+    expect(uses.filter((use) => use !== "" && ![".aborted", ".addEventListener", ".removeEventListener"].includes(use))).toEqual([]);
+    expect(/signal: externalSignal|signal: shutdownSignal|\[externalSignal\]|\(externalSignal\)/.test(body)).toBe(false);
+    // Each input and dependency member is read once.
+    for (const member of ["config", "environment", "shutdownSignal"]) expect(body.match(new RegExp(`\\binput\\.${member}\\b`, "g")), member).toHaveLength(1);
+    for (const member of ["client", "opener", "fetchImpl", "deadlineTimer", "wallClock", "monotonicClock", "liveGate"]) {
+      expect(body.match(new RegExp(`\\bdependencies\\.${member}\\b`, "g")), member).toHaveLength(1);
+    }
+  });
+
+  it("applies every existing rule to the run module with no new exemption or allowance", () => {
+    expect(EXEMPTIONS[RUN]).toBeUndefined();
+    expect(ALLOWED_TOKENS[RUN]).toBeUndefined();
+    expect(PHASE_6_BRAND_TOKENS[RUN]).toBeUndefined();
+    expect(SDK_IMPORTERS[RUN]).toBeUndefined();
+    expect([RUNWAY_COMPOSER, VERIFICATION_CONTRACT, KILL_SWITCH_CONFIG, RUNWAY_VERIFICATION, VERIFICATION_TRANSPORT]).not.toContain(RUN);
+    // The unrelaxed rules hold on the run module text itself.
+    expect(FORBIDDEN.filter(({ pattern }) => pattern.test(run)).map(({ label: name }) => name)).toEqual([]);
+    expect(PROVIDER_SELECTOR.test(run)).toBe(false);
+    expect(/RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/.test(run)).toBe(false);
+    // No provider identity, policy, origin, header or status of its own.
+    expect(/GOOGLE_PROVIDER_ID|RUNWAY_PROVIDER_ID|"[A-Z]+_(GENAI|ORGANIZATION)|https?:|x-goog|Authorization|Bearer|\bstatus === \d/i.test(run)).toBe(false);
+    expect(/createHttpProviderVerificationControlClient|isIssuedProviderVerification|parseSealedEnvelope|validateSealingContext|CredentialOpener\b/.test(run)).toBe(false);
   });
 });
 

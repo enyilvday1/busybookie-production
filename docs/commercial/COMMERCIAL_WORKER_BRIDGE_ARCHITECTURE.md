@@ -12877,7 +12877,8 @@ R44B11E_FUTURE_SLICE_SUFFIXES_LOCKED=NO
 
 ### R44B11F — ProviderConnection verification durable execution workflow
 
-**Locked decision (R44B11F; architecture and policy only, not yet implemented).**
+**Historical locked decision (R44B11F contract lock; not implemented at lock
+time).**
 
 R44B11F implements the provider-verification prerequisite already required by
 R44B11P1 without reusing generation execution, granting the public API
@@ -17485,6 +17486,243 @@ R44B11F is complete only when:
 - full commercial-api and commercial-worker regressions pass;
 - production builds pass.
 
+**Implemented, validated and published (R44B11F Phase 9 acceptance
+validation and status sync).**
+
+The locked R44B11F contract, as amended by the Phase 3 to Phase 8 contract
+amendments above, is implemented. The implementation is published through
+`64baf32e32093d702f686d00aa748eb88a6c3d30`. The acceptance validation below
+passed against that published implementation. It reopens no functional
+contract. Real-provider verification is not enabled (see "Current status"
+below).
+
+Published R44B11F commits, verified from Git, oldest first:
+
+```text
+5fe8ad00d38ca99bf548b9abd48ac152b662a37f  contract lock
+3eb9575a7d3591a4268ecaf336e81ba9ee2fb700  implementation start (D9-D11 scope lock recorded)
+0ddc96b74ff74b196bbc522c9ba3f65dd0c98e77  Phase 1: migration 0010, runtime grants
+36535b3a0974d22911869b15765d787cb9c981ab  Phase 2: customer verify request, read model, capability
+262b8edb491562bc33d892aedfea1c6f03986d95  Phase 3 result wire-contract amendment
+be23752daea43fdd4f3c8229cdc03d6b721caf08  Phase 3: worker-control lease, grant, VERIFYING, result
+3b5c6e440b492d0ebf6aacd2177f5eb4c766cb5e  Phase 4 expiry/crash-convergence contract amendment
+dcdf98520c1e528e82a0a95d88d7fe4697a84971  Phase 4: expiry, reconciliation and retention
+a92f8304e6059af7754fa034e45c83de2b47fde9  Phase 5 contract amendment
+36926a9645246cbf189767eb6a4cadd901c70886  Phase 5 provider identity contract repair
+563c0744b269362d703d48b511728691657062df  Phase 5: worker client, configuration, credential opening
+aad4271637fefc2e5f5ea92c856b90269dfa0663  Phase 6 transport contract amendment
+d668117fb5702985e356e51d4d4c7757002b3fd5  Phase 6: fixed-origin provider verification transports
+473dcc39c07fb24d0e36d1e60feb242e69559fcc  Phase 7 run-composition contract amendment
+40613ebf61b854357238808bc14154936e3ea3a7  Phase 7: library-only verification run
+6d984e622b2a8fffbddcce7b0ae0790d71447f36  Phase 8 integration contract amendment
+64baf32e32093d702f686d00aa748eb88a6c3d30  Phase 8: race, idempotency, boundary and integration tests
+```
+
+The last commit that changed `apps/commercial-api` or
+`packages/commercial-worker-protocol` is
+`dcdf98520c1e528e82a0a95d88d7fe4697a84971`. The last commit that changed
+commercial-worker production source is
+`40613ebf61b854357238808bc14154936e3ea3a7`. Commit
+`64baf32e32093d702f686d00aa748eb88a6c3d30` changed only two worker test
+files.
+
+Evidence is recorded in four classes, which are not interchangeable.
+
+Fresh Phase 9 closure gates. These ran sequentially on the published
+`64baf32e32093d702f686d00aa748eb88a6c3d30` tree with the existing npm
+scripts and configurations unchanged:
+
+- G1, full commercial-api non-database suite (`npm run test`,
+  `vitest.config.ts`, `--maxWorkers=4`): 25 files, 1082 of 1082 tests
+  passed, 0 failed, 0 skipped, exit 0.
+- G2, full commercial-api PostgreSQL suite (`npm run test:db`,
+  `vitest.db.config.ts`, sequential files): all 26 configured files, 846 of
+  846 tests passed, 0 failed, 0 skipped, exit 0. It ran only against the
+  dedicated guarded PostgreSQL 16 commercial test database, through the
+  unmodified fixture guard. No other database was used.
+- G3, commercial-api production build (`npm run build`, which first builds
+  `packages/commercial-worker-protocol`): exit 0. All 65 commercial-api
+  source modules were emitted, including the Phase 4 reconciliation
+  service, reconciliation loop, `credentialObligations` and
+  `runCommercialApiProcess` modules. Only gitignored `dist` output changed.
+
+The Phase 9 audit did not establish retained build evidence for the
+current commercial-api inputs, and the local build output predated
+`dcdf98520c1e528e82a0a95d88d7fe4697a84971`. G3 supplies that evidence for
+this closure. It does not imply that the code had never been built
+elsewhere.
+
+Earlier author-reported results. These were not rerun at Phase 9:
+
+- Phase 8 final candidate: the Phase 8 integration file passed 27 of 27,
+  the commercial-worker boundary suite passed 187 of 187, and the
+  commercial-api and commercial-worker typechecks passed.
+- Phase 8 gate: commercial-worker unit suite 33 files and 1765 tests;
+  commercial-worker integration suite 7 files and 94 tests (run before the
+  final repair of the Phase 8 integration file); commercial-api
+  `workerProviderVerification` 49 of 49 and `providerVerification` 14 of
+  14; commercial-api non-database suite 25 files and 1082 tests.
+- Earlier phase gates: the Phase 2 and Phase 3 candidates recorded full
+  commercial-api PostgreSQL runs of 25 files / 788 tests and 26 files / 837
+  tests, a Phase 3 full non-database run of 24 files / 1067 tests, and a
+  passing typecheck and production build. Phases 5 to 7 recorded focused
+  and full worker unit runs and scratch mutation campaigns.
+
+Independent review results. Each phase passed its recorded review chain
+before publication. The final independent Phase 8 confirmation freshly
+established:
+
+- the repaired promise path;
+- clean D-plus-follower controls;
+- the targeted secret-checker probe, with no availability retry caused by
+  that assertion;
+- exactly one next-graph grant request and one fake-provider call;
+- no unhandled rejection on the touched path;
+- no diagnostic canary exposure;
+- successful cleanup and follower execution.
+
+Accepted composed worker evidence. The gatekeeper accepted composed
+commercial-worker regression evidence in place of a Phase 9 rerun. The
+reasons are:
+
+- worker production source is byte-identical since
+  `40613ebf61b854357238808bc14154936e3ea3a7`;
+- the 1765-test unit count is the Phase 7 count of 1760 plus five boundary
+  cases, and the boundary suite was rerun at 187 of 187 on the final bytes;
+- the other six integration files and their commercial-api and worker
+  dependencies are unchanged since the 7-file / 94-test run;
+- the final Phase 8 integration file passed 27 of 27, with clean follower
+  controls.
+
+This evidence is not one fresh full worker run on
+`64baf32e32093d702f686d00aa748eb88a6c3d30`.
+
+Production-build interpretation. For this closure, "production builds
+pass" is satisfied by the existing commercial-api `npm run build`, which
+builds the shared protocol package and then the API. commercial-worker has
+no build script and compiles with `noEmit`. Its compile gate is its
+typecheck. No worker production artifact exists or was built.
+
+Acceptance mapping:
+
+- **Migration 0010 and runtime privileges.** Migration 0010 and
+  `runtimeGrants.ts` (`0ddc96b7`) are unchanged since. The catalog,
+  privileges, migrations and runtime-database PostgreSQL tests passed in
+  G2, and `migrationFiles` passed in G1.
+- **No generation job or generation authorization for verification.**
+  `provider_verification_jobs` is a separate relation with no
+  `generation_authorization_id` (`0ddc96b7`). The Phase 2 to 4 services
+  write no generation table. Evidence: the commercial-api boundary suite and
+  the PostgreSQL suites (G1, G2) and the Phase 8 integration file.
+- **The public API cannot open stored credentials.** commercial-api source
+  imports no credential opener. Credential opening exists only in the
+  worker (`563c0744`). Evidence: the commercial-api boundary suite (G1).
+- **Exact-version binding and open-job idempotency.** The 0010 exact-version
+  foreign key and the open-state partial unique index, and
+  `providerVerificationService` (`36535b3a`). Evidence: the
+  `providerConnectionsApplication` and `providerVerification` PostgreSQL
+  tests (G2).
+- **Worker lease, fencing and exact replay.** The lease, grant, VERIFYING and
+  result services (`be23752d`). Evidence: `workerProviderVerification` (G2)
+  and Phase 8 groups B, C, G and H (27 of 27).
+- **No credential is opened before the durable VERIFYING barrier.** The
+  grant and VERIFYING services, the worker credential capability
+  (`563c0744`) and the locked run order (`40613ebf`). Evidence: the
+  composed worker unit evidence and Phase 8 groups A, C, J and K.
+- **Rotation or disconnect before the barrier makes zero provider calls.**
+  Phase 4 pre-barrier cancellation (`dcdf9852`) and the grant and VERIFYING
+  refusals (`be23752d`). Evidence: the PostgreSQL suites (G2). A provider
+  call is reachable only after VERIFYING, as proven in Phase 8.
+- **Late results cannot verify a newer version or reactivate a disconnected
+  connection.** The result service (`be23752d`). Evidence:
+  `workerProviderVerification` (G2).
+- **Verification retention prevents unsafe credential destruction.**
+  `credentialObligations.ts` (`dcdf9852`) and 0010. Evidence: the
+  `providerVerification`, `providerConnectionsApplication`,
+  `disconnectConvergence` and `providerConnectionDisconnectGate` PostgreSQL
+  tests (G2).
+- **Crash and lease-expiry convergence close retention without another
+  customer request.** The reconciliation service, the reconciliation loop
+  and `runCommercialApiProcess` (`dcdf9852`). Evidence: the loop and
+  lifecycle unit tests (G1), `providerVerification` (G2), and Phase 8
+  groups D and E.
+- **Google and Runway transports are fixed-origin, non-generating, bounded,
+  redirect-disabled and single-attempt.** `d668117f`. Evidence: the
+  transport and provider unit tests (composed worker evidence) and the
+  Phase 6 mutation campaign.
+- **Real-provider verification remains production default-off.** The
+  verification kill switch (`563c0744`); the default live gate
+  (`40613ebf`); the capability registry, which requires an explicit
+  `verificationEnabled: true` while the production registry enables no
+  provider (`36535b3a`); and no caller or entry point. Evidence: the worker
+  boundary suite (187 of 187) and G1.
+- **`WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` remains unchanged.**
+  `workerConfig.ts` is D11-protected, and its hash was re-verified unchanged
+  at Phase 9.
+- **Full commercial-api and commercial-worker regressions pass.**
+  commercial-api: G1 and G2, both fresh. commercial-worker: the accepted
+  composed evidence above.
+- **Production builds pass.** G3, fresh. commercial-worker has a typecheck
+  only.
+
+**Historical scope exception (Phase 2).** Phase 2 commit
+`36535b3a0974d22911869b15765d787cb9c981ab` also modified two existing test
+files that the D11 scope lock does not list:
+
+- `apps/commercial-api/tests/db/providerConnectionDisconnectGate.test.ts`:
+  the only change added `lastVerificationAttemptAt`, `verificationPending`
+  and `verifiedAt` to the canonical ProviderConnection view key list that
+  the test asserts.
+- `apps/commercial-api/tests/db/runtimeDatabase.test.ts`: the latest-schema
+  expectations moved from version 9 to version 10 (migration count, latest
+  index and readiness version), and the synthetic "next" migration moved
+  from `0010` to `0011`.
+
+The Phase 2 review recorded both changes as test-baseline corrections
+required by migration 0010 and the expanded read model. No other
+commercial-api, commercial-worker or protocol path outside the D11 lists
+and the per-phase authorizations changed. D11 is not amended
+retrospectively. This note grants no permission for future unlisted
+changes, and any such change still requires a scope-amendment gate.
+
+**Current status (R44B11F Phase 9 docs sync).**
+
+- **R44B11A to R44B11E:** fully closed; unchanged.
+- **R44B11F contract lock:**
+  `5fe8ad00d38ca99bf548b9abd48ac152b662a37f`, with the Phase 3 to Phase 8
+  contract amendments listed above.
+- **R44B11F implementation (Phases 1 to 8):** implemented.
+- **R44B11F acceptance validation:** passed for all 15 acceptance bullets,
+  on the evidence above.
+- **R44B11F implementation publication:** published through
+  `64baf32e32093d702f686d00aa748eb88a6c3d30`.
+- **R44B11F Phase 9 (`ARCHITECTURE_STATUS_SYNC_AFTER_VALIDATION`):** this
+  status sync. The commit that contains it records its publication; this
+  text does not claim it.
+- **Historical authorization flags:** the existing
+  `R44B11F_PHASE_n_STATUS=AUTHORIZED_*` values, including
+  `R44B11F_PHASE_1_STATUS=AUTHORIZED_NEXT`, are historical records of each
+  phase's authorization at its lock. They are not current status. Current
+  status is carried by the implementation-evidence flags added with this
+  sync.
+- **Live verification enablement:** not enabled.
+  `R44B11F_WORKER_LIVE_PROVIDER_VERIFICATION_ENABLED=NO` and
+  `R44B11F_REAL_PROVIDER_VERIFICATION_COMMERCIAL_ENABLEMENT=NO` remain in
+  force, and explicit cost and side-effect approval is still required. None
+  of the following exists or is claimed: a production caller, a worker
+  process entry point, a real-provider smoke test, real credential use,
+  deployed staging or crash proof, or an operational rollout.
+- **Live enablement is blocked** until both pre-live decisions are made.
+  This sync resolves neither:
+  - `R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION`;
+  - `R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION`.
+- `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+- **R44B11P1 implementation:** started, not complete.
+- **R44B11 parent implementation:** started, not complete.
+- The customer generation route and production generation-policy enablement
+  remain separate future gates.
+- Revision suffixes after R44B11F remain unlocked.
+
 ```text
 R44B11F_DISCOVERY=PASS
 R44B11F_CONFLICT_SCREEN=PASS
@@ -17497,6 +17735,41 @@ R44B11F_IMPLEMENTATION_BASE=5fe8ad00d38ca99bf548b9abd48ac152b662a37f
 R44B11F_IMPLEMENTATION_DISCOVERY_REPORT_SHA256=f6c8eb52f80f08d69d136371417044fe423c0b0144f80cba6cb21100d29571a4
 R44B11F_IMPLEMENTATION_SCOPE_RESOLUTION_REPORT_SHA256=e40c3163624450273b07edf05c2a13196c1aa61b1233513f027f8714a23b0632
 R44B11F_IMPLEMENTATION_SCOPE_LOCK_REPORT_SHA256=00807437fe77e04015d9507589b64c60172f2dc75e48f27a92821e610f306c95
+R44B11F_IMPLEMENTATION_VALIDATED=YES
+R44B11F_IMPLEMENTATION_PUBLISHED=YES
+R44B11F_IMPLEMENTATION_PUBLISHED_THROUGH=64baf32e32093d702f686d00aa748eb88a6c3d30
+R44B11F_ACCEPTANCE_VALIDATION=PASS
+R44B11F_ACCEPTANCE_VALIDATION_HEAD=64baf32e32093d702f686d00aa748eb88a6c3d30
+R44B11F_CONTRACT_LOCK_COMMIT=5fe8ad00d38ca99bf548b9abd48ac152b662a37f
+R44B11F_IMPLEMENTATION_START_COMMIT=3eb9575a7d3591a4268ecaf336e81ba9ee2fb700
+R44B11F_PHASE_1_IMPLEMENTATION_COMMIT=0ddc96b74ff74b196bbc522c9ba3f65dd0c98e77
+R44B11F_PHASE_2_IMPLEMENTATION_COMMIT=36535b3a0974d22911869b15765d787cb9c981ab
+R44B11F_PHASE_3_CONTRACT_COMMIT=262b8edb491562bc33d892aedfea1c6f03986d95
+R44B11F_PHASE_3_IMPLEMENTATION_COMMIT=be23752daea43fdd4f3c8229cdc03d6b721caf08
+R44B11F_PHASE_4_CONTRACT_COMMIT=3b5c6e440b492d0ebf6aacd2177f5eb4c766cb5e
+R44B11F_PHASE_4_IMPLEMENTATION_COMMIT=dcdf98520c1e528e82a0a95d88d7fe4697a84971
+R44B11F_PHASE_5_CONTRACT_COMMITS=a92f8304e6059af7754fa034e45c83de2b47fde9,36926a9645246cbf189767eb6a4cadd901c70886
+R44B11F_PHASE_5_IMPLEMENTATION_COMMIT=563c0744b269362d703d48b511728691657062df
+R44B11F_PHASE_6_CONTRACT_COMMIT=aad4271637fefc2e5f5ea92c856b90269dfa0663
+R44B11F_PHASE_6_IMPLEMENTATION_COMMIT=d668117fb5702985e356e51d4d4c7757002b3fd5
+R44B11F_PHASE_7_CONTRACT_COMMIT=473dcc39c07fb24d0e36d1e60feb242e69559fcc
+R44B11F_PHASE_7_IMPLEMENTATION_COMMIT=40613ebf61b854357238808bc14154936e3ea3a7
+R44B11F_PHASE_8_CONTRACT_COMMIT=6d984e622b2a8fffbddcce7b0ae0790d71447f36
+R44B11F_PHASE_8_IMPLEMENTATION_COMMIT=64baf32e32093d702f686d00aa748eb88a6c3d30
+R44B11F_LAST_COMMERCIAL_API_OR_PROTOCOL_CHANGE_COMMIT=dcdf98520c1e528e82a0a95d88d7fe4697a84971
+R44B11F_LAST_WORKER_PRODUCTION_SOURCE_CHANGE_COMMIT=40613ebf61b854357238808bc14154936e3ea3a7
+R44B11F_PHASE_9_API_NON_DATABASE_SUITE=PASS_25_FILES_1082_TESTS
+R44B11F_PHASE_9_API_DATABASE_SUITE=PASS_26_FILES_846_TESTS
+R44B11F_PHASE_9_API_PRODUCTION_BUILD=PASS
+R44B11F_PRODUCTION_BUILD_GATE=COMMERCIAL_API_NPM_RUN_BUILD_PROTOCOL_PLUS_API
+R44B11F_WORKER_PRODUCTION_BUILD=NONE_TYPECHECK_ONLY
+R44B11F_WORKER_REGRESSION_EVIDENCE=ACCEPTED_COMPOSED_NOT_RERUN_AT_PHASE_9
+R44B11F_PHASE_2_UNLISTED_TEST_BASELINE_CORRECTIONS=apps/commercial-api/tests/db/providerConnectionDisconnectGate.test.ts,apps/commercial-api/tests/db/runtimeDatabase.test.ts
+R44B11F_PHASE_N_STATUS_FLAGS_ROLE=HISTORICAL_AUTHORIZATION_RECORDS
+R44B11F_LIVE_ENABLEMENT=BLOCKED_UNTIL_BOTH_PRE_LIVE_DECISIONS
+R44B11F_PRODUCTION_CALLER_OR_PROCESS_ENTRYPOINT=NONE
+R44B11F_REAL_PROVIDER_SMOKE_OR_DEPLOYED_STAGING_PROOF=NONE
+R44B11F_R44B11P1_COMPLETE=NO
 R44B11F_PHASE_1_STATUS=AUTHORIZED_NEXT
 R44B11F_SCOPE=PROVIDER_CONNECTION_VERIFICATION_DURABLE_EXECUTION_WORKFLOW
 R44B11F_DISCOVERY_BASE=dfc68eb6ff13786b1ecdf30116d1da1efc0bd84e

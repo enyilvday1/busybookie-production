@@ -16629,6 +16629,840 @@ exists, and that amendment is itself blocked until both pre-live carry items
 above are decided. Anything outside this boundary requires a new
 scope-amendment gate.
 
+#### R44B11F Phase 8 race, idempotency, boundary and integration regression contract amendment
+
+**Locked decision (R44B11F Phase 8 contract amendment; architecture only,
+precedes Phase 8 implementation).**
+
+Phase 8 discovery against published Phase 7 implementation commit
+`40613ebf61b854357238808bc14154936e3ea3a7` found that the published contract
+assigned Phase 8
+(`PHASE_8=RACE_IDEMPOTENCY_BOUNDARY_INTEGRATION_REGRESSION`) and its test path
+but locked no Phase 8 file authorization, test contract or requirements
+(P8-M1), that the published worker boundary test asserts the Phase 8 file does
+not exist (P8-M2), that transaction-start lease liveness had no locked
+expected outcome (P8-M3), that no expiry and ordering technique was locked
+(P8-M4), and that the split with the existing commercial-api database suites
+was undefined (P8-M5). Discovery found no contract conflict. This amendment
+closes those five gaps.
+
+##### Phase 8 purpose and production boundary
+
+Phase 8 is integration proof only. It validates the already-published
+Phase 3 to Phase 7 behaviour against the real commercial-api worker-control
+router and services, real PostgreSQL 16 transactions, exact replay, database
+lease expiry, Phase 4 reconciliation, crash windows, concurrency and
+idempotency, and the worker boundary regression. It introduces no business
+behaviour.
+
+```text
+production file new                  NONE
+production file modified             NONE
+commercial-api production modified   NONE
+migration                            NO
+schema change                        NO
+runtime-grant change                 NO
+shared protocol change               NO
+package or dependency change         NO
+new WorkerErrorCode                  NO
+```
+
+If Phase 8 implementation finds that any production behaviour, schema,
+grant, protocol or package must change for a required proof to pass, Phase 8
+stops and the architecture is reopened. An integration-test phase never
+repairs production silently, never weakens an assertion to match observed
+behaviour, and never mocks a commercial-api service to make a proof pass.
+
+##### Phase 8 file authorization
+
+```text
+TEST NEW       apps/commercial-worker/tests/integration/providerVerificationExecution.test.ts
+TEST MODIFIED  apps/commercial-worker/tests/boundary.test.ts
+```
+
+No other path may change in Phase 8. In particular every production file of
+both apps, every migration, the shared protocol package, both `package.json`
+files, both vitest configurations, every test support or fixture file, and
+the 19 D11 protected files stay byte-identical. No fixture or support file is
+created; helpers live inside `providerVerificationExecution.test.ts`.
+
+`apps/commercial-api/tests/db/workerProviderVerification.test.ts` and
+`apps/commercial-api/tests/db/providerVerification.test.ts` are not Phase 8
+modification scope. They are authoritative regression dependencies that
+Phase 8 runs unmodified (see suite ownership). If implementation proves that a
+required assertion can only be made there, Phase 8 stops for a separate,
+reviewed scope decision naming that file; it does not edit it under this
+authorization.
+
+##### Boundary test transition (P8-M2)
+
+The published Phase 7 boundary case "is the one Phase 7 production file, with
+no caller, no other liveGate holder and no Phase 8 file" asserts that the
+Phase 8 file does not exist. Phase 8 changes exactly that expectation:
+
+- the absence expectation is replaced by an existence expectation for the
+  exact path `tests/integration/providerVerificationExecution.test.ts`; the
+  case title may drop "no Phase 8 file"; every other expectation in that case
+  stays byte-identical;
+- no directory-wide or pattern-wide integration-test exemption is added, and
+  no existing production, import, network, provider-identity, selector,
+  live-gate, copy or brand rule is weakened or narrowed;
+- the `liveGate` rule over `src` is unchanged: the test seam token still
+  appears in no production module other than `providerVerificationRun.ts`.
+
+Phase 8 adds one describe, "provider verification integration boundary
+(R44B11F Phase 8)", whose static rules read the Phase 8 file with comments
+stripped:
+
+1. the file exists at the exact path;
+2. no `src` module imports it or names `providerVerificationExecution`;
+3. every import specifier belongs to this allowlist (a subset may be used;
+   type-only imports count as imports):
+
+   ```text
+   vitest
+   node:crypto
+   ../../src/providerVerificationRun.js
+   ../../src/workerControlClient.js
+   ../../src/workerError.js
+   ../../src/providerVerificationConfig.js
+   ../../src/providerVerificationContract.js
+   ../../src/providerVerificationTransport.js
+   ../../src/providerEnvironment.js
+   ../support/testCredentialOpening.js
+   ../../../commercial-api/src/database/runtimeDatabaseConfig.js
+   ../../../commercial-api/src/database/runtimePool.js
+   ../../../commercial-api/src/startCommercialApiServer.js
+   ../../../commercial-api/src/workerControl/workerControlApplication.js
+   ../../../commercial-api/src/workerControl/workerLeasePolicy.js
+   ../../../commercial-api/src/workerControl/workerSecurityEvents.js
+   ../../../commercial-api/src/providerConnections/providerVerificationReconciliationService.js
+   ../../../commercial-api/tests/db/support/testDatabase.js
+   ../../../commercial-api/tests/support/testWorkerAuthentication.js
+   ../../../commercial-api/tests/support/testWorkerSecurityEvents.js
+   ```
+
+   Widening the allowlist requires an architecture amendment;
+4. no provider SDK (`@google/genai`, `@runwayml/sdk`) and no network or
+   process primitive (`node:http`, `node:https`, `node:http2`, `node:net`,
+   `node:tls`, `node:dgram`, `node:child_process`, `node:worker_threads`,
+   `undici`, `ws`);
+5. no `https://` literal; an `http://` literal is allowed only as the loopback
+   base `http://127.0.0.1`; no provider host fragment (`googleapis`,
+   `runwayml`, case-insensitive);
+6. no name from `FORBIDDEN_PROVIDER_ENVIRONMENT_VARIABLES`, no
+   `WORKER_LIVE_PROVIDER_` token, no `COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION`
+   token and no `process.` access; the database configuration is read only
+   through the repository fixture `openGuardedClients`;
+7. no `vi.mock` and no `vi.doMock`;
+8. no exported declaration (the file is test-only and is never a module
+   dependency).
+
+Provider identifiers and policy IDs reach the test only through
+`SUPPORTED_PROVIDER_VERIFICATION_PAIRS`; the file keeps no second provider or
+policy literal.
+
+##### Execution environment
+
+The Phase 8 file is a commercial-worker integration suite run by the existing
+`vitest.integration.config.ts` (`test:integration`): sequential files and
+tests against the guarded PostgreSQL 16 test database it shares with the
+commercial-api database suites, which therefore never run concurrently with
+it. It composes:
+
+- `openGuardedClients` and `prepareSchemaV1` for the database, with the
+  file's single runtime pool from `loadRuntimeDatabaseConfig` and
+  `createRuntimePool` (configured as locked in "Phase 8 runtime pool
+  configuration" below), shared by the router and every direct
+  reconciliation pass;
+- the real `createWorkerControlApplication` served in-process by
+  `startCommercialApiServer` on `127.0.0.1`, port `0`;
+- the real worker-control services and real database transactions;
+- `createTestWorkerAuthenticationAdapter` and the recording security-event
+  sink;
+- the real `createHttpProviderVerificationControlClient` over loopback HTTP;
+- `reconcileProviderVerificationJobs` invoked directly (never the loop);
+- the test credential sealer and opener from `testCredentialOpening`;
+- a fake provider `fetchImpl` only.
+
+Database URLs and credentials are environment-provided through the existing
+fixture; nothing is hard-coded. When the database environment is missing the
+fixture throws and the suite fails, which is the repository convention: no
+`skip`, `skipIf` or fallback to unit fakes. A missing database environment is
+an execution-blocked gate recorded in the implementation report, never a
+reason to change this architecture.
+
+Verification jobs are seeded by the migrator as `QUEUED` rows with fencing
+counter `0` for connections whose provider and policy come from
+`SUPPORTED_PROVIDER_VERIFICATION_PAIRS`, bound to a current `ACTIVE`
+credential version sealed by the test sealer from a generated visible-ASCII
+fixture string within the Phase 6 credential shape. The customer verify
+route and `provider_connection.verification_requested` remain Phase 2 proofs
+and are not re-proven here.
+
+##### Phase 8 runtime pool configuration
+
+The published runtime defaults (`COMMERCIAL_API_DATABASE_LOCK_TIMEOUT_MS`
+5000, `COMMERCIAL_API_DATABASE_STATEMENT_TIMEOUT_MS` 15000) are shorter than
+a technique-C sidecar hold can be, so Phase 8 never relies on them. The Phase 8
+file builds its one runtime pool from an explicit configuration record passed
+to the existing `loadRuntimeDatabaseConfig(record, "development")` path, as
+the precedent suites do, with test-only values:
+
+```text
+COMMERCIAL_API_DATABASE_URL                    the fixture runtime URL (clients.config.runtimeUrl)
+COMMERCIAL_API_DATABASE_POOL_MAX               6
+COMMERCIAL_API_DATABASE_LOCK_TIMEOUT_MS        60000
+COMMERCIAL_API_DATABASE_STATEMENT_TIMEOUT_MS   90000
+```
+
+The record is a literal inside the test file. The test does not read
+`process.env`, does not mutate any global environment, and changes no
+production default, constant, migration or package. `createRuntimePool`
+already sends these values as PostgreSQL session startup parameters.
+
+Before any race proof, the test proves the values in force:
+
+- the loaded configuration has `lockTimeoutMs === 60000` and
+  `statementTimeoutMs === 90000`;
+- a query through the pool returns true for
+  `current_setting('lock_timeout')::interval = interval '60 seconds'` and
+  `current_setting('statement_timeout')::interval = interval '90 seconds'`.
+
+Timeout invariant for every technique-C race proof:
+
+```text
+sidecar maximum hold 20000 ms  <  lock_timeout 60000 ms  <  statement_timeout 90000 ms
+```
+
+The sidecar helper records the instant it acquires the Account lock and
+fails the test if the hold reaches 20000 ms before its release. Every poll
+inside a hold is bounded so that the bound holds. A PostgreSQL lock timeout
+(SQLSTATE `55P03`) or statement timeout (`57014`) in any controlled race
+transaction (worker route or reconciliation pass) is a test failure, never an
+accepted race outcome. The only expected `55P03` is the non-blocking probe
+below, which runs on a separate fixture connection and is not a race
+transaction.
+
+##### Database time authority and transaction-start lease liveness (P8-M3)
+
+PostgreSQL time is the only lease authority. The published behaviour is
+locked as-is:
+
+- lease issuance stamps `leased_at = now()` and
+  `lease_expires_at = now() + 30 seconds`;
+- grant, `VERIFYING` and first-result transactions judge liveness in
+  `lockVerificationJob` as `lease_expires_at <= now()`, where `now()` is the
+  transaction start; their `credential_granted_at`, `verifying_at` and
+  `completed_at` stamps are also transaction-start `now()`;
+- reconciliation selects with `now()` and re-checks expiry with
+  `clock_timestamp()` after its lifecycle locks.
+
+Accepted current behaviour
+(`R44B11F_PHASE_8_TRANSACTION_START_LEASE_LIVENESS_ACCEPTED=YES`): a worker
+transaction that starts before the database expiry instant may wait on locks,
+commit after that instant and still succeed. The stamp it writes
+(`credential_granted_at`, `verifying_at` with `last_verification_attempt_at`,
+or `completed_at`) is that transaction-start `now()`, and so may be earlier
+than `lease_expires_at` even though the physical commit is later. The
+aggregate `verified_at` of a worker `VERIFIED` result is not an independent
+`now()`; it is the millisecond copy of `completed_at` defined under "Timestamp
+sources and precision" below. This remains safe because every
+mutation serializes on the verification job row, the reconciler uses
+`FOR UPDATE ... SKIP LOCKED` and therefore skips a job a worker transaction
+holds, every terminal `UPDATE` is guarded by the expected prior state, and the
+migration 0010 trigger makes terminal rows immutable. At most one terminal
+outcome can exist. Phase 8 proves this behaviour and does not change it to
+`clock_timestamp()`.
+
+##### Timestamp sources and precision (P8-M3, P8-M4)
+
+PostgreSQL `timestamptz` values carry microseconds. node-postgres parses a
+`timestamptz` into a JavaScript `Date`, which holds milliseconds only, by
+truncation: the `Date` can be up to 999 microseconds earlier than the
+authoritative database value. Phase 8 therefore locks:
+
+- PostgreSQL is the authority for every lease-expiry boundary and every exact
+  timestamp comparison;
+- no lease-expiry, transaction-start or stored-timestamp correctness assertion
+  relies on a `timestamptz` after conversion through a JavaScript `Date` when
+  sub-millisecond precision can affect the result, and no JavaScript
+  timestamp comparison decides expiry;
+- a precision-sensitive value is either kept entirely inside one SQL
+  statement, or captured as exact text (`<column>::text`), kept locally as
+  that string, and cast back only inside PostgreSQL (`$n::timestamptz`). A
+  JavaScript `Date` is never the precision-preserving transport.
+
+This applies at least to `lease_expires_at`, `pg_stat_activity.xact_start`,
+and `credential_granted_at`, `verifying_at`, `last_verification_attempt_at`
+and `completed_at` wherever they are compared exactly with a captured
+`xact_start`.
+
+Stamp sources, from the published services (no change):
+
+```text
+credential_granted_at          now() of the credential-grant transaction (its transaction start)
+verifying_at                   now() of the VERIFYING transaction
+last_verification_attempt_at   the same now() of the same VERIFYING transaction (equal to verifying_at)
+completed_at (worker result)   now() of the worker result transaction
+completed_at (reconciliation)  now() of that reconciliation pass's own transaction
+leased_at, lease_expires_at    service-issued: now() and now() + 30 s of the lease transaction;
+                               technique B: clock_timestamp() and clock_timestamp() + the test interval
+verified_at (worker VERIFIED   the result service reads completed_at back through RETURNING as a JavaScript
+ on a current connection)      Date and passes that Date as the parameter of verified_at = $3: a
+                               millisecond-truncated copy of completed_at, not an independent now()
+```
+
+For a transaction under test, `now()` equals that backend's
+`pg_stat_activity.xact_start`; a statement about one transaction's `now()`
+never generalizes to another (worker and reconciler stamps come from
+different transactions).
+
+`verified_at` invariant (worker `VERIFIED` result on a current connection):
+
+```text
+verified_at IS NOT NULL AND verified_at = date_trunc('milliseconds', completed_at)
+```
+
+Phase 8 asserts this inside PostgreSQL (one `SELECT` joining
+`provider_connections` and `provider_verification_jobs`) and never compares
+the two through JavaScript `Date` objects, which would hide the difference.
+`verified_at` is not required to equal a captured `xact_start` at
+microsecond precision. Existing behaviour for every other path is preserved
+and not extended: a current `DEFINITIVE_FAILURE` sets `verified_at = NULL`;
+`INCONCLUSIVE` and every stale result leave the aggregate, and so
+`verified_at`, unchanged; reconciliation completions never write
+`verified_at`.
+
+Approved comparison forms (each `$n` is an exact `::text` capture):
+
+```text
+expiry crossed       SELECT clock_timestamp() > $1::timestamptz AS expired                    $1 = lease_expires_at::text
+started before       SELECT $1::timestamptz < $2::timestamptz AS started_before_expiry        $1 = xact_start::text, $2 = lease_expires_at::text
+stamp = xact_start   SELECT <stamp> = $1::timestamptz AS same_xact_start                      $1 = xact_start::text
+combined proof       SELECT <stamp> = $1::timestamptz AND <stamp> < $2::timestamptz AS valid   $1 = xact_start::text, $2 = lease_expires_at::text
+verified_at          SELECT verified_at IS NOT NULL AND verified_at = date_trunc('milliseconds', completed_at)
+```
+
+Expiry polling: the database clock is polled with the "expiry crossed" form
+until PostgreSQL returns true. A short delay between polls is allowed only to
+avoid busy-looping; it is never the expiry oracle, and neither is a flat
+`pg_sleep`, a wall-clock timer or a JavaScript comparison. This applies
+equally to the single service-issued 30-second wait and to every technique-B
+lease of at most 5 seconds.
+
+Observer queries: the repeated `pg_stat_activity` and `pg_blocking_pids`
+lookups (PID discovery, blocker relation, `xact_start::text` capture) each
+run as a separate autocommit statement on the fixture `runtime` connection,
+never inside one long-lived explicit transaction, because PostgreSQL caches
+the statistics snapshot for the duration of a transaction. The `FOR UPDATE
+NOWAIT` probe keeps its own separate rolled-back transaction, and observer
+queries never run inside it.
+
+Technique-B lead time: in every worker-first test, the worker transaction is
+observed blocked by the expected blocker and its `xact_start::text` captured
+while it is still active, and the "started before" form must return true
+before the expiry boundary is crossed. A worker transaction that begins at or
+after the expiry instant makes that setup invalid for the
+transaction-start-liveness proof: the test fails, or the harness rebuilds the
+deterministic setup from a fresh job and lease, bounded, before the
+authoritative race begins (before the expiry poll of that attempt). An
+invalid setup is never interpreted as proof of the target race, and a retry
+never follows the start of the authoritative race or hides a product failure.
+
+##### Expiry and race outcomes
+
+Both orderings of each race are locked from the published services:
+
+| Race | Worker transaction first | Expiry / reconciliation first |
+|---|---|---|
+| result vs expiry (`VERIFYING`) | the result commits `COMPLETED` with the provider outcome, aggregate rule and exactly one audit event, atomically; a concurrent reconciler pass skips the job (pass counts all zero); a later pass finds nothing | reconciliation commits `COMPLETED` / `INCONCLUSIVE` / `WORKER_LOST_DURING_VERIFYING` with one audit event (`verification_inconclusive` when current, `verification_result_stale` otherwise); the waiting result re-reads `COMPLETED`, fails `VERIFICATION_RESULT_CONFLICT` (HTTP 409, client `PROVIDER_VERIFICATION_RESULT_REJECTED`); no second terminal write, no second audit event, no aggregate change |
+| grant vs expiry (`LEASED`) | the grant stamps `credential_granted_at` once; a concurrent pass skips; a later pass completes `INCONCLUSIVE` / `WORKER_LOST_AFTER_CREDENTIAL_GRANT` with one `verification_inconclusive` event; the job never requeues | an ungranted expired job is requeued (`LEASED -> QUEUED`, live lease cleared, fencing counter kept, no audit); the waiting grant re-reads `QUEUED` and fails `NOT_LEASED`; `credential_granted_at` stays NULL |
+| `VERIFYING` vs expiry (granted `LEASED`) | the barrier commits `VERIFYING` with its provenance and `last_verification_attempt_at`; the job can no longer requeue; a later pass completes `WORKER_LOST_DURING_VERIFYING` | the granted job completes `WORKER_LOST_AFTER_CREDENTIAL_GRANT`; the waiting `VERIFYING` request re-reads `COMPLETED` and fails `NOT_LEASED`; no verifying provenance and no attempt timestamp are written |
+
+Further locked `VERIFYING` cases: before a grant, a live `VERIFYING` request
+fails `CREDENTIAL_NOT_GRANTED`; an expired lease not yet reconciled fails
+`LEASE_EXPIRED` for grant, `VERIFYING` and first result; after a pre-grant
+requeue `VERIFYING` fails `NOT_LEASED`.
+
+```text
+DOUBLE_TERMINAL_POSSIBLE=NO
+```
+
+##### Expiry and ordering techniques (P8-M4)
+
+A service-issued lease always lasts 30 seconds of database time, and the
+migration 0010 trigger makes live lease identity (`lease_worker_principal_id`,
+`lease_token_sha256`, `leased_at`, `lease_expires_at`) immutable while
+`LEASED` or `VERIFYING`, so a service-issued lease cannot be shortened.
+Production constants are never changed. Three techniques are allowed:
+
+```text
+A  SERVICE-ISSUED LEASE    issued through the real lease route; real 30-second expiry
+B  MIGRATOR SHORT LEASE    migrator UPDATE QUEUED -> LEASED with fence = previous + 1, a test-generated
+                           token in WORKER_LEASE_TOKEN_PATTERN shape stored only as its SHA-256 verifier,
+                           leased_at = clock_timestamp(), lease_expires_at = clock_timestamp() + a test
+                           interval of at most 5 seconds
+C  SIDECAR LOCK            a migrator transaction holding the job's Account row FOR UPDATE, making no
+                           change and ending with ROLLBACK
+```
+
+Use by test class:
+
+- **Phase 7 run proofs** use technique A only. A forged lease never proves
+  Phase 7 timing and is never handed to `runProviderVerification`.
+- **Exact race ordering** uses technique C, following the race protocol
+  below.
+- **Race and lower-level expiry cases in the worker file** use technique B,
+  driven through the real client methods (`requestProviderVerificationCredentialGrant`,
+  `acknowledgeProviderVerificationVerifying`,
+  `reportProviderVerificationResult`) with the known proof, so the worker
+  transaction can start before a near expiry instant. Technique B leases last
+  at most 5 seconds, which the timeout invariant above covers. They exist only
+  for server state-machine proof, never for the 30-second model, and are never
+  handed to `runProviderVerification`. The production 30-second lease constant
+  is unchanged.
+- **Real waits**: exactly one test, the batched crash test of contract item D,
+  waits for real service-issued 30-second expiry (technique A). It owns the
+  service-issued 30-second lease proof (`lease_expires_at - leased_at` exactly
+  30 seconds), the pre-grant requeue (G1), the fence n, requeue, then next
+  lease fence n+1 proof with the old proof rejected afterwards, and the G2 to
+  G4 expiry convergence. No other test, including contract item B, waits for a
+  service-issued 30-second expiry. After the last lease of that test, the test
+  reads the latest `lease_expires_at` of its leased jobs through the migrator
+  as exact text (`max(lease_expires_at)::text`) and keeps that string. It
+  then polls in a bounded loop with
+  `SELECT clock_timestamp() > $1::timestamptz AS expired` (`$1` the kept
+  text), and only after PostgreSQL returns true runs reconciliation or
+  asserts expiry. The authoritative expiry is never converted to a JavaScript
+  `Date` for this decision. A flat `pg_sleep(31)` is not the expiry oracle,
+  and the wall-clock per-test timeout (an override of at most 120000 ms) is
+  only a safety bound. A technique-B test likewise waits for its own short
+  lease only by the same PostgreSQL poll against its captured
+  `lease_expires_at::text`. The suite-level `testTimeout` and `hookTimeout`
+  are not raised.
+
+##### Race protocol (technique C)
+
+Mechanism. Only the transactions under test are relied on to take the
+Account lock. The grant, the first `VERIFYING` transition and the first
+result each lock the verification job row `FOR UPDATE` in
+`lockVerificationJob`, pass their state and live-lease checks, and then take
+the Account row `FOR SHARE` in `lockVerificationLifecycle`. A reconciliation
+pass that selects an actionable `LEASED` or `VERIFYING` job locks it with
+`FOR UPDATE OF j SKIP LOCKED` and then takes the same Account `FOR SHARE`. A
+sidecar holding that Account row `FOR UPDATE` therefore pauses each of them
+while it already holds the job row. A paused worker transaction makes the
+reconciler's `SKIP LOCKED` skip the job. Nothing here is claimed for lease
+issuance (which locks only the job row), for requests rejected before
+`lockVerificationLifecycle`, or for the token-free `COMPLETED` result replay
+path, which returns before any lifecycle lock.
+
+Backend identity. The sidecar is the migrator fixture connection, and its
+PID is read with `pg_backend_pid()` inside its transaction. Runtime-pool
+sessions carry `application_name = 'commercial-api'` and fixture connections
+carry `commercial-api-test-db`. A blocked worker or reconciler PID is captured
+from `pg_stat_activity` as the unique `commercial-api` backend whose
+`pg_blocking_pids(pid)` contains the expected blocker PID (the sidecar, or the
+captured reconciler). The lookup is a bounded poll that requires exactly one
+match. The `pg_stat_activity` and `pg_blocking_pids` lookups run on the
+fixture `runtime` connection, which is the pool's role, so that
+`xact_start` of pool sessions is visible to the test without any role or
+grant change; each lookup is a separate autocommit statement (see
+"Timestamp sources and precision"). A backend counts as paused only when that blocker relation is
+observed. `pg_locks` `granted = false` and waiting-lock counts are not used
+as the ordering proof, and fixed sleeps never establish order. That a paused
+transaction holds the job row is confirmed with a non-blocking probe:
+`SELECT id FROM provider_verification_jobs WHERE id = $1 FOR UPDATE NOWAIT`
+on the separate fixture `runtime` connection, inside its own rolled-back
+transaction, must fail with `55P03`.
+
+Worker-first sequence (grant vs expiry, `VERIFYING` vs expiry, result vs
+expiry):
+
+1. prepare the job and its technique-B lease in the state under test, and
+   capture its `lease_expires_at::text` locally (for result races this is the
+   pre-commit capture required because the terminal result clears the live
+   lease fields);
+2. the sidecar begins, captures its PID and locks the target Account row
+   `FOR UPDATE`;
+3. start the worker-control request through the real client without awaiting
+   it;
+4. capture the worker PID and observe `pg_blocking_pids(workerPid)` contain
+   the sidecar PID;
+5. confirm the job row is held with the probe, capture the worker backend's
+   `pg_stat_activity.xact_start::text` while it is still active, and assert in
+   PostgreSQL that it is earlier than the captured `lease_expires_at` (the
+   "started before" form; otherwise the technique-B lead-time rule applies);
+6. poll with `clock_timestamp() > $1::timestamptz` against the captured
+   `lease_expires_at::text` until PostgreSQL returns true; the sidecar has
+   held the Account row continuously since step 2 and the worker was observed
+   blocked by it at step 4, so the worker cannot commit before this boundary;
+7. run one reconciliation pass to completion and assert it skipped the
+   worker-held job (all counts zero, target row unchanged);
+8. release the sidecar (`ROLLBACK`);
+9. await the worker response and assert the accepted transaction-start
+   outcome: success, with the stamp written by that transaction
+   (`credential_granted_at`; `verifying_at` and `last_verification_attempt_at`;
+   or `completed_at`) equal to the captured `xact_start` and earlier than the
+   captured `lease_expires_at`, evaluated inside PostgreSQL with the
+   "combined proof" form against the two captured texts;
+10. run a later pass and assert the locked follow-up for that race (result:
+    nothing to do; grant: `WORKER_LOST_AFTER_CREDENTIAL_GRANT`; `VERIFYING`:
+    `WORKER_LOST_DURING_VERIFYING`).
+
+The result-race assertions compare against the locally captured
+`lease_expires_at::text`, never a value re-read after terminalization and
+never a JavaScript `Date`.
+
+Expiry-first sequence:
+
+1. prepare the job and its technique-B lease in the state under test, and
+   capture `lease_expires_at::text`;
+2. poll with `clock_timestamp() > $1::timestamptz` against that text until
+   PostgreSQL returns true, so the reconciler's `now()` selection sees the job
+   as actionable;
+3. the sidecar begins, captures its PID and locks the target Account row
+   `FOR UPDATE`;
+4. start one reconciliation pass without awaiting it, capture the reconciler
+   PID, observe `pg_blocking_pids(reconcilerPid)` contain the sidecar PID, and
+   confirm the job row is held with the probe;
+5. start the worker-control request without awaiting it, capture the worker
+   PID, and observe `pg_blocking_pids(workerPid)` contain the reconciler PID:
+   the worker is waiting on the job row that the reconciler holds;
+6. release the sidecar;
+7. await the reconciliation pass and confirm its committed transition from
+   the pass counts and the job row (one requeue, or one completion with one
+   audit event). By the observed blocker relation, the worker cannot read the
+   job row before this commit;
+8. await the worker response and assert the locked rejection (`NOT_LEASED`
+   for grant and `VERIFYING`, `VERIFICATION_RESULT_CONFLICT` for result), with
+   no further row change and no further audit event.
+
+Clean actionable-job precondition. Each test starts from `prepareSchemaV1` in
+`beforeEach`, the existing repository isolation of the precedent suites. In
+addition, every test that asserts reconciliation pass counts, a skip, or that
+exactly N rows changed first asserts that no `provider_verification_jobs` row
+other than its own targets is in `QUEUED`, `LEASED` or `VERIFYING`. Zero-count
+assertions never depend on accidental database emptiness.
+
+##### Lease, grant, VERIFYING and result replay
+
+Lease (technique A):
+
+- `QUEUED -> LEASED`; fencing counter exactly +1; the plaintext token is
+  returned once and only its SHA-256 verifier is stored;
+- `leased_at` set and `lease_expires_at - leased_at` exactly 30 seconds;
+- `lease_worker_principal_id` is the authenticated worker;
+- oldest-first selection (`created_at`, `id`);
+- a pre-grant requeue keeps the fencing counter, and the next lease is
+  fence n+1.
+
+Grant:
+
+- first grant requires `LEASED`, the live lease (owner, fence, token,
+  expiry), eligibility and a structurally valid policy, and stamps
+  `credential_granted_at` exactly once;
+- exact replay under the same still-live lease re-runs eligibility (a
+  rotation committed in between makes it fail `CREDENTIAL_VERSION_INELIGIBLE`)
+  and returns the same `sealedEnvelope`, `openingContext` and
+  `credentialGrantedAt` with no write and no audit; the HTTP body is identical
+  to the first response;
+- the real client issues a new local grant object for each successful
+  response; Phase 7 holds at most one;
+- after expiry: `LEASE_EXPIRED`, or `NOT_LEASED` once reconciled; after
+  `VERIFYING` or a terminal state: `NOT_LEASED`.
+
+`VERIFYING`:
+
+- first transition requires `LEASED`, a committed grant, the live lease, the
+  exact principal and fence and eligibility, and stamps `verifying_at`,
+  `verifying_worker_principal_id`, `verifying_fencing_counter` and
+  `last_verification_attempt_at` atomically;
+- exact replay requires `VERIFYING`, the live lease and the same principal
+  and fence, returns the original `verifyingAt` with no write, no attempt
+  timestamp rewrite and no audit, does not re-run eligibility, and fails
+  `VERIFYING_VERSION_DESTROYED` only for a `DESTROYED` bound version.
+
+Result:
+
+- first result requires `VERIFYING`, the live lease, the verifying principal
+  and fence and a valid pair, and commits job, aggregate and one audit event
+  atomically;
+- exact terminal replay of a `COMPLETED` job is token-free: the token must be
+  well-formed but is not authority; the verifying and result principal and
+  fence, the outcome and the reason must equal the stored tuple and the stored
+  reason must be worker-reportable; it returns the stored tuple and
+  `completedAt` with no write and no audit, and it succeeds after lease expiry
+  when the first result committed;
+- a different outcome or reason fails `VERIFICATION_RESULT_CONFLICT`;
+- a reconciler-written terminal result never replays as a worker result.
+
+##### Stale authority
+
+Locked rejection reasons (HTTP 409 `{"status":"error","code":"LEASE_REJECTED"}`,
+one `WORKER_PROVIDER_VERIFICATION_*_REJECTED` security event to the sink):
+
+| Route and state | stale fence | wrong token | wrong worker |
+|---|---|---|---|
+| grant, `LEASED` | `FENCING_MISMATCH` | `TOKEN_MISMATCH` | `OTHER_WORKER` |
+| `VERIFYING`, `LEASED` or `VERIFYING` | `FENCING_MISMATCH` | `TOKEN_MISMATCH` | `OTHER_WORKER` |
+| result, `VERIFYING` | `FENCING_MISMATCH` | `TOKEN_MISMATCH` | `OTHER_WORKER` |
+| result, `COMPLETED` | `FENCING_MISMATCH` | ignored for an exact tuple | `VERIFYING_PRINCIPAL_MISMATCH` |
+
+A grant or `VERIFYING` proof for a job not in an accepted state fails
+`NOT_LEASED`. A result for a job that is neither `VERIFYING` nor `COMPLETED`
+fails `NOT_VERIFYING`. While the job is `VERIFYING`, a result follows the
+first-call checks in the row above. On `COMPLETED`, a result never fails
+`NOT_VERIFYING`. It enters terminal replay/conflict logic instead: a
+verifying-principal mismatch fails `VERIFYING_PRINCIPAL_MISMATCH`, a fence
+mismatch fails `FENCING_MISMATCH`, an exact principal, fence, outcome and
+reason tuple with a worker-reportable stored reason is an exact replay, and
+any other mismatch fails `VERIFICATION_RESULT_CONFLICT`. Through the client each maps
+to `PROVIDER_VERIFICATION_GRANT_REJECTED`,
+`PROVIDER_VERIFICATION_VERIFYING_REJECTED` or
+`PROVIDER_VERIFICATION_RESULT_REJECTED`. Every rejection rolls back: the job
+row is unchanged, no terminal state changes and no `audit_events` row is
+written. The worker file proves one representative per route and column; the
+commercial-api database suites own the full reason matrix.
+
+##### Concurrent duplicates
+
+```text
+GRANT      concurrent identical proofs         one stamp; both 200 with the same credentialGrantedAt
+VERIFYING  concurrent identical proofs         one transition; both 200 with the same verifyingAt
+RESULT     concurrent identical tuples         one terminal transition plus one exact replay; one audit event
+RESULT     concurrent conflicting tuples       the first committed tuple wins; the other fails
+                                               VERIFICATION_RESULT_CONFLICT; one audit event
+```
+
+No double terminal state is possible.
+
+##### Audit contract
+
+```text
+first worker terminal result   provider_connection.verified | provider_connection.verification_failed |
+                               provider_connection.verification_inconclusive | provider_connection.verification_result_stale
+reconciliation completion      provider_connection.verification_inconclusive (LEASED after grant; VERIFYING when
+                               current) | provider_connection.verification_result_stale (VERIFYING when not current)
+no audit event                 lease, grant, VERIFYING, requeue, LIFECYCLE_NO_LONGER_ELIGIBLE cancellation,
+                               every exact replay, every rejection, every no-op reconciliation pass
+```
+
+Uniqueness is transactional and state-machine based (state-guarded terminal
+`UPDATE`, immutable terminal rows, the audit insert in the same transaction).
+Phase 8 adds no database uniqueness constraint. Phase 8 proves exactly one
+terminal audit event per job, none added by replay and none added by a
+repeated reconciliation pass.
+
+##### Crash windows
+
+No worker-side same-lease resume exists. The server state after each crash
+and its convergence are locked; windows with identical server state are
+grouped, and one representative per group is proven:
+
+| Group | Windows | Server state | Same-run replay | Convergence | Provider calls for the job |
+|---|---|---|---|---|---|
+| G1 | C0 lease committed, response unusable; C1 lease received, before grant | `LEASED`, no grant | none (lease is never retried) | requeue, fence kept; next lease fence n+1 | 0 |
+| G2 | C2 grant committed, response lost; C3 grant received, before `VERIFYING` | `LEASED`, granted | grant replay under the live lease | `WORKER_LOST_AFTER_CREDENTIAL_GRANT`, one event | 0 |
+| G3 | C4 `VERIFYING` committed, response lost; C5 before bind; C6 during bind/open | `VERIFYING` | `VERIFYING` replay under the live lease (C4) | `WORKER_LOST_DURING_VERIFYING`, one event | 0 |
+| G4 | C7 during the provider request; C8 report held locally, before the result request | `VERIFYING` | none | `WORKER_LOST_DURING_VERIFYING`, one event | at most 1, never repeated |
+| G5 | C9 result committed, response lost; C10 result received, before the run returns | `COMPLETED` provider outcome | exact result replay (C9) | none (terminal) | exactly 1 |
+
+Same-run replay applies only when the process survives and Phase 7's one
+retry follows `CONTROL_API_UNAVAILABLE`; after a process crash nothing
+replays.
+
+##### Process re-invocation and provider-call guarantee
+
+```text
+SAME_LEASE_RESUME_SUPPORTED=NO
+```
+
+The lease token exists only in memory; there is no journal and no persisted
+grant, acknowledgement or capability; binding accepts only objects issued by
+the same client instance; lease selection chooses only `QUEUED` jobs. A job
+becomes selectable again only after a pre-grant requeue, as fence n+1. Once a
+grant exists, or once `VERIFYING` is reached, the job never requeues.
+
+```text
+PROVIDER_CALL_GLOBAL_GUARANTEE=AT_MOST_ONCE_PER_PROVIDER_VERIFICATION_JOB
+```
+
+Not exactly once: crash, unsupported lease, local fault, lease budget,
+shutdown or rejection may leave zero calls. Only the one fence that crosses
+`VERIFYING` can reach the provider transport, and Phase 7 allows one transport
+call per run. A pre-grant requeue happens before any grant, `VERIFYING` or
+provider contact, so the prior lease made no call. No grant, `VERIFYING` or
+result replay can cause a provider call. A later customer request after a
+terminal state is a new job with its own guarantee.
+
+This is the guarantee of the locked BusyBookie worker path: Phase 7
+(`runProviderVerification`) is the only authorised provider-verification
+execution client in this architecture. The database and server state machine
+guarantee only that one fence ever crosses `VERIFYING` and that no lease
+requeues after a grant. They do not count provider calls, and they cannot
+physically or cryptographically stop an unauthorised external implementation
+holding that `VERIFYING` lease from calling a provider. The guarantee is not
+weakened for the authorised path and is not claimed to be database-enforced.
+
+##### Response-loss simulation and fresh object graphs
+
+Response loss is simulated only by wrapping the real client's injected
+`fetchImpl`: the wrapper forwards the request to the loopback router,
+awaits the real response so the server commit is complete, consumes the body,
+and then rejects with a transport `TypeError` for the selected attempt, which
+the client maps to `CONTROL_API_UNAVAILABLE`. The wrapper may retain the lost
+body for assertions only; it never hands it to any worker object. Server
+services are never mocked. This proves, through Phase 7's one exact retry:
+grant committed and lost then replayed; `VERIFYING` committed and lost then
+replayed; result committed and lost then replayed (`REPORTED`).
+
+A simulated process crash follows the
+`apps/commercial-worker/tests/integration/wholeChainCrashRecovery.test.ts`
+precedent:
+
+- from the crash point, the crashed graph's control `fetchImpl` and provider
+  fake never settle and never forward another request, and its
+  `deadlineTimer` never fires; a counter proves nothing from it reaches the
+  router afterwards;
+- the abandoned run promise is never awaited for server effects;
+- after the crash only a fresh client, opener, run and fake are built; no
+  lease token, proof, grant, acknowledgement or capability crosses the crash;
+- no worker-side persisted state is created.
+
+##### Worker integration path
+
+At least one full path is proven:
+
+```text
+runProviderVerification -> real provider-verification client -> loopback commercial-api router
+-> real services -> PostgreSQL 16 -> fake provider fetchImpl
+```
+
+using the Phase 7 `liveGate` dependency seam, an explicit injected
+`environment` record containing no provider variable, `config` from
+`loadProviderVerificationConfig` of an empty record, and the test opener. The
+fake provider counts calls, performs no network I/O and returns a
+deterministic success response that satisfies the Phase 6 classifier for the
+leased pair. It proves exactly one provider fetch, `REPORTED`, the stored
+terminal tuple (`VERIFIED` / `VERIFICATION_SUCCEEDED`, result principal and
+fence equal to the verifying provenance, `completed_at` set to the worker
+result transaction's `now()`, live lease cleared), the aggregate (`ACTIVE`,
+`VERIFIED`, and, asserted inside PostgreSQL, `verified_at IS NOT NULL AND
+verified_at = date_trunc('milliseconds', completed_at)`), exactly one
+`provider_connection.verified` event, and no
+secret in the run result. Real keys and real provider networks are never
+used.
+
+##### Suite ownership (P8-M5)
+
+```text
+apps/commercial-worker/tests/integration/providerVerificationExecution.test.ts   (new; Phase 8)
+  owns  the end-to-end Phase 7 run against the real router and PostgreSQL; crash and restart with fresh
+        object graphs; response-loss replay through the real client; the at-most-one provider call proof;
+        the technique-C race orderings and the transaction-start liveness proof; representative stale
+        authority, concurrency and audit assertions; cross-layer secret assertions
+
+apps/commercial-api/tests/db/workerProviderVerification.test.ts   (existing; run, not modified)
+apps/commercial-api/tests/db/providerVerification.test.ts         (existing; run, not modified)
+  own   low-level service and database transition details, the full stale-authority reason matrix,
+        request-contract validation, migration 0010 and trigger invariants, reconciliation precedence and
+        concurrency, atomicity rollback
+```
+
+The Phase 8 gate runs, and its report records with exact counts and skips:
+the new integration file, the full commercial-worker integration suite, both
+commercial-api database suites above, the full commercial-api and
+commercial-worker unit suites including both boundary tests, and both
+typechecks, together with whether the database environment was available.
+
+##### Phase 8 test contract
+
+`providerVerificationExecution.test.ts` contains at least:
+
+- **A. happy path**: the worker integration path above.
+- **B. lease and fence**: technique-A lease semantics (30 seconds, principal,
+  fence +1, verifier only). The pre-grant requeue, fence n+1 and old-proof
+  rejection are proven inside the single real-wait test of item D, never by
+  another 30-second wait.
+- **C. response loss**: grant, `VERIFYING` and result each committed, lost
+  and replayed through Phase 7's one retry; one stamp, one barrier write, one
+  terminal transition, one provider fetch, one audit event; the replayed
+  bodies equal the lost bodies; a lost lease response is `STOPPED` / `LEASE`
+  with no retry.
+- **D. crash**: one representative per crash group G1 to G5 with a fresh
+  graph afterwards; G1 to G4 share the single real-wait test (technique A),
+  followed by one reconciliation pass and the convergence in the crash table;
+  G5 needs no wait, and a fresh run then returns `NO_WORK` with the job
+  unchanged.
+- **E. expiry**: before grant requeue; after grant
+  `WORKER_LOST_AFTER_CREDENTIAL_GRANT`; `VERIFYING`
+  `WORKER_LOST_DURING_VERIFYING` (covered by D and F where they coincide).
+- **F. races**: both orderings of result vs expiry, grant vs expiry and
+  `VERIFYING` vs expiry with techniques B and C under the race protocol and
+  the explicit pool configuration, each worker-first case proving
+  transaction-start liveness (the worker transaction started before the
+  captured expiry, the PostgreSQL clock then crossed it while the worker was
+  held, the worker commit landed after it, the concurrent pass skipped, and
+  the stamp equals the captured `xact_start` and is earlier than the captured
+  `lease_expires_at`, all compared inside PostgreSQL from exact `::text`
+  captures); a worker transaction that starts at or after expiry is an
+  invalid setup under the technique-B lead-time rule, never a proof.
+- **G. concurrency**: concurrent identical grant, `VERIFYING` and result
+  requests, and concurrent conflicting results, per the duplicate table.
+- **H. authority**: one representative stale fence, wrong token and wrong
+  worker per route, including token non-authority for an exact terminal
+  replay, each proving no row change and no audit row.
+- **I. audit**: one terminal event per job; none on replay; a repeated
+  reconciliation pass is a no-op with no event.
+- **J. provider call**: at most one fake provider fetch per job across every
+  test; no replay adds one.
+- **K. secret safety**: the plaintext fixture credential never appears in any
+  run result or its `JSON.stringify`, any captured error, any security event,
+  any captured control body, or any `provider_verification_jobs` or
+  `audit_events` row text; no lease token, sealed envelope or provider body
+  appears in a run result. Assertions are booleans so a failure never prints
+  a secret.
+
+##### Phase 8 exclusions and pre-live carries
+
+Phase 8 does not own: a production caller or process entry point, live
+provider enablement, real-provider smoke tests, real credentials, external
+provider networks, deployed staging or deployed crash/restart proof, operator
+lifecycle, public deployment, Phase 9
+(`ARCHITECTURE_STATUS_SYNC_AFTER_VALIDATION`), or either pre-live carry.
+
+`R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION` and
+`R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION` remain
+unchanged and unowned by Phase 8, which neither solves nor tests a resolution
+of either. Live enablement remains blocked until both are decided.
+
+##### Phase 8 implementation authorization
+
+Phase 8 requires:
+
+```text
+new database migration = NO
+schema change = NO
+commercial-api change = NO
+worker production change = NO
+runtime-grant change = NO
+worker protocol change = NO
+worker authentication change = NO
+new worker error code = NO
+provider SDK use = NO
+provider call in tests = NO (fake provider fetchImpl only)
+live verification enablement = NO
+live submission enablement = NO
+process entry point = NO
+production caller = NO
+new package dependency = NO
+D11 scope-lock change = NO
+```
+
+Anything outside this boundary requires a new scope-amendment gate.
+
 #### R44B11F acceptance boundary
 
 R44B11F is complete only when:
@@ -17041,6 +17875,113 @@ R44B11F_PHASE_7_MIGRATION_CHANGE=NO
 R44B11F_PHASE_7_COMMERCIAL_API_CHANGE=NO
 R44B11F_PHASE_7_PROTOCOL_CHANGE=NO
 R44B11F_PHASE_7_DEPENDENCY_CHANGE=NO
+R44B11F_PHASE_8_CONTRACT_LOCKED=YES
+R44B11F_PHASE_8_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
+R44B11F_PHASE_8=RACE_IDEMPOTENCY_BOUNDARY_INTEGRATION_REGRESSION
+R44B11F_PHASE_8_PURPOSE=INTEGRATION_PROOF_ONLY_NO_NEW_BUSINESS_BEHAVIOUR
+R44B11F_PHASE_8_DISCOVERY_BASE=40613ebf61b854357238808bc14154936e3ea3a7
+R44B11F_PHASE_8_D11_SCOPE_LOCK_MODIFIED=NO
+R44B11F_PHASE_8_PRODUCTION_NEW=NONE
+R44B11F_PHASE_8_PRODUCTION_MODIFIED=NONE
+R44B11F_PHASE_8_COMMERCIAL_API_PRODUCTION_MODIFIED=NONE
+R44B11F_PHASE_8_MIGRATION_CHANGE=NO
+R44B11F_PHASE_8_SCHEMA_CHANGE=NO
+R44B11F_PHASE_8_RUNTIME_GRANT_CHANGE=NO
+R44B11F_PHASE_8_PROTOCOL_CHANGE=NO
+R44B11F_PHASE_8_DEPENDENCY_CHANGE=NO
+R44B11F_PHASE_8_NEW_WORKER_ERROR_CODES=NONE
+R44B11F_PHASE_8_PRODUCTION_CHANGE_DISCOVERED=STOP_AND_REOPEN_ARCHITECTURE
+R44B11F_PHASE_8_TEST_NEW=apps/commercial-worker/tests/integration/providerVerificationExecution.test.ts
+R44B11F_PHASE_8_TEST_MODIFIED=apps/commercial-worker/tests/boundary.test.ts
+R44B11F_PHASE_8_FIXTURE_NEW=NONE
+R44B11F_PHASE_8_FIXTURE_MODIFIED=NONE
+R44B11F_PHASE_8_IN_FILE_HELPERS=ALLOWED
+R44B11F_PHASE_8_API_DB_SUITES=RUN_NOT_MODIFIED
+R44B11F_PHASE_8_API_DB_SUITE_CHANGE=SEPARATE_REVIEWED_SCOPE_DECISION_REQUIRED
+R44B11F_PHASE_8_BOUNDARY_TRANSITION=ABSENCE_EXPECTATION_REPLACED_BY_EXACT_PATH_EXISTENCE
+R44B11F_PHASE_8_BOUNDARY_EXEMPTIONS_ADDED=NONE
+R44B11F_PHASE_8_BOUNDARY_EXISTING_RULES_WEAKENED=NO
+R44B11F_PHASE_8_BOUNDARY_IMPORT_RULE=EXACT_ALLOWLIST
+R44B11F_PHASE_8_BOUNDARY_NETWORK_RULE=NO_SDK_NO_NETWORK_MODULE_NO_HTTPS_LITERAL_LOOPBACK_HTTP_ONLY
+R44B11F_PHASE_8_BOUNDARY_PROVIDER_ENV_AND_LIVE_KEYS=FORBIDDEN_IN_TEST_FILE
+R44B11F_PHASE_8_BOUNDARY_PROCESS_ACCESS=FORBIDDEN_IN_TEST_FILE
+R44B11F_PHASE_8_BOUNDARY_MODULE_MOCKING=FORBIDDEN
+R44B11F_PHASE_8_TEST_FILE_IMPORTED_BY_SRC=NO
+R44B11F_PHASE_8_SUITE=COMMERCIAL_WORKER_TEST_INTEGRATION_CONFIG_SEQUENTIAL
+R44B11F_PHASE_8_DATABASE=POSTGRESQL_16_GUARDED_TEST_DATABASE_ENVIRONMENT_PROVIDED
+R44B11F_PHASE_8_DATABASE_MISSING=SUITE_FAILS_EXECUTION_BLOCKED_NO_SKIP_NO_UNIT_FALLBACK
+R44B11F_PHASE_8_ROUTER=REAL_WORKER_CONTROL_APPLICATION_IN_PROCESS_LOOPBACK
+R44B11F_PHASE_8_SERVICE_MOCKING=NO
+R44B11F_PHASE_8_RECONCILIATION_INVOCATION=DIRECT_SERVICE_PASS_NOT_LOOP
+R44B11F_PHASE_8_JOB_SEEDING=MIGRATOR_QUEUED_FENCE_0_SUPPORTED_PAIRS_TEST_SEALED_CREDENTIAL
+R44B11F_PHASE_8_DB_TIME_AUTHORITY=POSTGRESQL
+R44B11F_PHASE_8_WORKER_ROUTE_LIVENESS_CLOCK=TRANSACTION_START_NOW
+R44B11F_PHASE_8_RECONCILER_EXPIRY_CLOCK=SELECT_NOW_RECHECK_CLOCK_TIMESTAMP
+R44B11F_PHASE_8_TRANSACTION_START_LEASE_LIVENESS_ACCEPTED=YES
+R44B11F_PHASE_8_LIVENESS_CLOCK_CHANGE=NO
+R44B11F_PHASE_8_TIMESTAMP_PRECISION_AUTHORITY=POSTGRESQL_MICROSECOND_COMPARISON_EXACT_TEXT_CAPTURE_NO_JS_DATE_FOR_EXPIRY_OR_EXACT_TIMESTAMP_PROOF
+R44B11F_PHASE_8_VERIFIED_AT_SEMANTICS=WORKER_VERIFIED_NODE_DATE_MILLISECOND_COPY_OF_COMPLETED_AT_EQUAL_DATE_TRUNC_MILLISECONDS_COMPLETED_AT_ASSERTED_IN_POSTGRESQL
+R44B11F_PHASE_8_DOUBLE_TERMINAL_POSSIBLE=NO
+R44B11F_PHASE_8_RESULT_FIRST=PROVIDER_OUTCOME_COMMITTED_RECONCILER_SKIPS
+R44B11F_PHASE_8_RESULT_EXPIRY_FIRST=WORKER_LOST_DURING_VERIFYING_THEN_RESULT_VERIFICATION_RESULT_CONFLICT
+R44B11F_PHASE_8_GRANT_FIRST=GRANT_STAMPED_ONCE_THEN_WORKER_LOST_AFTER_CREDENTIAL_GRANT
+R44B11F_PHASE_8_GRANT_EXPIRY_FIRST=REQUEUE_THEN_GRANT_NOT_LEASED_NO_GRANT_STAMP
+R44B11F_PHASE_8_VERIFYING_FIRST=BARRIER_COMMITTED_NO_REQUEUE_THEN_WORKER_LOST_DURING_VERIFYING
+R44B11F_PHASE_8_VERIFYING_EXPIRY_FIRST=WORKER_LOST_AFTER_CREDENTIAL_GRANT_THEN_VERIFYING_NOT_LEASED
+R44B11F_PHASE_8_SERVICE_ISSUED_LEASE=REAL_30_SECONDS_NOT_SHORTENED
+R44B11F_PHASE_8_PRODUCTION_CONSTANTS_MUTATED=NO
+R44B11F_PHASE_8_PHASE_7_RUN_LEASES=SERVICE_ISSUED_ONLY
+R44B11F_PHASE_8_SHORT_MIGRATOR_LEASE=SERVER_STATE_MACHINE_PROOF_ONLY_MAX_5_SECONDS_NEVER_PHASE_7_RUN
+R44B11F_PHASE_8_RACE_ORDERING=SIDECAR_ACCOUNT_ROW_FOR_UPDATE_BLOCKER_PROVEN_BY_PG_BLOCKING_PIDS_NO_FIXED_SLEEP
+R44B11F_PHASE_8_SIDECAR_LOCK_TIMEOUT_PRECONDITION=EXPLICIT_TEST_ONLY_RUNTIME_POOL_RECORD_LOCK_TIMEOUT_60000_MS_STATEMENT_TIMEOUT_90000_MS_NO_PRODUCTION_DEFAULT_CHANGE
+R44B11F_PHASE_8_SIDECAR_TIMEOUT_INVARIANT=SIDECAR_MAX_HOLD_20000_MS_LT_LOCK_TIMEOUT_60000_MS_LT_STATEMENT_TIMEOUT_90000_MS_VALUES_ASSERTED
+R44B11F_PHASE_8_RACE_TIMEOUT_OUTCOME=LOCK_TIMEOUT_55P03_OR_STATEMENT_TIMEOUT_57014_IS_TEST_FAILURE
+R44B11F_PHASE_8_RACE_BLOCKER_PROOF=PG_BLOCKING_PIDS_OF_CAPTURED_PID_CONTAINS_EXPECTED_SIDECAR_OR_RECONCILER_PID
+R44B11F_PHASE_8_RACE_BACKEND_PID_CAPTURE=SIDECAR_PG_BACKEND_PID_WORKER_AND_RECONCILER_UNIQUE_PG_STAT_ACTIVITY_MATCH_SEPARATE_AUTOCOMMIT_OBSERVER_STATEMENTS
+R44B11F_PHASE_8_RACE_JOB_ROW_HELD_PROOF=SEPARATE_CONNECTION_FOR_UPDATE_NOWAIT_PROBE_55P03
+R44B11F_PHASE_8_RACE_SIDECAR_RELEASE=ONLY_AFTER_BLOCKER_RELATION_OBSERVED_AND_ORDERING_STEP_COMPLETED
+R44B11F_PHASE_8_ACCOUNT_LOCK_CLAIM_SCOPE=GRANT_FIRST_VERIFYING_FIRST_RESULT_AND_RECONCILIATION_OF_SELECTED_JOB_ONLY
+R44B11F_PHASE_8_RACE_CLEAN_ACTIONABLE_JOB_PRECONDITION=PREPARE_SCHEMA_V1_BEFORE_EACH_PLUS_EXPLICIT_ZERO_UNRELATED_ACTIONABLE_ASSERTION
+R44B11F_PHASE_8_RACE_LEASE_EXPIRY_CAPTURE=EXACT_TEXT_CAPTURE_BEFORE_WORKER_COMMIT_NEVER_REREAD_AFTER_TERMINAL_WORKER_XACT_START_BEFORE_EXPIRY_REQUIRED
+R44B11F_PHASE_8_REAL_EXPIRY_WAITS=EXACTLY_ONE_BATCHED_TEST_PER_TEST_TIMEOUT_MAX_120000_MS
+R44B11F_PHASE_8_REAL_WAIT_OWNS=SERVICE_ISSUED_30S_EXPIRY_PRE_GRANT_REQUEUE_FENCE_N_PLUS_1_G1_TO_G4
+R44B11F_PHASE_8_REAL_EXPIRY_ORACLE=CAPTURED_LATEST_LEASE_EXPIRES_AT_TEXT_BOUNDED_POSTGRESQL_CLOCK_TIMESTAMP_GT_TIMESTAMPTZ_POLL_NOT_FLAT_PG_SLEEP
+R44B11F_PHASE_8_SUITE_TIMEOUT_RAISED=NO
+R44B11F_PHASE_8_GRANT_REPLAY=SAME_LIVE_LEASE_ELIGIBILITY_RECHECKED_SAME_PAYLOAD_NO_WRITE_NO_AUDIT
+R44B11F_PHASE_8_VERIFYING_REPLAY=SAME_LIVE_LEASE_ORIGINAL_VERIFYING_AT_NO_WRITE_NO_AUDIT_DESTROYED_ONLY_FAILS
+R44B11F_PHASE_8_RESULT_REPLAY=COMPLETED_EXACT_TUPLE_NO_WRITE_NO_AUDIT_AFTER_EXPIRY_ALLOWED
+R44B11F_PHASE_8_TERMINAL_REPLAY_TOKEN_AUTHORITY=NO
+R44B11F_PHASE_8_RECONCILER_RESULT_WORKER_REPLAY=NO
+R44B11F_PHASE_8_STALE_AUTHORITY_MATRIX=GRANT_VERIFYING_RESULT_STALE_FENCE_WRONG_TOKEN_WRONG_WORKER_NO_MUTATION_NO_AUDIT
+R44B11F_PHASE_8_CONCURRENT_DUPLICATES=ONE_TRANSITION_PLUS_EXACT_REPLAY
+R44B11F_PHASE_8_CONCURRENT_CONFLICTING_RESULTS=FIRST_WINS_SECOND_CONFLICT_ONE_AUDIT
+R44B11F_PHASE_8_TERMINAL_AUDIT_EVENTS_PER_JOB=EXACTLY_1
+R44B11F_PHASE_8_REPLAY_AUDIT=NONE
+R44B11F_PHASE_8_REPEATED_RECONCILIATION_AUDIT=NONE
+R44B11F_PHASE_8_AUDIT_UNIQUENESS=TRANSACTIONAL_STATE_MACHINE_NO_NEW_CONSTRAINT
+R44B11F_PHASE_8_CRASH_WINDOWS=C0_TO_C10_GROUPED_G1_TO_G5_ONE_REPRESENTATIVE_EACH
+R44B11F_PHASE_8_SAME_LEASE_RESUME_SUPPORTED=NO
+R44B11F_PHASE_8_REQUEUE_AFTER_GRANT=NO
+R44B11F_PHASE_8_PROVIDER_CALL_GLOBAL_GUARANTEE=AT_MOST_ONCE_PER_PROVIDER_VERIFICATION_JOB
+R44B11F_PHASE_8_PROVIDER_CALL_EXACTLY_ONCE=NO
+R44B11F_PHASE_8_PROVIDER_CALL_GUARANTEE_SCOPE=LOCKED_PHASE_7_WORKER_PATH_NOT_DATABASE_ENFORCED
+R44B11F_PHASE_8_COMPLETED_RESULT_PATH=TERMINAL_REPLAY_OR_CONFLICT_NEVER_NOT_VERIFYING
+R44B11F_PHASE_8_PROVIDER_CALL_FROM_REPLAY=NO
+R44B11F_PHASE_8_RESPONSE_LOSS_SIMULATION=FETCHIMPL_WRAPPER_FORWARD_COMMIT_THEN_TRANSPORT_REJECTION
+R44B11F_PHASE_8_CRASH_SIMULATION=FROZEN_IO_FRESH_OBJECT_GRAPH_WHOLE_CHAIN_PRECEDENT
+R44B11F_PHASE_8_WORKER_PERSISTED_STATE=NONE
+R44B11F_PHASE_8_WORKER_INTEGRATION=RUN_PROVIDER_VERIFICATION_REAL_CLIENT_REAL_ROUTER_POSTGRESQL_FAKE_PROVIDER
+R44B11F_PHASE_8_LIVE_GATE=PHASE_7_DEPENDENCY_SEAM_ONLY
+R44B11F_PHASE_8_PROVIDER_TRANSPORT=FAKE_FETCHIMPL_ONLY
+R44B11F_PHASE_8_REAL_PROVIDER_CONTACT=NO
+R44B11F_PHASE_8_REAL_CREDENTIALS=NO
+R44B11F_PHASE_8_SECRET_ASSERTIONS=BOOLEAN_NO_PLAINTEXT_IN_RESULTS_ERRORS_EVENTS_BODIES_OR_ROWS
+R44B11F_PHASE_8_TEST_MATRIX=A_HAPPY_B_LEASE_C_RESPONSE_LOSS_D_CRASH_E_EXPIRY_F_RACES_G_CONCURRENCY_H_AUTHORITY_I_AUDIT_J_PROVIDER_CALL_K_SECRETS
+R44B11F_PHASE_8_GATE_RUNS=NEW_FILE_WORKER_INTEGRATION_API_DB_SUITES_BOTH_UNIT_SUITES_BOTH_TYPECHECKS
+R44B11F_PHASE_8_EXCLUDES=CALLER_ENTRYPOINT_LIVE_ENABLEMENT_SMOKE_REAL_CREDENTIALS_EXTERNAL_NETWORK_STAGING_DEPLOYED_CRASH_OPERATOR_DEPLOYMENT_PHASE_9_PRE_LIVE_CARRIES
+R44B11F_PHASE_8_STARVATION_CARRY_OWNED=NO
+R44B11F_PHASE_8_CREDENTIAL_INGRESS_CARRY_OWNED=NO
+R44B11F_PHASE_8_LIVE_ENABLEMENT_STILL_BLOCKED=YES
 R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT
 R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT
 ```

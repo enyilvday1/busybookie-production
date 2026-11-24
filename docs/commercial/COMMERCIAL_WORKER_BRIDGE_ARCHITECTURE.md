@@ -15639,6 +15639,996 @@ reached with a real credential in production until Phase 7 and a separate
 live-enablement amendment exist. Anything outside this boundary requires a
 new scope-amendment gate.
 
+#### R44B11F Phase 7 library-only verification run composition contract amendment
+
+**Locked decision (R44B11F Phase 7 contract amendment; architecture only,
+precedes Phase 7 implementation).**
+
+Phase 7 discovery against `d668117fb5702985e356e51d4d4c7757002b3fd5` found no
+contradiction between the R44B11F contract, the Phase 3 to Phase 6
+amendments, R44B11A, D11 and the published Phase 5 and Phase 6
+implementations. It found that the run-level composition owned by Phase 7 was
+not locked: the live-gate test seam, the lease and deadline budget, the
+disposition of local faults after `VERIFYING`, the disposition of an
+unsupported lease, the re-invocation and control-call retry policy, the
+signal authority, the run surface, and the Phase 7 file and boundary subset.
+This amendment locks exactly those items.
+
+It changes no migration, persistence, lifecycle, lock-order, aggregate,
+audit, route, wire, reconciliation, Phase 5 client, configuration, binding,
+capability, Phase 6 transport, classification or result-vocabulary decision
+already locked above. R44B11A remains in force with no Phase 7 exception.
+
+Precedence: this amendment resolves the two carry items recorded above as
+"Phase 7 work ... before any live enablement" (unsupported lease, under
+"Unsupported provider or policy") and "Phase 7 carry item" (credential-shape
+failure, under "Phase 5, 6 and 7 responsibilities (refined)"). Where the
+Phase 5 and Phase 6 boundary text says the Phase 5 modules have no caller in
+production source and that `providerVerificationRun.ts` stays absent, that
+text described the Phase 5 and Phase 6 states; Phase 7 narrows it exactly as
+locked under "Phase 7 boundary rules" below. D11 already authorises
+`providerVerificationRun.ts` and assigns
+`PHASE_7=LIBRARY_ONLY_VERIFICATION_RUN_COMPOSITION`.
+
+##### Phase 7 file authorization
+
+D11 remains the R44B11F-wide ceiling and is not modified. Phase 7 adds:
+
+```text
+apps/commercial-worker/src/providerVerificationRun.ts
+```
+
+Phase 7 modifies no existing production file (`PRODUCTION_MODIFIED=NONE`).
+
+Phase 7 tests add:
+
+```text
+apps/commercial-worker/tests/providerVerificationRun.test.ts
+```
+
+and may modify only:
+
+```text
+apps/commercial-worker/tests/boundary.test.ts
+```
+
+No other path may change in Phase 7. In particular the 19 D11 protected
+files, `providerVerificationConfig.ts`, `providerVerificationContract.ts`,
+`providerVerificationCredentialOpening.ts`, `workerControlClient.ts`,
+`workerError.ts`, `providerVerificationTransport.ts`,
+`googleProviderVerification.ts`, `runwayProviderVerification.ts`, the shared
+protocol package, every commercial-api file, every migration and both
+`package.json` files stay byte-identical. Every other existing worker test
+passes unmodified.
+
+Phase 8 assignment: the D11-authorised
+`apps/commercial-worker/tests/integration/providerVerificationExecution.test.ts`
+is not a Phase 7 file. It belongs to Phase 8
+(`PHASE_8=RACE_IDEMPOTENCY_BOUNDARY_INTEGRATION_REGRESSION`), which owns the
+integration proof of database lease expiry, reconciliation races, exact
+result replay against the real API services, crash windows and
+concurrency/idempotency. Phase 7 proves orchestration decisions with
+injected fakes only.
+
+Phase 7 does not create a process entry point, a loop, a scheduler, a
+journal of any kind, a provider request, a worker-control route, a new
+`WorkerErrorCode`, a migration or a package dependency, and it does not
+enable live verification.
+
+##### Module role
+
+```text
+providerVerificationRun.ts   library-only composition of one provider verification run: live gate, environment
+                             guard, lease, admission, grant, VERIFYING, binding, openOnceFor, the Phase 6 call
+                             inside use, result report, the lease budget and the internal signal
+```
+
+It composes the existing authorities and duplicates none of them:
+
+- pair admission is `classifyProviderVerificationLease` only;
+- credential binding and opening are `bindProviderVerificationCredential`
+  and `capability.openOnceFor` only;
+- control-plane requests are the four injected
+  `ProviderVerificationControlClient` methods only;
+- the provider request, the 10-second provider deadline, the bounded read and
+  provider classification are `performProviderVerification` only;
+- the result vocabulary is the Phase 3 vocabulary held by
+  `providerVerificationContract.ts`; Phase 7 creates no outcome or reason.
+
+Phase 7 never constructs a provider request, never names a provider origin,
+header or status, never classifies a provider condition, never parses a
+sealed envelope or opening context, and never reads or writes an issued-object
+record.
+
+##### Run surface
+
+`providerVerificationRun.ts` exports exactly:
+
+```text
+PROVIDER_VERIFICATION_RUN_LEASE_MS                    30000
+PROVIDER_VERIFICATION_RUN_CLOCK_MARGIN_MS             2000
+PROVIDER_VERIFICATION_RUN_CONTROL_DEADLINE_MS         3000
+PROVIDER_VERIFICATION_RUN_RESULT_RESERVE_MS           6000
+PROVIDER_VERIFICATION_RUN_TRANSPORT_SETUP_MARGIN_MS   250
+PROVIDER_VERIFICATION_RUN_PRE_TRANSPORT_MIN_MS        16250
+PROVIDER_VERIFICATION_RUN_PRE_VERIFYING_MIN_MS        19250
+PROVIDER_VERIFICATION_RUN_PRE_GRANT_MIN_MS            22250
+
+type ProviderVerificationRunInput = Readonly<{
+  config: ProviderVerificationConfig;
+  environment: WorkerEnvironment;
+  shutdownSignal?: AbortSignal;
+}>;
+
+type ProviderVerificationRunDependencies = Readonly<{
+  client: ProviderVerificationControlClient;
+  opener: <the opener member type of bindProviderVerificationCredential's input, derived>;
+  fetchImpl: ProviderVerificationTransportDependencies["fetchImpl"];
+  deadlineTimer?: ProviderVerificationDeadlineTimer;
+  wallClock?: () => number;
+  monotonicClock?: () => number;
+  liveGate?: (config: ProviderVerificationConfig) => void;
+}>;
+
+type ProviderVerificationRunStage =
+  "START" | "GATE" | "ENVIRONMENT" | "LEASE" | "GRANT" | "VERIFYING" | "BIND" | "VERIFICATION" | "RESULT";
+
+type ProviderVerificationRunAbandonedStage =
+  "START" | "LEASE" | "GRANT" | "VERIFYING" | "BIND" | "VERIFICATION";
+
+type ProviderVerificationRunResult =
+  | Readonly<{ status: "DISABLED" }>
+  | Readonly<{ status: "NO_WORK" }>
+  | Readonly<{ status: "UNSUPPORTED_LEASE"; providerVerificationJobId: string;
+               reason: "UNSUPPORTED_PROVIDER" | "UNSUPPORTED_POLICY" | "PROVIDER_POLICY_MISMATCH" }>
+  | Readonly<{ status: "REPORTED"; providerVerificationJobId: string; fencingCounter: number;
+               outcome: ProviderVerificationOutcome; reasonCode: ProviderVerificationReasonCode; completedAt: Date }>
+  | Readonly<{ status: "ABANDONED"; stage: ProviderVerificationRunAbandonedStage; cause: "SHUTDOWN" | "LEASE_BUDGET";
+               providerVerificationJobId: string | null }>
+  | Readonly<{ status: "STOPPED"; stage: ProviderVerificationRunStage; code: WorkerErrorCode;
+               providerVerificationJobId: string | null }>;
+
+async function runProviderVerification(
+  input: ProviderVerificationRunInput,
+  dependencies: ProviderVerificationRunDependencies,
+): Promise<ProviderVerificationRunResult>
+```
+
+Surface rules, all locked:
+
+- the opener type is derived from the parameter type of
+  `bindProviderVerificationCredential` and the `fetchImpl` type from the
+  exported `ProviderVerificationTransportDependencies`; Phase 7 imports
+  nothing from `credentialContracts.ts` and never names the global `fetch`;
+- the returned promise never rejects. Every fault is a frozen `STOPPED` or
+  `ABANDONED` value. A thrown value that is not a `WorkerError` is reported
+  as `STOPPED` / `WORKER_CONFIGURATION_INVALID`; no thrown value, error
+  object or cause is retained in a result;
+- `REPORTED` copies the job ID, fencing counter, outcome, reason code and
+  `completedAt` from the issued result acknowledgement, which the Phase 5
+  client has already checked against the sent report;
+- `ABANDONED` carries only a stage inside the cause window: the window opens
+  at step 4 (after `GATE` and `ENVIRONMENT`) and closes before step 13, so
+  `ABANDONED` never carries `GATE`, `ENVIRONMENT` or `RESULT`. `BIND` is
+  retained defensively, for a cause attributed by the "no step starts after a
+  cause" check at the transition from a settled `VERIFYING` step into the
+  synchronous binding step; binding itself is synchronous and cannot be
+  interrupted, and no asynchronous binding behaviour exists or is introduced.
+  `ABANDONED` / `BIND` is a defensive return-type member and does not require
+  a dedicated unit test unless the implementation contains a reachable
+  asynchronous or interleaving path into it. `STOPPED` may carry any stage;
+- the six statuses are orchestration states, not provider results. Phase 7
+  never expresses an orchestration state through the Phase 3 vocabulary, and
+  `UNSUPPORTED_LEASE` reuses only the Phase 5 admission refusal reason;
+- `providerVerificationJobId` is a safe identifier. No result carries a lease
+  token, machine credential, sealed envelope, opening context, plaintext,
+  provider status, header or body;
+- one invocation leases at most one job and handles at most that one job. It
+  has no loop, cadence, scheduler, polling or retry beyond the control-call
+  retries locked below, and a caller that wants more work invokes it again;
+- the module has no top-level state: no module-level `let` or `var`, no
+  module-level collection, timer or controller, and importing it has no side
+  effect;
+- it reads no process state (`process.*`), no `import.meta`, and logs
+  nothing. Unlike `credentialOpeningRun.ts`, which throws a closed error and
+  logs through an injected logger, the verification run returns its closed
+  code as data and has no logger; this difference is intentional.
+
+##### Locked operation order
+
+```text
+0. read each input and dependency member exactly once into a local (Phase 5 read-once rule)
+1. live gate
+2. dependency and input shape validation
+3. provider-environment guard
+4. shutdown-signal link
+5. leaseProviderVerification                     (at most once)
+6. classifyProviderVerificationLease             (before any grant)
+7. lease budget computation and budget-timer installation
+8. requestProviderVerificationCredentialGrant    (retry rule below)
+9. acknowledgeProviderVerificationVerifying      (retry rule below)
+10. bindProviderVerificationCredential           (at most once)
+11. capability.openOnceFor(binding, use)         (at most once)
+12. inside use: recorded-cause check, pre-transport budget check, then performProviderVerification (at most once)
+13. after use settles with a report and no recorded cause: reportProviderVerificationResult (retry rule below)
+```
+
+`VERIFYING` therefore follows the grant and precedes binding and opening, as
+already locked by Phase 5. Binding failures, opener failures and Phase 6 local
+validation failures necessarily occur after `VERIFYING`; their disposition is
+locked below. No step starts after a cause has been recorded.
+
+Stage reported in `STOPPED` and `ABANDONED` results, by step:
+
+```text
+START         0, 2, 4      GATE          1            ENVIRONMENT   3
+LEASE         5, 6         GRANT         7, 8         VERIFYING     9
+BIND          10           VERIFICATION  11, 12       RESULT        13
+```
+
+If `dependencies` or `input` is not a non-null object, the run returns
+`STOPPED` / `START` / `WORKER_CONFIGURATION_INVALID` and calls nothing,
+including the gate.
+
+##### Live gate and test seam (P7-M1)
+
+Production behaviour is unchanged: provider verification stays default-off,
+and Phase 7 delivers no live enablement.
+
+- `providerVerificationConfig.ts` remains the only live-enablement authority.
+  Phase 7 does not read the environment for the kill switch; the caller
+  passes the already loaded `ProviderVerificationConfig` as `input.config`.
+- Step 1 calls the effective gate with `input.config` before anything that
+  can reach the control plane or a provider. The effective gate is
+  `dependencies.liveGate` when present (`!== undefined`), otherwise
+  `requireLiveProviderVerification`. A present `liveGate` that is not a
+  function is `STOPPED` / `GATE` / `WORKER_CONFIGURATION_INVALID`.
+- The gate is synchronous. A throw of `WorkerError`
+  `PROVIDER_VERIFICATION_DISABLED` returns `{ status: "DISABLED" }`. Any other
+  `WorkerError` is `STOPPED` / `GATE` with its code; any other throw, and any
+  return value other than `undefined`, is `STOPPED` / `GATE` /
+  `WORKER_CONFIGURATION_INVALID`. A returned promise is observed and ignored,
+  never awaited.
+- Every Phase 5 configuration fails the default gate, so with the default
+  binding no run ever passes step 1.
+
+The `liveGate` dependency is the only test seam. It is locked as test-only:
+
+- no production source other than `providerVerificationRun.ts` contains the
+  token `liveGate`, so no production caller can supply a passing gate;
+- the module exports no function that skips, bypasses or replaces the gate,
+  and no gate implementation other than the default reference to
+  `requireLiveProviderVerification`;
+- Phase 7 has no production caller at all. A later amendment that introduces
+  a caller must call the run without `liveGate`; live enablement still
+  requires the separate live-enablement amendment, the cost and side-effect
+  approval and the API capability-registry step already required above;
+- importing `providerVerificationRun.ts` executes only declarations, so it
+  cannot make provider verification reachable.
+
+Tests inject a passing `liveGate` to exercise steps 2 to 13 with fake
+dependencies, and separately prove the default gate refuses before any lease.
+
+##### Dependency validation and environment guard
+
+Step 2 runs after a passing gate and before any lease, so that a dependency
+fault cannot first be discovered after `VERIFYING`:
+
+- `client` is a non-null object whose four verification members are
+  functions; each is read once here and later invoked with `client` as the
+  receiver;
+- `opener` is a non-null object whose `open` member is a function (the
+  Phase 5 `CredentialOpener` shape); `open` is read for this check only and
+  never called by Phase 7, which still passes the opener object itself to
+  binding;
+- `fetchImpl` is a function;
+- `deadlineTimer`, `wallClock` and `monotonicClock`, when present, are
+  functions;
+- `shutdownSignal`, when present, is an `AbortSignal` (`instanceof`);
+- `input.environment` is a non-null object (`typeof` `"object"`), the
+  `WorkerEnvironment` record shape, checked before any environment-policy
+  evaluation.
+
+Any failure is `STOPPED` / `START` / `WORKER_CONFIGURATION_INVALID` and
+nothing is leased, granted or acknowledged. Phase 7 does not re-implement Phase 6 dependency checks;
+Phase 6 still runs its own.
+
+Environment guard (step 3): the run calls
+`assertNoProviderEnvironment(input.environment)` from the unchanged
+`providerEnvironment.ts` before leasing, so a worker whose injected
+environment carries provider authority never consumes a verification lease.
+A well-formed environment that names a forbidden provider variable is
+`STOPPED` / `ENVIRONMENT` / `FORBIDDEN_PROVIDER_ENVIRONMENT`; a malformed
+environment never reaches the guard (step 2), and any non-`WorkerError` the
+guard throws on a well-formed record (for example an accessor or proxy trap)
+is `STOPPED` / `ENVIRONMENT` / `WORKER_CONFIGURATION_INVALID` under the
+never-reject rule, so no raw `TypeError` escapes. The same environment record is later passed to
+`bindProviderVerificationCredential`, whose own check (Phase 5 step 1) runs
+again unchanged as defence in depth. Duplicate validation is permitted: it
+is the same pure helper on the same injected record. Phase 7 never calls
+`assertNoProviderProcessEnvironment` and never reads `process.env`.
+
+##### Lease budget (P7-M2)
+
+Facts already locked and unchanged: the verification lease lives 30 seconds
+from database `leased_at`; there is no heartbeat and no renewal; a first
+worker result requires a live, unexpired lease; the Phase 6 provider deadline
+is 10 seconds and remains owned by Phase 6.
+
+Clock authority (anchored two-clock model):
+
+- `monotonicClock` (default `performance.now`) is read exactly once
+  immediately before the single lease request (`leaseSentMono`), once
+  immediately after a lease is returned and admitted (`receiptMono`), once
+  at each budget checkpoint below and once at budget-timer installation; no
+  other monotonic read exists;
+- `wallClock` (default `Date.now`, returning epoch milliseconds) is read at
+  most once per run: exactly once, at the same moment as `receiptMono`
+  (`receiptWallMs = wallClock()`), when a supported lease has been received
+  and admitted and the lease budget is established, and zero times on every
+  path that ends before budget establishment (gate refusal, start or
+  environment fault, shutdown before the lease, lease failure, `NO_WORK` and
+  `UNSUPPORTED_LEASE`). It is used only for the single server-expiry
+  projection below; no wall-clock read or comparison exists after budget
+  establishment;
+- a clock read that is not a finite number is `STOPPED` with the current
+  stage and `WORKER_CONFIGURATION_INVALID` (a failed `leaseSentMono` read
+  sends no lease request).
+
+Budget, computed once at receipt as an absolute monotonic instant:
+
+```text
+leaseSentMono            = monotonicClock()                    immediately before the lease request
+receiptMono              = monotonicClock()                    immediately after lease receipt and admission
+receiptWallMs            = wallClock()                         same moment; the only wall-clock read
+localLeaseCapEnd         = leaseSentMono + PROVIDER_VERIFICATION_RUN_LEASE_MS
+serverExpiryProjectedEnd = receiptMono + (lease.leaseExpiresAt.getTime() - receiptWallMs)
+budgetEnd                = min(localLeaseCapEnd, serverExpiryProjectedEnd) - PROVIDER_VERIFICATION_RUN_CLOCK_MARGIN_MS
+remaining()              = budgetEnd - monotonicClock()
+budgetAbortAt            = budgetEnd - PROVIDER_VERIFICATION_RUN_RESULT_RESERVE_MS
+```
+
+Why both estimates are safe and neither is a latency substitute:
+
+- The database stamps `leased_at = now()` and
+  `lease_expires_at = now() + 30 s` after the request was sent, so the real
+  lease end is never earlier than `leaseSentMono + 30000` on the worker's
+  monotonic timeline. `localLeaseCapEnd` is therefore a safe bound whatever
+  the worker's wall-clock skew, and it already charges the whole lease
+  request and response latency (up to the 3000 ms lease deadline).
+- `serverExpiryProjectedEnd` is exact for a synchronized worker clock, is
+  shorter (fails closed) for a worker clock ahead of the database, and is
+  longer for a worker clock behind it, in which case `localLeaseCapEnd` is
+  the minimum.
+- `CLOCK_MARGIN` (2000 ms) is a safety margin applied after both independent
+  lease-end estimates (monotonic-rate drift, timer latency, result transit
+  and commit time). It is not a substitute for lease-response latency, which
+  `localLeaseCapEnd` already accounts for.
+
+With lease round trip `L` (at most 3000 ms) and database-side time `d` from
+`leased_at` to receipt, the first pre-grant checkpoint sees at most
+`min(30000 - L, 30000 - d - A) - 2000` where `A` is how far the worker clock
+is ahead of the database. A worker clock ahead by more than about
+`5750 - d` ms makes every run abandon before the grant: this fails closed
+(the job is requeued by Phase 4) and is an accepted operational consequence
+that requires synchronized worker time. A worker clock behind the database
+can never extend `budgetEnd` beyond `localLeaseCapEnd - CLOCK_MARGIN`, and
+the server remains the final authority on every result.
+
+Locked constants and their composition:
+
+```text
+CONTROL_DEADLINE           3000   every individual control-plane request attempt, including the lease request
+RESULT_RESERVE             6000   = 2 x CONTROL_DEADLINE (one result request and its one exact retry)
+TRANSPORT_SETUP_MARGIN      250   local headroom for the Phase 6 local checks and deadline installation
+PRE_TRANSPORT_MIN         16250   = PROVIDER_VERIFICATION_TIMEOUT_MS (10000) + RESULT_RESERVE + TRANSPORT_SETUP_MARGIN
+PRE_VERIFYING_MIN         19250   = PRE_TRANSPORT_MIN + CONTROL_DEADLINE
+PRE_GRANT_MIN             22250   = PRE_VERIFYING_MIN + CONTROL_DEADLINE
+LEASE_MS                  30000   worker-local copy of the API's 30-second verification lease (drift-tested)
+CLOCK_MARGIN               2000   safety margin after both lease-end estimates
+```
+
+The transport is therefore never started when only the theoretical
+10000 + 6000 = 16000 ms remains: under the locked maximum setup envelope
+(at most 250 ms from the passing transport checkpoint to Phase 6 deadline
+installation), the 250 ms setup margin ensures the Phase 6 deadline is
+scheduled no later than the Phase 7 budget-abort boundary. At the exact
+boundary (checkpoint at 16250 and setup of exactly 250 ms) the two can
+coincide, and the Phase 7 `LEASE_BUDGET` cause may then win; that path fails
+closed (`ABANDONED`, nothing reported). Tests that prove a Phase 6
+`PROVIDER_TIMEOUT` distinctly therefore start the transport with additional
+headroom (`remaining()` at least 17000, locked in the test contract). The
+`PRE_VERIFYING_MIN` and `PRE_GRANT_MIN` values carry the same 250 ms so that
+the composition below closes without a gap.
+
+Checkpoints, each using `remaining()` with one fresh `monotonicClock` read;
+no checkpoint uses a receipt-time remainder, a wall-clock comparison or an
+independent countdown:
+
+- before every grant attempt: `remaining() >= PRE_GRANT_MIN` (22250);
+- before every `VERIFYING` attempt: `remaining() >= PRE_VERIFYING_MIN`
+  (19250); Phase 7 never acknowledges `VERIFYING` without enough time for the
+  barrier request, the full Phase 6 window and the result reserve;
+- inside `use`, before calling the transport:
+  `remaining() >= PRE_TRANSPORT_MIN` (16250); Phase 7 never starts the
+  10-second Phase 6 window without the setup margin and the result reserve
+  remaining after it.
+
+A failed checkpoint records the `LEASE_BUDGET` cause and the step does not
+start. The checkpoints exist to fail closed under latency, skew, timer lag or
+a slow opener.
+
+Numeric guarantee (conservative maximum-attempt envelopes; every faster call
+leaves the unused time in `remaining()`, which is always measured, never
+assumed):
+
+```text
+A. grant checkpoint      remaining >= 22250; one grant attempt <= 3000 (its deadline)  => >= 19250 at the VERIFYING checkpoint
+B. VERIFYING checkpoint  remaining >= 19250; one VERIFYING attempt <= 3000              => >= 16250 before bind and open
+C. transport checkpoint  remaining >= 16250; setup <= 250, Phase 6 <= 10000            => >= 6000 when the Phase 6 report exists
+D. result reserve        6000 = at most two result attempts x 3000                      => both attempts end by budgetEnd
+```
+
+A grant or `VERIFYING` retry re-checks its own minimum, so a retry never
+consumes the next phase's envelope. Binding is synchronous and the opener's
+duration is charged against `remaining()` at the transport checkpoint. A
+per-attempt deadline that fires late (event-loop lag) only shortens the next
+measured `remaining()`, and the next checkpoint fails closed. `RESULT_RESERVE`
+is subtracted once (in `budgetAbortAt`) and `CLOCK_MARGIN` once (in
+`budgetEnd`); neither is counted twice.
+
+Budget timer: after the pre-grant checkpoint passes for the first time, one
+budget timer is installed with delay
+`max(0, budgetAbortAt - monotonicClock())`, so all time spent between receipt
+and installation is charged against the budget. When it fires inside the
+cause window it records the `LEASE_BUDGET` cause. It is cancelled when the
+cause window closes or the run ends. Phase 7 never extends, renews or
+re-derives `budgetEnd`.
+
+Run duration: the lease budget bounds every Phase 7 control wait, the
+transport start and the result reserve, but it does not bound the whole
+invocation. `openOnceFor` is never raced (below), so a trusted local opener
+that never settles keeps the invocation pending past `budgetEnd`; this is a
+known local-dependency liveness assumption, not a lease guarantee. The
+server-side lease still expires on time and Phase 4 converges the job.
+
+##### Signal authority and cancellation (P7-M2, AbortSignal carry)
+
+Phase 7 owns exactly one internal run `AbortController` per invocation. Its
+signal is the only signal ever passed to `performProviderVerification`.
+
+- An external `shutdownSignal`, when present, is never passed to Phase 6, to
+  the client or to any other module. Phase 7 reads its `aborted` state once at
+  step 4: already aborted returns `ABANDONED` / `START` / `SHUTDOWN` with no
+  lease. Otherwise Phase 7 installs one `abort` listener (`once`) that records
+  the `SHUTDOWN` cause. A listener installation that throws is `STOPPED` /
+  `START` / `WORKER_CONFIGURATION_INVALID`.
+- Recording a cause (`SHUTDOWN` or `LEASE_BUDGET`) stores it in a local
+  variable and then aborts the internal run controller. The first cause
+  recorded wins; a later cause changes nothing.
+- Each control-plane request attempt (lease, grant, `VERIFYING`, result) runs
+  under its own per-attempt `AbortController`, created by one local helper,
+  with its own `CONTROL_DEADLINE` timer. For lease, grant and `VERIFYING`
+  attempts the per-attempt controller is also aborted when the run controller
+  aborts. Result attempts are not linked to the run controller (below). Only
+  the per-attempt signal is passed to the client.
+- Each control-plane wait settles no later than the moment its per-attempt
+  deadline fires or a cause is recorded; Phase 7 races the client promise and
+  does not rely on the client or `fetchImpl` honouring the signal. A late
+  settlement or rejection is observed and ignored and never surfaces as an
+  unhandled rejection.
+- A per-attempt deadline that fires with no recorded cause is treated
+  exactly as `CONTROL_API_UNAVAILABLE` for that attempt.
+- `openOnceFor` is never raced, including by the budget timer or the
+  shutdown listener, once entered. It is always awaited to settlement, so
+  the plaintext scope closes before the run returns; Phase 6 already settles
+  no later than its recorded cause, and the opener is a local trusted
+  dependency whose duration counts against the budget and whose settlement
+  is a liveness assumption (see "Run duration").
+- Shutdown or budget expiry while opening is pending: the cause is recorded
+  and the run controller aborted; Phase 7 keeps awaiting `openOnceFor`. If
+  the opener then fails, the run is `ABANDONED` / `VERIFICATION` with that
+  cause (precedence rule 2). If it succeeds, the first action inside `use` is
+  the recorded-cause check, so `use` returns without calling
+  `performProviderVerification`; the plaintext scope closes, no provider
+  request is sent, and the run is `ABANDONED` / `VERIFICATION`. There is no
+  second open and no transport call. Binding is synchronous (Phase 5:
+  "Synchronous; opens nothing") and has no pending state in which a cause
+  can be recorded.
+
+Cause window: causes may be recorded from step 4 until `openOnceFor`
+settles. When `openOnceFor` settles with a Phase 6 report and no cause is
+recorded, the window closes synchronously in the same turn: the budget timer
+is cancelled and the shutdown listener removed, so the result report is
+never cancelled by shutdown or budget. When the run ends on any other path,
+the same cleanup runs.
+
+The R44B11F_PHASE7_OR_PLATFORM_ABORTSIGNAL_PROXY_LIMIT carry item is
+resolved for Phase 7: Phase 6 only ever receives the genuine signal of a
+controller Phase 7 created, so a forged or proxied external signal cannot
+reach the transport. A misbehaving external signal can at most fail to
+cancel or cancel early, and either path is one of the locked dispositions.
+No Phase 6 change is made.
+
+##### First cause and terminality
+
+The run's terminal state is decided deterministically, in this precedence:
+
+1. A timer installation failure (the timer call throws or returns a value
+   that is not a function) is `STOPPED` with the current stage and
+   `WORKER_CONFIGURATION_INVALID`, and the guarded request is not sent. It
+   takes precedence over any cause recorded during the same installation
+   call.
+2. Inside the cause window, a recorded cause (`SHUTDOWN` or `LEASE_BUDGET`,
+   first wins) decides the run as `ABANDONED` with the stage in progress,
+   whatever the outstanding or concurrently completing step settles with:
+   a successful control response, a control failure, a closed local
+   `WorkerError` or a Phase 6 report. In particular a Phase 6 report returned
+   after Phase 7's own abort, including `INCONCLUSIVE` /
+   `VERIFICATION_AMBIGUOUS` from that abort, is never reported.
+3. Otherwise a control-call settlement decides: success continues;
+   `CONTROL_API_UNAVAILABLE` follows the retry rules; any other closed code is
+   `STOPPED` with that code.
+4. Otherwise a Phase 6 report decides and is reported verbatim. The Phase 6
+   10-second deadline produces `INCONCLUSIVE` / `PROVIDER_TIMEOUT`, which is a
+   provider result and is reported; it is always distinct from the Phase 7
+   `LEASE_BUDGET` cause.
+5. After the cause window closes, only the result requests' own deadlines and
+   settlements decide.
+
+Timer mechanics: Phase 7 uses the injected `deadlineTimer` when present,
+typed as the exported `ProviderVerificationDeadlineTimer`, and otherwise a
+module-local default built from one `setTimeout` and one `clearTimeout`. It
+does not import `realDeadlineTimer` or any generation timer. When
+`deadlineTimer` is injected, Phase 7 passes the same function to
+`performProviderVerification` as its `deadlineTimer`; otherwise it passes
+none and Phase 6 uses its own default. A timer callback that runs
+synchronously during installation records its effect immediately (a budget
+cause, or the per-attempt deadline) and the guarded request is then not sent.
+A callback that runs after its guarded operation has ended changes nothing.
+A cleanup function that throws is swallowed and never changes the selected
+result. Timer callbacks and closures never reference a plaintext credential:
+every timer is installed outside `use` or before `openOnceFor` begins.
+
+##### Re-invocation and control-call retries (P7-M5)
+
+Per run invocation, and therefore per lease:
+
+```text
+leaseProviderVerification            at most 1 call; no retry
+grant                                at most 2 attempts
+VERIFYING                            at most 2 attempts
+bindProviderVerificationCredential   at most 1 call
+openOnceFor                          at most 1 call
+performProviderVerification          at most 1 call
+result report                        at most 2 attempts
+second lease in the same run         never
+```
+
+- Lease: one attempt. Any failure, including `CONTROL_API_UNAVAILABLE`, is
+  `STOPPED` / `LEASE`. A lease committed by the server but not received
+  expires and is requeued by Phase 4.
+- Grant: a second attempt is made only after `CONTROL_API_UNAVAILABLE` from the
+  first, only while no grant has been obtained, no cause is recorded and the
+  pre-grant checkpoint passes again, and only with exactly the same job ID and
+  proof. The server's exact grant replay under the same live lease makes this
+  safe.
+- `VERIFYING`: the same rule with the pre-verifying checkpoint. Because a
+  retry is made only when no acknowledgement was obtained, at most one issued
+  acknowledgement object exists per run, and therefore at most one capability
+  can be bound. Phase 7 never makes a `VERIFYING` call after a successful
+  acknowledgement, never after a bind, and never re-requests a grant after
+  `VERIFYING`.
+- Result: a second attempt is made only after `CONTROL_API_UNAVAILABLE` from
+  the first (including its own deadline), because the server may have
+  committed. It is an exact replay of the same job ID, fencing counter, lease
+  token, outcome and reason code (the same frozen proof and the same report
+  object). It is made whatever the remaining budget, because exact terminal
+  replay does not require a live lease.
+- No retry ever follows `WORKER_AUTHENTICATION_REJECTED`, a route 409 code
+  (`PROVIDER_VERIFICATION_LEASE_REJECTED`, `..._GRANT_REJECTED`,
+  `..._VERIFYING_REJECTED`, `..._RESULT_REJECTED`),
+  `MALFORMED_CONTROL_RESPONSE`, `PROVIDER_VERIFICATION_REQUEST_INVALID` or any
+  other code.
+- Provider retry: none. Once binding has been attempted, the run never makes a
+  second bind, open or transport call and never sends a second provider
+  request under that lease, whatever happens next.
+
+These rules are compatible with the server's exact replay contracts: a grant
+or `VERIFYING` replay is requested only under the same live lease and fence,
+and a result replay carries the exact committed tuple. Crash recovery is not
+a worker decision: the lease token exists only in memory, so a later process
+can never resume a job, and the Phase 4 reconciliation contract converges it
+(requeue before grant; `WORKER_LOST_AFTER_CREDENTIAL_GRANT` after grant;
+`WORKER_LOST_DURING_VERIFYING` after `VERIFYING`).
+
+##### Result reporting
+
+- A result is reported only when `openOnceFor` has settled with a
+  `ProviderVerificationResultReport` returned by `performProviderVerification`
+  and no cause was recorded.
+- That report object is passed to `reportProviderVerificationResult`
+  unchanged. Phase 7 performs no outcome remapping, no reason remapping and
+  no local reason invention, and never reports anything it did not receive
+  from Phase 6.
+- A successful first attempt, or a successful exact replay, returns
+  `REPORTED`.
+- `PROVIDER_VERIFICATION_RESULT_REJECTED` (for example a lease that expired
+  before the first commit) is `STOPPED` / `RESULT` with no further attempt;
+  Phase 4 converges the job, and the provider result is lost. This is
+  accepted: a result outside the live lease is never worker authority.
+- `CONTROL_API_UNAVAILABLE` after the allowed exact replay is `STOPPED` /
+  `RESULT` / `CONTROL_API_UNAVAILABLE`; server reconciliation owns
+  convergence.
+
+##### Post-VERIFYING local faults (P7-M3)
+
+A local fault after the `VERIFYING` acknowledgement and before any provider
+request has no worker-reportable reason: the Phase 3 vocabulary is closed and
+reconciliation-only reasons are not worker-reportable. Reporting such a fault
+as `INCONCLUSIVE` / `VERIFICATION_AMBIGUOUS` or any other pair would invent a
+provider classification, which is prohibited. The locked disposition is:
+
+```text
+NO_RESULT_REPORT_STOP_AND_SERVER_RECONCILIATION
+```
+
+It applies to every closed code thrown after the acknowledgement by
+`bindProviderVerificationCredential`, `openOnceFor` or the Phase 6 local
+checks inside `use`, including at least:
+
+| Code | Raised by | Provider request possible |
+|---|---|---|
+| `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` | binding or `openOnceFor` | no |
+| `ENVELOPE_INVALID` | binding steps 5 and 6 | no |
+| `FORBIDDEN_PROVIDER_ENVIRONMENT` | binding step 1 (defence in depth) | no |
+| `PROVIDER_VERIFICATION_PROVIDER_UNSUPPORTED` / `..._POLICY_UNSUPPORTED` | binding or Phase 6 (unreachable after step 6, defence in depth) | no |
+| `CREDENTIAL_OPEN_FAILED` | `openOnceFor` step 5 | no |
+| `PROVIDER_VERIFICATION_REQUEST_INVALID` | Phase 6 local checks inside `use` (credential shape) | no |
+| `WORKER_CONFIGURATION_INVALID` | Phase 6 dependency check or deadline installation inside `use` | no |
+
+For each:
+
+- no result report is sent and no outcome is invented;
+- the run returns `STOPPED` with stage `BIND` (binding) or `VERIFICATION`
+  (`openOnceFor` and `use`) and the original closed code, unless a cause was
+  recorded first (precedence rule 2);
+- the plaintext, if opened, is released when `use` settles, by the Phase 5
+  `finally`; the capability stays consumed;
+- there is no second open, no second transport call and no same-lease retry;
+- the job stays `VERIFYING` until its lease expires, and Phase 4
+  reconciliation converges it to `COMPLETED` / `INCONCLUSIVE` /
+  `WORKER_LOST_DURING_VERIFYING`. A process crash anywhere after the
+  acknowledgement follows exactly the same server-owned path.
+
+Credential-shape failure specifically
+(`R44B11F_CREDENTIAL_SHAPE_FAILURE_RUN_DISPOSITION`): the stored credential
+fails the Phase 6 shape (1 to 4096 visible ASCII characters) inside `use`,
+Phase 6 throws `PROVIDER_VERIFICATION_REQUEST_INVALID` before any provider
+request, and Phase 7 returns `STOPPED` / `VERIFICATION` /
+`PROVIDER_VERIFICATION_REQUEST_INVALID` with no report. Discovery confirmed
+the case is reachable: API credential ingress accepts any non-empty string
+without NUL or lone surrogates up to 8192 UTF-8 bytes, so a key with
+whitespace or non-ASCII text is stored. Consequences, accepted for Phase 7:
+every customer retry for that credential version crosses `VERIFYING`, stamps
+`last_verification_attempt_at`, makes no provider call and converges to
+`INCONCLUSIVE` / `WORKER_LOST_DURING_VERIFYING`, which never invalidates the
+connection.
+
+Pre-live carry item `R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION`:
+narrowing credential ingress to the verification shape, or adding a
+dedicated worker-reportable reason, is a commercial-api and Phase 3
+vocabulary decision. It is deferred to a separate architecture decision
+before live enablement and is not made or implemented in Phase 7.
+
+##### Unsupported lease (P7-M4)
+
+`R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION` is locked as follows. When
+`classifyProviderVerificationLease(lease)` refuses
+(`UNSUPPORTED_PROVIDER`, `UNSUPPORTED_POLICY` or `PROVIDER_POLICY_MISMATCH`):
+
+- no grant, no `VERIFYING`, no bind, no open, no provider request and no
+  result report;
+- no budget timer is installed; the shutdown listener is removed;
+- the run returns `UNSUPPORTED_LEASE` with the job ID and the refusal reason,
+  and never leases again in the same invocation.
+
+There is no release, reject or terminal route for a verification job before
+`VERIFYING`, so the lease expires naturally and Phase 4 requeues the job with
+its fencing counter preserved. Because lease selection is oldest first
+(`ORDER BY created_at, id`), an unsupported oldest job is leased again after
+every expiry by every worker that runs, and can starve newer supported jobs
+(head-of-line starvation). This is recorded, not hidden.
+
+Pre-live carry item `R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION`:
+live provider verification must not be enabled until either
+
+- A. the API gains an explicit release, reject or terminal disposition route
+  for an unsupported verification lease; or
+- B. an architecture amendment explicitly accepts a bounded alternative.
+
+This is a pre-live blocker, not a Phase 7 library-composition blocker.
+Phase 7 adds no route and changes no API selection.
+
+The same natural-expiry path applies to any run that ends before the grant
+(gate passes but `LEASE_BUDGET`, `SHUTDOWN`, a grant rejection or a control
+failure): the job is requeued by Phase 4, and a run that ends after the grant
+converges through Phase 4 as locked above.
+
+##### Credential ownership and secret lifetime
+
+```text
+PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
+PLAINTEXT_SECRET_LOGGING=FORBIDDEN
+PLAINTEXT_SECRET_SERIALIZATION=FORBIDDEN
+PLAINTEXT_SECRET_ERROR_CAUSE=FORBIDDEN
+```
+
+- The capability returned by binding may exist outside `use`; it holds no
+  plaintext.
+- The plaintext exists only as the `use` callback's parameter. The `use`
+  callback is an inline function passed to the single `openOnceFor` call, and
+  the single `performProviderVerification` call is inside it, with the
+  plaintext as `credential` and the internal run signal as `signal`.
+- The binding object passed to `openOnceFor` is built from the lease's job
+  ID, provider, policy ID and fencing counter only. The transport dependency
+  object is built before `openOnceFor` and contains no secret.
+- No plaintext survives `use`: it is not assigned to any outer variable,
+  closure, timer, result, error or module state, and is never passed to the
+  capability, client, gate, clock or logger. No capability is passed to
+  Phase 6.
+- There is no credential cache, no reopen and no retry of open or `use`.
+- The lease token exists only in the run's local proof object, is sent only
+  in the client's request bodies, and appears in no result.
+- The result report payload is the Phase 6 report only; it carries no
+  credential.
+
+Section 29 applies unchanged.
+
+##### Heartbeat, renewal and journal
+
+Verification has no heartbeat and no lease renewal; Phase 7 adds neither and
+imports neither `inFlightHeartbeat.ts` nor `preProviderOrchestration.ts`. The
+acceptance-journal rule above applies unchanged: Phase 7 has no journal and
+imports no journal, state-root or recovery module.
+
+##### Phase 7 boundary rules (P7-M6)
+
+`boundary.test.ts` changes only as follows, each with guard-the-guard cases:
+
+- inventory: the pinned worker source inventory gains exactly
+  `src/providerVerificationRun.ts`. The Phase 5 and Phase 6 absence
+  assertions for `providerVerificationRun.ts` become presence assertions, and
+  the `providerVerification` path list becomes the three Phase 5, three
+  Phase 6 and one Phase 7 modules;
+- import allowlist for `providerVerificationRun.ts`, exactly:
+
+```text
+./providerVerificationConfig.js             requireLiveProviderVerification; type ProviderVerificationConfig
+./providerVerificationContract.js           classifyProviderVerificationLease; types of the report, outcome and reason
+./providerVerificationCredentialOpening.js  bindProviderVerificationCredential
+./workerControlClient.js                    types only (ProviderVerificationControlClient, LeaseProof and the verification wire types)
+./providerVerificationTransport.js          performProviderVerification; types ProviderVerificationDeadlineTimer, ProviderVerificationTransportDependencies
+./workerError.js                            WorkerError; type WorkerErrorCode
+./providerEnvironment.js                    assertNoProviderEnvironment; type WorkerEnvironment
+```
+
+- the run module imports nothing else: not `commercial-worker-protocol`, not
+  `credentialContracts.js`, not `googleProviderVerification.js` or
+  `runwayProviderVerification.js`, not any journal, state-root, recovery,
+  pre-provider, heartbeat, generation execution, adapter or contract module,
+  not `node:*`, `undici` or any provider SDK. `PROTOCOL_IMPORTERS` is
+  unchanged;
+- callers, narrowed exactly: `bindProviderVerificationCredential` may be
+  named outside the opening module only in the run module; the four
+  verification client method names may be named outside the client only in
+  the run module; `performProviderVerification` and the transport module
+  name may be named outside the three Phase 6 modules only in the run module;
+  `createHttpProviderVerificationControlClient`, the three `isIssued...`
+  predicates and the Google and Runway verification names keep their existing
+  rules unchanged (the run module names none of them);
+- the run module has no caller: no source imports
+  `./providerVerificationRun.js`, and no source other than the run module
+  contains `liveGate`;
+- static rules in the run module: no `process.`, `import.meta`,
+  `require.main`, `console.`, `\blog\(`, `\bfetch\b`, network primitive,
+  `setInterval`, `while (`, `for (`, `do {` or `switch (`; no module-level
+  `let` or `var`; no `new WeakSet`, `new Set` or `new Map`; exactly two
+  `new AbortController()` (the run controller and the per-attempt helper);
+  exactly one `setTimeout(` and one `clearTimeout(` (the default timer);
+  exactly one `Date.now` and one `performance.now` (the default clocks);
+  outside import declarations, exactly one `requireLiveProviderVerification`
+  reference (the default gate); exactly one `openOnceFor(` and exactly one
+  `performProviderVerification(`, the latter inside the inline `use`
+  callback of the former; no `.open(`;
+- order in the run module source, ignoring import declarations: the first
+  occurrences of the gate call, `assertNoProviderEnvironment(`, the lease
+  method, `classifyProviderVerificationLease(`, the grant method, the
+  `VERIFYING` method, `bindProviderVerificationCredential(`, `openOnceFor(`
+  and the result method appear in the locked order;
+- existing rules apply to the run module with no new exemption or
+  allowance: the brand rule, the R44B11A copy rule, the provider-selector rule
+  (including `LIVE_PROVIDER`), the provider-variable rule, the process
+  environment rule and the SUBMITTING-vocabulary rules;
+- the Phase 6 transport rule that the transport imports no Phase 7 module
+  stays unchanged.
+
+##### Phase 7 test contract
+
+`providerVerificationRun.test.ts` uses injected fakes only (fake client
+returning genuinely issued objects through the real client over a fake
+`fetchImpl` where issued-object provenance is needed, fake opener, fake
+provider `fetchImpl`, fake timer and clocks, injected `liveGate`). No real
+provider, network or database is contacted. Required cases:
+
+- live gate: importing the module has no side effect; the default gate with
+  every loadable configuration returns `DISABLED` with no lease and no fetch
+  of either kind; an injected passing gate permits composition; a throwing
+  or value-returning injected gate is handled as locked;
+- start: non-object input or dependencies; each invalid dependency,
+  including an opener object without a function `open` member; invalid
+  shutdown signal; a malformed (`null`, string, number) `input.environment`
+  is `STOPPED` / `START` / `WORKER_CONFIGURATION_INVALID`, while a
+  well-formed environment naming a forbidden provider variable is `STOPPED` /
+  `ENVIRONMENT` / `FORBIDDEN_PROVIDER_ENVIRONMENT`; each with no lease call,
+  no grant, no `VERIFYING` and no raw `TypeError`;
+- lease: `null` is `NO_WORK`; supported lease proceeds; unsupported
+  provider, unsupported policy and pair mismatch return `UNSUPPORTED_LEASE`
+  with no grant, no `VERIFYING`, no report and exactly one lease call;
+  lease 409, 401/403 and `CONTROL_API_UNAVAILABLE` stop with no retry;
+- order: gate < environment guard < lease < classify < grant < `VERIFYING` <
+  bind < open < transport < report, by a shared call log;
+- grant and `VERIFYING`: success; 409; authentication rejection;
+  `CONTROL_API_UNAVAILABLE` then success (one exact retry, same job ID and
+  proof); two `CONTROL_API_UNAVAILABLE` stop; per-attempt deadline treated as
+  unavailable; no retry when the checkpoint fails; never a second bind, open
+  or transport;
+- capability: one bind; one `openOnceFor`; the opener called once; the
+  transport receives a plaintext string as `credential` and the internal
+  signal, never the capability; the transport is called inside `use`;
+- transport pass-through: `VERIFIED`, both `DEFINITIVE_FAILURE` reasons and
+  at least `PROVIDER_TIMEOUT`, `PROVIDER_NETWORK_FAILURE`,
+  `PROVIDER_OPERATION_DRIFT`, `VERIFICATION_AMBIGUOUS` and
+  `PROVIDER_RESPONSE_TOO_LARGE` are reported with exactly the Phase 6 pair;
+- budget: insufficient remaining time before the grant, before `VERIFYING`
+  and before the transport each abandon with `LEASE_BUDGET` and send nothing
+  further, including the transport checkpoint at exactly 16000 ms remaining
+  (below `PRE_TRANSPORT_MIN`); the server-expiry projection and the
+  `leaseSentMono`-anchored 30000 ms cap both bound the budget; the budget
+  timer delay is `budgetAbortAt - monotonicClock()` at installation, so time
+  advanced between receipt and installation is charged; the budget timer
+  fires at the result reserve and aborts an in-flight transport, after which
+  nothing is reported; a non-finite clock read (including `leaseSentMono`)
+  stops; the constants and their composition are pinned, and
+  `PROVIDER_VERIFICATION_RUN_LEASE_MS` is drift-tested against the API's
+  `PROVIDER_VERIFICATION_LEASE_SECONDS`;
+- slow lease with a worker clock behind the database (the P7-M2 class): fake
+  monotonic `leaseSentMono = 0`, lease response received at monotonic 2900,
+  `leaseExpiresAt` = database lease time + 30000, worker wall clock 4000 ms
+  behind. Then `localLeaseCapEnd = 30000`, `serverExpiryProjectedEnd = 34000`,
+  `budgetEnd = 28000` and `budgetAbortAt = 22000`. With the grant answered by
+  monotonic 8700, `VERIFYING` (checkpoint `remaining()` 19300) answered by
+  11600 (inside its 3000 ms deadline) and the opener settling at 11800, the test asserts that the budget
+  timer is installed to fire at monotonic 22000, and that the transport
+  checkpoint at monotonic 11800 (`remaining()` 16200) abandons with
+  `LEASE_BUDGET` and no provider request. A receipt-anchored budget
+  (`receiptMono + min(30000, ...) - 2000 = 30900`) would place the abort at
+  24900 and pass that checkpoint (19100), so the test fails if the
+  `leaseSentMono` anchor is removed;
+- provider timeout distinct from lease budget: the transport starts with
+  `remaining()` at least 17000 (well above `PRE_TRANSPORT_MIN`); the fake
+  provider never answers; the Phase 6 10-second deadline fires first and the
+  run reports `INCONCLUSIVE` / `PROVIDER_TIMEOUT` with no `LEASE_BUDGET`
+  cause. Separately, a fake Phase 6 deadline timer that does not fire lets
+  the Phase 7 budget timer fire at `budgetAbortAt`, and the run is
+  `ABANDONED` / `VERIFICATION` / `LEASE_BUDGET` with nothing reported;
+- signal: the only signal Phase 6 receives is the internal one; an external
+  shutdown signal is linked, never forwarded; shutdown before the lease,
+  during the grant, during `VERIFYING` and during the transport each abandon
+  with `SHUTDOWN` and report nothing; shutdown while the fake opener is
+  pending, with the opener then succeeding and then, separately, failing,
+  each return `ABANDONED` / `VERIFICATION` / `SHUTDOWN`, with the opener
+  called once, `use` entered at most once, no transport call and no report;
+  shutdown after `use` is entered but before the transport call (raised from
+  inside the fake opener's settlement) gives the same result; no shutdown
+  test targets binding, which is synchronous; shutdown after `use` settles
+  does not cancel the result report; first cause wins; listeners and timers
+  are removed on every path; no `ABANDONED` result carries `GATE`,
+  `ENVIRONMENT` or `RESULT`;
+- timers: installation throw or non-function return stops with
+  `WORKER_CONFIGURATION_INVALID` and no request; synchronous expiry during
+  installation; late callbacks change nothing; cleanup throws are swallowed;
+  late control settlements and rejections produce no unhandled rejection;
+- result: success; `CONTROL_API_UNAVAILABLE` then exact replay success
+  (identical job ID, fencing counter, lease token, outcome and reason);
+  second failure stops; 409 stops with no retry; malformed response stops with
+  no retry; the report payload is exactly the Phase 6 report;
+- result replay after `budgetEnd`: a valid Phase 6 report is obtained before
+  `budgetAbortAt`, so the cause window closes with no recorded cause and
+  result delivery begins legally; the first result attempt starts and hits
+  its own 3000 ms deadline while the fake monotonic clock is advanced past
+  `budgetEnd`, simulating timer and callback scheduling lag (the
+  implementation never deliberately waits until after `budgetEnd`), and the
+  external shutdown signal is aborted; the exact replay is still sent (identical job
+  ID, fencing counter, lease token, outcome and reason) under its own
+  3000 ms deadline; neither attempt's signal is aborted by shutdown or budget;
+  there is no third attempt; a fake server answering the replay with
+  `PROVIDER_VERIFICATION_RESULT_REJECTED` (expired lease) gives `STOPPED` /
+  `RESULT` with that code, and one answering it with the issued
+  acknowledgement gives `REPORTED`; the server, not the worker budget, remains
+  the final lease-expiry authority;
+- exact checkpoint thresholds (each comparison is `>=`): with all other
+  conditions satisfied, `remaining()` 22249 before a grant attempt fails with
+  `LEASE_BUDGET` and sends no grant, and 22250 passes; 19249 before a
+  `VERIFYING` attempt fails and sends no `VERIFYING`, and 19250 passes; 16249
+  at the transport checkpoint fails with no provider request, and 16250
+  passes;
+- unexpected non-`WorkerError` throws (never-reject): a client method that
+  rejects with a plain `Error` during the lease, the grant and `VERIFYING`;
+  an opener whose `open` throws a non-`WorkerError` (surfacing through Phase 5
+  as `CREDENTIAL_OPEN_FAILED`) and an injected `deadlineTimer` that throws a
+  plain `TypeError` only for the Phase 6 10000 ms installation (surfacing
+  through Phase 6 as `WORKER_CONFIGURATION_INVALID`; a throwing `fetchImpl`
+  is a provider `NETWORK_FAILURE`, not a local fault); a result-stage client rejection with a
+  plain `Error`; each returns `STOPPED` with the current stage and, for a
+  plain throw reaching Phase 7, `WORKER_CONFIGURATION_INVALID`, retains no
+  thrown value or cause, and makes no retry; the same throw after a recorded
+  cause inside the cause window returns `ABANDONED` with that cause; across
+  every case the returned promise resolves and never rejects;
+- local faults after `VERIFYING`: credential-shape failure, opener failure,
+  `ENVELOPE_INVALID`, `PROVIDER_VERIFICATION_AUTHORITY_MISMATCH` and Phase 6
+  `WORKER_CONFIGURATION_INVALID` each stop with the original code, no result
+  report, no second open and no provider request;
+- secret: no plaintext, lease token, envelope or provider body appears in any
+  result, in `JSON.stringify` of any result, or in any error the fakes
+  observe; nothing is logged;
+- re-invocation: exactly one bind, open and transport per run under every
+  retry combination; allowed control retries never cause a second provider
+  request; never a second lease in one run.
+
+Integration, real-PostgreSQL race and crash-window proofs are Phase 8.
+
+##### Phase 5, 6 and 7 responsibilities (final)
+
+```text
+PHASE 5  configuration and live gate; vocabulary and admission; the four client methods and provenance;
+         binding, capability and credential opening
+PHASE 6  the provider request, the 10-second provider deadline, the bounded read and classification
+PHASE 7  run composition only: gate, environment guard, lease, admission disposition, grant, VERIFYING,
+         binding call, openOnceFor call, the transport call inside use, the lease budget, the internal
+         signal, the control-call retry policy and result reporting
+PHASE 8  integration, race, crash-window, idempotency and regression proof
+```
+
+##### Phase 7 implementation authorization
+
+Phase 7 requires:
+
+```text
+new database migration = NO
+commercial-api change = NO
+runtime-grant change = NO
+worker protocol change = NO
+worker authentication change = NO
+existing worker configuration change = NO
+existing worker production file change = NO
+new worker error code = NO
+generation credential-opening change = NO
+provider SDK use = NO
+provider call in tests = NO (injected fakes only)
+live verification enablement = NO
+live submission enablement = NO
+process entry point = NO
+production caller = NO
+new package dependency = NO
+```
+
+The default gate still refuses every configuration, so no Phase 7 code can
+reach a provider in production until a separate live-enablement amendment
+exists, and that amendment is itself blocked until both pre-live carry items
+above are decided. Anything outside this boundary requires a new
+scope-amendment gate.
+
 #### R44B11F acceptance boundary
 
 R44B11F is complete only when:
@@ -15860,7 +16850,7 @@ R44B11F_PHASE_5_KILL_SWITCH_SELECTOR_ALLOWANCE=EXACT_WHOLE_TOKEN_ONLY_IN_PROVIDE
 R44B11F_PHASE_5_ADMISSION_REFUSALS=UNSUPPORTED_PROVIDER,UNSUPPORTED_POLICY,PROVIDER_POLICY_MISMATCH
 R44B11F_PHASE_5_UNSUPPORTED_LEASE_GRANT_ALLOWED=NO
 R44B11F_PHASE_5_UNSUPPORTED_LEASE_RESULT_REPORT_ALLOWED=NO
-R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION=PHASE_7_REQUIRED_BEFORE_LIVE_ENABLEMENT
+R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION=CLASSIFY_BEFORE_GRANT_NO_GRANT_NO_VERIFYING_NO_REPORT_STOP
 R44B11F_VERIFICATION_ACCEPTANCE_JOURNAL_GATE=NONE
 R44B11F_PHASE_5_LOCAL_LEASE_EXPIRY_DECISION=NO
 R44B11F_PHASE_5_PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
@@ -15920,7 +16910,7 @@ R44B11F_PHASE_6_LOCAL_CHECK_ORDER=DEPENDENCIES,INPUT_SHAPE,PAIR_ADMISSION,CREDEN
 R44B11F_PHASE_6_STREAM_CANCEL_FAILURE=SWALLOWED_OUTCOME_UNCHANGED_NO_RETRY
 R44B11F_PHASE_6_TIMER_CLEANUP_FAILURE=SWALLOWED_OUTCOME_UNCHANGED_NO_RETRY
 R44B11F_PHASE_6_LATE_SETTLEMENT=OBSERVED_AND_IGNORED_NO_UNHANDLED_REJECTION
-R44B11F_CREDENTIAL_SHAPE_FAILURE_RUN_DISPOSITION=PHASE_7_REQUIRED_BEFORE_LIVE_ENABLEMENT
+R44B11F_CREDENTIAL_SHAPE_FAILURE_RUN_DISPOSITION=NO_RESULT_REPORT_STOP_AND_SERVER_RECONCILIATION
 R44B11F_PHASE_6_RAW_OUTCOMES=RESPONSE,BODY_TOO_LARGE,TIMEOUT,CALLER_ABORT,NETWORK_FAILURE
 R44B11F_PHASE_6_JSON_AND_SHAPE_OWNER=PROVIDER_CLASSIFIER
 R44B11F_PHASE_6_DEFINITIVE_SET=GOOGLE_401_UNAUTHENTICATED,GOOGLE_403_PERMISSION_DENIED_NOT_BILLING,RUNWAY_401
@@ -15959,6 +16949,100 @@ R44B11F_PHASE_6_PROCESS_ENTRYPOINT=NO
 R44B11F_PHASE_6_MIGRATION_CHANGE=NO
 R44B11F_PHASE_6_COMMERCIAL_API_CHANGE=NO
 R44B11F_PHASE_6_DEPENDENCY_CHANGE=NO
+R44B11F_PHASE_7_CONTRACT_LOCKED=YES
+R44B11F_PHASE_7_STATUS=AUTHORIZED_AFTER_CONTRACT_PUBLICATION
+R44B11F_PHASE_7_SCOPE=LIBRARY_ONLY_VERIFICATION_RUN_COMPOSITION
+R44B11F_PHASE_7_DISCOVERY_BASE=d668117fb5702985e356e51d4d4c7757002b3fd5
+R44B11F_PHASE_7_D11_SCOPE_LOCK_MODIFIED=NO
+R44B11F_PHASE_7_PRODUCTION_NEW=apps/commercial-worker/src/providerVerificationRun.ts
+R44B11F_PHASE_7_PRODUCTION_MODIFIED=NONE
+R44B11F_PHASE_7_TEST_NEW=apps/commercial-worker/tests/providerVerificationRun.test.ts
+R44B11F_PHASE_7_TEST_MODIFIED=apps/commercial-worker/tests/boundary.test.ts
+R44B11F_PHASE_7_INTEGRATION_TEST_ASSIGNED_TO_PHASE_8=apps/commercial-worker/tests/integration/providerVerificationExecution.test.ts
+R44B11F_PHASE_7_ENTRY_POINT=runProviderVerification
+R44B11F_PHASE_7_RUN_RESULT_STATUSES=DISABLED,NO_WORK,UNSUPPORTED_LEASE,REPORTED,ABANDONED,STOPPED
+R44B11F_PHASE_7_RUN_PROMISE_REJECTS=NO
+R44B11F_PHASE_7_ORCHESTRATION_STATES_USE_PHASE_3_VOCABULARY=NO
+R44B11F_PHASE_7_LEASES_PER_INVOCATION=AT_MOST_1
+R44B11F_PHASE_7_LOOP_OR_CADENCE=NO
+R44B11F_PHASE_7_PROCESS_ENTRYPOINT=NO
+R44B11F_PHASE_7_PRODUCTION_CALLER=NO
+R44B11F_PHASE_7_PROCESS_ACCESS=NO
+R44B11F_PHASE_7_LOGGING=NO
+R44B11F_PHASE_7_MODULE_STATE=NONE
+R44B11F_PHASE_7_IMPORT_SIDE_EFFECTS=NONE
+R44B11F_PHASE_7_INPUT_READ_ONCE=YES
+R44B11F_PHASE_7_OPERATION_ORDER=GATE,VALIDATION,ENVIRONMENT_GUARD,SHUTDOWN_LINK,LEASE,CLASSIFY,BUDGET,GRANT,VERIFYING,BIND,OPEN_ONCE_FOR,TRANSPORT_IN_USE,RESULT
+R44B11F_PHASE_7_LIVE_GATE=FIRST_BEFORE_ANY_LEASE_DEFAULT_REQUIRE_LIVE_PROVIDER_VERIFICATION
+R44B11F_PHASE_7_LIVE_GATE_TEST_SEAM=OPTIONAL_LIVEGATE_DEPENDENCY_NO_PRODUCTION_PASSER
+R44B11F_PHASE_7_LIVE_GATE_SKIP_EXPORT=NO
+R44B11F_PHASE_7_LIVE_ENABLEMENT=NO
+R44B11F_PHASE_7_DEPENDENCY_VALIDATION=BEFORE_LEASE_INCLUDING_OPENER_OPEN_FUNCTION_AND_ENVIRONMENT_OBJECT_SHAPE_WORKER_CONFIGURATION_INVALID
+R44B11F_PHASE_7_ENVIRONMENT_GUARD=INJECTED_ASSERT_NO_PROVIDER_ENVIRONMENT_BEFORE_LEASE_AND_AGAIN_AT_BIND
+R44B11F_PHASE_7_CLOCK=MONOTONIC_LEASE_SENT_ANCHOR_THEN_ONE_WALL_READ_AT_RECEIPT_FOR_SERVER_EXPIRY_PROJECTION_THEN_MONOTONIC_REMAINING_ONLY
+R44B11F_PHASE_7_LEASE_MS=30000
+R44B11F_PHASE_7_CLOCK_MARGIN_MS=2000
+R44B11F_PHASE_7_BUDGET=BUDGET_END_EQUALS_MIN_LEASE_SENT_MONO_PLUS_30000_OR_RECEIPT_MONO_PLUS_LEASE_EXPIRES_AT_GETTIME_MINUS_RECEIPT_WALL_MS_THEN_MINUS_CLOCK_MARGIN
+R44B11F_PHASE_7_BUDGET_CHECKPOINTS=MONOTONIC_REMAINING_EQUALS_BUDGET_END_MINUS_MONOTONIC_NOW
+R44B11F_PHASE_7_CONTROL_REQUEST_DEADLINE_MS=3000
+R44B11F_PHASE_7_RESULT_RESERVE_MS=6000
+R44B11F_PHASE_7_TRANSPORT_SETUP_MARGIN_MS=250
+R44B11F_PHASE_7_PRE_GRANT_MIN_REMAINING_MS=22250
+R44B11F_PHASE_7_PRE_VERIFYING_MIN_REMAINING_MS=19250
+R44B11F_PHASE_7_PRE_TRANSPORT_MIN_REMAINING_MS=16250
+R44B11F_PHASE_7_BUDGET_TIMER=ANCHORED_TO_BUDGET_END_DELAY_MAX_0_BUDGET_END_MINUS_RESULT_RESERVE_MINUS_MONOTONIC_NOW_RECORDS_LEASE_BUDGET
+R44B11F_PHASE_7_BUDGET_RENEWAL=NO
+R44B11F_PHASE_7_PROVIDER_DEADLINE_OWNER=PHASE_6_10000_UNCHANGED
+R44B11F_PHASE_7_SIGNAL_AUTHORITY=ONE_INTERNAL_RUN_CONTROLLER_ONLY_SIGNAL_TO_PHASE_6
+R44B11F_PHASE_7_EXTERNAL_SIGNAL_TO_PHASE_6=NO
+R44B11F_PHASE_7_EXTERNAL_SHUTDOWN=LINKED_INTO_INTERNAL_CONTROLLER_NEVER_FORWARDED
+R44B11F_PHASE_7_ABORT_CONTROLLERS=RUN_CONTROLLER_PLUS_PER_CONTROL_ATTEMPT_HELPER
+R44B11F_PHASE_7_CONTROL_WAITS=RACED_LATE_SETTLEMENT_OBSERVED_AND_IGNORED
+R44B11F_PHASE_7_OPEN_ONCE_FOR_RACED=NO
+R44B11F_PHASE_7_OPEN_ONCE_FOR_LIVENESS=TRUSTED_LOCAL_OPENER_ASSUMPTION_INVOCATION_NOT_BOUNDED_BY_LEASE_BUDGET
+R44B11F_PHASE_7_ABANDONED_STAGES=START,LEASE,GRANT,VERIFYING,BIND,VERIFICATION
+R44B11F_PHASE_7_CAUSE_WINDOW=SHUTDOWN_LINK_UNTIL_OPEN_ONCE_FOR_SETTLES
+R44B11F_PHASE_7_CAUSE_PRECEDENCE=TIMER_INSTALL_FAILURE_THEN_FIRST_RECORDED_CAUSE_THEN_STEP_SETTLEMENT
+R44B11F_PHASE_7_REPORT_AFTER_OWN_ABORT=NO
+R44B11F_PHASE_7_RESULT_REQUEST_CANCELLED_BY_SHUTDOWN_OR_BUDGET=NO
+R44B11F_PHASE_7_DEADLINE_TIMER=INJECTED_PROVIDER_VERIFICATION_DEADLINE_TIMER_OR_LOCAL_DEFAULT
+R44B11F_PHASE_7_GENERATION_TIMER_IMPORT=NO
+R44B11F_PHASE_7_TIMER_INSTALL_FAILURE=WORKER_CONFIGURATION_INVALID_NO_REQUEST
+R44B11F_PHASE_7_TIMER_CLEANUP_FAILURE=SWALLOWED
+R44B11F_PHASE_7_CAPABILITY_BINDS_PER_LEASE=AT_MOST_1
+R44B11F_PHASE_7_OPENS_PER_LEASE=AT_MOST_1
+R44B11F_PHASE_7_TRANSPORT_CALLS_PER_LEASE=AT_MOST_1
+R44B11F_PHASE_7_PROVIDER_RETRY=NO
+R44B11F_PHASE_7_LEASE_RETRY=NO
+R44B11F_PHASE_7_GRANT_RETRY=ONE_EXACT_ON_CONTROL_API_UNAVAILABLE_NO_GRANT_HELD_CHECKPOINT_PASSING
+R44B11F_PHASE_7_VERIFYING_RETRY=ONE_EXACT_ON_CONTROL_API_UNAVAILABLE_NO_ACK_HELD_CHECKPOINT_PASSING
+R44B11F_PHASE_7_RESULT_RETRY=ONE_EXACT_REPLAY_ON_CONTROL_API_UNAVAILABLE_ANY_BUDGET
+R44B11F_PHASE_7_REJECTION_RETRY=NO
+R44B11F_PHASE_7_SECOND_LEASE_PER_RUN=NO
+R44B11F_PHASE_7_RESULT_MAPPING=PHASE_6_REPORT_FORWARDED_VERBATIM
+R44B11F_PHASE_7_RESULT_REMAPPING=NO
+R44B11F_PHASE_7_POST_VERIFYING_LOCAL_FAULT=NO_RESULT_REPORT_STOP_AND_SERVER_RECONCILIATION
+R44B11F_PHASE_7_UNSUPPORTED_LEASE=CLASSIFY_BEFORE_GRANT_NO_GRANT_NO_VERIFYING_NO_REPORT_STOP
+R44B11F_PHASE_7_NEW_WORKER_ERROR_CODES=NONE
+R44B11F_PHASE_7_PLAINTEXT_SCOPE=OPEN_ONCE_FOR_USE_CALLBACK_ONLY
+R44B11F_PHASE_7_CAPABILITY_PASSED_TO_TRANSPORT=NO
+R44B11F_PHASE_7_PLAINTEXT_SECRET_STORAGE=PERSISTENCE_FORBIDDEN
+R44B11F_PHASE_7_PLAINTEXT_SECRET_LOGGING=FORBIDDEN
+R44B11F_PHASE_7_PLAINTEXT_SECRET_SERIALIZATION=FORBIDDEN
+R44B11F_PHASE_7_PLAINTEXT_SECRET_ERROR_CAUSE=FORBIDDEN
+R44B11F_PHASE_7_ABORTSIGNAL_PROXY_LIMIT=NOT_EXPOSED_INTERNAL_SIGNAL_ONLY_NO_PHASE_6_CHANGE
+R44B11F_PHASE_7_HEARTBEAT=NO
+R44B11F_PHASE_7_ACCEPTANCE_JOURNAL_GATE=NONE
+R44B11F_PHASE_7_PROTOCOL_IMPORT=NO
+R44B11F_PHASE_7_R44B11A_PROVIDER_IDENTITY_RULE=IN_FORCE_NO_EXCEPTION
+R44B11F_PHASE_7_BOUNDARY_EXEMPTIONS_ADDED=NONE
+R44B11F_PHASE_7_PROVIDER_CALLS_IN_TESTS=NO
+R44B11F_PHASE_7_MIGRATION_CHANGE=NO
+R44B11F_PHASE_7_COMMERCIAL_API_CHANGE=NO
+R44B11F_PHASE_7_PROTOCOL_CHANGE=NO
+R44B11F_PHASE_7_DEPENDENCY_CHANGE=NO
+R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT
+R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT
 ```
 
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_23

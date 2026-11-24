@@ -2342,9 +2342,9 @@ describe("provider verification run boundary (R44B11F Phase 7)", () => {
     };
   };
 
-  it("is the one Phase 7 production file, with no caller, no other liveGate holder and no Phase 8 file", () => {
+  it("is the one Phase 7 production file, with no caller and no other liveGate holder", () => {
     expect(sources.map(({ path }) => path)).toContain(RUN);
-    expect(existsSync(join(APP_ROOT, "tests", "integration", "providerVerificationExecution.test.ts"))).toBe(false);
+    expect(existsSync(join(APP_ROOT, "tests", "integration", "providerVerificationExecution.test.ts"))).toBe(true);
     // No source imports the run module or names its entry point or constants.
     expect(sources.filter(({ text }) => importsOf(text).some((specifier) => /providerVerificationRun/.test(specifier))).map(({ path }) => path)).toEqual([]);
     expect(sources.filter(({ path, text }) => path !== RUN && /providerVerificationRun|runProviderVerification|PROVIDER_VERIFICATION_RUN_/.test(text)).map(({ path }) => path)).toEqual([]);
@@ -2574,6 +2574,96 @@ describe("provider verification run boundary (R44B11F Phase 7)", () => {
     // No provider identity, policy, origin, header or status of its own.
     expect(/GOOGLE_PROVIDER_ID|RUNWAY_PROVIDER_ID|"[A-Z]+_(GENAI|ORGANIZATION)|https?:|x-goog|Authorization|Bearer|\bstatus === \d/i.test(run)).toBe(false);
     expect(/createHttpProviderVerificationControlClient|isIssuedProviderVerification|parseSealedEnvelope|validateSealingContext|CredentialOpener\b/.test(run)).toBe(false);
+  });
+});
+
+// R44B11F Phase 8 (architecture "R44B11F Phase 8 race, idempotency, boundary
+// and integration regression contract amendment", "Boundary test transition"):
+// static rules over the one Phase 8 integration file, read with comments
+// stripped. No directory-wide or pattern-wide integration exemption exists.
+describe("provider verification integration boundary (R44B11F Phase 8)", () => {
+  const PHASE_8_PATH = join(APP_ROOT, "tests", "integration", "providerVerificationExecution.test.ts");
+  const stripComments = (text: string) => code(text.replace(/\/\*[\s\S]*?\*\//g, ""));
+  const phase8 = () => stripComments(read(PHASE_8_PATH));
+  const PHASE_8_IMPORTS = new Set([
+    "vitest",
+    "node:crypto",
+    "../../src/providerVerificationRun.js",
+    "../../src/workerControlClient.js",
+    "../../src/workerError.js",
+    "../../src/providerVerificationConfig.js",
+    "../../src/providerVerificationContract.js",
+    "../../src/providerVerificationTransport.js",
+    "../../src/providerEnvironment.js",
+    "../support/testCredentialOpening.js",
+    "../../../commercial-api/src/database/runtimeDatabaseConfig.js",
+    "../../../commercial-api/src/database/runtimePool.js",
+    "../../../commercial-api/src/startCommercialApiServer.js",
+    "../../../commercial-api/src/workerControl/workerControlApplication.js",
+    "../../../commercial-api/src/workerControl/workerLeasePolicy.js",
+    "../../../commercial-api/src/workerControl/workerSecurityEvents.js",
+    "../../../commercial-api/src/providerConnections/providerVerificationReconciliationService.js",
+    "../../../commercial-api/tests/db/support/testDatabase.js",
+    "../../../commercial-api/tests/support/testWorkerAuthentication.js",
+    "../../../commercial-api/tests/support/testWorkerSecurityEvents.js",
+  ]);
+  const NETWORK_OR_SDK = /@google\/genai|@runwayml\/sdk|node:https?\b|node:http2\b|node:net\b|node:tls\b|node:dgram\b|node:child_process\b|node:worker_threads\b|undici|["']ws["']/;
+  const offApprovedLoopback = (text: string) => (text.match(/http:\/\/[^\s"'`]*/g) ?? []).filter((literal) => !literal.startsWith("http://127.0.0.1"));
+  // The provider-variable names, read from the module that alone names them.
+  const providerVariables = [...read(join(SRC_ROOT, "providerEnvironment.ts")).matchAll(/^ {2}"([A-Z0-9_]+)",$/gm)].map((match) => match[1]!);
+
+  it("exists at the exact path and is neither imported nor named by worker source", () => {
+    expect(existsSync(PHASE_8_PATH)).toBe(true);
+    expect(sources.filter(({ text }) => /providerVerificationExecution/.test(text)).map(({ path }) => path)).toEqual([]);
+  });
+
+  it("imports only the locked allowlist, with no provider SDK and no network or child-process primitive", () => {
+    const specifiers = importsOf(phase8());
+    expect(specifiers.length).toBeGreaterThan(0);
+    expect(specifiers.filter((specifier) => !PHASE_8_IMPORTS.has(specifier))).toEqual([]);
+    expect(NETWORK_OR_SDK.test(phase8())).toBe(false);
+    // Guard the guards.
+    for (const planted of ['import { request } from "node:https";', 'import WebSocket from "ws";', 'import type { Agent } from "undici";', 'await import("@runwayml/sdk");']) {
+      expect(NETWORK_OR_SDK.test(planted), planted).toBe(true);
+    }
+    expect(PHASE_8_IMPORTS.has("node:http")).toBe(false);
+    expect(importsOf('import type { WorkerLease } from "../../src/workerLeaseService.js";')).toEqual(["../../src/workerLeaseService.js"]);
+  });
+
+  it("names no https origin, no non-loopback http origin and no provider host, brand, identifier or policy literal", () => {
+    const text = phase8();
+    expect(text.includes("https://")).toBe(false);
+    expect(offApprovedLoopback(text)).toEqual([]);
+    expect(/googleapis|runwayml/i.test(text)).toBe(false);
+    expect(/runway|gemini|genai/i.test(text)).toBe(false);
+    expect(/GOOGLE_[A-Z_]*|RUNWAY_[A-Z_]*|_V1BETA|ORGANIZATION_GET/.test(text)).toBe(false);
+    expect(text).toMatch(/\bSUPPORTED_PROVIDER_VERIFICATION_PAIRS\b/);
+    // Guard the guards.
+    expect(offApprovedLoopback("const base = `http://127.0.0.1:${port}`;")).toEqual([]);
+    expect(offApprovedLoopback('const base = "http://localhost:80";')).toEqual(["http://localhost:80"]);
+  });
+
+  it("reads no provider variable, live-provider key or process state; the database configuration comes only from the guarded fixture", () => {
+    const text = phase8();
+    expect(providerVariables).toHaveLength(16);
+    expect(providerVariables.filter((name) => text.includes(name))).toEqual([]);
+    expect(/WORKER_LIVE_PROVIDER_|COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION/.test(text)).toBe(false);
+    expect(/\bprocess\./.test(text)).toBe(false);
+    expect(/COMMERCIAL_API_TEST_DATABASE|DATABASE_URL\s*:\s*["'`]/.test(text)).toBe(false);
+    expect(text).toMatch(/\bopenGuardedClients\(\)/);
+    expect(text).toMatch(/COMMERCIAL_API_DATABASE_URL: clients\.config\.runtimeUrl,/);
+    // Guard the guards.
+    expect(/\bprocess\./.test("const value = process.env.KEY;")).toBe(true);
+    expect(/DATABASE_URL\s*:\s*["'`]/.test('COMMERCIAL_API_DATABASE_URL: "postgres://u@127.0.0.1/db",')).toBe(true);
+  });
+
+  it("mocks no module and exports nothing", () => {
+    const text = phase8();
+    expect(/\bvi\.(mock|doMock)\b/.test(text)).toBe(false);
+    expect(/^\s*export\b/m.test(text)).toBe(false);
+    // Guard the guards.
+    expect(/\bvi\.(mock|doMock)\b/.test('vi.mock("../../src/workerControlClient.js");')).toBe(true);
+    expect(/^\s*export\b/m.test("const a = 1;\nexport const b = 2;")).toBe(true);
   });
 });
 

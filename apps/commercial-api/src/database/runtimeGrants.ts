@@ -107,6 +107,8 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
   // R44B11F provider-verification lifecycle. Account/connection/version,
   // verification policy, requester and creation provenance are immutable.
   // The token column stores only SHA-256, never the plaintext lease token.
+  // R44B11G (migration 0011): the three unsupported-deferral columns, whose
+  // writes the provider_verification_jobs_deferral_guard trigger bounds.
   provider_verification_jobs: {
     select: true,
     insert: true,
@@ -126,6 +128,9 @@ export const RUNTIME_TABLE_PRIVILEGES: Readonly<Record<string, TablePrivileges>>
       "result_worker_principal_id",
       "result_fencing_counter",
       "completed_at",
+      "deferred_until",
+      "unsupported_deferral_count",
+      "last_unsupported_refusal",
       "updated_at",
     ],
   },

@@ -13,6 +13,8 @@ import { send } from "../httpClient.js";
 import { openGuardedClients, prepareSchemaV1, resetTestSchema, type GuardedClients } from "./support/testDatabase.js";
 
 const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
+const PROVIDER_VERIFICATION_SHA256 = "5edfa48f485bda7795ee10d1f6405bad407f289af2493a0fca2a9dbe1af82bea";
+const UNSUPPORTED_DEFERRAL_SHA256 = "4935da7090351235cf73f08699d9bcce87ed685a85b9ba52b8b43db9c087027f";
 
 let clients: GuardedClients;
 let migrations: readonly MigrationFile[];
@@ -44,11 +46,12 @@ async function withPool<T>(config: RuntimeDatabaseConfig, fn: (pool: RuntimePool
 }
 
 describe("runtime pool against PostgreSQL 16", () => {
-  it("connects as the runtime role and verifies the latest committed schema (version 10) with its exact checksum", async () => {
+  it("connects as the runtime role and verifies the latest committed schema (version 11) with its exact checksum", async () => {
     expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
-    expect(migrations).toHaveLength(10);
+    expect(migrations).toHaveLength(11);
+    expect(migrations[10]).toMatchObject({ version: 11, name: "provider_verification_unsupported_deferral", sha256: UNSUPPORTED_DEFERRAL_SHA256 });
     await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
-      await expect(verifyRuntimeDatabase(pool, migrations)).resolves.toEqual({ latestVersion: 10, latestSha256: migrations[9]!.sha256 });
+      await expect(verifyRuntimeDatabase(pool, migrations)).resolves.toEqual({ latestVersion: 11, latestSha256: UNSUPPORTED_DEFERRAL_SHA256 });
 
       const identity = await pool.query<{ user: string; version_num: string }>(
         "SELECT current_user AS user, current_setting('server_version_num') AS version_num",
@@ -101,34 +104,36 @@ describe("runtime pool against PostgreSQL 16", () => {
 
   it("detects drift, a schema behind and a schema ahead of the committed migrations", async () => {
     const [schemaV1, ...later] = migrations;
-    const provenance = migrations[9]!;
+    const provenance = migrations[10]!;
     const drifted = parseMigrationFile(schemaV1!.fileName, new TextEncoder().encode(`${schemaV1!.sql}-- drift\n`));
-    const next = parseMigrationFile("0011_next.sql", new TextEncoder().encode("SELECT 11;\n"));
+    const next = parseMigrationFile("0012_next.sql", new TextEncoder().encode("SELECT 12;\n"));
 
     await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
       await expect(verifyRuntimeDatabase(pool, [drifted, ...later])).rejects.toMatchObject({
         code: "SCHEMA_DRIFT",
       });
       await expect(verifyRuntimeDatabase(pool, [...migrations, next])).rejects.toMatchObject({ code: "SCHEMA_BEHIND" });
+      // M4: a build whose manifest ends at 0010 refuses a database with 0011 applied.
+      await expect(verifyRuntimeDatabase(pool, migrations.slice(0, 10))).rejects.toMatchObject({ code: "SCHEMA_AHEAD" });
     });
 
-    // Ahead: a migration applied to the database that the code does not know.
-    await clients.migrator.query("INSERT INTO schema_migrations (version, name, sha256) VALUES (11, 'next', $1)", [next.sha256]);
+    // Ahead (RD1): a migration applied to the database that the code does not know.
+    await clients.migrator.query("INSERT INTO schema_migrations (version, name, sha256) VALUES (12, 'next', $1)", [next.sha256]);
     try {
       await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
         await expect(verifyRuntimeDatabase(pool, migrations)).rejects.toMatchObject({ code: "SCHEMA_AHEAD" });
-        // Readiness verified against version 10 now sees a newer applied migration.
-        const check = createReadinessCheck(pool, { latestVersion: 10, latestSha256: provenance.sha256 }, 2000);
+        // Readiness verified against version 11 now sees a newer applied migration.
+        const check = createReadinessCheck(pool, { latestVersion: 11, latestSha256: provenance.sha256 }, 2000);
         await expect(check()).resolves.toBe(false);
       });
     } finally {
-      await clients.migrator.query("DELETE FROM schema_migrations WHERE version = 11");
+      await clients.migrator.query("DELETE FROM schema_migrations WHERE version = 12");
     }
   });
 
   it("is not ready while the database is still at version 1", async () => {
     const [schemaV1] = migrations;
-    const provenance = migrations[9]!;
+    const provenance = migrations[10]!;
     await resetTestSchema(clients.migrator);
     await runMigrations(clients.migrator, [schemaV1!]);
     // As a version-1 deployment's grants did, let the runtime role read the schema version.
@@ -136,7 +141,7 @@ describe("runtime pool against PostgreSQL 16", () => {
     try {
       await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
         await expect(verifyRuntimeDatabase(pool, migrations)).rejects.toMatchObject({ code: "SCHEMA_BEHIND" });
-        const check = createReadinessCheck(pool, { latestVersion: 10, latestSha256: provenance.sha256 }, 2000);
+        const check = createReadinessCheck(pool, { latestVersion: 11, latestSha256: provenance.sha256 }, 2000);
         await expect(check()).resolves.toBe(false);
       });
     } finally {
@@ -144,17 +149,17 @@ describe("runtime pool against PostgreSQL 16", () => {
     }
   });
 
-  it("is not ready while the database is at version 9, and is ready at version 10", async () => {
-    const provenance = migrations[9]!;
+  it("is not ready while the database is at version 10 (RD3: SCHEMA_BEHIND), and is ready at version 11", async () => {
+    const provenance = migrations[10]!;
     await resetTestSchema(clients.migrator);
-    await runMigrations(clients.migrator, migrations.slice(0, 9));
-    // As a version-9 deployment's grants did, let the runtime role read the schema version.
+    await runMigrations(clients.migrator, migrations.slice(0, 10));
+    // As a version-10 deployment's grants did, let the runtime role read the schema version.
     await clients.migrator.query("GRANT SELECT ON schema_migrations TO busybookie_commercial_test_runtime");
     try {
       await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
         await expect(verifyRuntimeDatabase(pool, migrations)).rejects.toMatchObject({ code: "SCHEMA_BEHIND" });
-        // A process verified at version 10 also reports not ready here.
-        const check = createReadinessCheck(pool, { latestVersion: 10, latestSha256: provenance.sha256 }, 2000);
+        // A process verified at version 11 also reports not ready here.
+        const check = createReadinessCheck(pool, { latestVersion: 11, latestSha256: provenance.sha256 }, 2000);
         await expect(check()).resolves.toBe(false);
       });
     } finally {
@@ -163,9 +168,36 @@ describe("runtime pool against PostgreSQL 16", () => {
 
     await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
       const verified = await verifyRuntimeDatabase(pool, migrations);
-      expect(verified).toEqual({ latestVersion: 10, latestSha256: provenance.sha256 });
+      expect(verified).toEqual({ latestVersion: 11, latestSha256: provenance.sha256 });
       await expect(createReadinessCheck(pool, verified, 2000)()).resolves.toBe(true);
     });
+  });
+
+  it("RD2/M4: a 0010 instance verified and ready turns unready once 0011 is applied, and a restart of it fails SCHEMA_AHEAD", async () => {
+    const legacy = migrations.slice(0, 10);
+    expect(legacy.at(-1)).toMatchObject({ version: 10, sha256: PROVIDER_VERIFICATION_SHA256 });
+    await resetTestSchema(clients.migrator);
+    await runMigrations(clients.migrator, legacy);
+    // As a version-10 deployment's grants did, let the runtime role read the schema version.
+    await clients.migrator.query("GRANT SELECT ON schema_migrations TO busybookie_commercial_test_runtime");
+    try {
+      await withPool(runtimeConfig(clients.config.runtimeUrl), async (pool) => {
+        const verified = await verifyRuntimeDatabase(pool, legacy);
+        expect(verified).toEqual({ latestVersion: 10, latestSha256: PROVIDER_VERIFICATION_SHA256 });
+        const check = createReadinessCheck(pool, verified, 2000);
+        await expect(check()).resolves.toBe(true);
+
+        await expect(runMigrations(clients.migrator, migrations)).resolves.toEqual({
+          applied: ["0011_provider_verification_unsupported_deferral.sql"],
+          latestVersion: 11,
+        });
+
+        await expect(check()).resolves.toBe(false);
+        await expect(verifyRuntimeDatabase(pool, legacy)).rejects.toMatchObject({ code: "SCHEMA_AHEAD" });
+      });
+    } finally {
+      await prepareSchemaV1(clients);
+    }
   });
 
   it("detects a missing schema", async () => {

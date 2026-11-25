@@ -124,8 +124,9 @@ describe("discoverMigrations", () => {
 
 describe("committed migrations", () => {
   const SCHEMA_V1_SHA256 = "6e03d9d784278318d1e6586d7c247aef7486d6c5641409cfacab5fc77a5a88ed";
+  const MIGRATION_0011_SHA256 = "4935da7090351235cf73f08699d9bcce87ed685a85b9ba52b8b43db9c087027f";
 
-  it("discovers 0001 to 0010 in order, contiguously, with LF bytes and stable checksums", async () => {
+  it("discovers 0001 to 0011 in order, contiguously, with LF bytes and stable checksums", async () => {
     const migrations = await discoverMigrations();
 
     expect(migrations.map((entry) => entry.fileName)).toEqual([
@@ -139,8 +140,10 @@ describe("committed migrations", () => {
       "0008_generation_usage_ledger.sql",
       "0009_provider_connection_disconnect_convergence.sql",
       "0010_provider_connection_verification_workflow.sql",
+      "0011_provider_verification_unsupported_deferral.sql",
     ]);
-    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(migrations.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(migrations.at(-1)).toMatchObject({ version: 11, name: "provider_verification_unsupported_deferral" });
     for (const migration of migrations) {
       const raw = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, migration.fileName));
       expect(migration.sha256).toBe(sha256Hex(raw));
@@ -148,14 +151,117 @@ describe("committed migrations", () => {
     }
     // Earlier migrations are byte-for-byte unchanged.
     expect(migrations[0]?.sha256).toBe(SCHEMA_V1_SHA256);
-    expect(migrations.slice(1, 6).map((entry) => entry.sha256)).toEqual([
+    expect(migrations.slice(1, 10).map((entry) => entry.sha256)).toEqual([
       "599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06",
       "639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868",
       "c19113d3e3022f26e17cb4eeba9cee2719a387914549d5c2996fc66fcd8cfe49",
       "ff12efddc15441e2c529796632ca3e1ad188ebb6c7df5ddfb1058426065934ec",
       "99121d3d19b6044b309be149c0d1376a79f55f4f52b34cd90930cc3664d2813a",
+      "4471e20d206719de8f2418bf69e471d168bc49d5a4d785dd3c0f59e07b1e7e9f",
+      "087c2d4512180bfd8607663120e90c8928ab48fefe8ca4ca1c4063ef5d9cfee5",
+      "bfda9520641dd1b0e4789ad57766e0f9e0efcc899c98babcca6e0daafa090223",
+      "5edfa48f485bda7795ee10d1f6405bad407f289af2493a0fca2a9dbe1af82bea",
     ]);
     expect(migrations[9]?.sha256).toBe("5edfa48f485bda7795ee10d1f6405bad407f289af2493a0fca2a9dbe1af82bea");
+    expect(migrations[10]?.sha256).toBe(MIGRATION_0011_SHA256);
+  });
+
+  it("adds unsupported-verification deferral in 0011 only: three columns, four checks, one index and one new guard, no backfill, grant or terminal path", async () => {
+    const migrations = await discoverMigrations();
+    const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+    const deferral = migrations[10]!;
+    const statements = withoutComments(deferral.sql);
+
+    expect(deferral.fileName).toBe("0011_provider_verification_unsupported_deferral.sql");
+    expect(deferral.sha256).toBe(MIGRATION_0011_SHA256);
+    expect(migrations.slice(0, 10).some((migration) => /deferred_until|unsupported_deferral|last_unsupported_refusal/.test(migration.sql))).toBe(
+      false,
+    );
+
+    // No table; exactly the three columns with their types, nullability and default.
+    expect(statements).not.toMatch(/CREATE TABLE/i);
+    expect([...statements.matchAll(/^\s*ALTER TABLE (\w+)/gm)].map((match) => match[1])).toEqual(["provider_verification_jobs"]);
+    expect([...statements.matchAll(/ADD COLUMN (\w+) (.+?),?$/gm)].map((match) => [match[1], match[2]])).toEqual([
+      ["deferred_until", "timestamptz NULL"],
+      ["unsupported_deferral_count", "integer NOT NULL DEFAULT 0"],
+      ["last_unsupported_refusal", "text NULL"],
+    ]);
+    // Exactly the four published constraint names, in order.
+    expect([...statements.matchAll(/ADD CONSTRAINT (\w+)/g)].map((match) => match[1])).toEqual([
+      "provider_verification_jobs_unsupported_deferral_count_ck",
+      "provider_verification_jobs_last_unsupported_refusal_ck",
+      "provider_verification_jobs_unsupported_deferral_presence_ck",
+      "provider_verification_jobs_deferred_after_creation_ck",
+    ]);
+    expect(statements).toMatch(/CHECK \(unsupported_deferral_count >= 0\)/);
+    // The closed refusal vocabulary: exactly these three values.
+    expect([...new Set(statements.match(/'(UNSUPPORTED_PROVIDER|UNSUPPORTED_POLICY|PROVIDER_POLICY_MISMATCH)'/g))].sort()).toEqual([
+      "'PROVIDER_POLICY_MISMATCH'",
+      "'UNSUPPORTED_POLICY'",
+      "'UNSUPPORTED_PROVIDER'",
+    ]);
+    expect(statements).toMatch(
+      /\(\(unsupported_deferral_count = 0\) = \(last_unsupported_refusal IS NULL\)\)\s+AND \(\(unsupported_deferral_count = 0\) = \(deferred_until IS NULL\)\)/,
+    );
+    expect(statements).toMatch(/deferred_until IS NULL\s+OR deferred_until > created_at/);
+
+    // The eligible-queue index, built in the runner's transaction; queue_ix is not dropped.
+    expect([...statements.matchAll(/CREATE (?:UNIQUE )?INDEX (\w+)/g)].map((match) => match[1])).toEqual([
+      "provider_verification_jobs_eligible_queue_ix",
+    ]);
+    expect(statements).toMatch(
+      /CREATE INDEX provider_verification_jobs_eligible_queue_ix\s+ON provider_verification_jobs \(\(COALESCE\(deferred_until, created_at\)\), id\)\s+WHERE state = 'QUEUED';/,
+    );
+    expect(statements).not.toMatch(/CONCURRENTLY/i);
+
+    // One new guard function and trigger; the 0010 guard is neither replaced nor dropped.
+    expect([...statements.matchAll(/CREATE (?:OR REPLACE )?FUNCTION (\w+)/g)].map((match) => match[1])).toEqual([
+      "provider_verification_jobs_deferral_guard",
+    ]);
+    expect([...statements.matchAll(/CREATE TRIGGER (\w+)/g)].map((match) => match[1])).toEqual(["provider_verification_jobs_deferral_guard"]);
+    expect(statements).toMatch(
+      /CREATE TRIGGER provider_verification_jobs_deferral_guard\s+BEFORE INSERT OR UPDATE ON provider_verification_jobs\s+FOR EACH ROW EXECUTE FUNCTION provider_verification_jobs_deferral_guard\(\);/,
+    );
+    expect(statements).toMatch(/^REVOKE ALL ON FUNCTION provider_verification_jobs_deferral_guard\(\) FROM PUBLIC;$/m);
+    expect(statements).not.toMatch(/OR REPLACE|\bDROP\b|ALTER FUNCTION|DISABLE TRIGGER/i);
+    expect(statements).not.toMatch(/FUNCTION provider_verification_jobs_guard\(\)/);
+
+    // The guard: transaction-start now(), check_violation, the exact backoff, and it never assigns NEW.
+    const body = statements.slice(statements.indexOf("AS $$"), statements.lastIndexOf("$$;"));
+    expect(body).not.toMatch(/\bNEW\.\w+\s*:=/);
+    expect(body).not.toMatch(/clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp/i);
+    expect(body).toMatch(/OLD\.state = 'LEASED'\s+AND NEW\.state = 'QUEUED'\s+AND OLD\.credential_granted_at IS NULL\s+AND OLD\.lease_expires_at > now\(\)/);
+    expect(body).toMatch(/NEW\.unsupported_deferral_count = OLD\.unsupported_deferral_count \+ 1/);
+    expect(body).toMatch(/NEW\.last_unsupported_refusal IS NOT NULL/);
+    expect(body).toMatch(/NEW\.deferred_until > now\(\)/);
+    expect(body).toMatch(/WHEN NEW\.unsupported_deferral_count >= 5 THEN 3600\s+ELSE 300 \* \(1 << \(NEW\.unsupported_deferral_count - 1\)\)/);
+    expect(body).toMatch(/NEW\.deferred_until <= now\(\) \+ make_interval\(secs => bound_seconds\)/);
+    expect(body.match(/ERRCODE = 'check_violation'/g)).toHaveLength(3);
+    expect(body).not.toMatch(/ERRCODE = '(?!check_violation')/);
+
+    // No terminal path, threshold or new terminal reason.
+    expect(statements).not.toMatch(/CANCELLED|COMPLETED|terminal_reason_code|completed_at|result_|VERIFICATION_UNSCHEDULABLE/);
+    expect(statements).not.toMatch(/unsupported_deferral_count\s*(>=|>|=)\s*(?!0\b|5 THEN)\d+/);
+    // No backfill, grant, role, secret, provider brand or transaction control.
+    expect(statements).not.toMatch(/^\s*(UPDATE|INSERT|DELETE)\b/im);
+    expect(statements).not.toMatch(/\bTRUNCATE\b|\bCASCADE\b|audit_events/i);
+    expect(statements).not.toMatch(/\bCREATE\s+(ROLE|USER)\b|^\s*GRANT\b/im);
+    expect(deferral.sql).not.toMatch(/runway|gemini|genai|veo|google/i);
+    const SECRET_COLUMN = /\w*(secret|plaintext|password|api_key|sealed|fingerprint|bearer|token)\w*\s+(text|jsonb|bytea|uuid)\b/i;
+    expect(statements).not.toMatch(SECRET_COLUMN);
+
+    // Every added column is runtime-updatable through the manifest (granted only by grant-runtime).
+    const updateColumns = RUNTIME_TABLE_PRIVILEGES.provider_verification_jobs!.updateColumns;
+    for (const [, column] of statements.matchAll(/ADD COLUMN (\w+)/g)) {
+      expect(updateColumns).toContain(column);
+    }
+
+    // Guard the guards.
+    expect("  NEW.deferred_until := now();").toMatch(/\bNEW\.\w+\s*:=/);
+    expect("unsupported_deferral_count >= 10").toMatch(/unsupported_deferral_count\s*(>=|>|=)\s*(?!0\b|5 THEN)\d+/);
+    expect("unsupported_deferral_count >= 5 THEN 3600").not.toMatch(/unsupported_deferral_count\s*(>=|>|=)\s*(?!0\b|5 THEN)\d+/);
+    expect("CREATE INDEX CONCURRENTLY x").toMatch(/CONCURRENTLY/i);
+    expect("  UPDATE provider_verification_jobs SET x = 1;").toMatch(/^\s*(UPDATE|INSERT|DELETE)\b/im);
   });
 
   it("adds input-failure provenance in 0007 only: a uuid and a bigint column, no backfill, token verifier, table, role, grant, secret or provider brand", async () => {

@@ -1,14 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { RUNTIME_TABLE_PRIVILEGES } from "../../src/database/runtimeGrants.js";
+import { discoverMigrations } from "../../src/database/migrationFiles.js";
+import { runMigrations } from "../../src/database/runMigrations.js";
+import { applyRuntimeGrants, RUNTIME_TABLE_PRIVILEGES } from "../../src/database/runtimeGrants.js";
 import {
   expectSqlError,
   inRolledBackTransaction,
   insertAccountWithFreeGrant,
   openGuardedClients,
   prepareSchemaV1,
+  resetTestSchema,
   type GuardedClients,
 } from "./support/testDatabase.js";
+import { APPROVED_RUNTIME_ROLE } from "./support/testDatabaseGuard.js";
 
 const INSUFFICIENT_PRIVILEGE = "42501";
 const TABLES = Object.keys(RUNTIME_TABLE_PRIVILEGES);
@@ -191,7 +195,7 @@ describe("runtime role authority", () => {
       expect(audit.rowCount).toBe(1);
 
       const version = await clients.runtime.query("SELECT max(version) AS version FROM schema_migrations");
-      expect(version.rows).toEqual([{ version: 10 }]);
+      expect(version.rows).toEqual([{ version: 11 }]);
     });
   });
 
@@ -300,6 +304,9 @@ describe("runtime role authority", () => {
         "result_worker_principal_id",
         "result_fencing_counter",
         "completed_at",
+        "deferred_until",
+        "unsupported_deferral_count",
+        "last_unsupported_refusal",
         "updated_at",
       ],
     });
@@ -336,6 +343,9 @@ describe("runtime role authority", () => {
       "result_worker_principal_id",
       "result_fencing_counter",
       "completed_at",
+      "deferred_until",
+      "unsupported_deferral_count",
+      "last_unsupported_refusal",
     ]) {
       expect(
         await runtimeHas(
@@ -361,6 +371,55 @@ describe("runtime role authority", () => {
         "SELECT has_table_privilege(current_user, 'public.provider_verification_jobs', 'TRIGGER') AS allowed",
       ),
     ).toBe(false);
+  });
+
+  it("receives the three deferral UPDATE columns only from the runtime-grant command of a 0011 build, never from migration 0011 (R44B11G)", async () => {
+    const DEFERRAL_COLUMNS = ["deferred_until", "unsupported_deferral_count", "last_unsupported_refusal"];
+    const columnPrivileges = async () =>
+      (
+        await clients.runtime.query<{ column: string; select: boolean; update: boolean; references: boolean }>(
+          `SELECT c AS column,
+                  has_column_privilege(current_user, 'public.provider_verification_jobs', c, 'SELECT') AS select,
+                  has_column_privilege(current_user, 'public.provider_verification_jobs', c, 'UPDATE') AS update,
+                  has_column_privilege(current_user, 'public.provider_verification_jobs', c, 'REFERENCES') AS references
+             FROM unnest($1::text[]) AS c ORDER BY c`,
+          [DEFERRAL_COLUMNS],
+        )
+      ).rows;
+    const granted = (select: boolean, update: boolean) =>
+      [...DEFERRAL_COLUMNS].sort().map((column) => ({ column, select, update, references: false }));
+    const migrations = await discoverMigrations();
+    expect(migrations.at(-1)?.version).toBe(11);
+
+    try {
+      // Migration alone: the runtime role holds nothing on the new columns (the migration grants nothing).
+      await resetTestSchema(clients.migrator);
+      await runMigrations(clients.migrator, migrations);
+      expect(await columnPrivileges()).toEqual(granted(false, false));
+
+      // A pre-0011 build's grant-runtime refuses a 0011 database and changes nothing.
+      await expect(applyRuntimeGrants(clients.migrator, APPROVED_RUNTIME_ROLE, migrations.slice(0, 10))).rejects.toMatchObject({
+        code: "RUNTIME_GRANT_SCHEMA_MISMATCH",
+      });
+      expect(await columnPrivileges()).toEqual(granted(false, false));
+
+      // The 0011 build's grant-runtime (the test-support grant path) synchronises the role to the manifest.
+      await applyRuntimeGrants(clients.migrator, APPROVED_RUNTIME_ROLE, migrations);
+      expect(await columnPrivileges()).toEqual(granted(true, true));
+
+      // The 0011 build's grant-runtime refuses a database still at 0010 and grants nothing there.
+      await resetTestSchema(clients.migrator);
+      await runMigrations(clients.migrator, migrations.slice(0, 10));
+      await expect(applyRuntimeGrants(clients.migrator, APPROVED_RUNTIME_ROLE, migrations)).rejects.toMatchObject({
+        code: "RUNTIME_GRANT_SCHEMA_MISMATCH",
+      });
+      expect(
+        await runtimeHas("SELECT has_table_privilege(current_user, 'public.provider_verification_jobs', 'SELECT') AS allowed"),
+      ).toBe(false);
+    } finally {
+      await prepareSchemaV1(clients);
+    }
+    expect(await columnPrivileges()).toEqual(granted(true, true));
   });
 
   it("holds only SELECT and INSERT on the generation usage ledger, with no updatable column (migration 0008)", async () => {

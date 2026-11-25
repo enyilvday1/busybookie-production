@@ -32,6 +32,8 @@ const INPUT_FAILURE_FILE = "0007_input_failure_provenance.sql";
 const USAGE_LEDGER_FILE = "0008_generation_usage_ledger.sql";
 const DISCONNECT_CONVERGENCE_FILE = "0009_provider_connection_disconnect_convergence.sql";
 const PROVIDER_VERIFICATION_FILE = "0010_provider_connection_verification_workflow.sql";
+const UNSUPPORTED_DEFERRAL_FILE = "0011_provider_verification_unsupported_deferral.sql";
+const UNSUPPORTED_DEFERRAL_SHA256 = "4935da7090351235cf73f08699d9bcce87ed685a85b9ba52b8b43db9c087027f";
 const COMMITTED_FILES = [
   SCHEMA_V1_FILE,
   PROVIDER_CONNECTIONS_FILE,
@@ -43,6 +45,7 @@ const COMMITTED_FILES = [
   USAGE_LEDGER_FILE,
   DISCONNECT_CONVERGENCE_FILE,
   PROVIDER_VERIFICATION_FILE,
+  UNSUPPORTED_DEFERRAL_FILE,
 ];
 
 let clients: GuardedClients;
@@ -112,13 +115,13 @@ function commandDependencies(migrationsDirectory: string) {
 }
 
 describe("migration runner against PostgreSQL 16", () => {
-  it("applies the bootstrap and 0001 to 0010 to an empty database and records the exact checksums", async () => {
+  it("applies the bootstrap and 0001 to 0011 to an empty database and records the exact checksums", async () => {
     expect(await publicTables()).toEqual([]);
 
     const migrations = await discoverMigrations();
     const result = await runMigrations(clients.migrator, migrations);
 
-    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 10 });
+    expect(result).toEqual({ applied: COMMITTED_FILES, latestVersion: 11 });
     const v1 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, SCHEMA_V1_FILE));
     const v2 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_CONNECTIONS_FILE));
     const v3 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, GENERATION_AUTHORIZATIONS_FILE));
@@ -129,6 +132,8 @@ describe("migration runner against PostgreSQL 16", () => {
     const v8 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, USAGE_LEDGER_FILE));
     const v9 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, DISCONNECT_CONVERGENCE_FILE));
     const v10 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_VERIFICATION_FILE));
+    const v11 = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, UNSUPPORTED_DEFERRAL_FILE));
+    expect(sha256Hex(v11)).toBe(UNSUPPORTED_DEFERRAL_SHA256);
     expect(sha256Hex(v10)).toBe("5edfa48f485bda7795ee10d1f6405bad407f289af2493a0fca2a9dbe1af82bea");
     expect(sha256Hex(v9)).toBe("bfda9520641dd1b0e4789ad57766e0f9e0efcc899c98babcca6e0daafa090223");
     expect(sha256Hex(v8)).toBe("087c2d4512180bfd8607663120e90c8928ab48fefe8ca4ca1c4063ef5d9cfee5");
@@ -138,6 +143,7 @@ describe("migration runner against PostgreSQL 16", () => {
     expect(sha256Hex(v2)).toBe("599dcc34eaf046ab942e8b2f575531cd98499a1790a4ae5df12ff6c36d697f06");
     expect(sha256Hex(v3)).toBe("639f300b96592064d03659b09da99f84ad242be8c41829e8bbedebb24c819868");
     expect(sha256Hex(v4)).toBe("c19113d3e3022f26e17cb4eeba9cee2719a387914549d5c2996fc66fcd8cfe49");
+    expect(sha256Hex(v7)).toBe("4471e20d206719de8f2418bf69e471d168bc49d5a4d785dd3c0f59e07b1e7e9f");
     expect(await appliedRows()).toEqual([
       { version: 1, name: "commercial_schema_v1", sha256: sha256Hex(v1) },
       { version: 2, name: "provider_connections", sha256: sha256Hex(v2) },
@@ -149,6 +155,7 @@ describe("migration runner against PostgreSQL 16", () => {
       { version: 8, name: "generation_usage_ledger", sha256: sha256Hex(v8) },
       { version: 9, name: "provider_connection_disconnect_convergence", sha256: sha256Hex(v9) },
       { version: 10, name: "provider_connection_verification_workflow", sha256: sha256Hex(v10) },
+      { version: 11, name: "provider_verification_unsupported_deferral", sha256: UNSUPPORTED_DEFERRAL_SHA256 },
     ]);
     expect(await publicTables()).toEqual([
       "accounts",
@@ -169,18 +176,18 @@ describe("migration runner against PostgreSQL 16", () => {
     ]);
   });
 
-  it("applies 0002 to 0010 on top of a database already at version 1", async () => {
+  it("applies 0002 to 0011 on top of a database already at version 1", async () => {
     const [schemaV1] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1]);
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE, DISCONNECT_CONVERGENCE_FILE, PROVIDER_VERIFICATION_FILE]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(result.applied).toEqual([PROVIDER_CONNECTIONS_FILE, GENERATION_AUTHORIZATIONS_FILE, WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE, DISCONNECT_CONVERGENCE_FILE, PROVIDER_VERIFICATION_FILE, UNSUPPORTED_DEFERRAL_FILE]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   });
 
-  it("upgrades a database at version 3 through version 10", async () => {
+  it("upgrades a database at version 3 through version 11", async () => {
     const [schemaV1, providerConnections, generationAuthorizations] = await discoverMigrations();
     await runMigrations(clients.migrator, [schemaV1!, providerConnections!, generationAuthorizations!]);
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3]);
@@ -190,8 +197,8 @@ describe("migration runner against PostgreSQL 16", () => {
 
     const result = await runMigrations(clients.migrator, await discoverMigrations());
 
-    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE, DISCONNECT_CONVERGENCE_FILE, PROVIDER_VERIFICATION_FILE], latestVersion: 10 });
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(result).toEqual({ applied: [WORKER_BRIDGE_FILE, SUBMISSION_PROVENANCE_FILE, LEASE_EPOCH_FILE, INPUT_FAILURE_FILE, USAGE_LEDGER_FILE, DISCONNECT_CONVERGENCE_FILE, PROVIDER_VERIFICATION_FILE, UNSUPPORTED_DEFERRAL_FILE], latestVersion: 11 });
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     for (const table of ["worker_principals", "execution_jobs", "execution_attempts"]) {
       expect(await publicTables()).toContain(table);
     }
@@ -226,9 +233,10 @@ describe("migration runner against PostgreSQL 16", () => {
       `commercial-api migrate: applied ${USAGE_LEDGER_FILE}\n`,
       `commercial-api migrate: applied ${DISCONNECT_CONVERGENCE_FILE}\n`,
       `commercial-api migrate: applied ${PROVIDER_VERIFICATION_FILE}\n`,
-      "commercial-api migrate: schema at version 10\n",
+      `commercial-api migrate: applied ${UNSUPPORTED_DEFERRAL_FILE}\n`,
+      "commercial-api migrate: schema at version 11\n",
     ]);
-    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   });
 
   it.each(COMMITTED_FILES)("rejects checksum drift in an applied %s and changes nothing", async (edited) => {
@@ -246,7 +254,7 @@ describe("migration runner against PostgreSQL 16", () => {
     await expectMigrationError(runMigrations(clients.migrator, await discoverMigrations(scratch)), "MIGRATION_CHECKSUM_DRIFT");
     const after = await clients.migrator.query("SELECT version, sha256, applied_at FROM schema_migrations ORDER BY version");
     expect(after.rows).toEqual(before.rows);
-    expect(after.rows).toHaveLength(10);
+    expect(after.rows).toHaveLength(11);
   });
 
   it("rejects an applied version whose committed name differs", async () => {
@@ -780,5 +788,147 @@ describe("migration 0005 on a schema-version-4 database", () => {
     expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect((await clients.migrator.query("SELECT count(*)::int AS count FROM generation_usage_events")).rows).toEqual([{ count: 0 }]);
     expect((await clients.migrator.query("SELECT * FROM generation_usage_ledger ORDER BY generation_authorization_id")).rows).toEqual(before.rows);
+  });
+});
+
+// Migration 0011 on databases already at schema version 10 (R44B11G S1).
+// Rows are built by the owner through the 0010 guard's legal transitions.
+describe("migration 0011 on a schema-version-10 database", () => {
+  const CLEAR_LEASE = "lease_worker_principal_id = NULL, lease_token_sha256 = NULL, leased_at = NULL, lease_expires_at = NULL";
+
+  async function verificationJob(subject: string): Promise<Readonly<{ jobId: string; workerId: string }>> {
+    const q = async (sql: string, params: unknown[]) => (await clients.migrator.query<{ id: string }>(sql, params)).rows[0]!.id;
+    const owner = await insertAccountWithFreeGrant(clients.migrator, subject);
+    const workerId = await q("INSERT INTO worker_principals (label) VALUES ($1) RETURNING id", [`${subject}-worker`]);
+    const connectionId = await q(
+      "INSERT INTO provider_connections (account_id, provider, credential_kind, created_by_user_id) VALUES ($1, 'EXAMPLE_PROVIDER', 'API_KEY', $2) RETURNING id",
+      [owner.accountId, owner.userId],
+    );
+    const versionId = await q(
+      `INSERT INTO provider_credential_versions
+         (account_id, provider_connection_id, credential_version, status, sealed_credential,
+          fingerprint_algorithm, fingerprint_key_ref, fingerprint_value, created_by_user_id)
+       VALUES ($1, $2, 1, 'ACTIVE', '{"format":"fixture-envelope"}'::jsonb, 'HMAC-SHA-256', 'fixture/v1', repeat('B', 43), $3) RETURNING id`,
+      [owner.accountId, connectionId, owner.userId],
+    );
+    const jobId = await q(
+      `INSERT INTO provider_verification_jobs
+         (account_id, provider_connection_id, provider_credential_version_id, verification_policy_id, requested_by_user_id)
+       VALUES ($1, $2, $3, 'EXAMPLE_METADATA_V1', $4) RETURNING id`,
+      [owner.accountId, connectionId, versionId, owner.userId],
+    );
+    return { jobId, workerId };
+  }
+
+  const LEASE = `UPDATE provider_verification_jobs
+      SET state = 'LEASED', lease_worker_principal_id = $2, lease_token_sha256 = repeat('a', 64), lease_fencing_counter = 1,
+          leased_at = clock_timestamp(), lease_expires_at = clock_timestamp() + interval '5 minutes', updated_at = clock_timestamp()
+    WHERE id = $1`;
+
+  // The text between the dollar quotes of a CREATE FUNCTION, which is what pg_proc.prosrc stores.
+  function functionBody(sql: string, name: string): string {
+    const start = sql.indexOf(`CREATE FUNCTION ${name}()`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const open = sql.indexOf("$$", start) + 2;
+    return sql.slice(open, sql.indexOf("$$", open));
+  }
+
+  async function verificationTriggers() {
+    return (
+      await clients.migrator.query<{ tgname: string; def: string }>(
+        `SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger
+          WHERE tgrelid = 'public.provider_verification_jobs'::regclass AND NOT tgisinternal ORDER BY tgname`,
+      )
+    ).rows;
+  }
+
+  async function guardSource(name: string): Promise<string[]> {
+    return (await clients.migrator.query<{ src: string }>("SELECT prosrc AS src FROM pg_proc WHERE proname = $1", [name])).rows.map((row) => row.src);
+  }
+
+  it("S1: adds 0 / NULL / NULL to every existing row, changes nothing else, keeps the 0010 guard byte-identical and is not reapplied", async () => {
+    const migrations = await discoverMigrations();
+    await runMigrations(clients.migrator, migrations.slice(0, 10));
+    expect((await appliedRows()).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+    await verificationJob("deferral-legacy-queued");
+    const leased = await verificationJob("deferral-legacy-leased");
+    await clients.migrator.query(LEASE, [leased.jobId, leased.workerId]);
+    const cancelled = await verificationJob("deferral-legacy-cancelled");
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs SET state = 'CANCELLED', terminal_reason_code = 'LIFECYCLE_NO_LONGER_ELIGIBLE',
+              completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1`,
+      [cancelled.jobId],
+    );
+    const completed = await verificationJob("deferral-legacy-completed");
+    await clients.migrator.query(LEASE, [completed.jobId, completed.workerId]);
+    await clients.migrator.query("UPDATE provider_verification_jobs SET credential_granted_at = clock_timestamp() WHERE id = $1", [completed.jobId]);
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs SET state = 'VERIFYING', verifying_at = clock_timestamp(), verifying_worker_principal_id = $2,
+              verifying_fencing_counter = 1 WHERE id = $1`,
+      [completed.jobId, completed.workerId],
+    );
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs SET state = 'COMPLETED', ${CLEAR_LEASE}, result_outcome = 'VERIFIED',
+              terminal_reason_code = 'CREDENTIAL_ACCEPTED', result_worker_principal_id = $2, result_fencing_counter = 1,
+              completed_at = clock_timestamp() WHERE id = $1`,
+      [completed.jobId, completed.workerId],
+    );
+
+    const before = (await clients.migrator.query("SELECT * FROM provider_verification_jobs ORDER BY id")).rows;
+    expect(before.map((row: { state: string }) => row.state).sort()).toEqual(["CANCELLED", "COMPLETED", "LEASED", "QUEUED"]);
+    const triggersBefore = await verificationTriggers();
+    expect(triggersBefore.map((row) => row.tgname)).toEqual(["provider_verification_jobs_guard"]);
+    const v10Sql = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, PROVIDER_VERIFICATION_FILE), "utf8");
+    expect(await guardSource("provider_verification_jobs_guard")).toEqual([functionBody(v10Sql, "provider_verification_jobs_guard")]);
+    expect(await guardSource("provider_verification_jobs_deferral_guard")).toEqual([]);
+
+    const result = await runMigrations(clients.migrator, migrations);
+
+    expect(result).toEqual({ applied: [UNSUPPORTED_DEFERRAL_FILE], latestVersion: 11 });
+    expect((await appliedRows()).at(-1)).toEqual({ version: 11, name: "provider_verification_unsupported_deferral", sha256: UNSUPPORTED_DEFERRAL_SHA256 });
+
+    const after = (await clients.migrator.query("SELECT * FROM provider_verification_jobs ORDER BY id")).rows;
+    expect(
+      after.map(({ deferred_until, unsupported_deferral_count, last_unsupported_refusal }) => [
+        unsupported_deferral_count,
+        last_unsupported_refusal,
+        deferred_until,
+      ]),
+    ).toEqual(before.map(() => [0, null, null]));
+    expect(after.map(({ deferred_until: _d, unsupported_deferral_count: _c, last_unsupported_refusal: _r, ...rest }) => rest)).toEqual(before);
+
+    // The 0010 guard and trigger are byte-identical; the new guard is added beside them.
+    expect(await guardSource("provider_verification_jobs_guard")).toEqual([functionBody(v10Sql, "provider_verification_jobs_guard")]);
+    const triggersAfter = await verificationTriggers();
+    expect(triggersAfter.map((row) => row.tgname)).toEqual(["provider_verification_jobs_deferral_guard", "provider_verification_jobs_guard"]);
+    expect(triggersAfter[1]).toEqual(triggersBefore[0]);
+    const v11Sql = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, UNSUPPORTED_DEFERRAL_FILE), "utf8");
+    expect(await guardSource("provider_verification_jobs_deferral_guard")).toEqual([
+      functionBody(v11Sql, "provider_verification_jobs_deferral_guard"),
+    ]);
+
+    // A live, ungranted lease migrated from schema 10 can take the new transition once, within d(1).
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'QUEUED', ${CLEAR_LEASE}, unsupported_deferral_count = unsupported_deferral_count + 1,
+              last_unsupported_refusal = 'UNSUPPORTED_POLICY', deferred_until = now() + interval '300 seconds', updated_at = now()
+        WHERE id = $1`,
+      [leased.jobId],
+    );
+    const deferred = await clients.migrator.query(
+      "SELECT state, lease_fencing_counter, unsupported_deferral_count, last_unsupported_refusal FROM provider_verification_jobs WHERE id = $1",
+      [leased.jobId],
+    );
+    expect(deferred.rows).toEqual([
+      { state: "QUEUED", lease_fencing_counter: "1", unsupported_deferral_count: 1, last_unsupported_refusal: "UNSUPPORTED_POLICY" },
+    ]);
+
+    // Repeat execution applies nothing and records no duplicate version.
+    await expect(runMigrations(clients.migrator, migrations)).resolves.toEqual({ applied: [], latestVersion: 11 });
+    const counts = await clients.migrator.query<{ version: number; count: string }>(
+      "SELECT version, count(*) AS count FROM schema_migrations GROUP BY version HAVING count(*) <> 1",
+    );
+    expect(counts.rows).toEqual([]);
   });
 });

@@ -1,6 +1,17 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { openGuardedClients, prepareSchemaV1, type GuardedClients } from "./support/testDatabase.js";
+import { DEFAULT_MIGRATIONS_DIRECTORY } from "../../src/database/migrationFiles.js";
+import {
+  expectSqlError,
+  inRolledBackTransaction,
+  insertAccountWithFreeGrant,
+  openGuardedClients,
+  prepareSchemaV1,
+  type GuardedClients,
+} from "./support/testDatabase.js";
 
 let clients: GuardedClients;
 
@@ -193,7 +204,9 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "provider_verification_jobs_credential_grant_state_ck",
     "provider_verification_jobs_credential_grant_time_ck",
     "provider_verification_jobs_credential_same_connection_fk",
+    "provider_verification_jobs_deferred_after_creation_ck",
     "provider_verification_jobs_fencing_counter_ck",
+    "provider_verification_jobs_last_unsupported_refusal_ck",
     "provider_verification_jobs_lease_complete_ck",
     "provider_verification_jobs_lease_state_ck",
     "provider_verification_jobs_lease_times_ck",
@@ -211,6 +224,8 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
     "provider_verification_jobs_terminal_reason_ck",
     "provider_verification_jobs_terminal_state_ck",
     "provider_verification_jobs_terminal_time_ck",
+    "provider_verification_jobs_unsupported_deferral_count_ck",
+    "provider_verification_jobs_unsupported_deferral_presence_ck",
     "provider_verification_jobs_verifying_after_grant_ck",
     "provider_verification_jobs_verifying_fencing_ck",
     "provider_verification_jobs_verifying_pair_ck",
@@ -227,7 +242,7 @@ const EXPECTED_CONSTRAINTS: Readonly<Record<string, readonly string[]>> = {
   generation_usage_ledger: ["generation_usage_ledger_authorization_same_production_fk", "generation_usage_ledger_pk"],
 };
 
-describe("schema catalog (migrations 0001 to 0010)", () => {
+describe("schema catalog (migrations 0001 to 0011)", () => {
   it("contains exactly the fourteen domain tables and schema_migrations", async () => {
     const tables = await rows<{ relname: string; relkind: string }>(
       `SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -416,6 +431,12 @@ describe("schema catalog (migrations 0001 to 0010)", () => {
         indexname: "provider_verification_jobs_credential_obligation_ix",
         indexdef:
           "CREATE INDEX provider_verification_jobs_credential_obligation_ix ON public.provider_verification_jobs USING btree (provider_credential_version_id, state) WHERE ((credential_granted_at IS NOT NULL) AND (state = ANY (ARRAY['LEASED'::text, 'VERIFYING'::text])))",
+      },
+      {
+        // R44B11G (0011): the lease-selection order; queue_ix below is retained.
+        indexname: "provider_verification_jobs_eligible_queue_ix",
+        indexdef:
+          "CREATE INDEX provider_verification_jobs_eligible_queue_ix ON public.provider_verification_jobs USING btree (COALESCE(deferred_until, created_at), id) WHERE (state = 'QUEUED'::text)",
       },
       {
         indexname: "provider_verification_jobs_lease_expiry_ix",
@@ -804,8 +825,12 @@ describe("schema catalog (migrations 0001 to 0010)", () => {
     expect(insertGuard).toContain("NEW.recorded_at := clock_timestamp();");
     expect(insertGuard).not.toMatch(/\bnow\(\)|current_timestamp|transaction_timestamp|statement_timestamp/i);
 
-    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1");
-    expect(version).toEqual([{ version: 10, name: "provider_connection_verification_workflow" }]);
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations WHERE version >= 9 ORDER BY version");
+    expect(version).toEqual([
+      { version: 9, name: "provider_connection_disconnect_convergence" },
+      { version: 10, name: "provider_connection_verification_workflow" },
+      { version: 11, name: "provider_verification_unsupported_deferral" },
+    ]);
   });
 
   it("stores no secret, sealed credential, fingerprint or plaintext lease token on worker-bridge tables", async () => {
@@ -1034,6 +1059,11 @@ describe("schema catalog (migrations 0001 to 0010)", () => {
       },
       {
         relname: "provider_verification_jobs",
+        tgname: "provider_verification_jobs_deferral_guard",
+        def: "CREATE TRIGGER provider_verification_jobs_deferral_guard BEFORE INSERT OR UPDATE ON public.provider_verification_jobs FOR EACH ROW EXECUTE FUNCTION provider_verification_jobs_deferral_guard()",
+      },
+      {
+        relname: "provider_verification_jobs",
         tgname: "provider_verification_jobs_guard",
         def: "CREATE TRIGGER provider_verification_jobs_guard BEFORE INSERT OR UPDATE ON public.provider_verification_jobs FOR EACH ROW EXECUTE FUNCTION provider_verification_jobs_guard()",
       },
@@ -1058,6 +1088,7 @@ describe("schema catalog (migrations 0001 to 0010)", () => {
       { proname: "generation_usage_ledger_guard_append_only", public_execute: false },
       { proname: "generation_usage_ledger_guard_insert", public_execute: false },
       { proname: "provider_credential_versions_guard_update", public_execute: false },
+      { proname: "provider_verification_jobs_deferral_guard", public_execute: false },
       { proname: "provider_verification_jobs_guard", public_execute: false },
       { proname: "worker_principals_guard_update", public_execute: false },
     ]);
@@ -1079,5 +1110,429 @@ describe("schema catalog (migrations 0001 to 0010)", () => {
       "created_at",
       "updated_at",
     ]);
+  });
+
+  it("records unsupported-verification deferral (0011): three columns, four checks, the eligible-queue index and a second guard beside the unchanged 0010 guard (S6)", async () => {
+    const columns = await rows<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'provider_verification_jobs'
+          AND column_name IN ('deferred_until', 'unsupported_deferral_count', 'last_unsupported_refusal') ORDER BY ordinal_position`,
+    );
+    expect(columns).toEqual([
+      { column_name: "deferred_until", data_type: "timestamp with time zone", is_nullable: "YES", column_default: null },
+      { column_name: "unsupported_deferral_count", data_type: "integer", is_nullable: "NO", column_default: "0" },
+      { column_name: "last_unsupported_refusal", data_type: "text", is_nullable: "YES", column_default: null },
+    ]);
+    // Appended after the 0010 columns; no 0010 column is altered or dropped.
+    const attributes = await rows<{ attname: string }>(
+      `SELECT attname FROM pg_attribute WHERE attrelid = 'public.provider_verification_jobs'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`,
+    );
+    expect(attributes.map((row) => row.attname).slice(-4)).toEqual(["updated_at", "deferred_until", "unsupported_deferral_count", "last_unsupported_refusal"]);
+    expect(attributes).toHaveLength(26);
+
+    const checks = await rows<{ conname: string; def: string; validated: boolean }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def, convalidated AS validated FROM pg_constraint
+        WHERE conname IN ('provider_verification_jobs_unsupported_deferral_count_ck', 'provider_verification_jobs_last_unsupported_refusal_ck',
+                          'provider_verification_jobs_unsupported_deferral_presence_ck', 'provider_verification_jobs_deferred_after_creation_ck')
+        ORDER BY conname`,
+    );
+    expect(checks).toEqual([
+      {
+        conname: "provider_verification_jobs_deferred_after_creation_ck",
+        def: "CHECK (((deferred_until IS NULL) OR (deferred_until > created_at)))",
+        validated: true,
+      },
+      {
+        conname: "provider_verification_jobs_last_unsupported_refusal_ck",
+        def: "CHECK (((last_unsupported_refusal IS NULL) OR (last_unsupported_refusal = ANY (ARRAY['UNSUPPORTED_PROVIDER'::text, 'UNSUPPORTED_POLICY'::text, 'PROVIDER_POLICY_MISMATCH'::text]))))",
+        validated: true,
+      },
+      { conname: "provider_verification_jobs_unsupported_deferral_count_ck", def: "CHECK ((unsupported_deferral_count >= 0))", validated: true },
+      {
+        conname: "provider_verification_jobs_unsupported_deferral_presence_ck",
+        def: "CHECK ((((unsupported_deferral_count = 0) = (last_unsupported_refusal IS NULL)) AND ((unsupported_deferral_count = 0) = (deferred_until IS NULL))))",
+        validated: true,
+      },
+    ]);
+
+    // Two row guards, fired in name order (deferral guard first); neither modifies NEW.
+    const triggers = await rows<{ tgname: string; def: string; enabled: string }>(
+      `SELECT tgname, pg_get_triggerdef(oid) AS def, tgenabled::text AS enabled FROM pg_trigger
+        WHERE tgrelid = 'public.provider_verification_jobs'::regclass AND NOT tgisinternal ORDER BY tgname`,
+    );
+    expect(triggers).toEqual([
+      {
+        tgname: "provider_verification_jobs_deferral_guard",
+        def: "CREATE TRIGGER provider_verification_jobs_deferral_guard BEFORE INSERT OR UPDATE ON public.provider_verification_jobs FOR EACH ROW EXECUTE FUNCTION provider_verification_jobs_deferral_guard()",
+        enabled: "O",
+      },
+      {
+        tgname: "provider_verification_jobs_guard",
+        def: "CREATE TRIGGER provider_verification_jobs_guard BEFORE INSERT OR UPDATE ON public.provider_verification_jobs FOR EACH ROW EXECUTE FUNCTION provider_verification_jobs_guard()",
+        enabled: "O",
+      },
+    ]);
+
+    const functions = await rows<{ proname: string; src: string; language: string; security_definer: boolean; public_execute: boolean }>(
+      `SELECT p.proname, p.prosrc AS src, l.lanname AS language, p.prosecdef AS security_definer,
+              has_function_privilege('public', p.oid, 'EXECUTE') AS public_execute
+         FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+        WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'provider_verification_jobs_%' ORDER BY p.proname`,
+    );
+    expect(functions.map(({ proname, language, security_definer, public_execute }) => ({ proname, language, security_definer, public_execute }))).toEqual([
+      { proname: "provider_verification_jobs_deferral_guard", language: "plpgsql", security_definer: false, public_execute: false },
+      { proname: "provider_verification_jobs_guard", language: "plpgsql", security_definer: false, public_execute: false },
+    ]);
+    // pg_proc.prosrc is exactly the text between the dollar quotes of each committed CREATE FUNCTION:
+    // the 0010 guard is byte-identical to baseline and the 0011 guard is the committed one.
+    const bodyOf = async (file: string, name: string) => {
+      const sql = await readFile(join(DEFAULT_MIGRATIONS_DIRECTORY, file), "utf8");
+      const start = sql.indexOf(`CREATE FUNCTION ${name}()`);
+      expect(start, name).toBeGreaterThanOrEqual(0);
+      const open = sql.indexOf("$$", start) + 2;
+      return sql.slice(open, sql.indexOf("$$", open));
+    };
+    const source = (name: string) => functions.find(({ proname }) => proname === name)!.src;
+    expect(source("provider_verification_jobs_guard")).toBe(
+      await bodyOf("0010_provider_connection_verification_workflow.sql", "provider_verification_jobs_guard"),
+    );
+    expect(source("provider_verification_jobs_deferral_guard")).toBe(
+      await bodyOf("0011_provider_verification_unsupported_deferral.sql", "provider_verification_jobs_deferral_guard"),
+    );
+    expect(source("provider_verification_jobs_deferral_guard")).not.toMatch(/\bNEW\.\w+\s*:=|clock_timestamp/);
+
+    const version = await rows<{ version: number; name: string }>("SELECT version, name FROM schema_migrations WHERE version = 11");
+    expect(version).toEqual([{ version: 11, name: "provider_verification_unsupported_deferral" }]);
+  });
+});
+
+// R44B11G S2-S7: database enforcement of the unsupported deferral, exercised by
+// the table owner (triggers bind every role) inside rolled-back transactions.
+// Within one transaction now() is fixed, so the bounds below are exact.
+describe("unsupported-verification deferral enforcement (migration 0011)", () => {
+  const CHECK_VIOLATION = "23514";
+  const SHAPE = /unsupported deferral requires a live ungranted lease, one increment, a refusal and a future deferral/;
+  const BOUND = /unsupported deferral exceeds its backoff bound/;
+  const CREATED = /created with no unsupported deferral/;
+  const CLEAR_LEASE = "lease_worker_principal_id = NULL, lease_token_sha256 = NULL, leased_at = NULL, lease_expires_at = NULL";
+  const d = (n: number) => (n >= 5 ? 3600 : 300 * 2 ** (n - 1));
+
+  type Connection = Readonly<{ accountId: string; userId: string; connectionId: string; versionId: string; workerId: string }>;
+  type Job = Readonly<{ jobId: string; workerId: string }>;
+
+  async function connection(subject: string): Promise<Connection> {
+    const q = async (sql: string, params: unknown[]) => (await clients.migrator.query<{ id: string }>(sql, params)).rows[0]!.id;
+    const owner = await insertAccountWithFreeGrant(clients.migrator, subject);
+    const workerId = await q("INSERT INTO worker_principals (label) VALUES ($1) RETURNING id", [`${subject}-worker`]);
+    const connectionId = await q(
+      "INSERT INTO provider_connections (account_id, provider, credential_kind, created_by_user_id) VALUES ($1, 'EXAMPLE_PROVIDER', 'API_KEY', $2) RETURNING id",
+      [owner.accountId, owner.userId],
+    );
+    const versionId = await q(
+      `INSERT INTO provider_credential_versions
+         (account_id, provider_connection_id, credential_version, status, sealed_credential,
+          fingerprint_algorithm, fingerprint_key_ref, fingerprint_value, created_by_user_id)
+       VALUES ($1, $2, 1, 'ACTIVE', '{"format":"fixture-envelope"}'::jsonb, 'HMAC-SHA-256', 'fixture/v1', repeat('a', 43), $3) RETURNING id`,
+      [owner.accountId, connectionId, owner.userId],
+    );
+    return { accountId: owner.accountId, userId: owner.userId, connectionId, versionId, workerId };
+  }
+
+  const INSERT_JOB = `INSERT INTO provider_verification_jobs
+      (account_id, provider_connection_id, provider_credential_version_id, verification_policy_id, requested_by_user_id)
+    VALUES ($1, $2, $3, 'EXAMPLE_METADATA_V1', $4) RETURNING id`;
+
+  async function job(subject: string): Promise<Job> {
+    const c = await connection(subject);
+    const inserted = await clients.migrator.query<{ id: string }>(INSERT_JOB, [c.accountId, c.connectionId, c.versionId, c.userId]);
+    return { jobId: inserted.rows[0]!.id, workerId: c.workerId };
+  }
+
+  // QUEUED -> LEASED exactly as the 0010 guard requires (fence + 1).
+  async function lease(target: Job, expires = "now() + interval '30 seconds'", leasedAt = "now()"): Promise<void> {
+    await clients.migrator.query(
+      `UPDATE provider_verification_jobs
+          SET state = 'LEASED', lease_worker_principal_id = $2, lease_token_sha256 = repeat('a', 64),
+              lease_fencing_counter = lease_fencing_counter + 1, leased_at = ${leasedAt}, lease_expires_at = ${expires}, updated_at = now()
+        WHERE id = $1`,
+      [target.jobId, target.workerId],
+    );
+  }
+
+  function deferral(
+    options: Partial<Readonly<{ increment: string; refusal: string; deferredUntil: string; state: string; clearLease: boolean; extra: string }>> = {},
+  ): string {
+    const {
+      increment = "1",
+      refusal = "'UNSUPPORTED_PROVIDER'",
+      deferredUntil = "now() + interval '300 seconds'",
+      state = "'QUEUED'",
+      clearLease = true,
+      extra = "",
+    } = options;
+    return `UPDATE provider_verification_jobs
+        SET state = ${state}, ${clearLease ? `${CLEAR_LEASE}, ` : ""}${extra}
+            unsupported_deferral_count = unsupported_deferral_count + ${increment},
+            last_unsupported_refusal = ${refusal}, deferred_until = ${deferredUntil}, updated_at = now()
+      WHERE id = $1`;
+  }
+
+  async function expectGuardRejection(sql: string, params: readonly unknown[], message: RegExp): Promise<void> {
+    await clients.migrator.query("SAVEPOINT deferral_probe");
+    let caught: unknown;
+    try {
+      await clients.migrator.query(sql, params as unknown[]);
+    } catch (error) {
+      caught = error;
+    }
+    await clients.migrator.query("ROLLBACK TO SAVEPOINT deferral_probe");
+    expect(caught, `expected ${message} from: ${sql}`).toBeInstanceOf(Error);
+    expect(caught).toMatchObject({ code: CHECK_VIOLATION });
+    expect((caught as Error).message).toMatch(message);
+  }
+
+  async function columnsOf(jobId: string) {
+    return (
+      await clients.migrator.query<{
+        state: string;
+        fence: string;
+        count: number;
+        refusal: string | null;
+        deferred_until: Date | null;
+        offset_seconds: string | null;
+      }>(
+        `SELECT state, lease_fencing_counter AS fence, unsupported_deferral_count AS count, last_unsupported_refusal AS refusal,
+                deferred_until, extract(epoch FROM deferred_until - now())::text AS offset_seconds
+           FROM provider_verification_jobs WHERE id = $1`,
+        [jobId],
+      )
+    ).rows[0]!;
+  }
+
+  it("S2: each deferral CHECK rejects its own violation (the guard, which rejects these first, disabled for this rolled-back probe)", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const queued = await job("deferral-s2");
+      await clients.migrator.query("ALTER TABLE provider_verification_jobs DISABLE TRIGGER provider_verification_jobs_deferral_guard");
+      const set = (assignments: string) => `UPDATE provider_verification_jobs SET ${assignments} WHERE id = $1`;
+      const later = "deferred_until = now() + interval '1 hour'";
+
+      await expectSqlError(clients.migrator, set(`unsupported_deferral_count = -1, last_unsupported_refusal = 'UNSUPPORTED_PROVIDER', ${later}`), [queued.jobId], {
+        code: CHECK_VIOLATION,
+        constraint: "provider_verification_jobs_unsupported_deferral_count_ck",
+      });
+      await expectSqlError(clients.migrator, set(`unsupported_deferral_count = 1, last_unsupported_refusal = 'UNSUPPORTED_MODEL', ${later}`), [queued.jobId], {
+        code: CHECK_VIOLATION,
+        constraint: "provider_verification_jobs_last_unsupported_refusal_ck",
+      });
+      for (const assignments of [
+        `unsupported_deferral_count = 1, last_unsupported_refusal = NULL, ${later}`,
+        "unsupported_deferral_count = 0, last_unsupported_refusal = 'UNSUPPORTED_POLICY', deferred_until = NULL",
+        "unsupported_deferral_count = 1, last_unsupported_refusal = 'UNSUPPORTED_POLICY', deferred_until = NULL",
+        `unsupported_deferral_count = 0, last_unsupported_refusal = NULL, ${later}`,
+      ]) {
+        await expectSqlError(clients.migrator, set(assignments), [queued.jobId], {
+          code: CHECK_VIOLATION,
+          constraint: "provider_verification_jobs_unsupported_deferral_presence_ck",
+        });
+      }
+      await expectSqlError(
+        clients.migrator,
+        set("unsupported_deferral_count = 1, last_unsupported_refusal = 'PROVIDER_POLICY_MISMATCH', deferred_until = created_at"),
+        [queued.jobId],
+        { code: CHECK_VIOLATION, constraint: "provider_verification_jobs_deferred_after_creation_ck" },
+      );
+      // Control: the same shape one microsecond after creation satisfies every CHECK.
+      await clients.migrator.query(
+        set("unsupported_deferral_count = 1, last_unsupported_refusal = 'PROVIDER_POLICY_MISMATCH', deferred_until = created_at + interval '1 microsecond'"),
+        [queued.jobId],
+      );
+    });
+  });
+
+  it("S3: a job is inserted with 0 / NULL / NULL, and any non-default deferral column on INSERT is rejected", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const c = await connection("deferral-s3");
+      const insert = (columns: string, values: string) =>
+        `INSERT INTO provider_verification_jobs
+           (account_id, provider_connection_id, provider_credential_version_id, verification_policy_id, requested_by_user_id, ${columns})
+         VALUES ($1, $2, $3, 'EXAMPLE_METADATA_V1', $4, ${values})`;
+      const params = [c.accountId, c.connectionId, c.versionId, c.userId];
+
+      await expectGuardRejection(insert("unsupported_deferral_count", "1"), params, CREATED);
+      await expectGuardRejection(insert("last_unsupported_refusal", "'UNSUPPORTED_PROVIDER'"), params, CREATED);
+      await expectGuardRejection(insert("deferred_until", "now() + interval '1 minute'"), params, CREATED);
+      await expectGuardRejection(
+        insert("unsupported_deferral_count, last_unsupported_refusal, deferred_until", "1, 'UNSUPPORTED_PROVIDER', now() + interval '1 minute'"),
+        params,
+        CREATED,
+      );
+
+      const inserted = await clients.migrator.query<{ id: string }>(INSERT_JOB, params);
+      expect(await columnsOf(inserted.rows[0]!.id)).toMatchObject({ state: "QUEUED", fence: "0", count: 0, refusal: null, deferred_until: null });
+    });
+  });
+
+  it("S4: accepts the deferral only from a live ungranted lease with one increment, a refusal and now() < x <= now() + d(n); each predicate negated alone is rejected", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const live = await job("deferral-s4-live");
+      await lease(live);
+      const params = [live.jobId];
+
+      // OLD.state = 'LEASED' negated: a QUEUED job.
+      const queued = await job("deferral-s4-queued");
+      await expectGuardRejection(deferral(), [queued.jobId], SHAPE);
+      // NEW.state = 'QUEUED' negated: the lease is kept.
+      await expectGuardRejection(deferral({ state: "'LEASED'", clearLease: false }), params, SHAPE);
+      // OLD.credential_granted_at IS NULL negated: a granted lease.
+      const granted = await job("deferral-s4-granted");
+      await lease(granted);
+      await clients.migrator.query("UPDATE provider_verification_jobs SET credential_granted_at = now() WHERE id = $1", [granted.jobId]);
+      await expectGuardRejection(deferral(), [granted.jobId], SHAPE);
+      // OLD.lease_expires_at > now() negated: a lease ending exactly at transaction start.
+      const expired = await job("deferral-s4-expired");
+      await lease(expired, "now()", "now() - interval '2 minutes'");
+      await expectGuardRejection(deferral(), [expired.jobId], SHAPE);
+      // NEW.count = OLD.count + 1 negated: no increment, and two.
+      await expectGuardRejection(deferral({ increment: "0" }), params, SHAPE);
+      await expectGuardRejection(deferral({ increment: "2" }), params, SHAPE);
+      // NEW.last_unsupported_refusal IS NOT NULL negated.
+      await expectGuardRejection(deferral({ refusal: "NULL" }), params, SHAPE);
+      // NEW.deferred_until > now() negated: now(), the past and NULL.
+      await expectGuardRejection(deferral({ deferredUntil: "now()" }), params, SHAPE);
+      await expectGuardRejection(deferral({ deferredUntil: "now() - interval '1 second'" }), params, SHAPE);
+      await expectGuardRejection(deferral({ deferredUntil: "NULL" }), params, SHAPE);
+      // NEW.deferred_until <= now() + d(1) negated by one microsecond.
+      await expectGuardRejection(deferral({ deferredUntil: "now() + interval '300 seconds' + interval '1 microsecond'" }), params, BOUND);
+
+      // The bound is inclusive: exactly now() + d(1) is accepted.
+      await clients.migrator.query(deferral({ deferredUntil: "now() + interval '300 seconds'" }), params);
+      const row = await columnsOf(live.jobId);
+      expect(row).toMatchObject({ state: "QUEUED", fence: "1", count: 1, refusal: "UNSUPPORTED_PROVIDER" });
+      expect(Number(row.offset_seconds)).toBe(300);
+    });
+  });
+
+  it("S4/N6: bounds step n by d(n) = 300, 600, 1200, 2400 and then 3600 through n = 50, and accepts any shorter future deferral", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const target = await job("deferral-s4-schedule");
+      const refusals = ["'UNSUPPORTED_PROVIDER'", "'UNSUPPORTED_POLICY'", "'PROVIDER_POLICY_MISMATCH'"];
+
+      for (let n = 1; n <= 50; n += 1) {
+        await lease(target);
+        const refusal = refusals[n % refusals.length]!;
+        const bound = `now() + make_interval(secs => ${d(n)})`;
+        await expectGuardRejection(deferral({ refusal, deferredUntil: `${bound} + interval '1 microsecond'` }), [target.jobId], BOUND);
+        await expectGuardRejection(deferral({ refusal, deferredUntil: "now()" }), [target.jobId], SHAPE);
+        // Upper bound only: n = 2 takes a one-second deferral; every other step takes exactly d(n).
+        await clients.migrator.query(deferral({ refusal, deferredUntil: n === 2 ? "now() + interval '1 second'" : bound }), [target.jobId]);
+
+        const row = await columnsOf(target.jobId);
+        expect(row).toMatchObject({ state: "QUEUED", fence: String(n), count: n, refusal: refusal.slice(1, -1) });
+        expect(Number(row.offset_seconds), `n = ${n}`).toBe(n === 2 ? 1 : d(n));
+      }
+      expect([1, 2, 3, 4, 5, 6, 7, 50].map(d)).toEqual([300, 600, 1200, 2400, 3600, 3600, 3600, 3600]);
+    });
+  });
+
+  it("S5/N4: no other transition changes the deferral columns, none can make a job terminal, and requeue, lease and cancellation preserve them", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const target = await job("deferral-s5");
+      await lease(target);
+      await clients.migrator.query(deferral({ refusal: "'UNSUPPORTED_POLICY'" }), [target.jobId]);
+      const deferred = await columnsOf(target.jobId);
+      const kept = { count: 1, refusal: "UNSUPPORTED_POLICY", deferred_until: deferred.deferred_until };
+      const set = (assignments: string) => `UPDATE provider_verification_jobs SET ${assignments}, updated_at = now() WHERE id = $1`;
+
+      // QUEUED: no column may be edited, reset or cleared outside a deferral.
+      for (const assignments of [
+        "deferred_until = now() + interval '1 second'",
+        "deferred_until = NULL, unsupported_deferral_count = 0, last_unsupported_refusal = NULL",
+        "last_unsupported_refusal = 'PROVIDER_POLICY_MISMATCH'",
+        "unsupported_deferral_count = unsupported_deferral_count + 1, deferred_until = now() + interval '1 second'",
+      ]) {
+        await expectGuardRejection(set(assignments), [target.jobId], SHAPE);
+      }
+      // A lease that also touches the columns is rejected; a plain lease keeps them.
+      await expectGuardRejection(
+        `UPDATE provider_verification_jobs
+            SET state = 'LEASED', lease_worker_principal_id = $2, lease_token_sha256 = repeat('a', 64), lease_fencing_counter = lease_fencing_counter + 1,
+                leased_at = now(), lease_expires_at = now() + interval '30 seconds', deferred_until = NULL, updated_at = now()
+          WHERE id = $1`,
+        [target.jobId, target.workerId],
+        SHAPE,
+      );
+      await lease(target);
+      expect(await columnsOf(target.jobId)).toMatchObject({ state: "LEASED", fence: "2", ...kept });
+
+      // Worker-loss style completion and lifecycle cancellation from LEASED may not carry a deferral change.
+      await expectGuardRejection(set(`state = 'CANCELLED', ${CLEAR_LEASE}, terminal_reason_code = 'LIFECYCLE_NO_LONGER_ELIGIBLE', completed_at = now(), deferred_until = NULL, unsupported_deferral_count = 0, last_unsupported_refusal = NULL`), [target.jobId], SHAPE);
+      await expectGuardRejection(set(`state = 'CANCELLED', ${CLEAR_LEASE}, terminal_reason_code = 'LIFECYCLE_NO_LONGER_ELIGIBLE', completed_at = now(), unsupported_deferral_count = unsupported_deferral_count + 1, last_unsupported_refusal = 'UNSUPPORTED_PROVIDER', deferred_until = now() + interval '300 seconds'`), [target.jobId], SHAPE);
+      // Natural-expiry style requeue (no deferral column written) keeps the columns.
+      await clients.migrator.query(set(`state = 'QUEUED', ${CLEAR_LEASE}`), [target.jobId]);
+      expect(await columnsOf(target.jobId)).toMatchObject({ state: "QUEUED", fence: "2", ...kept });
+
+      // A granted lease may not change the columns on its way to VERIFYING, and may not be deferred.
+      await lease(target);
+      await clients.migrator.query(set("credential_granted_at = now()"), [target.jobId]);
+      await expectGuardRejection(deferral(), [target.jobId], SHAPE);
+      await expectGuardRejection(
+        set(`state = 'VERIFYING', verifying_at = now(), verifying_worker_principal_id = '${target.workerId}', verifying_fencing_counter = 3, deferred_until = NULL`),
+        [target.jobId],
+        SHAPE,
+      );
+      await clients.migrator.query(
+        set(`state = 'VERIFYING', verifying_at = now(), verifying_worker_principal_id = '${target.workerId}', verifying_fencing_counter = 3`),
+        [target.jobId],
+      );
+      await expectGuardRejection(
+        set(`state = 'COMPLETED', ${CLEAR_LEASE}, result_outcome = 'VERIFIED', terminal_reason_code = 'CREDENTIAL_ACCEPTED',
+             result_worker_principal_id = '${target.workerId}', result_fencing_counter = 3, completed_at = now(), unsupported_deferral_count = 0,
+             last_unsupported_refusal = NULL, deferred_until = NULL`),
+        [target.jobId],
+        SHAPE,
+      );
+      await clients.migrator.query(
+        set(`state = 'COMPLETED', ${CLEAR_LEASE}, result_outcome = 'VERIFIED', terminal_reason_code = 'CREDENTIAL_ACCEPTED',
+             result_worker_principal_id = '${target.workerId}', result_fencing_counter = 3, completed_at = now()`),
+        [target.jobId],
+      );
+      // N2 at the schema level: the deferral columns persist on the COMPLETED row, which is then immutable.
+      expect(await columnsOf(target.jobId)).toMatchObject({ state: "COMPLETED", fence: "3", ...kept });
+      for (const assignments of ["deferred_until = NULL", "unsupported_deferral_count = 0", "last_unsupported_refusal = 'UNSUPPORTED_PROVIDER'"]) {
+        await expectSqlError(clients.migrator, set(assignments), [target.jobId], { code: CHECK_VIOLATION });
+      }
+
+      // N3 at the schema level: lifecycle cancellation of a deferred QUEUED job preserves the columns; the terminal row is immutable.
+      const cancelled = await job("deferral-s5-cancelled");
+      await lease(cancelled);
+      await clients.migrator.query(deferral({ refusal: "'PROVIDER_POLICY_MISMATCH'" }), [cancelled.jobId]);
+      const before = await columnsOf(cancelled.jobId);
+      await clients.migrator.query(
+        set("state = 'CANCELLED', terminal_reason_code = 'LIFECYCLE_NO_LONGER_ELIGIBLE', completed_at = now()"),
+        [cancelled.jobId],
+      );
+      expect(await columnsOf(cancelled.jobId)).toMatchObject({
+        state: "CANCELLED",
+        count: 1,
+        refusal: "PROVIDER_POLICY_MISMATCH",
+        deferred_until: before.deferred_until,
+      });
+      await expectSqlError(clients.migrator, set("deferred_until = NULL"), [cancelled.jobId], { code: CHECK_VIOLATION });
+    });
+  });
+
+  it("S7: a deferral leaves the fencing counter unchanged and cannot change it", async () => {
+    await inRolledBackTransaction(clients.migrator, async () => {
+      const target = await job("deferral-s7");
+      await lease(target);
+      expect((await columnsOf(target.jobId)).fence).toBe("1");
+
+      // The deferral shape is valid, but the 0010 fence rule refuses any fence change outside QUEUED -> LEASED.
+      await expectSqlError(clients.migrator, deferral({ extra: "lease_fencing_counter = lease_fencing_counter + 1," }), [target.jobId], {
+        code: CHECK_VIOLATION,
+      });
+      await clients.migrator.query(deferral(), [target.jobId]);
+      expect(await columnsOf(target.jobId)).toMatchObject({ state: "QUEUED", fence: "1", count: 1 });
+    });
   });
 });

@@ -227,8 +227,11 @@ export function isCurrentForAggregate(lifecycle: VerificationLifecycle): boolean
 // Eligible verification work only: an ACTIVE Account and owner, a connection
 // that is neither DISCONNECTED nor DISABLED, and a bound version that is still
 // ACTIVE. This is a filter; the grant and barrier re-check under locks.
-// Oldest first (provider_verification_jobs_queue_ix order); bounded to one
-// row; SKIP LOCKED so concurrent workers never wait on or share a job.
+// R44B11G: only jobs whose key COALESCE(deferred_until, created_at) has
+// passed, in (key, id) order (provider_verification_jobs_eligible_queue_ix);
+// the eligibility predicate stays in WHERE so a concurrently deferred row is
+// re-checked before locking. Bounded to one row; SKIP LOCKED so concurrent
+// workers never wait on or share a job.
 const SELECT_NEXT = `
 SELECT j.id, c.provider, j.verification_policy_id
   FROM provider_verification_jobs j
@@ -238,12 +241,13 @@ SELECT j.id, c.provider, j.verification_policy_id
   JOIN provider_credential_versions v
     ON v.account_id = j.account_id AND v.provider_connection_id = j.provider_connection_id AND v.id = j.provider_credential_version_id
  WHERE j.state = 'QUEUED'
+   AND COALESCE(j.deferred_until, j.created_at) <= now()
    AND j.lease_fencing_counter < ${MAX_FENCING_COUNTER}
    AND a.status = 'ACTIVE'
    AND u.status = 'ACTIVE'
    AND c.status NOT IN ('DISCONNECTED', 'DISABLED')
    AND v.status = 'ACTIVE'
- ORDER BY j.created_at, j.id
+ ORDER BY COALESCE(j.deferred_until, j.created_at), j.id
  LIMIT 1
    FOR UPDATE OF j SKIP LOCKED`;
 

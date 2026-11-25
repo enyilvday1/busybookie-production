@@ -30,6 +30,9 @@ export type WorkerSecurityEventType =
   | "WORKER_PROVIDER_VERIFICATION_GRANT_REJECTED"
   | "WORKER_PROVIDER_VERIFICATION_VERIFYING_REJECTED"
   | "WORKER_PROVIDER_VERIFICATION_RESULT_REJECTED"
+  // R44B11G: unsupported-lease deferral refusals. The existing lease reasons
+  // are reused; there is no new rejection reason.
+  | "WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED"
   // R44B10P2: input-failed refusals (no migration; a union member only).
   | "WORKER_INPUT_FAILURE_REJECTED";
 

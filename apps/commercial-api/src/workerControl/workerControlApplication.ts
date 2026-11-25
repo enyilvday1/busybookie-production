@@ -28,6 +28,7 @@ import { isInputFailureCode, reportWorkerInputFailed } from "./workerInputFailed
 import { acquireProviderVerificationLease, type ProviderVerificationLease } from "./workerProviderVerificationLeaseService.js";
 import { grantProviderVerificationCredential } from "./workerProviderVerificationCredentialGrantService.js";
 import { acknowledgeProviderVerificationVerifying } from "./workerProviderVerificationVerifyingService.js";
+import { deferUnsupportedProviderVerification, isProviderVerificationRefusal } from "./workerProviderVerificationDeferralService.js";
 import {
   isProviderVerificationOutcome,
   isWorkerReportableVerificationReason,
@@ -53,6 +54,10 @@ import type { WorkerSecurityEvent, WorkerSecurityEventSink } from "./workerSecur
 //   POST /worker-control/v1/provider-verifications/:jobId/credential-grant the exact bound sealed credential
 //   POST /worker-control/v1/provider-verifications/:jobId/verifying        durable LEASED -> VERIFYING barrier
 //   POST /worker-control/v1/provider-verifications/:jobId/result           VERIFYING -> COMPLETED (published wire contract)
+//
+// R44B11G unsupported-lease deferral (never terminal; no /release route):
+//
+//   POST /worker-control/v1/provider-verifications/:jobId/unsupported      ungranted LEASED -> QUEUED, deferred d(n)
 //
 // The router exists only when a WorkerAuthenticationAdapter, a
 // WorkerSecurityEventSink and the runtime pool are injected in code; the
@@ -89,8 +94,9 @@ const SUBMISSION_FAILED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter"
 const INPUT_FAILED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "failureCode"]);
 const VERIFICATION_LEASE_PATH = `${WORKER_CONTROL_PREFIX}/provider-verifications/lease`;
 const VERIFICATION_ACTION =
-  /^\/worker-control\/v1\/provider-verifications\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(credential-grant|verifying|result)$/;
+  /^\/worker-control\/v1\/provider-verifications\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(credential-grant|verifying|result|unsupported)$/;
 const VERIFICATION_RESULT_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "outcome", "reasonCode"]);
+const UNSUPPORTED_MEMBERS: ReadonlySet<string> = new Set(["fencingCounter", "leaseToken", "refusal"]);
 
 class HttpFailure extends Error {
   constructor(
@@ -172,6 +178,7 @@ export function createWorkerControlApplication(options: WorkerControlApplication
         | "WORKER_PROVIDER_VERIFICATION_GRANT_REJECTED"
         | "WORKER_PROVIDER_VERIFICATION_VERIFYING_REJECTED"
         | "WORKER_PROVIDER_VERIFICATION_RESULT_REJECTED"
+        | "WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED"
         | null = null,
       // R44B11F: which identifier the route names in its security events.
       target: "attempt" | "verification" = "attempt",
@@ -428,6 +435,30 @@ export function createWorkerControlApplication(options: WorkerControlApplication
       "verification",
     );
 
+  // R44B11G: an admission refusal defers the leased job, never terminally.
+  // Exactly three members and the closed refusal vocabulary; there is no
+  // duration member, and the service is called without a schedule, so the
+  // deferral is always the production d(n).
+  const verificationUnsupported = (jobId: string) =>
+    route(
+      async (request, response, context) => {
+        const body = await readJsonObjectBody(request, UNSUPPORTED_MEMBERS);
+        const proof = parseProof(body);
+        const { refusal } = body;
+        if (!isProviderVerificationRefusal(refusal)) throw new RequestBodyError("INVALID_REQUEST");
+        const deferral = await deferUnsupportedProviderVerification(pool, context, jobId, proof, refusal);
+        sendJson(response, 200, {
+          providerVerificationJobId: deferral.providerVerificationJobId,
+          fencingCounter: deferral.fencingCounter,
+          state: deferral.state,
+          deferredUntil: deferral.deferredUntil.toISOString(),
+        });
+      },
+      jobId,
+      "WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED",
+      "verification",
+    );
+
   const verificationLeaseRoute: ApplicationRoute = Object.freeze({ methods: ["POST"], handle: verificationLease });
 
   // The input-failed report (section 18, R44B10P2). Exactly the five closed
@@ -458,13 +489,15 @@ export function createWorkerControlApplication(options: WorkerControlApplication
       if (pathname === VERIFICATION_LEASE_PATH) return verificationLeaseRoute;
       const verification = VERIFICATION_ACTION.exec(pathname);
       if (verification !== null) {
-        const [, jobId, verificationAction] = verification as unknown as [string, string, "credential-grant" | "verifying" | "result"];
+        const [, jobId, verificationAction] = verification as unknown as [string, string, "credential-grant" | "verifying" | "result" | "unsupported"];
         const handle =
           verificationAction === "credential-grant"
             ? verificationCredentialGrant(jobId)
             : verificationAction === "verifying"
               ? verificationVerifying(jobId)
-              : verificationResult(jobId);
+              : verificationAction === "result"
+                ? verificationResult(jobId)
+                : verificationUnsupported(jobId);
         return Object.freeze({ methods: ["POST"], handle });
       }
       const match = ATTEMPT_ACTION.exec(pathname);

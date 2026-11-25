@@ -352,3 +352,151 @@ describe("R44B11F provider-verification worker routes", () => {
     expect((await send(port, "POST", leasePath, JSON.stringify({ provider: "X" }), json)).status).toBe(400);
   });
 });
+
+// R44B11G: the unsupported-lease deferral route (section 4), without a
+// database. The fake pool throws on any transaction: a 400 proves no lifecycle
+// work happened, and a valid body reaching the service surfaces as a 503.
+describe("R44B11G unsupported-lease deferral route", () => {
+  const job = randomUUID();
+  const LEASE_TOKEN = "C".repeat(43);
+  const unsupportedPath = `/worker-control/v1/provider-verifications/${job}/unsupported`;
+  const json = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  const valid = { fencingCounter: 1, leaseToken: LEASE_TOKEN, refusal: "UNSUPPORTED_POLICY" };
+
+  it("answers only POST, and 404 for a non-canonical id, /release and any other action (H6)", async () => {
+    const { port } = await start();
+    for (const method of ["GET", "PUT", "DELETE", "PATCH"]) {
+      const response = await send(port, method, unsupportedPath);
+      expect(response.status, method).toBe(405);
+      expect(response.headers.allow).toBe("POST");
+    }
+    for (const path of [
+      `/worker-control/v1/provider-verifications/${job.toUpperCase()}/unsupported`,
+      `/worker-control/v1/provider-verifications/${job}/release`,
+      `/worker-control/v1/provider-verifications/${job}/unsupported/x`,
+      `/worker-control/v1/provider-verifications/${job}/unsupported-lease`,
+      `/worker-control/v1/provider-verifications/${job}/defer`,
+      "/worker-control/v1/provider-verifications/not-a-uuid/unsupported",
+      "/worker-control/v1/provider-verifications/unsupported",
+      `/worker-control/v1/attempts/${job}/unsupported`,
+    ]) {
+      expect((await send(port, "POST", path, JSON.stringify(valid), json)).status, path).toBe(404);
+    }
+  });
+
+  it("requires worker authentication (H1), refuses Origin first (H3) and fails closed on a security-sink outage (H8)", async () => {
+    const { port, recording } = await start();
+    const missing = await send(port, "POST", unsupportedPath, JSON.stringify(valid), { "Content-Type": "application/json" });
+    const rejected = await send(port, "POST", unsupportedPath, JSON.stringify(valid), { ...json, Authorization: "Bearer fixture-alice" });
+    for (const response of [missing, rejected]) {
+      expect(response.status).toBe(401);
+      expect(response.body).toBe('{"status":"error","code":"AUTHENTICATION_REQUIRED"}\n');
+      expect(response.headers["www-authenticate"]).toBe("Bearer");
+    }
+    expect(recording.events.map((event) => [event.type, event.reason, event.providerVerificationJobId, event.executionAttemptId])).toEqual([
+      ["WORKER_AUTH_REQUIRED", "CREDENTIAL_ABSENT", job, undefined],
+      ["WORKER_AUTH_REJECTED", "ADAPTER_REJECTED", job, undefined],
+    ]);
+
+    const origin = await send(port, "POST", unsupportedPath, JSON.stringify(valid), { ...json, Origin: "https://app.example" });
+    expect(origin.status).toBe(403);
+    expect(origin.body).toBe('{"status":"error","code":"ORIGIN_NOT_ALLOWED"}\n');
+    expect(origin.headers["access-control-allow-origin"]).toBeUndefined();
+    expect(origin.headers["set-cookie"]).toBeUndefined();
+    expect(recording.events.at(-1)).toMatchObject({ type: "WORKER_ORIGIN_REJECTED", reason: "ORIGIN_PRESENT", providerVerificationJobId: job });
+    expect(recording.events.at(-1)!.workerPrincipalId).toBeUndefined();
+
+    // Both refusals must be logged before responding; an unavailable log fails closed.
+    recording.setFailing(true);
+    expect((await send(port, "POST", unsupportedPath, JSON.stringify(valid), { "Content-Type": "application/json" })).status).toBe(503);
+    expect((await send(port, "POST", unsupportedPath, JSON.stringify(valid), { ...json, Origin: "https://app.example" })).status).toBe(503);
+
+    const outage = await start({ available: false });
+    const unavailable = await send(outage.port, "POST", unsupportedPath, JSON.stringify(valid), json);
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.body).toBe('{"status":"error","code":"SERVICE_UNAVAILABLE"}\n');
+    expect(outage.recording.events.map((event) => [event.type, event.reason])).toEqual([["WORKER_AUTH_UNAVAILABLE", "ADAPTER_FAULT"]]);
+
+    // Neither the bearer credential nor the lease token reaches a response or an event.
+    const visible = [missing, rejected, origin, unavailable].map((response) => response.body + JSON.stringify(response.headers)).join("") +
+      JSON.stringify(recording.events) + JSON.stringify(outage.recording.events);
+    expect(visible.includes(TOKEN)).toBe(false);
+    expect(visible.includes(LEASE_TOKEN)).toBe(false);
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["a missing fencingCounter", { leaseToken: LEASE_TOKEN, refusal: "UNSUPPORTED_POLICY" }],
+    ["a missing leaseToken", { fencingCounter: 1, refusal: "UNSUPPORTED_POLICY" }],
+    ["a missing refusal", { fencingCounter: 1, leaseToken: LEASE_TOKEN }],
+    ["a zero fencingCounter", { ...valid, fencingCounter: 0 }],
+    ["a negative fencingCounter", { ...valid, fencingCounter: -1 }],
+    ["a fractional fencingCounter", { ...valid, fencingCounter: 1.5 }],
+    ["an unsafe fencingCounter", { ...valid, fencingCounter: 2 ** 53 }],
+    ["a string fencingCounter", { ...valid, fencingCounter: "1" }],
+    ["a null fencingCounter", { ...valid, fencingCounter: null }],
+    ["a short leaseToken", { ...valid, leaseToken: "short" }],
+    ["a long leaseToken", { ...valid, leaseToken: "C".repeat(44) }],
+    ["a leaseToken outside the alphabet", { ...valid, leaseToken: `${"C".repeat(42)}=` }],
+    ["a non-string leaseToken", { ...valid, leaseToken: 42 }],
+    ["an unknown refusal", { ...valid, refusal: "UNSUPPORTED_MODEL" }],
+    ["a lowercase refusal", { ...valid, refusal: "unsupported_policy" }],
+    ["a padded refusal", { ...valid, refusal: " UNSUPPORTED_POLICY" }],
+    ["a terminal-sounding refusal", { ...valid, refusal: "VERIFICATION_UNSCHEDULABLE" }],
+    ["a result reason as refusal", { ...valid, refusal: "CREDENTIAL_REJECTED" }],
+    ["a null refusal", { ...valid, refusal: null }],
+    ["a numeric refusal", { ...valid, refusal: 1 }],
+    ["an array refusal", { ...valid, refusal: ["UNSUPPORTED_POLICY"] }],
+    ["an extra deferralSeconds", { ...valid, deferralSeconds: 1 }],
+    ["an extra deferredUntil", { ...valid, deferredUntil: "2026-11-25T00:00:00.000Z" }],
+    ["an extra schedule", { ...valid, schedule: [1, 1, 1] }],
+    ["an extra durationSeconds", { ...valid, durationSeconds: 60 }],
+    ["an extra delay", { ...valid, delay: 1 }],
+    ["an extra providerVerificationJobId", { ...valid, providerVerificationJobId: job }],
+    ["an extra outcome", { ...valid, outcome: "INCONCLUSIVE" }],
+    ["an extra terminal reason", { ...valid, terminalReasonCode: "WORKER_UNSUPPORTED" }],
+  ])("refuses %s with 400 before any transaction and without a security event (H5)", async (_label, body) => {
+    const { port, recording } = await start();
+    const response = await send(port, "POST", unsupportedPath, JSON.stringify(body), json);
+    expect(response.status).toBe(400);
+    expect(response.body).toBe('{"status":"error","code":"INVALID_REQUEST"}\n');
+    expect(recording.events).toEqual([]);
+  });
+
+  it("refuses a duplicate member, malformed JSON and a non-object body with 400", async () => {
+    const { port, recording } = await start();
+    for (const raw of [
+      `{"fencingCounter":1,"leaseToken":"${LEASE_TOKEN}","refusal":"UNSUPPORTED_POLICY","refusal":"UNSUPPORTED_PROVIDER"}`,
+      "{not json",
+      "[]",
+      "null",
+      `"${LEASE_TOKEN}"`,
+      "",
+    ]) {
+      expect((await send(port, "POST", unsupportedPath, raw, json)).status, raw).toBe(400);
+    }
+    expect(recording.events).toEqual([]);
+  });
+
+  it("frames the body: 415 for a non-JSON media type and 413 for an oversized body (H6)", async () => {
+    const { port, recording } = await start();
+    expect((await send(port, "POST", unsupportedPath, JSON.stringify(valid), { ...json, "Content-Type": "text/plain" })).status).toBe(415);
+    expect((await send(port, "POST", unsupportedPath, JSON.stringify(valid), { Authorization: `Bearer ${TOKEN}` })).status).toBe(415);
+    const oversized = JSON.stringify({ ...valid, refusal: "U".repeat(5000) });
+    expect((await send(port, "POST", unsupportedPath, oversized, json)).status).toBe(413);
+    expect(recording.events).toEqual([]);
+  });
+
+  it.each(["UNSUPPORTED_PROVIDER", "UNSUPPORTED_POLICY", "PROVIDER_POLICY_MISMATCH"])(
+    "passes the exact closed refusal %s through to the deferral service, which needs a transaction",
+    async (refusal) => {
+      // The fake pool refuses transactions: reaching the service is a 503, not a 400.
+      const { port, recording } = await start();
+      const response = await send(port, "POST", unsupportedPath, JSON.stringify({ ...valid, refusal }), json);
+      expect(response.status).toBe(503);
+      expect(response.body).toBe('{"status":"error","code":"SERVICE_UNAVAILABLE"}\n');
+      // A database failure is not a lease rejection: no security event.
+      expect(recording.events).toEqual([]);
+    },
+  );
+});

@@ -452,6 +452,7 @@ describe("worker-control boundary (lease foundation only)", () => {
       "src/workerControl/workerLeasePolicy.ts",
       "src/workerControl/workerLeaseService.ts",
       "src/workerControl/workerProviderVerificationCredentialGrantService.ts",
+      "src/workerControl/workerProviderVerificationDeferralService.ts",
       "src/workerControl/workerProviderVerificationLeaseService.ts",
       "src/workerControl/workerProviderVerificationResultService.ts",
       "src/workerControl/workerProviderVerificationVerifyingService.ts",
@@ -650,7 +651,10 @@ describe("R44B11F provider-verification worker-control boundary", () => {
   const GRANT = "workerProviderVerificationCredentialGrantService.ts";
   const VERIFYING = "workerProviderVerificationVerifyingService.ts";
   const RESULT = "workerProviderVerificationResultService.ts";
-  const ALL = [LEASE, GRANT, VERIFYING, RESULT];
+  // R44B11G (B8): the unsupported-lease deferral service is held to the same
+  // no-provider-call, no-generation and state-write confinement rules.
+  const DEFERRAL = "workerProviderVerificationDeferralService.ts";
+  const ALL = [LEASE, GRANT, VERIFYING, RESULT, DEFERRAL];
   const NO_PROVIDER_CALL = /fetch\s*\(|https?:|node:https?|node:net|node:tls|undici|\.open\s*\(|createDecipheriv|CredentialOpener/;
   const NO_GENERATION = /execution_attempts|execution_jobs|generation_authorizations/;
 
@@ -669,6 +673,7 @@ describe("R44B11F provider-verification worker-control boundary", () => {
       [LEASE]: /SET state = 'LEASED', lease_worker_principal_id = \$2, lease_token_sha256 = \$3,\s*lease_fencing_counter = lease_fencing_counter \+ 1/,
       [VERIFYING]: /SET state = 'VERIFYING', verifying_at = now\(\), verifying_worker_principal_id = \$2,\s*verifying_fencing_counter = lease_fencing_counter/,
       [RESULT]: /SET state = 'COMPLETED', lease_worker_principal_id = NULL, lease_token_sha256 = NULL,/,
+      [DEFERRAL]: /SET state = 'QUEUED', lease_worker_principal_id = NULL, lease_token_sha256 = NULL,\s*leased_at = NULL, lease_expires_at = NULL,\s*unsupported_deferral_count = unsupported_deferral_count \+ 1/,
     };
     const STATE_WRITE = /\bSET\s+state\s*=|verifying_at\s*=\s*now|result_outcome\s*=|last_verification_attempt_at\s*=|verification_status\s*=/;
     for (const name of ALL) {
@@ -694,6 +699,129 @@ describe("R44B11F provider-verification worker-control boundary", () => {
     const application = code(read(join(SRC_ROOT, "workerControl", "workerControlApplication.ts")));
     expect(application).toMatch(/const VERIFICATION_RESULT_MEMBERS: ReadonlySet<string> = new Set\(\["fencingCounter", "leaseToken", "outcome", "reasonCode"\]\);/);
     expect(application).toMatch(/if \(!isProviderVerificationOutcome\(outcome\) \|\| !isWorkerReportableVerificationReason\(reasonCode\)\) throw new RequestBodyError\("INVALID_REQUEST"\);/);
+  });
+
+  // R44B11G B8: the deferral columns are written only by the deferral service,
+  // anywhere in commercial-api source. Comparisons such as the lease query's
+  // COALESCE(j.deferred_until, j.created_at) <= now() are reads, not writes.
+  const DEFERRAL_COLUMN_WRITE = /\b(deferred_until|unsupported_deferral_count|last_unsupported_refusal)\s*=(?!=)/;
+
+  it("confines writes of the R44B11G deferral columns to the deferral service (B8)", () => {
+    const writers = sourceFiles.filter((path) => DEFERRAL_COLUMN_WRITE.test(code(read(path)))).map(label);
+    expect(writers).toEqual([`src/workerControl/${DEFERRAL}`]);
+    const deferral = service(DEFERRAL);
+    // The three SET assignments, then the guarded UPDATE's optimistic count check
+    // (WHERE ... unsupported_deferral_count = $4), which the pattern cannot tell apart.
+    expect(deferral.match(new RegExp(DEFERRAL_COLUMN_WRITE.source, "g"))).toEqual([
+      "unsupported_deferral_count =",
+      "last_unsupported_refusal =",
+      "deferred_until =",
+      "unsupported_deferral_count =",
+    ]);
+    // Guard the guard.
+    expect(DEFERRAL_COLUMN_WRITE.test("SET deferred_until = now() + make_interval(secs => $6)")).toBe(true);
+    expect(DEFERRAL_COLUMN_WRITE.test("unsupported_deferral_count = unsupported_deferral_count + 1")).toBe(true);
+    expect(DEFERRAL_COLUMN_WRITE.test("AND COALESCE(j.deferred_until, j.created_at) <= now()")).toBe(false);
+    expect(DEFERRAL_COLUMN_WRITE.test("deferred_until <= now() + d")).toBe(false);
+    expect(DEFERRAL_COLUMN_WRITE.test("deferred_until == x")).toBe(false);
+  });
+
+  it("keeps the deferral service non-terminal, audit-free and lifecycle-lock-free, with the published lock order and checks (N5, section 4.3)", () => {
+    const deferral = service(DEFERRAL);
+    // N5: no terminal state, terminal reason, completion time or result field.
+    expect(/CANCELLED|COMPLETED|terminal_reason_code|completed_at|result_/.test(deferral)).toBe(false);
+    // No audit row, and no Account, connection or credential-version read or lock.
+    expect(/audit|INSERT\s+INTO|accounts|users|provider_connections|provider_credential_versions|lockVerificationLifecycle|requireEligibleForVerification|isCurrentForAggregate/.test(deferral)).toBe(false);
+    // No credential grant, VERIFYING barrier or provider surface.
+    expect(/credential_granted_at\s*=(?!=)|'VERIFYING'|verifying_|sealed|envelope|fingerprint|DELETE\s+FROM/i.test(deferral)).toBe(false);
+    // Lock order: principal FOR SHARE, then the job FOR UPDATE; then LEASED, the live proof and no grant.
+    const order = [
+      "await requireActiveWorker(client, context.workerPrincipalId);",
+      "const job = await lockVerificationJob(client, jobId);",
+      'if (job.state !== "LEASED") throw rejectVerification("NOT_LEASED");',
+      "requireLiveVerificationLease(job, context, proof);",
+      'if (job.credentialGrantedAt !== null) throw rejectVerification("CREDENTIAL_GRANTED");',
+      "UPDATE provider_verification_jobs",
+    ].map((step) => deferral.indexOf(step));
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(deferral.match(/UPDATE provider_verification_jobs/g)).toHaveLength(1);
+    expect(deferral.match(/FOR (UPDATE|SHARE)/g)).toBeNull();
+    // The guarded UPDATE: same live lease, no grant, one increment, database-clock deferral.
+    expect(deferral).toMatch(
+      /WHERE id = \$1 AND state = 'LEASED' AND credential_granted_at IS NULL\s+AND lease_worker_principal_id = \$2 AND lease_fencing_counter = \$3 AND unsupported_deferral_count = \$4/,
+    );
+    expect(deferral).toMatch(/deferred_until = now\(\) \+ make_interval\(secs => \$6\)/);
+    expect(deferral).not.toMatch(/lease_fencing_counter\s*=\s*lease_fencing_counter|clock_timestamp|Date\.now|new Date\(/);
+    // The exact production schedule d(n) is the default.
+    expect(deferral).toMatch(/return deferralCount >= 5 \? 3600 : 300 \* 2 \*\* \(deferralCount - 1\);/);
+    expect(deferral).toMatch(/schedule: UnsupportedDeferralSchedule = unsupportedDeferralSeconds,/);
+    expect(deferral).toMatch(
+      /export const PROVIDER_VERIFICATION_REFUSALS = Object\.freeze\(\["UNSUPPORTED_PROVIDER", "UNSUPPORTED_POLICY", "PROVIDER_POLICY_MISMATCH"\] as const\);/,
+    );
+  });
+
+  it("routes the deferral only through the worker-control wrapper, with three members and no schedule (B1-B3)", () => {
+    const application = code(read(join(SRC_ROOT, "workerControl", "workerControlApplication.ts")));
+    expect(application).toMatch(/\\\/\(credential-grant\|verifying\|result\|unsupported\)\$\/;/);
+    expect(application).toMatch(/const UNSUPPORTED_MEMBERS: ReadonlySet<string> = new Set\(\["fencingCounter", "leaseToken", "refusal"\]\);/);
+    expect(application).toMatch(/if \(!isProviderVerificationRefusal\(refusal\)\) throw new RequestBodyError\("INVALID_REQUEST"\);/);
+    // B1: exactly (pool, context, jobId, proof, refusal), once, with no schedule argument.
+    expect(application.match(/deferUnsupportedProviderVerification\(/g)).toHaveLength(1);
+    expect(application).toMatch(/await deferUnsupportedProviderVerification\(pool, context, jobId, proof, refusal\);/);
+    const handler = application.slice(application.indexOf("const verificationUnsupported = (jobId: string) =>"), application.indexOf("const verificationLeaseRoute"));
+    expect(handler.length).toBeGreaterThan(0);
+    expect(handler).toMatch(/"WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED"/);
+    expect(handler).toMatch(/readJsonObjectBody\(request, UNSUPPORTED_MEMBERS\)/);
+    expect(handler.match(/sendJson\(/g)).toHaveLength(1);
+    expect(handler).toMatch(
+      /sendJson\(response, 200, \{\s*providerVerificationJobId: deferral\.providerVerificationJobId,\s*fencingCounter: deferral\.fencingCounter,\s*state: deferral\.state,\s*deferredUntil: deferral\.deferredUntil\.toISOString\(\),\s*\}\);/,
+    );
+    // B2: only the deferral service names the schedule seam; no source calls the service elsewhere.
+    const seamUsers = sourceFiles
+      .filter((path) => /UnsupportedDeferralSchedule|unsupportedDeferralSeconds/.test(code(read(path))))
+      .map(label);
+    expect(seamUsers).toEqual([`src/workerControl/${DEFERRAL}`]);
+    const callers = sourceFiles.filter((path) => /deferUnsupportedProviderVerification\(/.test(code(read(path)))).map(label);
+    expect(callers.sort()).toEqual(["src/workerControl/workerControlApplication.ts", `src/workerControl/${DEFERRAL}`]);
+    // No verification release route (/release stays 404).
+    const verificationAction = application.slice(application.indexOf("const VERIFICATION_ACTION ="), application.indexOf("const VERIFICATION_RESULT_MEMBERS"));
+    expect(verificationAction).toMatch(/\(credential-grant\|verifying\|result\|unsupported\)\$\/;/);
+    expect(verificationAction).not.toMatch(/release/);
+    const events = code(read(join(SRC_ROOT, "workerControl", "workerSecurityEvents.ts")));
+    expect(events.match(/"WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED"/g)).toHaveLength(1);
+  });
+
+  it("has no terminal unsupported vocabulary and compares the deferral count with no constant anywhere in source (N5)", () => {
+    const COUNT_COMPARED_WITH_CONSTANT = /unsupported_deferral_count\s*(<>|!=|<=|>=|<|>|=)\s*\d/;
+    for (const path of sourceFiles) {
+      const text = code(read(path));
+      expect({ path: label(path), unschedulable: /VERIFICATION_UNSCHEDULABLE/.test(read(path)), compared: COUNT_COMPARED_WITH_CONSTANT.test(text) }).toEqual({
+        path: label(path),
+        unschedulable: false,
+        compared: false,
+      });
+    }
+    // Guard the guard.
+    expect(COUNT_COMPARED_WITH_CONSTANT.test("WHERE unsupported_deferral_count >= 5")).toBe(true);
+    expect(COUNT_COMPARED_WITH_CONSTANT.test("unsupported_deferral_count = $4")).toBe(false);
+  });
+
+  it("selects only eligible jobs in (COALESCE(deferred_until, created_at), id) order with the predicate in WHERE (F8.3, section 3)", () => {
+    const lease = service(LEASE);
+    const start = lease.indexOf("const SELECT_NEXT = `");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const selectNext = lease.slice(start, lease.indexOf("`;", start) + 2);
+    const where = selectNext.slice(selectNext.indexOf(" WHERE "), selectNext.indexOf(" ORDER BY "));
+    expect(where).toMatch(/\n   AND COALESCE\(j\.deferred_until, j\.created_at\) <= now\(\)\n/);
+    expect(where).toMatch(/j\.state = 'QUEUED'/);
+    expect(where).toMatch(/j\.lease_fencing_counter < \$\{MAX_FENCING_COUNTER\}/);
+    expect(selectNext).toMatch(/\n ORDER BY COALESCE\(j\.deferred_until, j\.created_at\), j\.id\n LIMIT 1\n   FOR UPDATE OF j SKIP LOCKED`;$/);
+    expect(selectNext).not.toMatch(/ORDER BY j\.created_at/);
+    // SELECT_NEXT stays a module-private constant (m4).
+    expect(lease).not.toMatch(/export\s+(const|let|var)\s+SELECT_NEXT|export\s*\{[^}]*SELECT_NEXT/);
+    // The lease UPDATE itself is unchanged and writes no deferral column.
+    expect(lease).toMatch(/WHERE id = \$1 AND state = 'QUEUED'\s+RETURNING lease_fencing_counter, lease_expires_at/);
   });
 });
 

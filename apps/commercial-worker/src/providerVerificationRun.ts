@@ -66,7 +66,25 @@ type AdmissionRefusal = "UNSUPPORTED_PROVIDER" | "UNSUPPORTED_POLICY" | "PROVIDE
 export type ProviderVerificationRunResult =
   | Readonly<{ status: "DISABLED" }>
   | Readonly<{ status: "NO_WORK" }>
-  | Readonly<{ status: "UNSUPPORTED_LEASE"; providerVerificationJobId: string; reason: AdmissionRefusal }>
+  // R44B11G: a refused lease is deferred, never made terminal. disposition is
+  // the worker's knowledge of the server-side deferral; cause is whether a
+  // shutdown was recorded before the result was returned (independent of it).
+  | Readonly<{
+      status: "UNSUPPORTED_LEASE";
+      providerVerificationJobId: string;
+      reason: AdmissionRefusal;
+      disposition: "DEFERRED";
+      deferredUntil: Date;
+      cause: "SHUTDOWN" | null;
+    }>
+  | Readonly<{
+      status: "UNSUPPORTED_LEASE";
+      providerVerificationJobId: string;
+      reason: AdmissionRefusal;
+      disposition: "REJECTED" | "UNCONFIRMED" | "NOT_SENT";
+      detail: WorkerErrorCode | "SHUTDOWN";
+      cause: "SHUTDOWN" | null;
+    }>
   | Readonly<{
       status: "REPORTED";
       providerVerificationJobId: string;
@@ -196,13 +214,15 @@ export async function runProviderVerification(
     return code === "PROVIDER_VERIFICATION_DISABLED" ? Object.freeze({ status: "DISABLED" }) : stopped("GATE", code, null);
   }
 
-  // 2. Dependency and input shape, before anything is leased. The four client
-  // methods are read once here and later invoked with the client as receiver;
-  // the opener's open member is read for this check only and never called.
+  // 2. Dependency and input shape, before anything is leased. The five client
+  // methods (R44B11G adds the deferral) are read once here and later invoked
+  // with the client as receiver; the opener's open member is read for this
+  // check only and never called.
   let leaseProviderVerification: unknown = undefined;
   let requestProviderVerificationCredentialGrant: unknown = undefined;
   let acknowledgeProviderVerificationVerifying: unknown = undefined;
   let reportProviderVerificationResult: unknown = undefined;
+  let deferUnsupportedProviderVerification: unknown = undefined;
   let valid = false;
   try {
     if (typeof client === "object" && client !== null && typeof opener === "object" && opener !== null) {
@@ -211,12 +231,14 @@ export async function runProviderVerification(
       requestProviderVerificationCredentialGrant = methods.requestProviderVerificationCredentialGrant;
       acknowledgeProviderVerificationVerifying = methods.acknowledgeProviderVerificationVerifying;
       reportProviderVerificationResult = methods.reportProviderVerificationResult;
+      deferUnsupportedProviderVerification = methods.deferUnsupportedProviderVerification;
       const openMember: unknown = (opener as Readonly<Record<string, unknown>>).open;
       valid =
         typeof leaseProviderVerification === "function" &&
         typeof requestProviderVerificationCredentialGrant === "function" &&
         typeof acknowledgeProviderVerificationVerifying === "function" &&
         typeof reportProviderVerificationResult === "function" &&
+        typeof deferUnsupportedProviderVerification === "function" &&
         typeof openMember === "function" &&
         typeof fetchImpl === "function" &&
         (deadlineTimer === undefined || typeof deadlineTimer === "function") &&
@@ -436,9 +458,29 @@ export async function runProviderVerification(
     const jobId = leaseJobId;
     const proof: LeaseProof = Object.freeze({ fencingCounter, leaseToken });
 
-    // 6. Admission, before any grant. A refused lease is left to expire.
+    // 6. Admission, before any grant. R44B11G: a refused lease is deferred by
+    // exactly one linked control attempt (CLASSIFY -> DEFERRAL, then return):
+    // no budget, grant, VERIFYING, bind, open, transport or result report, no
+    // retry. The cause window stays open through the attempt; the finally
+    // below closes it after the result has been built.
     const admission = classifyProviderVerificationLease({ provider, verificationPolicyId });
-    if (admission.status === "REFUSED") return Object.freeze({ status: "UNSUPPORTED_LEASE", providerVerificationJobId: jobId, reason: admission.reason });
+    if (admission.status === "REFUSED") {
+      const reason = admission.reason;
+      // Whether the send closure ran: set as its first statement.
+      const dispatch = { sent: false };
+      const sendDeferral = (signal: AbortSignal): unknown => {
+        dispatch.sent = true;
+        return Reflect.apply(deferUnsupportedProviderVerification as (...args: unknown[]) => unknown, client, [jobId, proof, reason, signal]);
+      };
+      const attempt = await controlAttempt(sendDeferral, true);
+      const outcome = deferralOutcome(attempt, dispatch.sent);
+      // Sampled once, after the attempt returned and with no await before the
+      // return, so no shutdown can be recorded between the sample and the result.
+      const cause = currentCause() === "SHUTDOWN" ? "SHUTDOWN" : null;
+      return outcome.disposition === "DEFERRED"
+        ? Object.freeze({ status: "UNSUPPORTED_LEASE", providerVerificationJobId: jobId, reason, disposition: "DEFERRED", deferredUntil: outcome.deferredUntil, cause })
+        : Object.freeze({ status: "UNSUPPORTED_LEASE", providerVerificationJobId: jobId, reason, disposition: outcome.disposition, detail: outcome.detail, cause });
+    }
 
     // 7. Lease budget: one monotonic receipt instant and the run's only wall
     // clock read, then monotonic remaining() only.
@@ -572,6 +614,55 @@ export async function runProviderVerification(
     return decide(CONFIGURATION_INVALID);
   } finally {
     closeWindow();
+  }
+}
+
+type DeferralOutcome =
+  | Readonly<{ disposition: "DEFERRED"; deferredUntil: Date }>
+  | Readonly<{ disposition: "REJECTED" | "UNCONFIRMED" | "NOT_SENT"; detail: WorkerErrorCode | "SHUTDOWN" }>;
+
+const deferralDetail = (disposition: "REJECTED" | "UNCONFIRMED" | "NOT_SENT", detail: WorkerErrorCode | "SHUTDOWN"): DeferralOutcome =>
+  Object.freeze({ disposition, detail });
+
+// R44B11G disposition of the one deferral attempt: the first matching row of
+// the locked precedence, from the attempt kind, whether the send closure ran,
+// and the settled value. NOT_SENT asserts only that no dispatch can have
+// happened; UNCONFIRMED makes no delivery claim; only a validated value is
+// DEFERRED. Never throws.
+function deferralOutcome(attempt: ControlAttempt, sent: boolean): DeferralOutcome {
+  // Row 1: the deadline timer could not be installed; nothing was sent.
+  if (attempt.kind === "TIMER_INVALID") return deferralDetail("NOT_SENT", CONFIGURATION_INVALID);
+  // Rows 2 and 8: cancelled before the closure ran, or while in flight.
+  if (attempt.kind === "CANCELLED") return sent ? deferralDetail("UNCONFIRMED", "SHUTDOWN") : deferralDetail("NOT_SENT", "SHUTDOWN");
+  if (attempt.kind === "FAILED") {
+    // Row 3: expiry during timer installation, before the closure ran.
+    if (!sent) return deferralDetail("NOT_SENT", attempt.code);
+    // Row 4: the real client's local validation, which runs before dispatch.
+    if (attempt.code === "PROVIDER_VERIFICATION_REQUEST_INVALID") return deferralDetail("NOT_SENT", attempt.code);
+    // Row 7: a definitive refusal.
+    if (attempt.code === "PROVIDER_VERIFICATION_DEFERRAL_REJECTED" || attempt.code === "WORKER_AUTHENTICATION_REJECTED") {
+      return deferralDetail("REJECTED", attempt.code);
+    }
+    // Rows 9, 10 and 11: deadline, 5xx, transport, lost response, malformed
+    // (including 404 from an older API) or any other closed code.
+    return deferralDetail("UNCONFIRMED", attempt.code);
+  }
+  // Rows 5 and 6: a value whose deferredUntil is usable is DEFERRED; anything
+  // else stays fail-closed (the deferral may still have committed).
+  const deferredUntil = usableDeferredUntil(attempt.value);
+  return deferredUntil === null ? deferralDetail("UNCONFIRMED", CONFIGURATION_INVALID) : Object.freeze({ disposition: "DEFERRED", deferredUntil });
+}
+
+// deferredUntil, read exactly once: a Date whose getTime (applied directly, so
+// a forged non-Date throws) is finite, else null. Never throws.
+function usableDeferredUntil(value: unknown): Date | null {
+  try {
+    if (typeof value !== "object" || value === null) return null;
+    const read: unknown = (value as Readonly<Record<string, unknown>>).deferredUntil;
+    const instant: unknown = Reflect.apply(Date.prototype.getTime, read, []);
+    return typeof instant === "number" && Number.isFinite(instant) ? (read as Date) : null;
+  } catch {
+    return null;
   }
 }
 

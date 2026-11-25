@@ -710,6 +710,20 @@ export type ProviderVerificationResultAcknowledgement = Readonly<{
   completedAt: Date;
 }>;
 
+// R44B11G: the admission refusals a worker may report for a lease it cannot
+// serve. Closed; the refusal is diagnostic and grants no authority.
+export const PROVIDER_VERIFICATION_REFUSALS = Object.freeze(["UNSUPPORTED_PROVIDER", "UNSUPPORTED_POLICY", "PROVIDER_POLICY_MISMATCH"] as const);
+export type ProviderVerificationRefusal = (typeof PROVIDER_VERIFICATION_REFUSALS)[number];
+
+// R44B11G: the committed deferral. The job is QUEUED again with the same
+// fencing counter, and is not leasable before deferredUntil (database time).
+export type ProviderVerificationDeferralAcknowledgement = Readonly<{
+  providerVerificationJobId: string;
+  fencingCounter: number;
+  state: "QUEUED";
+  deferredUntil: Date;
+}>;
+
 export type ProviderVerificationControlClient = Readonly<{
   leaseProviderVerification: (signal?: AbortSignal) => Promise<ProviderVerificationLease | null>;
   requestProviderVerificationCredentialGrant: (
@@ -728,6 +742,14 @@ export type ProviderVerificationControlClient = Readonly<{
     report: ProviderVerificationResultReport,
     signal?: AbortSignal,
   ) => Promise<ProviderVerificationResultAcknowledgement>;
+  // R44B11G: the one deferral request for a refused lease. Exactly one request,
+  // never retried; no duration, schedule or time member is ever sent.
+  deferUnsupportedProviderVerification: (
+    providerVerificationJobId: string,
+    proof: LeaseProof,
+    refusal: ProviderVerificationRefusal,
+    signal?: AbortSignal,
+  ) => Promise<ProviderVerificationDeferralAcknowledgement>;
 }>;
 
 const VERIFICATION_POLICY_ID = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -810,6 +832,21 @@ export function parseProviderVerificationResultResponse(
   });
 }
 
+// R44B11G: the deferral acknowledgement must answer exactly the job and fencing
+// generation presented, in state QUEUED, with a canonical server instant.
+export function parseProviderVerificationDeferralResponse(
+  body: unknown,
+  expected: Readonly<{ providerVerificationJobId: string; fencingCounter: number }>,
+): ProviderVerificationDeferralAcknowledgement {
+  const acknowledgement = exactKeys(body, ["providerVerificationJobId", "fencingCounter", "state", "deferredUntil"]);
+  const providerVerificationJobId = text(acknowledgement.providerVerificationJobId, UUID);
+  const fencingCounter = positiveSafeInteger(acknowledgement.fencingCounter);
+  if (providerVerificationJobId !== expected.providerVerificationJobId || fencingCounter !== expected.fencingCounter || acknowledgement.state !== "QUEUED") {
+    throw malformed();
+  }
+  return Object.freeze({ providerVerificationJobId, fencingCounter, state: "QUEUED", deferredUntil: instant(acknowledgement.deferredUntil) });
+}
+
 // Issued-object provenance: exact object identity. Only the frozen objects a
 // client method itself produced from a 200 response of the matching route are
 // registered; the exported parsers never register, and a copy or look-alike
@@ -865,6 +902,13 @@ function verificationReport(report: unknown): ProviderVerificationResultReport {
   return snapshot;
 }
 
+// R44B11G: the refusal, read once as an argument and checked against the
+// closed vocabulary before anything is sent.
+function verificationRefusal(refusal: unknown): ProviderVerificationRefusal {
+  if (typeof refusal !== "string" || !(PROVIDER_VERIFICATION_REFUSALS as readonly string[]).includes(refusal)) throw invalidVerificationRequest();
+  return refusal as ProviderVerificationRefusal;
+}
+
 export function createHttpProviderVerificationControlClient(options: WorkerControlClientOptions): ProviderVerificationControlClient {
   const { post } = controlTransport(options);
 
@@ -909,6 +953,22 @@ export function createHttpProviderVerificationControlClient(options: WorkerContr
         signal,
       );
       return parseProviderVerificationResultResponse(body, { providerVerificationJobId, fencingCounter, report: fixed });
+    },
+    deferUnsupportedProviderVerification: async (
+      providerVerificationJobId: string,
+      proof: LeaseProof,
+      refusal: ProviderVerificationRefusal,
+      signal?: AbortSignal,
+    ) => {
+      const { fencingCounter, leaseToken } = verificationProof(providerVerificationJobId, proof);
+      const reported = verificationRefusal(refusal);
+      const body = await post(
+        `/worker-control/v1/provider-verifications/${providerVerificationJobId}/unsupported`,
+        { fencingCounter, leaseToken, refusal: reported },
+        "PROVIDER_VERIFICATION_DEFERRAL_REJECTED",
+        signal,
+      );
+      return parseProviderVerificationDeferralResponse(body, { providerVerificationJobId, fencingCounter });
     },
   });
 }

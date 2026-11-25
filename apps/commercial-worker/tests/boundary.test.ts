@@ -1810,11 +1810,14 @@ describe("provider verification boundary (R44B11F Phase 5)", () => {
   const contract = code(read(join(SRC_ROOT, "providerVerificationContract.ts")));
   const opening = code(read(join(SRC_ROOT, "providerVerificationCredentialOpening.ts")));
   const textOf = (path: string) => code(read(join(APP_ROOT, path)));
+  // R44B11G adds the deferral method, held to the same single-request,
+  // shared-transport and single-caller rules.
   const VERIFICATION_METHODS = [
     "leaseProviderVerification",
     "requestProviderVerificationCredentialGrant",
     "acknowledgeProviderVerificationVerifying",
     "reportProviderVerificationResult",
+    "deferUnsupportedProviderVerification",
   ] as const;
   const brand = FORBIDDEN.find(({ label: name }) => name === "provider SDK or brand")!.pattern;
   const PROVIDER_VARIABLE = /RUNWAYML_[A-Z_]+|GEMINI_API_KEY|GOOGLE_[A-Z_]+|GCLOUD_[A-Z_]+/;
@@ -2285,11 +2288,13 @@ describe("provider verification run boundary (R44B11F Phase 7)", () => {
   // Import declarations removed, so counts and order see only the module body.
   const bodyOf = (text: string) => text.replace(/^import\b[^;]*;$/gm, "");
   const body = bodyOf(run);
+  // R44B11G adds the deferral method: read once, one call site.
   const VERIFICATION_METHODS = [
     "leaseProviderVerification",
     "requestProviderVerificationCredentialGrant",
     "acknowledgeProviderVerificationVerifying",
     "reportProviderVerificationResult",
+    "deferUnsupportedProviderVerification",
   ] as const;
   const NETWORK = /node:http\b|node:https\b|node:http2\b|node:net\b|node:tls\b|node:dgram\b|undici|WebSocket|globalThis/;
   const LOOP = /\bfor\s*\(|\bwhile\s*\(|\bdo\s*\{|\bswitch\s*\(/;
@@ -2664,6 +2669,165 @@ describe("provider verification integration boundary (R44B11F Phase 8)", () => {
     // Guard the guards.
     expect(/\bvi\.(mock|doMock)\b/.test('vi.mock("../../src/workerControlClient.js");')).toBe(true);
     expect(/^\s*export\b/m.test("const a = 1;\nexport const b = 2;")).toBe(true);
+  });
+});
+
+// R44B11G (architecture R44B11G 5.1, 5.2 and 11 B4, B6, B7): the worker side of
+// the unsupported-lease deferral. Read with whole-line comments stripped.
+describe("R44B11G unsupported-lease deferral boundary (worker)", () => {
+  const run = bodyOfRun();
+  function bodyOfRun() {
+    return code(read(join(SRC_ROOT, "providerVerificationRun.ts"))).replace(/^import\b[^;]*;$/gm, "");
+  }
+  const at = (token: string) => run.indexOf(token);
+  const DEFER_CALL = "Reflect.apply(deferUnsupportedProviderVerification as ";
+  // The refused-admission branch, by brace matching from its opening line.
+  const refusedBranch = () => {
+    const start = run.indexOf('if (admission.status === "REFUSED") {');
+    const open = run.indexOf("{", start);
+    let depth = 0;
+    let index = open;
+    for (; index < run.length; index += 1) {
+      if (run[index] === "{") depth += 1;
+      if (run[index] === "}") depth -= 1;
+      if (depth === 0) break;
+    }
+    return start < 0 ? "" : run.slice(start, index + 1);
+  };
+
+  it("B7: calls the deferral only in the refused-admission branch, after admission and before any budget, grant, VERIFYING, bind or transport", () => {
+    const branch = refusedBranch();
+    expect(branch.length).toBeGreaterThan(0);
+    expect(run.split(DEFER_CALL).length - 1).toBe(1);
+    expect(branch).toContain(DEFER_CALL);
+    expect(at(DEFER_CALL)).toBeGreaterThan(at("classifyProviderVerificationLease("));
+    for (const later of [
+      "checkpoint(PROVIDER_VERIFICATION_RUN_PRE_GRANT_MIN_MS)",
+      '() => record("LEASE_BUDGET"));',
+      "Reflect.apply(requestProviderVerificationCredentialGrant as ",
+      "Reflect.apply(acknowledgeProviderVerificationVerifying as ",
+      "bindProviderVerificationCredential(",
+      "openOnceFor(",
+      "performProviderVerification(",
+      "Reflect.apply(reportProviderVerificationResult as ",
+    ]) {
+      expect(at(DEFER_CALL), later).toBeLessThan(at(later));
+    }
+    // The branch makes exactly one linked control attempt and returns: no
+    // controlStep (no cause-over-settlement mapping), retry, budget timer,
+    // grant, VERIFYING, bind, open, transport or result report.
+    expect(branch.match(/controlAttempt\(/g)).toHaveLength(1);
+    expect(branch).toMatch(/const attempt = await controlAttempt\(sendDeferral, true\);/);
+    expect(/controlStep\(|retriedStep\(|checkpoint\(|timer\(|record\(|requestProviderVerificationCredentialGrant|acknowledgeProviderVerificationVerifying|reportProviderVerificationResult|bindProviderVerificationCredential|openOnceFor|performProviderVerification/.test(branch)).toBe(false);
+    expect(branch.match(/\breturn\b/g)).toHaveLength(2);
+    // The send closure records that it ran as its first statement.
+    expect(branch).toMatch(/const sendDeferral = \(signal: AbortSignal\): unknown => \{\s*dispatch\.sent = true;\s*return Reflect\.apply\(deferUnsupportedProviderVerification as /);
+    // The cause is sampled once, synchronously, with no await before the return.
+    expect(branch.match(/currentCause\(\)/g)).toHaveLength(1);
+    expect(branch.slice(branch.indexOf("const cause = currentCause()")).includes("await")).toBe(false);
+    // The worker never chooses a duration: no schedule, seconds or time argument is passed.
+    expect(branch).toMatch(/\[jobId, proof, reason, signal\]\);/);
+    expect(/deferralSeconds|schedule|duration|setTimeout|Date\.now/.test(branch)).toBe(false);
+    // Guard the guard: a grant call inside the branch would be caught.
+    expect(/requestProviderVerificationCredentialGrant/.test('if (admission.status === "REFUSED") { Reflect.apply(requestProviderVerificationCredentialGrant as f, c, []); }')).toBe(true);
+  });
+
+  it("classifies dispositions with the locked rows and reads deferredUntil once through Date.prototype.getTime", () => {
+    const outcome = run.slice(at("function deferralOutcome("), at("function usableDeferredUntil("));
+    expect(outcome.length).toBeGreaterThan(0);
+    expect(outcome).toMatch(/if \(attempt\.kind === "TIMER_INVALID"\) return deferralDetail\("NOT_SENT", CONFIGURATION_INVALID\);/);
+    expect(outcome).toMatch(/if \(attempt\.kind === "CANCELLED"\) return sent \? deferralDetail\("UNCONFIRMED", "SHUTDOWN"\) : deferralDetail\("NOT_SENT", "SHUTDOWN"\);/);
+    expect(outcome).toMatch(/if \(!sent\) return deferralDetail\("NOT_SENT", attempt\.code\);/);
+    expect(outcome).toMatch(/if \(attempt\.code === "PROVIDER_VERIFICATION_REQUEST_INVALID"\) return deferralDetail\("NOT_SENT", attempt\.code\);/);
+    expect(outcome).toMatch(/attempt\.code === "PROVIDER_VERIFICATION_DEFERRAL_REJECTED" \|\| attempt\.code === "WORKER_AUTHENTICATION_REJECTED"/);
+    // Only a usable deferredUntil is DEFERRED.
+    expect(outcome.match(/disposition: "DEFERRED"/g)).toHaveLength(1);
+    const usable = run.slice(at("function usableDeferredUntil("), at("// REPORTED copies") >= 0 ? at("// REPORTED copies") : at("function reportedFrom("));
+    expect(usable.match(/\.deferredUntil\b/g)).toHaveLength(1);
+    expect(usable).toMatch(/Reflect\.apply\(Date\.prototype\.getTime, read, \[\]\)/);
+    expect(usable).toMatch(/Number\.isFinite\(instant\)/);
+    expect(usable).toMatch(/\} catch \{\s*return null;\s*\}/);
+  });
+
+  it("B4: the client sends exactly fencingCounter, leaseToken and refusal through the shared post(), and no duration", () => {
+    const method = methodSource("deferUnsupportedProviderVerification");
+    expect(method.length).toBeGreaterThan(0);
+    expect(method.match(/\bpost\(/g)).toHaveLength(1);
+    expect(method).toMatch(/`\/worker-control\/v1\/provider-verifications\/\$\{providerVerificationJobId\}\/unsupported`,\s*\{ fencingCounter, leaseToken, refusal: reported \},\s*"PROVIDER_VERIFICATION_DEFERRAL_REJECTED",\s*signal,/);
+    expect(method).toMatch(/const \{ fencingCounter, leaseToken \} = verificationProof\(providerVerificationJobId, proof\);\s*const reported = verificationRefusal\(refusal\);/);
+    expect(/deferralSeconds|schedule|duration|deferredUntil:|seconds/i.test(method)).toBe(false);
+    expect(FORBIDDEN_IN_PRIMITIVE.test(method)).toBe(false);
+    // The closed refusal vocabulary and the 409 code, each defined once.
+    expect(clientSource).toMatch(
+      /export const PROVIDER_VERIFICATION_REFUSALS = Object\.freeze\(\["UNSUPPORTED_PROVIDER", "UNSUPPORTED_POLICY", "PROVIDER_POLICY_MISMATCH"\] as const\);/,
+    );
+    const errors = code(read(join(SRC_ROOT, "workerError.ts")));
+    expect(errors.match(/"PROVIDER_VERIFICATION_DEFERRAL_REJECTED"/g)).toHaveLength(1);
+    expect(errors).toMatch(/PROVIDER_VERIFICATION_DEFERRAL_REJECTED: "The worker-control API rejected the unsupported provider verification deferral\.",/);
+    // Guard the guard.
+    expect(/deferralSeconds|schedule|duration|deferredUntil:|seconds/i.test("{ fencingCounter, leaseToken, refusal, deferralSeconds: 1 }")).toBe(true);
+  });
+
+  it("introduces no provider SDK, credential opening or live-enablement path in the deferral code", () => {
+    const branch = refusedBranch();
+    const method = methodSource("deferUnsupportedProviderVerification");
+    for (const text of [branch, method]) {
+      expect(/@google|@runwayml|sealed|envelope|\.open\(|CredentialOpener|LIVE_PROVIDER|liveGate|https?:/i.test(text)).toBe(false);
+    }
+    // The client's import list is unchanged by R44B11G.
+    expect(importsOf(clientSource).sort()).toEqual(["./providerExecutionContract.js", "./providerVerificationContract.js", "./workerError.js"]);
+  });
+
+  // B6: the Phase 8 integration-file rules, applied unchanged to the R44B11G integration file.
+  const DEFERRAL_INTEGRATION = join(APP_ROOT, "tests", "integration", "providerVerificationDeferral.test.ts");
+  const integration = () => code(read(DEFERRAL_INTEGRATION).replace(/\/\*[\s\S]*?\*\//g, ""));
+  const INTEGRATION_IMPORTS = new Set([
+    "vitest",
+    "node:crypto",
+    "../../src/providerVerificationRun.js",
+    "../../src/workerControlClient.js",
+    "../../src/workerError.js",
+    "../../src/providerVerificationConfig.js",
+    "../../src/providerVerificationContract.js",
+    "../../src/providerVerificationTransport.js",
+    "../../src/providerEnvironment.js",
+    "../support/testCredentialOpening.js",
+    "../../../commercial-api/src/database/runtimeDatabaseConfig.js",
+    "../../../commercial-api/src/database/runtimePool.js",
+    "../../../commercial-api/src/startCommercialApiServer.js",
+    "../../../commercial-api/src/workerControl/workerControlApplication.js",
+    "../../../commercial-api/src/workerControl/workerLeasePolicy.js",
+    "../../../commercial-api/src/workerControl/workerSecurityEvents.js",
+    "../../../commercial-api/src/providerConnections/providerVerificationReconciliationService.js",
+    "../../../commercial-api/tests/db/support/testDatabase.js",
+    "../../../commercial-api/tests/support/testWorkerAuthentication.js",
+    "../../../commercial-api/tests/support/testWorkerSecurityEvents.js",
+  ]);
+
+  it("B6: the integration file exists, imports only the Phase 8 allowlist and no network primitive, and is not named by worker source", () => {
+    expect(existsSync(DEFERRAL_INTEGRATION)).toBe(true);
+    expect(sources.filter(({ text }) => /providerVerificationDeferral/.test(text)).map(({ path }) => path)).toEqual([]);
+    const specifiers = importsOf(integration());
+    expect(specifiers.length).toBeGreaterThan(0);
+    expect(specifiers.filter((specifier) => !INTEGRATION_IMPORTS.has(specifier))).toEqual([]);
+    expect(/@google\/genai|@runwayml\/sdk|node:https?\b|node:http2\b|node:net\b|node:tls\b|node:dgram\b|node:child_process\b|node:worker_threads\b|undici|["']ws["']/.test(integration())).toBe(false);
+  });
+
+  it("B6: the integration file names no provider host, brand or https origin, reads no provider variable or process state, mocks nothing and exports nothing", () => {
+    const text = integration();
+    expect(text.includes("https://")).toBe(false);
+    expect((text.match(/http:\/\/[^\s"'`]*/g) ?? []).filter((literal) => !literal.startsWith("http://127.0.0.1"))).toEqual([]);
+    expect(/googleapis|runwayml|runway|gemini|genai/i.test(text)).toBe(false);
+    expect(/GOOGLE_[A-Z_]*|RUNWAY_[A-Z_]*|_V1BETA|ORGANIZATION_GET/.test(text)).toBe(false);
+    const providerVariables = [...read(join(SRC_ROOT, "providerEnvironment.ts")).matchAll(/^ {2}"([A-Z0-9_]+)",$/gm)].map((match) => match[1]!);
+    expect(providerVariables.filter((name) => text.includes(name))).toEqual([]);
+    expect(/WORKER_LIVE_PROVIDER_|COMMERCIAL_WORKER_LIVE_PROVIDER_VERIFICATION/.test(text)).toBe(false);
+    expect(/\bprocess\./.test(text)).toBe(false);
+    expect(/COMMERCIAL_API_TEST_DATABASE|DATABASE_URL\s*:\s*["'`]/.test(text)).toBe(false);
+    expect(text).toMatch(/\bopenGuardedClients\(\)/);
+    expect(text).toMatch(/COMMERCIAL_API_DATABASE_URL: clients\.config\.runtimeUrl,/);
+    expect(/\bvi\.(mock|doMock)\b/.test(text)).toBe(false);
+    expect(/^\s*export\b/m.test(text)).toBe(false);
   });
 });
 

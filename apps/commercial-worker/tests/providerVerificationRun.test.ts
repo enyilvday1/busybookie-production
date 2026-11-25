@@ -50,6 +50,8 @@ const FENCE = 9;
 const GOOGLE_POLICY = "GOOGLE_GENAI_MODELS_LIST_V1BETA";
 const RUNWAY_POLICY = "RUNWAY_ORGANIZATION_GET_V1_2024_11_06";
 const WALL_BASE = Date.parse("2026-11-24T10:00:00.000Z");
+// R44B11G: the deferral instant the fake control API acknowledges (d(1) = 300 s).
+const DEFERRED_UNTIL_MS = WALL_BASE + 300_000;
 const DISABLED_CONFIG: ProviderVerificationConfig = loadProviderVerificationConfig({});
 
 const contextFor = (provider: string) => ({
@@ -159,12 +161,18 @@ function virtualTime() {
   return { state, timer, live, advance, advanceTo, jump, mono, wall, budgetTimers };
 }
 
-type Route = "lease" | "grant" | "verifying" | "result";
+// R44B11G adds the unsupported-lease deferral route.
+type Route = "lease" | "grant" | "verifying" | "result" | "unsupported";
 type Answer = Readonly<{
+  // The fake control fetch records the request, then fails as a transport
+  // (the server may have committed; the response is lost).
+  transportFailure?: boolean;
   // A non-200 status, mapped by the real client.
   status?: number;
   // The request never settles and ignores its signal.
   hang?: boolean;
+  // A manually settled fake fetch, still parsed and validated by the real client.
+  response?: Promise<Response>;
   // Virtual time the request takes (fires due timers).
   advance?: number;
   // Clock lag after the answer, with no timer callback.
@@ -203,11 +211,11 @@ const providerResponse = (status: number, text = '{"models":[]}', headers: Recor
 function setup(options: Setup = {}) {
   const time = virtualTime();
   const log: string[] = [];
-  const answers: Record<Route, Answer[]> = { lease: [], grant: [], verifying: [], result: [], ...options.answers } as Record<Route, Answer[]>;
+  const answers: Record<Route, Answer[]> = { lease: [], grant: [], verifying: [], result: [], unsupported: [], ...options.answers } as Record<Route, Answer[]>;
   const pendingAnswer: Partial<Record<Route, Answer>> = {};
-  const sent: Record<Route, unknown[]> = { lease: [], grant: [], verifying: [], result: [] };
-  const signals: Record<Route, AbortSignal[]> = { lease: [], grant: [], verifying: [], result: [] };
-  const sentAt: Record<Route, number[]> = { lease: [], grant: [], verifying: [], result: [] };
+  const sent: Record<Route, unknown[]> = { lease: [], grant: [], verifying: [], result: [], unsupported: [] };
+  const signals: Record<Route, AbortSignal[]> = { lease: [], grant: [], verifying: [], result: [], unsupported: [] };
+  const sentAt: Record<Route, number[]> = { lease: [], grant: [], verifying: [], result: [], unsupported: [] };
   const provider = options.runway === true ? RUNWAY_PROVIDER_ID : GOOGLE_PROVIDER_ID;
   const policy = options.runway === true ? RUNWAY_POLICY : GOOGLE_POLICY;
   const envelope = "envelope" in options ? options.envelope : options.runway === true ? RUNWAY_ENVELOPE : GOOGLE_ENVELOPE;
@@ -216,13 +224,23 @@ function setup(options: Setup = {}) {
   // The fake worker-control API behind the real client.
   const controlFetch = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const path = new URL(String(url)).pathname;
-    const route: Route = path.endsWith("/lease") ? "lease" : path.endsWith("/credential-grant") ? "grant" : path.endsWith("/verifying") ? "verifying" : "result";
+    const route: Route = path.endsWith("/lease")
+      ? "lease"
+      : path.endsWith("/credential-grant")
+        ? "grant"
+        : path.endsWith("/verifying")
+          ? "verifying"
+          : path.endsWith("/unsupported")
+            ? "unsupported"
+            : "result";
     const requestBody: Record<string, unknown> = init?.body === undefined ? {} : (JSON.parse(String(init.body)) as Record<string, unknown>);
     sent[route].push(init?.body === undefined ? undefined : JSON.parse(String(init.body)));
     sentAt[route].push(time.state.now);
     const answer = pendingAnswer[route] ?? {};
     const enteredWall = WALL_BASE + time.state.now;
     if (answer.hang === true) return new Promise<Response>(() => undefined);
+    if (answer.response !== undefined) return answer.response;
+    if (answer.transportFailure === true) throw new TypeError("fixture lost response");
     if (answer.advance !== undefined) time.advance(answer.advance);
     const status = answer.status ?? 200;
     let payload: unknown = {};
@@ -248,6 +266,8 @@ function setup(options: Setup = {}) {
         payload = { providerVerificationJobId: JOB, fencingCounter: FENCE, credentialGrantedAt: iso(WALL_BASE), credential: { sealedEnvelope: envelope, openingContext: context } };
       } else if (route === "verifying") {
         payload = { providerVerificationJobId: JOB, fencingCounter: FENCE, state: "VERIFYING", verifyingAt: iso(WALL_BASE) };
+      } else if (route === "unsupported") {
+        payload = { providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: iso(DEFERRED_UNTIL_MS) };
       } else {
         payload = {
           providerVerificationJobId: JOB,
@@ -264,7 +284,7 @@ function setup(options: Setup = {}) {
   }) as typeof fetch;
   const real = createHttpProviderVerificationControlClient({ baseUrl: "http://127.0.0.1:9", machineCredential: MACHINE, fetchImpl: controlFetch });
 
-  const calls = { lease: 0, grant: [] as unknown[][], verifying: [] as unknown[][], result: [] as unknown[][], receivers: [] as unknown[] };
+  const calls = { lease: 0, grant: [] as unknown[][], verifying: [] as unknown[][], result: [] as unknown[][], defer: [] as unknown[][], receivers: [] as unknown[] };
   const through = async (route: Route, call: () => Promise<unknown>): Promise<unknown> => {
     const answer = answers[route].shift() ?? {};
     pendingAnswer[route] = answer;
@@ -301,6 +321,13 @@ function setup(options: Setup = {}) {
       calls.receivers.push(this);
       if (signal !== undefined) signals.result.push(signal);
       return through("result", () => real.reportProviderVerificationResult(jobId, proof, report, signal)) as never;
+    },
+    deferUnsupportedProviderVerification(jobId: string, proof, refusal, signal?: AbortSignal) {
+      log.push("defer");
+      calls.defer.push([jobId, proof, refusal, signal]);
+      calls.receivers.push(this);
+      if (signal !== undefined) signals.unsupported.push(signal);
+      return through("unsupported", () => real.deferUnsupportedProviderVerification(jobId, proof, refusal, signal)) as never;
     },
   };
 
@@ -699,7 +726,10 @@ describe("lease and admission", () => {
     h.quiescent();
   });
 
-  it("refuses an unsupported provider, policy or pair before any grant, leaving the lease to expire", async () => {
+  // R44B11G supersedes the Phase 7 "leave the lease to expire" disposition for
+  // this path only: classification before grant, no grant, VERIFYING or result
+  // report are kept, and "STOP" becomes exactly one deferral request.
+  it("refuses an unsupported provider, policy or pair before any grant, then defers it with exactly one request", async () => {
     const cases: Array<[Answer, string]> = [
       [{ provider: "OTHER_PROVIDER" }, "UNSUPPORTED_PROVIDER"],
       [{ policy: "OTHER_POLICY_V1" }, "UNSUPPORTED_POLICY"],
@@ -708,9 +738,18 @@ describe("lease and admission", () => {
     for (const [answer, reason] of cases) {
       const h = setup({ answers: { lease: [answer] } });
       const result = await h.run();
-      expect(result).toEqual({ status: "UNSUPPORTED_LEASE", providerVerificationJobId: JOB, reason });
+      expect(result).toEqual({
+        status: "UNSUPPORTED_LEASE",
+        providerVerificationJobId: JOB,
+        reason,
+        disposition: "DEFERRED",
+        deferredUntil: new Date(DEFERRED_UNTIL_MS),
+        cause: null,
+      });
       expect(Object.isFrozen(result)).toBe(true);
       expect(h.calls.lease).toBe(1);
+      expect(h.calls.defer).toHaveLength(1);
+      expect(h.sent.unsupported).toEqual([{ fencingCounter: FENCE, leaseToken: LEASE_TOKEN, refusal: reason }]);
       expect(h.time.state.wallReads).toBe(0);
       expect(h.time.budgetTimers()).toEqual([]);
       nothingAfterLease(h);
@@ -1578,6 +1617,548 @@ describe("the run promise never rejects", () => {
   });
 });
 
+// --- R44B11G unsupported-lease deferral ---------------------------------------
+//
+// Architecture R44B11G 5.2 and 11 (R1-R13, SD1-SD12, SD4-A/B/C, SD12-S). Every
+// decisive case is deterministic: the injected deadlineTimer counts its calls
+// (call #1 is the lease attempt, call #2 the deferral attempt), a lease member
+// getter records shutdown synchronously, and injected deferral methods settle
+// under test control.
+
+describe("R44B11G unsupported-lease deferral run (R1-R13, SD1-SD12)", () => {
+  const DEFERRED_KEYS = ["cause", "deferredUntil", "disposition", "providerVerificationJobId", "reason", "status"];
+  const OTHER_KEYS = ["cause", "detail", "disposition", "providerVerificationJobId", "reason", "status"];
+  const DEFERRED_UNTIL = new Date(DEFERRED_UNTIL_MS);
+  // Every disposition x cause combination produced in this block (SD10).
+  const produced = new Set<string>();
+
+  // A lease the worker refuses (UNSUPPORTED_PROVIDER), answered by the fake API.
+  const unsupported = () => setup({ answers: { lease: [{ provider: "OTHER_PROVIDER" }] } });
+
+  function expectUnsupported(result: ProviderVerificationRunResult, disposition: string, detailOrUntil: string | Date, cause: "SHUTDOWN" | null) {
+    const common = { status: "UNSUPPORTED_LEASE", providerVerificationJobId: JOB, reason: "UNSUPPORTED_PROVIDER", disposition };
+    expect(result).toEqual(disposition === "DEFERRED" ? { ...common, deferredUntil: detailOrUntil, cause } : { ...common, detail: detailOrUntil, cause });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.keys(result).sort()).toEqual(disposition === "DEFERRED" ? DEFERRED_KEYS : OTHER_KEYS);
+    produced.add(`${disposition}|${cause}`);
+  }
+
+  // Nothing after classification but the deferral: no budget, grant,
+  // VERIFYING, open, transport or result report, and no wall-clock read.
+  const nothingButDeferral = (h: ReturnType<typeof setup>) => {
+    nothingAfterLease(h);
+    expect(h.time.budgetTimers()).toEqual([]);
+    expect(h.time.state.wallReads).toBe(0);
+    expect(h.log.filter((entry) => ["grant", "verifying", "open", "transport", "result"].includes(entry))).toEqual([]);
+  };
+
+  // The counting deadline-timer seam: call #2 (the deferral attempt) is replaced.
+  function seamTimer(h: ReturnType<typeof setup>, second: (ms: number, onExpiry: () => void) => unknown) {
+    const counter = { calls: 0 };
+    const timer = ((ms: number, onExpiry: () => void) => {
+      counter.calls += 1;
+      return counter.calls === 2 ? second(ms, onExpiry) : h.time.timer(ms, onExpiry);
+    }) as ProviderVerificationDeadlineTimer;
+    return { timer, counter };
+  }
+  // Call #2 returns a cancel that synchronously records shutdown (SD4 seam).
+  const shutdownOnCancel = (h: ReturnType<typeof setup>) => (ms: number, onExpiry: () => void) => {
+    const cancel = h.time.timer(ms, onExpiry);
+    return () => {
+      cancel();
+      h.shutdown.abort();
+    };
+  };
+  // SD2 technique: a lease member getter records shutdown synchronously, after
+  // the lease and before the deferral attempt.
+  const shutdownDuringLeaseRead = (h: ReturnType<typeof setup>) => {
+    h.answers.lease.splice(0, h.answers.lease.length, {
+      provider: "OTHER_PROVIDER",
+      transform: (value) => {
+        const lease = value as Record<string, unknown>;
+        return {
+          ...lease,
+          get leaseExpiresAt() {
+            h.shutdown.abort();
+            return lease.leaseExpiresAt;
+          },
+        };
+      },
+    });
+  };
+  // An injected deferral method, counting its calls.
+  const injectedDefer = (h: ReturnType<typeof setup>, answer: () => unknown) => ({
+    ...h.client,
+    deferUnsupportedProviderVerification: (...args: unknown[]) => {
+      h.calls.defer.push(args);
+      return answer();
+    },
+  });
+
+  it("R6/SD5: a validated deferral is DEFERRED with cause null, from exactly one request carrying exactly the proof and refusal", async () => {
+    const h = unsupported();
+    const result = await h.run();
+    expectUnsupported(result, "DEFERRED", DEFERRED_UNTIL, null);
+    expect(h.calls.defer).toHaveLength(1);
+    const [jobId, proof, refusal, signal] = h.calls.defer[0]!;
+    expect([jobId, proof, refusal]).toEqual([JOB, { fencingCounter: FENCE, leaseToken: LEASE_TOKEN }, "UNSUPPORTED_PROVIDER"]);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(h.calls.receivers.at(-1)).toBe(h.client);
+    expect(h.sent.unsupported).toEqual([{ fencingCounter: FENCE, leaseToken: LEASE_TOKEN, refusal: "UNSUPPORTED_PROVIDER" }]);
+    // CLASSIFY -> DEFERRAL, then return: the deferral is the only request after the lease.
+    expect(h.log).toEqual(["gate", "read-open", "environment", "shutdown-link", "lease", "defer"]);
+    // The deferral attempt uses the 3000 ms control deadline, and no budget timer.
+    expect(h.time.state.timers.map((entry) => entry.ms)).toEqual([PROVIDER_VERIFICATION_RUN_CONTROL_DEADLINE_MS, PROVIDER_VERIFICATION_RUN_CONTROL_DEADLINE_MS]);
+    nothingButDeferral(h);
+    h.quiescent();
+  });
+
+  it("R7: 409 and 401/403 are REJECTED with the client's code, with no retry", async () => {
+    for (const [status, code] of [
+      [409, "PROVIDER_VERIFICATION_DEFERRAL_REJECTED"],
+      [401, "WORKER_AUTHENTICATION_REJECTED"],
+      [403, "WORKER_AUTHENTICATION_REJECTED"],
+    ] as const) {
+      const h = unsupported();
+      h.answers.unsupported.push({ status }, {});
+      expectUnsupported(await h.run(), "REJECTED", code, null);
+      expect(h.calls.defer, String(status)).toHaveLength(1);
+      expect(h.sent.unsupported).toHaveLength(1);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+  });
+
+  it("R9/SD8: 5xx, a lost response and the 3000 ms deadline are UNCONFIRMED / CONTROL_API_UNAVAILABLE, never DEFERRED, with no retry", async () => {
+    for (const answer of [{ status: 500 }, { status: 503 }, { transportFailure: true }] as const) {
+      const h = unsupported();
+      h.answers.unsupported.push(answer, {});
+      expectUnsupported(await h.run(), "UNCONFIRMED", "CONTROL_API_UNAVAILABLE", null);
+      expect(h.calls.defer).toHaveLength(1);
+      expect(h.sent.unsupported).toHaveLength(1);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+    const h = unsupported();
+    h.answers.unsupported.push({ hang: true });
+    const pending = h.start();
+    await settle();
+    expect(h.calls.defer).toHaveLength(1);
+    h.time.advance(PROVIDER_VERIFICATION_RUN_CONTROL_DEADLINE_MS - 1);
+    await settle();
+    expect(h.signals.unsupported[0]!.aborted).toBe(false);
+    h.time.advance(1);
+    expectUnsupported(await pending, "UNCONFIRMED", "CONTROL_API_UNAVAILABLE", null);
+    expect(h.signals.unsupported[0]!.aborted).toBe(true);
+    expect(h.calls.defer).toHaveLength(1);
+    nothingButDeferral(h);
+    h.quiescent();
+  });
+
+  it("R10/SD9/M1: a 404 from an older API, another unexpected status or a malformed 200 is UNCONFIRMED / MALFORMED_CONTROL_RESPONSE", async () => {
+    for (const answer of [
+      { status: 404 },
+      { status: 400 },
+      { status: 405 },
+      { body: { providerVerificationJobId: JOB, fencingCounter: FENCE, state: "LEASED", deferredUntil: iso(DEFERRED_UNTIL_MS) } },
+      { body: { providerVerificationJobId: JOB, fencingCounter: FENCE + 1, state: "QUEUED", deferredUntil: iso(DEFERRED_UNTIL_MS) } },
+      { body: { providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: "soon" } },
+      { body: { providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: iso(DEFERRED_UNTIL_MS), deferralSeconds: 300 } },
+      { body: { providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED" } },
+    ] as const) {
+      const h = unsupported();
+      h.answers.unsupported.push(answer, {});
+      expectUnsupported(await h.run(), "UNCONFIRMED", "MALFORMED_CONTROL_RESPONSE", null);
+      expect(h.calls.defer).toHaveLength(1);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+  });
+
+  it("R11: any other closed code (including a plain throw, as WORKER_CONFIGURATION_INVALID) is UNCONFIRMED with that code", async () => {
+    const h = unsupported();
+    h.answers.unsupported.push({ plainError: true });
+    expectUnsupported(await h.run(), "UNCONFIRMED", "WORKER_CONFIGURATION_INVALID", null);
+    expect(h.calls.defer).toHaveLength(1);
+    const other = unsupported();
+    expectUnsupported(
+      await other.run({}, { client: injectedDefer(other, () => Promise.reject(new WorkerError("LEASE_EXPIRED"))) }),
+      "UNCONFIRMED",
+      "LEASE_EXPIRED",
+      null,
+    );
+    expect(other.calls.defer).toHaveLength(1);
+    nothingButDeferral(other);
+    other.quiescent();
+  });
+
+  it("R4: PROVIDER_VERIFICATION_REQUEST_INVALID from the client's local validation is NOT_SENT, synchronous or asynchronous", async () => {
+    for (const answer of [
+      () => {
+        throw new WorkerError("PROVIDER_VERIFICATION_REQUEST_INVALID");
+      },
+      () => Promise.reject(new WorkerError("PROVIDER_VERIFICATION_REQUEST_INVALID")),
+    ]) {
+      const h = unsupported();
+      expectUnsupported(await h.run({}, { client: injectedDefer(h, answer) }), "NOT_SENT", "PROVIDER_VERIFICATION_REQUEST_INVALID", null);
+      expect(h.calls.defer).toHaveLength(1);
+      expect(h.sent.unsupported).toHaveLength(0);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+  });
+
+  it("R1/SD7: a deferral deadline timer that throws or is not a function is NOT_SENT / WORKER_CONFIGURATION_INVALID with zero requests", async () => {
+    for (const second of [
+      () => {
+        throw new TypeError("fixture timer");
+      },
+      () => "not a cancel",
+    ]) {
+      const h = unsupported();
+      const seam = seamTimer(h, second);
+      expectUnsupported(await h.run({}, { deadlineTimer: seam.timer }), "NOT_SENT", "WORKER_CONFIGURATION_INVALID", null);
+      expect(seam.counter.calls).toBe(2);
+      expect(h.calls.defer).toHaveLength(0);
+      expect(h.sent.unsupported).toHaveLength(0);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+    // SD7 with a cause already recorded (SD2 technique): the timer failure ranks first; the cause is reported.
+    const h = unsupported();
+    shutdownDuringLeaseRead(h);
+    const seam = seamTimer(h, () => {
+      throw new TypeError("fixture timer");
+    });
+    expectUnsupported(await h.run({}, { deadlineTimer: seam.timer }), "NOT_SENT", "WORKER_CONFIGURATION_INVALID", "SHUTDOWN");
+    expect(h.calls.defer).toHaveLength(0);
+    nothingButDeferral(h);
+    h.quiescent();
+  });
+
+  it("R2/SD2: shutdown recorded after the lease and before the send is NOT_SENT / SHUTDOWN, cause SHUTDOWN, zero deferral requests", async () => {
+    const h = unsupported();
+    shutdownDuringLeaseRead(h);
+    expectUnsupported(await h.run(), "NOT_SENT", "SHUTDOWN", "SHUTDOWN");
+    expect(h.calls.lease).toBe(1);
+    expect(h.calls.defer).toHaveLength(0);
+    expect(h.sent.unsupported).toHaveLength(0);
+    nothingButDeferral(h);
+    h.quiescent();
+  });
+
+  it("R3/SD11: a deadline fired synchronously while installing the deferral timer is NOT_SENT / CONTROL_API_UNAVAILABLE; with a recorded cause, cause SHUTDOWN", async () => {
+    const expiresAtInstall = (_ms: number, onExpiry: () => void) => {
+      onExpiry();
+      return () => undefined;
+    };
+    for (const recordCause of [false, true]) {
+      const h = unsupported();
+      if (recordCause) shutdownDuringLeaseRead(h);
+      const seam = seamTimer(h, expiresAtInstall);
+      expectUnsupported(await h.run({}, { deadlineTimer: seam.timer }), "NOT_SENT", "CONTROL_API_UNAVAILABLE", recordCause ? "SHUTDOWN" : null);
+      // sent === false: the closure never ran, so no client call and no control request.
+      expect(h.calls.defer).toHaveLength(0);
+      expect(h.sent.unsupported).toHaveLength(0);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+  });
+
+  it("R8/SD3: shutdown while the deferral is in flight is UNCONFIRMED / SHUTDOWN, one request, and the late settlement is absorbed", async () => {
+    // The real client over a request that never settles.
+    const h = unsupported();
+    h.answers.unsupported.push({ hang: true });
+    const pending = h.start();
+    await settle();
+    expect(h.calls.defer).toHaveLength(1);
+    h.shutdown.abort();
+    expectUnsupported(await pending, "UNCONFIRMED", "SHUTDOWN", "SHUTDOWN");
+    expect(h.signals.unsupported[0]!.aborted).toBe(true);
+    nothingButDeferral(h);
+    h.quiescent();
+    // An injected method whose promise settles after the run returned: resolution and rejection.
+    for (const settleLate of ["resolve", "reject"] as const) {
+      const late = deferred<unknown>();
+      const g = unsupported();
+      const running = g.start({}, { client: injectedDefer(g, () => late.promise) });
+      await settle();
+      g.shutdown.abort();
+      expectUnsupported(await running, "UNCONFIRMED", "SHUTDOWN", "SHUTDOWN");
+      if (settleLate === "resolve") late.resolve({ providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: DEFERRED_UNTIL });
+      else late.reject(new WorkerError("CONTROL_API_UNAVAILABLE"));
+      await settle();
+      expect(g.calls.defer).toHaveLength(1);
+      g.quiescent();
+    }
+  });
+
+  it("SD4-A: a validated deferral settled before a shutdown recorded inside finish() stays DEFERRED, with cause SHUTDOWN", async () => {
+    const h = unsupported();
+    const seam = seamTimer(h, shutdownOnCancel(h));
+    expectUnsupported(await h.run({}, { deadlineTimer: seam.timer }), "DEFERRED", DEFERRED_UNTIL, "SHUTDOWN");
+    expect(seam.counter.calls).toBe(2);
+    // Call #1's cancel did not abort: the lease attempt was unaffected.
+    expect(h.calls.lease).toBe(1);
+    expect(h.calls.defer).toHaveLength(1);
+    // The recorded cause took effect once; a second abort changes nothing.
+    h.shutdown.abort();
+    await settle();
+    nothingButDeferral(h);
+    h.quiescent();
+  });
+
+  it("SD4-B: a 409 settled before a shutdown recorded inside finish() stays REJECTED, with cause SHUTDOWN", async () => {
+    const h = unsupported();
+    h.answers.unsupported.push({ status: 409 });
+    const seam = seamTimer(h, shutdownOnCancel(h));
+    expectUnsupported(await h.run({}, { deadlineTimer: seam.timer }), "REJECTED", "PROVIDER_VERIFICATION_DEFERRAL_REJECTED", "SHUTDOWN");
+    expect(h.calls.lease).toBe(1);
+    expect(h.calls.defer).toHaveLength(1);
+    nothingButDeferral(h);
+    h.quiescent();
+  });
+
+  it("SD4-C (supplementary race): shutdown in the same turn as the deferral keeps the invariants", async () => {
+    const h = unsupported();
+    h.answers.unsupported.push({ before: () => h.shutdown.abort() });
+    const result = await h.run();
+    expect(result.status).toBe("UNSUPPORTED_LEASE");
+    if (result.status !== "UNSUPPORTED_LEASE") return;
+    expect(result.cause).toBe("SHUTDOWN");
+    if (result.disposition === "DEFERRED") expect(result.deferredUntil).toEqual(DEFERRED_UNTIL);
+    else expect(result.disposition).toBe("UNCONFIRMED");
+    expect(h.calls.defer).toHaveLength(1);
+    h.quiescent();
+  });
+
+  it.each(["same synchronous turn", "later microtask"] as const)("SD4-C: successful fake control response resolves with shutdown in the %s", async (schedule) => {
+    const h = unsupported();
+    const fetchResponse = deferred<Response>();
+    const response = new Response(
+      JSON.stringify({ providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: iso(DEFERRED_UNTIL_MS) }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+    let validated = 0;
+    h.answers.unsupported.push({
+      response: fetchResponse.promise,
+      transform: (value) => {
+        // through() reaches this hook only after the real HTTP client validated.
+        expect(value).toEqual({ providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: DEFERRED_UNTIL });
+        validated += 1;
+        return value;
+      },
+    });
+    const added = vi.spyOn(AbortSignal.prototype, "addEventListener");
+    const removed = vi.spyOn(AbortSignal.prototype, "removeEventListener");
+    const events: string[] = [];
+    let shutdownRecorded = false;
+    const pending = h.start();
+    const returned = pending.then((result) => {
+      events.push("return");
+      return { result, shutdownRecorded, validated };
+    });
+    try {
+      // Drain runnable work, without advancing time: the actual fetch is pending.
+      await settle();
+      expect(h.calls.lease).toBe(1);
+      expect(h.calls.defer).toHaveLength(1);
+      expect(h.sent.unsupported).toHaveLength(1);
+      expect(validated).toBe(0);
+      expect(h.externalSignal.aborted).toBe(false);
+      expect(getEventListeners(h.externalSignal, "abort")).toHaveLength(1);
+      expect(h.signals.unsupported[0]!.aborted).toBe(false);
+      // Both linked attempts install their listener on the internal run signal.
+      const links = added.mock.calls.flatMap((args, index) =>
+        args[0] === "abort" ? [{ signal: added.mock.contexts[index] as AbortSignal, listener: args[1] }] : [],
+      );
+      expect(links).toHaveLength(2);
+      expect(links[0]!.signal).toBe(links[1]!.signal);
+      const abort = () => {
+        events.push("shutdown");
+        h.shutdown.abort();
+        // Observing the internal signal proves the run recorded the shutdown.
+        shutdownRecorded = links[1]!.signal.aborted;
+      };
+      events.push("resolve");
+      fetchResponse.resolve(response);
+      if (schedule === "same synchronous turn") abort();
+      else queueMicrotask(abort);
+
+      const atReturn = await returned;
+      expect(events).toEqual(["resolve", "shutdown", "return"]);
+      expect(atReturn.shutdownRecorded).toBe(true);
+      expect(atReturn.result.status).toBe("UNSUPPORTED_LEASE");
+      if (atReturn.result.status !== "UNSUPPORTED_LEASE") throw new Error("fixture expected unsupported lease");
+      const cause = atReturn.shutdownRecorded ? "SHUTDOWN" : null;
+      if (atReturn.result.disposition === "DEFERRED") {
+        expect(atReturn.validated).toBe(1);
+        expectUnsupported(atReturn.result, "DEFERRED", DEFERRED_UNTIL, cause);
+      } else {
+        expectUnsupported(atReturn.result, "UNCONFIRMED", "SHUTDOWN", cause);
+        expect(h.signals.unsupported[0]!.aborted).toBe(true);
+      }
+      h.quiescent();
+      for (const { signal, listener } of links) {
+        expect(getEventListeners(signal, "abort")).toHaveLength(0);
+        expect(removed.mock.calls.filter((args, index) => removed.mock.contexts[index] === signal && args[0] === "abort" && args[1] === listener)).toHaveLength(1);
+      }
+      const snapshot = JSON.stringify(atReturn.result);
+      // Let the losing client's parsing/validation chain finish after cancellation.
+      await settle();
+      expect(validated).toBe(1);
+      expect(response.bodyUsed).toBe(true);
+      h.shutdown.abort();
+      h.time.advance(PROVIDER_VERIFICATION_RUN_CONTROL_DEADLINE_MS);
+      await settle();
+      expect(JSON.stringify(atReturn.result)).toBe(snapshot);
+      expect(h.calls.defer).toHaveLength(1);
+      expect(h.sent.unsupported).toHaveLength(1);
+      expect(h.calls.lease).toBe(1);
+      expect(h.time.state.timers).toHaveLength(2);
+      expect(h.time.state.timers.every((timer) => timer.cleared === 1 && !timer.fired)).toBe(true);
+      nothingButDeferral(h);
+      h.quiescent();
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      h.shutdown.abort();
+      fetchResponse.resolve(response);
+      await returned;
+      await settle();
+      added.mockRestore();
+      removed.mockRestore();
+    }
+  });
+
+  it("SD6: a shutdown after the run returned changes nothing and finds no listener", async () => {
+    const h = unsupported();
+    const result = await h.run();
+    expectUnsupported(result, "DEFERRED", DEFERRED_UNTIL, null);
+    h.quiescent();
+    const snapshot = JSON.stringify(result);
+    h.shutdown.abort();
+    await settle();
+    expect(JSON.stringify(result)).toBe(snapshot);
+    expect(h.calls.defer).toHaveLength(1);
+  });
+
+  it("R5/SD12: an injected value with an unusable deferredUntil is UNCONFIRMED / WORKER_CONFIGURATION_INVALID, never DEFERRED, read at most once, never rejecting", async () => {
+    const forged = Object.create(Date.prototype) as Date;
+    const cases: Array<[string, (reads: { count: number }) => unknown]> = [
+      ["invalid Date", () => ({ providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: new Date(Number.NaN) })],
+      ["string", () => ({ providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: "2026-11-24T00:00:00.000Z" })],
+      [
+        "throwing getter",
+        (reads) => ({
+          providerVerificationJobId: JOB,
+          fencingCounter: FENCE,
+          state: "QUEUED",
+          get deferredUntil() {
+            reads.count += 1;
+            throw new TypeError("fixture accessor");
+          },
+        }),
+      ],
+      ["forged Date", () => ({ providerVerificationJobId: JOB, fencingCounter: FENCE, state: "QUEUED", deferredUntil: forged })],
+      ["null value", () => null],
+    ];
+    for (const [name, value] of cases) {
+      const reads = { count: 0 };
+      const h = unsupported();
+      const result = await h.run({}, { client: injectedDefer(h, () => Promise.resolve(value(reads))) });
+      expectUnsupported(result, "UNCONFIRMED", "WORKER_CONFIGURATION_INVALID", null);
+      expect(h.calls.defer, name).toHaveLength(1);
+      expect(reads.count, name).toBeLessThanOrEqual(1);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+  });
+
+  it("SD12-S: an unusable deferredUntil with a shutdown recorded inside finish() is UNCONFIRMED with cause SHUTDOWN, read exactly once", async () => {
+    for (const variant of ["NaN", "throws"] as const) {
+      const reads = { count: 0 };
+      const h = unsupported();
+      const value = {
+        providerVerificationJobId: JOB,
+        fencingCounter: FENCE,
+        state: "QUEUED",
+        get deferredUntil(): Date {
+          reads.count += 1;
+          if (variant === "throws") throw new TypeError("fixture accessor");
+          return new Date(Number.NaN);
+        },
+      };
+      const seam = seamTimer(h, shutdownOnCancel(h));
+      const result = await h.run({}, { client: injectedDefer(h, () => Promise.resolve(value)), deadlineTimer: seam.timer });
+      expectUnsupported(result, "UNCONFIRMED", "WORKER_CONFIGURATION_INVALID", "SHUTDOWN");
+      expect(reads.count, variant).toBe(1);
+      expect(h.calls.lease).toBe(1);
+      expect(h.calls.defer).toHaveLength(1);
+      nothingButDeferral(h);
+      h.quiescent();
+    }
+  });
+
+  it("R12: at most one deferral request on every path, and exactly one wherever the closure ran", async () => {
+    // The cases above each assert their single call; here, a retryable-looking
+    // failure followed by a success answer is still never retried.
+    for (const first of [{ status: 503 }, { transportFailure: true }, { status: 409 }, { status: 404 }] as const) {
+      const h = unsupported();
+      h.answers.unsupported.push(first, {}, {});
+      await h.run();
+      expect(h.calls.defer, JSON.stringify(first)).toHaveLength(1);
+      expect(h.sent.unsupported, JSON.stringify(first)).toHaveLength(1);
+    }
+  });
+
+  it("R13: a client without the deferral method stops at START before any lease", async () => {
+    const h = unsupported();
+    const { deferUnsupportedProviderVerification: _omitted, ...withoutDeferral } = h.client;
+    expect(await h.run({}, { client: withoutDeferral })).toEqual(stoppedAt("START", "WORKER_CONFIGURATION_INVALID", null));
+    expect(await h.run({}, { client: { ...h.client, deferUnsupportedProviderVerification: "defer" } })).toEqual(stoppedAt("START", "WORKER_CONFIGURATION_INVALID", null));
+    expect(h.calls.lease).toBe(0);
+    expect(h.calls.defer).toHaveLength(0);
+  });
+
+  it("SD1: an external signal already aborted at entry is ABANDONED / START / SHUTDOWN with no lease and no deferral", async () => {
+    const h = unsupported();
+    h.shutdown.abort();
+    expect(await h.run()).toEqual(abandonedAt("START", "SHUTDOWN", null));
+    expect(h.calls.lease).toBe(0);
+    expect(h.calls.defer).toHaveLength(0);
+    h.quiescent();
+  });
+
+  it("supported verification is unchanged: no deferral request on the supported path", async () => {
+    const h = setup();
+    expect(await h.run()).toEqual(reported("VERIFIED", "VERIFICATION_SUCCEEDED"));
+    expect(h.calls.defer).toHaveLength(0);
+    expect(h.sent.unsupported).toHaveLength(0);
+  });
+
+  it("the default live gate still refuses before any lease or deferral", async () => {
+    const h = unsupported();
+    expect(await h.run({}, { liveGate: undefined })).toEqual({ status: "DISABLED" });
+    expect(h.calls.lease).toBe(0);
+    expect(h.calls.defer).toHaveLength(0);
+  });
+
+  it("SD10: every disposition x cause combination was produced deterministically above", () => {
+    expect([...produced].sort()).toEqual(
+      [
+        "DEFERRED|null",
+        "DEFERRED|SHUTDOWN",
+        "REJECTED|null",
+        "REJECTED|SHUTDOWN",
+        "UNCONFIRMED|null",
+        "UNCONFIRMED|SHUTDOWN",
+        "NOT_SENT|null",
+        "NOT_SENT|SHUTDOWN",
+      ].sort(),
+    );
+  });
+});
+
 // --- cross-cutting checks over every result in this file ---------------------
 
 describe("secret safety and result shapes (all results above)", () => {
@@ -1600,10 +2181,15 @@ describe("secret safety and result shapes (all results above)", () => {
         expect(value instanceof Error).toBe(false);
       }
       const keys = Object.keys(entry).sort();
+      // R44B11G widens the UNSUPPORTED_LEASE member: a DEFERRED result carries
+      // deferredUntil, every other disposition carries detail.
       const expectedKeys: Record<string, string[]> = {
         DISABLED: ["status"],
         NO_WORK: ["status"],
-        UNSUPPORTED_LEASE: ["providerVerificationJobId", "reason", "status"],
+        UNSUPPORTED_LEASE:
+          entry.status === "UNSUPPORTED_LEASE" && entry.disposition === "DEFERRED"
+            ? ["cause", "deferredUntil", "disposition", "providerVerificationJobId", "reason", "status"]
+            : ["cause", "detail", "disposition", "providerVerificationJobId", "reason", "status"],
         REPORTED: ["completedAt", "fencingCounter", "outcome", "providerVerificationJobId", "reasonCode", "status"],
         ABANDONED: ["cause", "providerVerificationJobId", "stage", "status"],
         STOPPED: ["code", "providerVerificationJobId", "stage", "status"],

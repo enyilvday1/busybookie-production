@@ -23,6 +23,8 @@ import {
   isIssuedProviderVerificationCredentialGrant,
   isIssuedProviderVerificationLease,
   isIssuedProviderVerificationVerifyingAcknowledgement,
+  parseProviderVerificationDeferralResponse,
+  PROVIDER_VERIFICATION_REFUSALS,
   parseProviderVerificationCredentialGrantResponse,
   parseProviderVerificationLeaseResponse,
   parseProviderVerificationVerifyingResponse,
@@ -75,6 +77,9 @@ const RESULT_BODY = {
   reasonCode: "VERIFICATION_SUCCEEDED",
   completedAt: COMPLETED_AT,
 };
+// R44B11G: the committed deferral acknowledgement.
+const DEFERRED_UNTIL = "2026-11-23T10:05:00.000Z";
+const DEFERRAL_BODY = { providerVerificationJobId: JOB, fencingCounter: 4, state: "QUEUED", deferredUntil: DEFERRED_UNTIL };
 
 type Captured = { url: string; init: RequestInit };
 type Answer = Readonly<{ status: number; body: unknown }> | "THROW";
@@ -143,13 +148,23 @@ const CALLS: readonly Call[] = [
     success: RESULT_BODY,
     invoke: (client) => client.reportProviderVerificationResult(JOB, PROOF, REPORT),
   },
+  // R44B11G: the unsupported-lease deferral shares the same transport and mapping.
+  {
+    name: "deferUnsupportedProviderVerification",
+    path: `/worker-control/v1/provider-verifications/${JOB}/unsupported`,
+    conflict: "PROVIDER_VERIFICATION_DEFERRAL_REJECTED",
+    success: DEFERRAL_BODY,
+    invoke: (client) => client.deferUnsupportedProviderVerification(JOB, PROOF, "UNSUPPORTED_POLICY"),
+  },
 ];
 
 describe("provider verification client surface", () => {
-  it("is a separate client with exactly the four locked methods; the generation client is unchanged", () => {
+  // R44B11G widens the locked surface by exactly the deferral method.
+  it("is a separate client with exactly the five locked methods; the generation client is unchanged", () => {
     const { client } = clientAnswering(ok(LEASE_BODY));
     expect(Object.keys(client).sort()).toEqual([
       "acknowledgeProviderVerificationVerifying",
+      "deferUnsupportedProviderVerification",
       "leaseProviderVerification",
       "reportProviderVerificationResult",
       "requestProviderVerificationCredentialGrant",
@@ -274,7 +289,9 @@ describe("provider verification client requests", () => {
             ? client.requestProviderVerificationCredentialGrant(JOB, PROOF, controller.signal)
             : call.name === "acknowledgeProviderVerificationVerifying"
               ? client.acknowledgeProviderVerificationVerifying(JOB, PROOF, controller.signal)
-              : client.reportProviderVerificationResult(JOB, PROOF, REPORT, controller.signal);
+              : call.name === "deferUnsupportedProviderVerification"
+                ? client.deferUnsupportedProviderVerification(JOB, PROOF, "UNSUPPORTED_POLICY", controller.signal)
+                : client.reportProviderVerificationResult(JOB, PROOF, REPORT, controller.signal);
       expect(await codeOf(invoke), call.name).toBe("CONTROL_API_UNAVAILABLE");
       expect(captured, call.name).toHaveLength(1);
       expect(captured[0]!.init.signal).toBe(controller.signal);
@@ -313,8 +330,138 @@ describe("provider verification client status mapping", () => {
       "PROVIDER_VERIFICATION_GRANT_REJECTED",
       "PROVIDER_VERIFICATION_VERIFYING_REJECTED",
       "PROVIDER_VERIFICATION_RESULT_REJECTED",
+      "PROVIDER_VERIFICATION_DEFERRAL_REJECTED",
     ]);
     expect(new WorkerError("PROVIDER_VERIFICATION_VERIFYING_REJECTED").message).toBe("The worker-control API rejected the VERIFYING acknowledgement.");
+    expect(new WorkerError("PROVIDER_VERIFICATION_DEFERRAL_REJECTED").message).toBe("The worker-control API rejected the unsupported provider verification deferral.");
+  });
+});
+
+// R44B11G section 5.1 and 11 W1-W5: the unsupported-lease deferral method.
+describe("R44B11G deferral client (W1-W5)", () => {
+  it("W1: posts exactly fencingCounter, leaseToken and refusal to the unsupported route, and returns the frozen acknowledgement", async () => {
+    for (const refusal of PROVIDER_VERIFICATION_REFUSALS) {
+      const { client, captured } = clientAnswering(ok(DEFERRAL_BODY));
+      const extraProof = { ...PROOF, providerVerificationJobId: JOB, deferralSeconds: 1, extra: "never sent" };
+      const acknowledgement = await client.deferUnsupportedProviderVerification(JOB, extraProof, refusal);
+      expect(acknowledgement).toEqual({ providerVerificationJobId: JOB, fencingCounter: 4, state: "QUEUED", deferredUntil: new Date(DEFERRED_UNTIL) });
+      expect(Object.isFrozen(acknowledgement)).toBe(true);
+      expect(captured).toHaveLength(1);
+      const [request] = captured;
+      expect(request!.url).toBe(`http://127.0.0.1:9/worker-control/v1/provider-verifications/${JOB}/unsupported`);
+      expect(request!.url.includes(LEASE_TOKEN) || request!.url.includes(MACHINE)).toBe(false);
+      expect(request!.init.method).toBe("POST");
+      expect(request!.init.redirect).toBe("error");
+      expect(request!.init.headers).toEqual({ Authorization: `Bearer ${MACHINE}`, "Content-Type": "application/json" });
+      // B4: exactly three members, and no duration, schedule or time member.
+      expect(JSON.parse(String(request!.init.body))).toEqual({ fencingCounter: 4, leaseToken: LEASE_TOKEN, refusal });
+      expect(Object.keys(JSON.parse(String(request!.init.body)) as object)).toEqual(["fencingCounter", "leaseToken", "refusal"]);
+      expect("signal" in request!.init).toBe(false);
+    }
+    expect(PROVIDER_VERIFICATION_REFUSALS).toEqual(["UNSUPPORTED_PROVIDER", "UNSUPPORTED_POLICY", "PROVIDER_POLICY_MISMATCH"]);
+    expect(Object.isFrozen(PROVIDER_VERIFICATION_REFUSALS)).toBe(true);
+  });
+
+  it("W2: validates the acknowledgement strictly: job, fence, state QUEUED, canonical instant and exact members", async () => {
+    for (const body of [
+      { ...DEFERRAL_BODY, providerVerificationJobId: OTHER_JOB },
+      { ...DEFERRAL_BODY, providerVerificationJobId: JOB.toUpperCase() },
+      { ...DEFERRAL_BODY, fencingCounter: 5 },
+      { ...DEFERRAL_BODY, fencingCounter: "4" },
+      { ...DEFERRAL_BODY, state: "LEASED" },
+      { ...DEFERRAL_BODY, state: "queued" },
+      { ...DEFERRAL_BODY, state: "CANCELLED" },
+      { ...DEFERRAL_BODY, deferredUntil: "2026-11-23T10:05:00Z" },
+      { ...DEFERRAL_BODY, deferredUntil: "2026-02-30T10:05:00.000Z" },
+      { ...DEFERRAL_BODY, deferredUntil: 1795000000000 },
+      { ...DEFERRAL_BODY, deferredUntil: null },
+      { ...DEFERRAL_BODY, deferralSeconds: 300 },
+      { ...DEFERRAL_BODY, leaseToken: LEASE_TOKEN },
+      { providerVerificationJobId: JOB, fencingCounter: 4, state: "QUEUED" },
+      [],
+      null,
+      "QUEUED",
+    ]) {
+      const { client, captured } = clientAnswering(ok(body));
+      expect(await codeOf(client.deferUnsupportedProviderVerification(JOB, PROOF, "UNSUPPORTED_PROVIDER")), JSON.stringify(body)).toBe("MALFORMED_CONTROL_RESPONSE");
+      expect(captured).toHaveLength(1);
+    }
+    // The exported parser applies the same rules and never registers provenance.
+    expect(parseProviderVerificationDeferralResponse(DEFERRAL_BODY, { providerVerificationJobId: JOB, fencingCounter: 4 })).toEqual({
+      providerVerificationJobId: JOB,
+      fencingCounter: 4,
+      state: "QUEUED",
+      deferredUntil: new Date(DEFERRED_UNTIL),
+    });
+    expect(() => parseProviderVerificationDeferralResponse(DEFERRAL_BODY, { providerVerificationJobId: JOB, fencingCounter: 5 })).toThrow(WorkerError);
+  });
+
+  it("W3: maps every status, including 404 from an older API as MALFORMED_CONTROL_RESPONSE, with exactly one request", async () => {
+    for (const [answer, expected] of [
+      [{ status: 409, body: { status: "error", code: "LEASE_REJECTED" } }, "PROVIDER_VERIFICATION_DEFERRAL_REJECTED"],
+      [{ status: 401, body: {} }, "WORKER_AUTHENTICATION_REJECTED"],
+      [{ status: 403, body: {} }, "WORKER_AUTHENTICATION_REJECTED"],
+      [{ status: 500, body: "" }, "CONTROL_API_UNAVAILABLE"],
+      [{ status: 503, body: {} }, "CONTROL_API_UNAVAILABLE"],
+      ["THROW", "CONTROL_API_UNAVAILABLE"],
+      [{ status: 404, body: { status: "error", code: "NOT_FOUND" } }, "MALFORMED_CONTROL_RESPONSE"],
+      [{ status: 400, body: {} }, "MALFORMED_CONTROL_RESPONSE"],
+      [{ status: 405, body: {} }, "MALFORMED_CONTROL_RESPONSE"],
+      [{ status: 413, body: {} }, "MALFORMED_CONTROL_RESPONSE"],
+      [{ status: 415, body: {} }, "MALFORMED_CONTROL_RESPONSE"],
+      [{ status: 201, body: DEFERRAL_BODY }, "MALFORMED_CONTROL_RESPONSE"],
+    ] as const) {
+      const { client, captured } = clientAnswering(answer, ok(DEFERRAL_BODY));
+      expect(await codeOf(client.deferUnsupportedProviderVerification(JOB, PROOF, "PROVIDER_POLICY_MISMATCH")), JSON.stringify(answer)).toBe(expected);
+      expect(captured).toHaveLength(1);
+    }
+  });
+
+  it("W4: refuses an invalid job ID, proof or refusal with PROVIDER_VERIFICATION_REQUEST_INVALID and zero requests", async () => {
+    const send = async (invoke: (client: ProviderVerificationControlClient) => Promise<unknown>) => {
+      const { client, captured } = clientAnswering(ok(DEFERRAL_BODY));
+      const code = await codeOf(invoke(client));
+      expect(captured).toHaveLength(0);
+      return code;
+    };
+    for (const job of ["", "not-a-uuid", JOB.toUpperCase(), `${JOB}/release`, 42, null, undefined]) {
+      expect(await send((client) => client.deferUnsupportedProviderVerification(job as string, PROOF, "UNSUPPORTED_PROVIDER")), String(job)).toBe(
+        "PROVIDER_VERIFICATION_REQUEST_INVALID",
+      );
+    }
+    for (const proof of [null, "proof", { fencingCounter: 0, leaseToken: LEASE_TOKEN }, { fencingCounter: 4, leaseToken: "short" }, { fencingCounter: 4 }]) {
+      expect(await send((client) => client.deferUnsupportedProviderVerification(JOB, proof as typeof PROOF, "UNSUPPORTED_PROVIDER")), JSON.stringify(proof)).toBe(
+        "PROVIDER_VERIFICATION_REQUEST_INVALID",
+      );
+    }
+    for (const refusal of ["", "unsupported_provider", "UNSUPPORTED_MODEL", "VERIFICATION_UNSCHEDULABLE", " UNSUPPORTED_POLICY", 1, null, undefined, ["UNSUPPORTED_POLICY"]]) {
+      expect(await send((client) => client.deferUnsupportedProviderVerification(JOB, PROOF, refusal as "UNSUPPORTED_POLICY")), JSON.stringify(refusal)).toBe(
+        "PROVIDER_VERIFICATION_REQUEST_INVALID",
+      );
+    }
+  });
+
+  it("W5: reads each proof member exactly once and sends only the validated locals", async () => {
+    const reads = { fencingCounter: 0, leaseToken: 0 };
+    const shifting = {
+      get fencingCounter() {
+        reads.fencingCounter += 1;
+        return reads.fencingCounter === 1 ? 4 : 99;
+      },
+      get leaseToken() {
+        reads.leaseToken += 1;
+        return reads.leaseToken === 1 ? LEASE_TOKEN : "x";
+      },
+    };
+    const { client, captured } = clientAnswering(ok(DEFERRAL_BODY));
+    await client.deferUnsupportedProviderVerification(JOB, shifting, "UNSUPPORTED_PROVIDER");
+    expect(reads).toEqual({ fencingCounter: 1, leaseToken: 1 });
+    expect(JSON.parse(String(captured[0]!.init.body))).toEqual({ fencingCounter: 4, leaseToken: LEASE_TOKEN, refusal: "UNSUPPORTED_PROVIDER" });
+  });
+
+  it("keeps the error opaque: no lease token, credential or response body in a deferral failure", async () => {
+    const { client } = clientAnswering({ status: 409, body: { status: "error", leaked: LEASE_TOKEN } });
+    expect(await codeOf(client.deferUnsupportedProviderVerification(JOB, PROOF, "UNSUPPORTED_POLICY"))).toBe("PROVIDER_VERIFICATION_DEFERRAL_REJECTED");
   });
 });
 
@@ -612,7 +759,9 @@ describe("provider verification client reads caller input exactly once", () => {
           ? client.requestProviderVerificationCredentialGrant(JOB, typed)
           : call.name === "acknowledgeProviderVerificationVerifying"
             ? client.acknowledgeProviderVerificationVerifying(JOB, typed)
-            : client.reportProviderVerificationResult(JOB, typed, REPORT);
+            : call.name === "deferUnsupportedProviderVerification"
+              ? client.deferUnsupportedProviderVerification(JOB, typed, "UNSUPPORTED_POLICY")
+              : client.reportProviderVerificationResult(JOB, typed, REPORT);
       await invoke;
       expect(proof.reads, call.name).toEqual({ fencingCounter: 1, leaseToken: 1 });
       expect(captured, call.name).toHaveLength(1);

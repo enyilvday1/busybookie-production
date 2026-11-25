@@ -80,7 +80,10 @@ export type WorkerErrorCode =
   | "PROVIDER_VERIFICATION_GRANT_REJECTED"
   | "PROVIDER_VERIFICATION_VERIFYING_REJECTED"
   | "PROVIDER_VERIFICATION_RESULT_REJECTED"
-  | "PROVIDER_VERIFICATION_AUTHORITY_MISMATCH";
+  | "PROVIDER_VERIFICATION_AUTHORITY_MISMATCH"
+  // R44B11G: the control plane refused the unsupported-lease deferral (HTTP
+  // 409: stale, foreign, expired or granted lease, or no longer LEASED).
+  | "PROVIDER_VERIFICATION_DEFERRAL_REJECTED";
 
 const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   STATE_ROOT_UNSUITABLE: "The worker state root is unsuitable for the acceptance journal.",
@@ -125,6 +128,7 @@ const MESSAGES: Readonly<Record<WorkerErrorCode, string>> = {
   PROVIDER_VERIFICATION_VERIFYING_REJECTED: "The worker-control API rejected the VERIFYING acknowledgement.",
   PROVIDER_VERIFICATION_RESULT_REJECTED: "The worker-control API rejected the provider verification result.",
   PROVIDER_VERIFICATION_AUTHORITY_MISMATCH: "The provider verification authority does not match; the credential was not opened.",
+  PROVIDER_VERIFICATION_DEFERRAL_REJECTED: "The worker-control API rejected the unsupported provider verification deferral.",
 };
 
 export class WorkerError extends Error {

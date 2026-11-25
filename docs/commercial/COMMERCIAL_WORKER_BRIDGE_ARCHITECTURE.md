@@ -18259,4 +18259,1001 @@ R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENAB
 R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT
 ```
 
+### R44B11G — Unsupported verification lease bounded deferral
+
+Status: locked architecture contract (Decision A). Not implemented. This section authorises no implementation, migration, runtime-grant, database, deployment or live-enablement work. Each of those needs its own explicitly authorised gate (subsection 10A).
+
+Source: the reviewed R44B11G Decision A contract v4 (sha256 53ca86e3aae70e3f0a69bed502d33a9fc536630a3f6207b05af6f15fe07f3c80), confirmed ready for authoring by an independent review. Its sections 1 to 14 are reproduced below with four editorial corrections from that review and without the proposal's review change logs. Labels in parentheses such as M-1, RC-B, m4, n5 or RR-2 name the review finding that introduced a rule. The review records are kept outside the repository and are not normative. Section numbers below are local to this R44B11G section.
+
+#### 1. Behavioural decisions
+
+D1. A worker admission refusal is evidence about that worker build only. It is never terminal authority. No R44B11G component makes a verification job terminal. The terminal writers remain exactly those of R44B11F: the result route, Phase 4 worker-loss convergence, and reconciler lifecycle cancellation (`LIFECYCLE_NO_LONGER_ELIGIBLE`).
+
+D2. A confirmed refusal moves the job LEASED -> QUEUED with a bounded deferral. The job stays open and leasable after the deferral, and can be verified, lifecycle-cancelled or requeued by natural expiry.
+
+D3. No new terminal reason. No new provider-result reason. No result report on the unsupported path.
+
+D4. Persistently unsupported jobs remain open, observable (section 9) and possibly pending indefinitely. The existing mechanisms that can end them are:
+- a worker build supporting the pair leases the job after its deferral and verifies it;
+- lifecycle ineligibility (connection DISCONNECTED or DISABLED, credential rotation, Account or owner not ACTIVE) -> reconciler `LIFECYCLE_NO_LONGER_ELIGIBLE`.
+
+Carry `R44B11G_PERSISTENT_UNSUPPORTED_RESOLUTION_CARRY` stays OPEN. Any further resolution, for example server-authoritative registry-withdrawal cancellation, needs a separately authorised slice. R44B11G adds no administrative endpoint, no operator authority and no registry-driven cancellation, and does not present D4 as a complete operational solution.
+
+D5. Fleet-support requirement (operational, not code-enforced): before any live enablement, the capability registry may enable a (provider, policy) pair only after every enabled verification worker supports it. It must disable the pair before any rollout that removes support. Fleet capability is verified independently, outside R44B11G.
+
+D6. Pre-live carries:
+- `R44B11G_TARGETS=R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION`, as carry option A (an explicit release disposition route). The carry stays `REQUIRED_BEFORE_LIVE_ENABLEMENT` until the R44B11G implementation is independently validated, accepted and published.
+- `R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION` stays open and out of scope.
+
+#### 2. Schema and migration 0011
+
+Path: `apps/commercial-api/migrations/0011_provider_verification_unsupported_deferral.sql`. No transaction control. LF only.
+
+##### 2.1 Persistence
+
+| Column | Purpose |
+|---|---|
+| `deferred_until timestamptz NULL` | Scheduling: lease selection skips a deferred job. The only column safety needs |
+| `unsupported_deferral_count integer NOT NULL DEFAULT 0` | Backoff step and durable persistence evidence. Dedicated scheduling counter, never derived from or compared with `lease_fencing_counter`. No terminal threshold exists, and no code path may branch to a terminal state on it |
+| `last_unsupported_refusal text NULL` | Non-authoritative diagnostic. Read by no decision |
+
+##### 2.2 Constraints
+
+```text
+provider_verification_jobs_unsupported_deferral_count_ck
+  CHECK (unsupported_deferral_count >= 0)
+provider_verification_jobs_last_unsupported_refusal_ck
+  CHECK (last_unsupported_refusal IS NULL OR last_unsupported_refusal IN
+         ('UNSUPPORTED_PROVIDER','UNSUPPORTED_POLICY','PROVIDER_POLICY_MISMATCH'))
+provider_verification_jobs_unsupported_deferral_presence_ck
+  CHECK ((unsupported_deferral_count = 0) = (last_unsupported_refusal IS NULL)
+     AND (unsupported_deferral_count = 0) = (deferred_until IS NULL))
+provider_verification_jobs_deferred_after_creation_ck
+  CHECK (deferred_until IS NULL OR deferred_until > created_at)
+```
+
+Counter overflow: `unsupported_deferral_count` is a 32-bit integer. Each increment needs one committed deferral, and each deferral needs a fresh lease after the previous deferral has ended, so with d(n) >= 300 s overflow is unreachable (more than 10^5 years at the 3600 s cap). If `count + 1` ever overflowed, PostgreSQL raises `numeric_value_out_of_range`. The transaction rolls back, the route answers 503, the worker reports UNCONFIRMED (CONTROL_API_UNAVAILABLE), and the job stays LEASED until natural expiry requeues it. That is safe, non-terminal, and leaves the job leasable. No wraparound and no terminal transition can result.
+
+##### 2.3 Backoff d(n)
+
+n = count after the increment.
+
+```text
+d(n) = 300 * 2^(n-1) s for n <= 4   -> 300, 600, 1200, 2400
+d(n) = 3600 s          for n >= 5
+SQL: CASE WHEN n >= 5 THEN 3600 ELSE 300 * (1 << (n - 1)) END
+```
+
+##### 2.4 Trigger `provider_verification_jobs_deferral_guard`
+
+A new plpgsql function, `BEFORE INSERT OR UPDATE FOR EACH ROW`, with EXECUTE revoked from PUBLIC. It never modifies NEW. The 0010 function and trigger are unchanged.
+
+```text
+INSERT: count = 0 AND last_unsupported_refusal IS NULL AND deferred_until IS NULL
+UPDATE, when (count, last_unsupported_refusal, deferred_until) IS DISTINCT FROM OLD:
+  require OLD.state = 'LEASED' AND NEW.state = 'QUEUED'
+      AND OLD.credential_granted_at IS NULL
+      AND OLD.lease_expires_at > now()
+      AND NEW.count = OLD.count + 1
+      AND NEW.last_unsupported_refusal IS NOT NULL
+      AND NEW.deferred_until > now()
+      AND NEW.deferred_until <= now() + make_interval(secs => d(NEW.count))
+  else RAISE check_violation
+```
+
+Trigger bound vs service schedule: the database enforces an upper bound d(n) and a strictly-future lower bound. It does not enforce exact equality. The service always writes exactly `now() + d(n)` in production. Exactness is a service property proven by test F3. The bound is a database property proven by S4. The database bound is authoritative: no caller, including the test seam (4.3), can exceed d(n) or write a non-future deferral.
+
+##### 2.5 Interaction with 0010 (verified against the 0010 source)
+
+| Concern | Enforced by |
+|---|---|
+| LEASED -> QUEUED is legal | 0010 transition table |
+| Fence unchanged on that transition | 0010 fence rule (changes only on QUEUED -> LEASED, by +1) |
+| Live lease fields NULL in QUEUED | 0010 `lease_state_ck` and `lease_complete_ck` |
+| No requeue after a grant | 0010 and 0011 |
+| Terminal rows fully immutable, including the new columns | 0010 whole-row `NEW IS DISTINCT FROM OLD` check |
+| No other writer touches the deferral columns | 0011 |
+
+The triggers fire in name order (`..._deferral_guard` before `..._guard`). Neither modifies NEW, so the order is irrelevant.
+
+##### 2.6 Legal transitions after 0011
+
+| Transition | Writer | Deferral columns |
+|---|---|---|
+| insert -> QUEUED | customer verify | 0 / NULL / NULL |
+| QUEUED -> LEASED | lease service (UPDATE unchanged) | unchanged |
+| LEASED -> QUEUED, deferral | new deferral service | +1, refusal set, bounded |
+| LEASED -> QUEUED, natural expiry | reconciler (unchanged) | unchanged |
+| QUEUED or LEASED -> CANCELLED `LIFECYCLE_NO_LONGER_ELIGIBLE` | reconciler (unchanged) | unchanged |
+| Grant; LEASED -> VERIFYING; -> COMPLETED | existing services | unchanged |
+
+##### 2.7 Indexes
+
+```text
+CREATE INDEX provider_verification_jobs_eligible_queue_ix
+  ON provider_verification_jobs ((COALESCE(deferred_until, created_at)), id)
+  WHERE state = 'QUEUED';
+```
+
+`provider_verification_jobs_queue_ix` (0010) is retained for now. After R44B11G the lease query no longer uses it, so it costs writes only. Dropping it is left to a later slice.
+
+##### 2.8 Runtime grants
+
+The `runtimeGrants.ts` manifest adds `deferred_until`, `unsupported_deferral_count` and `last_unsupported_refusal` to the `provider_verification_jobs` UPDATE columns. The migration grants nothing. Grants are applied only by the existing `grant-runtime` database command (`runDatabaseCommand("grant-runtime")`, `npm run grant-runtime`), which API startup never runs. That command synchronises the runtime role to the manifest of the build that runs it.
+
+Versioning (RC-1). Before granting, `applyRuntimeGrants` requires `max(schema_migrations.version)` to equal the latest migration of the build running the command, and requires the public tables to equal the manifest's tables. Otherwise it throws `MigrationError("RUNTIME_GRANT_SCHEMA_MISMATCH")` (`runtimeGrants.ts:236-245`) and grants nothing. Therefore:
+- a pre-R44B11G build's `grant-runtime` (latest 0010) fails with `RUNTIME_GRANT_SCHEMA_MISMATCH` once 0011 is applied;
+- the R44B11G build's `grant-runtime` (latest 0011) fails with `RUNTIME_GRANT_SCHEMA_MISMATCH` before 0011 is applied;
+- updated grants are applied only by the R44B11G (or later, 0011-compatible) build's `grant-runtime`, after `migrate` has applied 0011;
+- API startup never applies grants (`runDatabaseCommand.ts`: "Never invoked by API startup").
+
+##### 2.9 Migration mechanics
+
+- ADD COLUMN with a constant default does not rewrite the table. This holds on the repository-enforced minimum, PostgreSQL 16 (`MINIMUM_SERVER_VERSION_NUM = 160000`, `verifyRuntimeDatabase.ts:26-27`).
+- Existing rows satisfy the CHECKs.
+- ADD COLUMN fires no row triggers.
+- The index is created without CONCURRENTLY, because migrations run in a transaction.
+
+#### 3. Lease selection
+
+Only `SELECT_NEXT` in `workerProviderVerificationLeaseService.ts` changes:
+
+```text
+ WHERE j.state = 'QUEUED'
+   AND COALESCE(j.deferred_until, j.created_at) <= now()     -- added, MUST stay in WHERE
+   AND j.lease_fencing_counter < MAX
+   AND <existing lifecycle filters unchanged>
+ ORDER BY COALESCE(j.deferred_until, j.created_at), j.id      -- changed
+ LIMIT 1
+   FOR UPDATE OF j SKIP LOCKED
+```
+
+Locked invariants:
+- **WHERE invariant.** The eligibility predicate is in the WHERE clause, not only in ORDER BY.
+- **EvalPlanQual invariant.** Under READ COMMITTED, when a candidate row was updated by a transaction that committed after the statement's snapshot, PostgreSQL re-evaluates the WHERE clause on the newest row version before locking. Because the eligibility predicate (and `state = 'QUEUED'`) is in WHERE, a job deferred or leased concurrently is never returned on the basis of its stale version. A row locked by an in-progress transaction is skipped (SKIP LOCKED) and is not waited on.
+- **Timestamp semantics.** `now()` is the transaction start. Accepted edge: a job whose creating transaction's `now()` is later than the leasing transaction's `now()` waits one poll.
+
+#### 4. HTTP wire contract (unchanged in substance)
+
+##### 4.1 Route
+
+`POST /worker-control/v1/provider-verifications/:jobId/unsupported`
+
+`:jobId` must be a lowercase canonical UUID. `/release` stays 404.
+
+##### 4.2 Request
+
+The body has exactly these members:
+
+```text
+{ fencingCounter: <safe integer >= 1>, leaseToken: <WORKER_LEASE_TOKEN_PATTERN>,
+  refusal: "UNSUPPORTED_PROVIDER" | "UNSUPPORTED_POLICY" | "PROVIDER_POLICY_MISMATCH" }
+```
+
+There is no schedule, duration or time member, and any extra member is a 400 (`readJsonObjectBody` exact member set). `refusal` is diagnostic and grants no authority.
+
+##### 4.3 Transaction (READ COMMITTED)
+
+1. `requireActiveWorker` locks the principal FOR SHARE. If inactive -> `WORKER_NOT_ACTIVE`.
+2. `lockVerificationJob` locks the job FOR UPDATE and judges expiry at transaction-start `now()`. If absent -> `UNKNOWN_VERIFICATION_JOB`.
+3. The state must be LEASED, else `NOT_LEASED`.
+4. `requireLiveVerificationLease`: `OTHER_WORKER`, `FENCING_MISMATCH`, `TOKEN_MISMATCH`, `LEASE_EXPIRED`.
+5. `credentialGrantedAt === null`, else `CREDENTIAL_GRANTED`.
+6. The guarded UPDATE runs (state LEASED, no grant, same worker, same fence). It sets QUEUED, clears the live lease fields, increments the count, sets the refusal and sets `deferred_until = now() + d(old count + 1)`. RETURNING the fence and `deferred_until`. No row is an invariant failure (503).
+
+No Account, ProviderConnection, credential-version or audit row is read, locked or written. Lock order: principal, then job.
+
+**Scheduling seam.** The service function accepts an optional schedule parameter, used by tests only.
+- Its default is d(n).
+- The HTTP handler calls the service without it.
+- Whatever schedule is used, the trigger (2.4) refuses any deferral beyond d(n) or not in the future, so the seam can shorten deferrals but never lengthen them past the production bound.
+- The request body carries no duration, so a worker cannot influence the deferral.
+- Boundary tests B1-B5 (section 11) lock this.
+
+##### 4.4 Responses
+
+| Status | Code | Cause | State change | Security event |
+|---|---|---|---|---|
+| 200 | — | committed | yes | none |
+| 400 | `INVALID_REQUEST` | body defect | no | none |
+| 401 | `AUTHENTICATION_REQUIRED` | bearer missing or rejected; `WORKER_NOT_ACTIVE` (rolled back) | no | `WORKER_AUTH_*` / `DEFERRAL_REJECTED`+`WORKER_NOT_ACTIVE` |
+| 403 | `ORIGIN_NOT_ALLOWED` | Origin header present | no | `WORKER_ORIGIN_REJECTED` |
+| 404 | `NOT_FOUND` | bad id, unknown action, or a pre-R44B11G API | no | none |
+| 405 | `METHOD_NOT_ALLOWED` | not POST | no | none |
+| 409 | `LEASE_REJECTED` | steps 2-5 | no | `WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED` + reason |
+| 413 / 415 | — | body framing | no | none |
+| 503 | `SERVICE_UNAVAILABLE` | auth unavailable, DB failure (including counter overflow), sink failure | no | — |
+
+The 200 body has exactly `{ providerVerificationJobId, fencingCounter, state: "QUEUED", deferredUntil }`. No new HTTP error code. No new rejection reason. No exact replay: a repeat after commit gets 409.
+
+#### 5. Worker contract
+
+##### 5.1 Client (`workerControlClient.ts`)
+
+```text
+deferUnsupportedProviderVerification(jobId, proof, refusal, signal?)
+  -> { providerVerificationJobId, fencingCounter, state: "QUEUED", deferredUntil: Date }
+```
+
+- Local validation (each member read once) happens before any request. A failure -> `PROVIDER_VERIFICATION_REQUEST_INVALID`, zero requests.
+- The method uses the shared `post()` unchanged.
+- Status mapping:
+  - 200 + valid body -> value;
+  - 200 + invalid body -> `MALFORMED_CONTROL_RESPONSE`;
+  - 401 or 403 -> `WORKER_AUTHENTICATION_REJECTED`;
+  - 409 -> `PROVIDER_VERIFICATION_DEFERRAL_REJECTED` (new code);
+  - 5xx, transport failure or abort -> `CONTROL_API_UNAVAILABLE`;
+  - 400, 404, 405, 413, 415 or any other status -> `MALFORMED_CONTROL_RESPONSE`.
+- Historical note: this is the existing Phase 3/5 `post()` mapping. A 404 has always surfaced as `MALFORMED_CONTROL_RESPONSE`. R44B11G does not separate 404 from a malformed body.
+
+##### 5.2 Run (`providerVerificationRun.ts`)
+
+Step 2 additionally reads `deferUnsupportedProviderVerification` once. If it is not a function -> `STOPPED / START / WORKER_CONFIGURATION_INVALID` (existing step-2 rule).
+
+###### Result schema (replaces the single Phase 7 UNSUPPORTED_LEASE shape)
+
+```text
+| { status: "UNSUPPORTED_LEASE"; providerVerificationJobId: string; reason: AdmissionRefusal;
+    disposition: "DEFERRED"; deferredUntil: Date; cause: "SHUTDOWN" | null }
+| { status: "UNSUPPORTED_LEASE"; providerVerificationJobId: string; reason: AdmissionRefusal;
+    disposition: "REJECTED" | "UNCONFIRMED" | "NOT_SENT";
+    detail: WorkerErrorCode | "SHUTDOWN"; cause: "SHUTDOWN" | null }
+```
+
+Permitted keys:
+- DEFERRED results have exactly `status`, `providerVerificationJobId`, `reason`, `disposition`, `deferredUntil`, `cause`.
+- Every other disposition has exactly `status`, `providerVerificationJobId`, `reason`, `disposition`, `detail`, `cause`.
+
+`disposition` is the worker's knowledge of the server-side deferral. `cause` is whether a shutdown was recorded before the result was returned. The two are independent. Only `SHUTDOWN` is reachable as a cause here. LEASE_BUDGET is recorded only at or after step 7, including the pre-grant checkpoint, budget-timer stage and transport checkpoint. Every such recording occurs after admission classification. At c9a99aa4 these are: the checkpoint's `record("LEASE_BUDGET")` (run.ts :463), first called by the pre-grant checkpoint (:476) before the budget timer is installed; the budget-timer callback (:484); and the pre-transport check (:545). Admission refuses at :441, before all of them, so no LEASE_BUDGET can be recorded on the deferral path.
+
+###### Path
+
+After admission refuses:
+1. The run makes exactly one `controlAttempt(send, linked = true)` call, where `send` calls the deferral method via `Reflect.apply` (the Phase 7 call-site style), with the 3000 ms control deadline.
+2. It does not call `controlStep`, so Phase 7's cause-over-settlement mapping does not apply.
+3. There is no retry.
+4. No grant, VERIFYING, bind, open, transport or result request is made.
+5. No budget timer is installed.
+
+Operation order (n6): `R44B11F_PHASE_7_OPERATION_ORDER` is unchanged for supported verification. Only the refusal branch of CLASSIFY changes. That branch is `CLASSIFY → DEFERRAL`, then return. It has no BUDGET, grant, VERIFYING, bind, credential opening, transport or result report. This is the deferral-path supersession of `R44B11F_PHASE_7_UNSUPPORTED_LEASE` and `R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION` (below). It is not a further supersession, and the historical Phase 7 text is not edited.
+
+###### Disposition precedence (first match wins, from the ControlAttempt kind)
+
+Three distinct facts (RC-2):
+- **closure invoked:** the run's send closure ran. The run-local boolean `sent` records this. `sent` starts false, and the closure sets `sent = true` as its first statement, before reading arguments or calling the client.
+- **network dispatch:** bytes left the process. The run cannot observe this. `sent === true` does not prove it, because the client may still fail locally or the transport may fail before transmission.
+- **server commit:** the deferral was committed. Only a validated 200 (`VALUE`) proves this.
+
+`controlAttempt` returns without invoking the closure in exactly these situations:
+- `TIMER_INVALID`;
+- an interruption recorded during timer installation, either a deadline callback fired synchronously inside `timer(...)` (`FAILED / CONTROL_API_UNAVAILABLE`) or a run-signal abort (`CANCELLED`);
+- `runSignal.aborted` already true (`CANCELLED`).
+
+| # | Condition (from `sent` and the ControlAttempt kind) | disposition | detail |
+|---|---|---|---|
+| 1 | `TIMER_INVALID` (deadline timer throws or returns a non-function); `sent === false` | NOT_SENT | `WORKER_CONFIGURATION_INVALID` |
+| 2 | `CANCELLED` with `sent === false` (cause recorded before the attempt or during installation) | NOT_SENT | `SHUTDOWN` |
+| 3 | `FAILED` with `sent === false` (synchronous deadline expiry during timer installation; the only reachable code is `CONTROL_API_UNAVAILABLE`) | NOT_SENT | the code (`CONTROL_API_UNAVAILABLE`) |
+| 4 | `FAILED` with `PROVIDER_VERIFICATION_REQUEST_INVALID` (produced by the real worker client's local input validation, which runs before `post()` and therefore before dispatch; see the note below) | NOT_SENT | that code |
+| 5 | `VALUE` whose `deferredUntil` is unusable (RC-D): the settled value is not a non-null object, reading `deferredUntil` throws, or the value read is not a `Date` whose `Reflect.apply(Date.prototype.getTime, value, [])` returns a finite number (that call throws for a forged non-Date, and the throw is caught) | UNCONFIRMED | `WORKER_CONFIGURATION_INVALID` |
+| 6 | `VALUE` with a usable `deferredUntil` | DEFERRED | — |
+| 7 | `FAILED` with `PROVIDER_VERIFICATION_DEFERRAL_REJECTED` or `WORKER_AUTHENTICATION_REJECTED` | REJECTED | that code |
+| 8 | `CANCELLED` with `sent === true` (shutdown while in flight) | UNCONFIRMED | `SHUTDOWN` |
+| 9 | `FAILED` with `CONTROL_API_UNAVAILABLE` and `sent === true` (deadline, 5xx, transport, lost response) | UNCONFIRMED | `CONTROL_API_UNAVAILABLE` |
+| 10 | `FAILED` with `MALFORMED_CONTROL_RESPONSE` (includes 404 from an old API) | UNCONFIRMED | `MALFORMED_CONTROL_RESPONSE` |
+| 11 | `FAILED` with any other code (`closedCodeOf`) | UNCONFIRMED | that code |
+
+NOT_SENT asserts only that no dispatch can have happened (rows 1-4). It never claims a server outcome. UNCONFIRMED makes no delivery claim either way. No row claims network delivery. A local-validation NOT_SENT (row 4) is possible only before dispatch.
+
+Row 4 note (m7): the real `deferUnsupportedProviderVerification` validates its inputs and throws `PROVIDER_VERIFICATION_REQUEST_INVALID` before calling `post()`. Its response parsing raises `MALFORMED_CONTROL_RESPONSE`, never `REQUEST_INVALID`. The run cannot observe dispatch, so row 4's NOT_SENT relies on that client contract. An injected client that dispatched and then threw this code would be misclassified (L16). No production behaviour is added for that case.
+
+Row 5 (RC-D):
+- `deferredUntil` is read exactly once into a local.
+- The real client already validates the response, so row 5 is reachable only through an injected or faulty dependency. The run stays fail-closed.
+- Row 5 never yields DEFERRED and never claims the database did not commit: the deferral may have committed.
+- It does not throw or reject the run promise, makes no retry, and keeps the separately sampled `cause`.
+
+Row 5 precedes row 6 and cannot conflict with rows 1-3 or 8: TIMER_INVALID, CANCELLED and installation-time FAILED are different ControlAttempt kinds from VALUE. The disposition depends only on the ControlAttempt kind, `sent` and the settled value, and the shutdown `cause` is sampled independently (below).
+
+Coverage of every reachable settlement:
+
+| ControlAttempt | `sent` | Row |
+|---|---|---|
+| `TIMER_INVALID` | false | 1 |
+| `CANCELLED` | false | 2 |
+| `CANCELLED` | true | 8 |
+| `FAILED` | false (only `CONTROL_API_UNAVAILABLE` is reachable) | 3 |
+| `FAILED` | true | 4, 7, 9, 10 or 11 by code. Every `WorkerErrorCode` and any `closedCodeOf` fallback has a row |
+| `VALUE` | true (`VALUE` implies the closure ran) | 5 or 6 |
+
+###### Cause sampling
+
+`cause` is computed exactly once, as `currentCause() === "SHUTDOWN" ? "SHUTDOWN" : null`:
+- synchronously,
+- after `controlAttempt` has returned (including its early TIMER_INVALID, CANCELLED or installation-time FAILED returns),
+- in the same synchronous segment that builds and returns the frozen result,
+- before the `finally` that runs `closeWindow()`.
+
+No `await` lies between the sample and the return, so no shutdown can be recorded after the sample and before the return. A cause recorded at any earlier time, including before admission (for example from a synchronous re-entrant abort during the lease member reads), is therefore preserved. A shutdown arriving after the return finds the window closed and changes nothing, which is existing Phase 7 behaviour.
+
+###### Locked cases
+
+| Case | Result |
+|---|---|
+| External signal already aborted at run entry | `ABANDONED / START / SHUTDOWN` (existing; no lease, no deferral) |
+| Shutdown recorded after lease, before send | NOT_SENT, detail `SHUTDOWN`, cause `SHUTDOWN`, zero deferral requests |
+| Shutdown while the request is in flight | UNCONFIRMED, detail `SHUTDOWN`, cause `SHUTDOWN` |
+| Confirmed response, no shutdown | DEFERRED, cause `null` |
+| Confirmed response settled first, shutdown recorded before return | DEFERRED, cause `SHUTDOWN` (the commit is reported, not concealed) |
+| Commit happened, response lost (transport, deadline, 5xx, abort) | UNCONFIRMED, never DEFERRED |
+| Timer installation fails | NOT_SENT, detail `WORKER_CONFIGURATION_INVALID`, cause = sampled value (preserved if recorded) |
+| Deadline fires synchronously during timer installation (closure never invoked) | NOT_SENT, detail `CONTROL_API_UNAVAILABLE`, `sent === false`, zero requests, cause = sampled value (preserved if recorded) |
+| Confirmed or rejected response settled, then shutdown recorded inside `finish()` (by the deadline cancel) | DEFERRED or REJECTED unchanged; cause `SHUTDOWN` (SD4-A, SD4-B) |
+| Malformed or unexpected response (including 404) | UNCONFIRMED, detail `MALFORMED_CONTROL_RESPONSE`, cause sampled |
+| Injected client resolves a value with an unusable `deferredUntil` (row 5) | UNCONFIRMED, detail `WORKER_CONFIGURATION_INVALID`, cause sampled, never DEFERRED, no retry, no throw |
+| 409 | REJECTED, detail `PROVIDER_VERIFICATION_DEFERRAL_REJECTED`, cause sampled |
+
+###### Never-reject and cleanup
+
+- The deferral attempt runs inside the run's existing `try { ... } finally { closeWindow(); }`.
+- `controlAttempt` already never throws:
+  - timer installation is guarded;
+  - `send` is invoked inside try/catch;
+  - its promise is wrapped by `Promise.resolve(...).then(onValue, onFailure)`, so a late rejection is always handled;
+  - `finish` swallows deadline-cancel failures and unlinks the listener.
+- Result construction reads only local primitives and the settled value. `deferredUntil` is read once inside a try and checked as in row 5. Any failure -> row 5 (UNCONFIRMED, `WORKER_CONFIGURATION_INVALID`).
+- No new promise is created outside `controlAttempt`. No unhandled rejection is introduced.
+
+###### Superseded historical rules, for this R44B11G deferral path only
+
+The historical text is not edited.
+
+- `R44B11F_PHASE_7_CAUSE_PRECEDENCE=TIMER_INSTALL_FAILURE_THEN_FIRST_RECORDED_CAUSE_THEN_STEP_SETTLEMENT`. On the deferral attempt, the timer installation failure still ranks first. Otherwise the settlement decides `disposition`, and a recorded cause is reported in `cause` rather than replacing the result. Every other Phase 7 step keeps the historical precedence.
+- `R44B11F_PHASE_7_UNSUPPORTED_LEASE` and `R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION` (`CLASSIFY_BEFORE_GRANT_NO_GRANT_NO_VERIFYING_NO_REPORT_STOP`). Classification before grant, no grant, no VERIFYING and no result report are kept. "STOP" with no further control request is replaced by exactly one deferral request.
+- P7-M4 prose (arch ~16327-16353): "the shutdown listener is removed" is replaced by "the listener stays registered until the run returns, so a shutdown during the deferral request is observed". "There is no release, reject or terminal route for a verification job before VERIFYING" is replaced by "the R44B11G deferral route exists, and no terminal route exists". The "ORDER BY created_at, id" description is replaced by section 3.
+- `R44B11F_PHASE_7_CAUSE_WINDOW=SHUTDOWN_LINK_UNTIL_OPEN_ONCE_FOR_SETTLES` (m2). The deferral path never reaches `openOnceFor`. On this path only, the cause window stays open through the deferral attempt until the run returns. `closeWindow()` runs in the existing `finally`, which removes the shutdown listener after the result has been built. Every other path keeps the historical window.
+- `R44B11F_PHASE_7_RUN_RESULT_STATUSES` is unchanged (no new status). The UNSUPPORTED_LEASE member shape is widened as above.
+
+#### 6. Persistence and audit rules
+
+- No `audit_events` row (the deferral is not a provider interaction or outcome).
+- No customer-visible change: verify-route view, read model (`verificationPending` true while the job is open) and ProviderConnection columns untouched.
+- Durable diagnostics are the job-row deferral columns.
+- Rejected requests go to the existing worker security log.
+- Successful deferrals are not security events.
+- Run results contain no secret.
+
+#### 7. Bounded fairness
+
+##### 7.1 Definitions
+
+- `key(j) = COALESCE(deferred_until, created_at)`.
+- **Selection order:** the total order on `(key, id)` over QUEUED rows satisfying `key <= now()`, fence < MAX, and the lifecycle filters.
+- **Successful acquisition:** a committed QUEUED -> LEASED.
+- **Skipped row:** a row locked by another in-flight transaction (lease, deferral, grant, reconciler, customer cancel), passed over under SKIP LOCKED in that statement only.
+
+##### 7.2 Why `created_at` order alone starves
+
+U unsupported jobs older than supported J, deferral D, fleet acquisition rate r. If U >= r·D, an unsupported job is eligible at every instant and precedes J, so J is never acquired.
+
+##### 7.3 Theorem
+
+Let J become eligible (QUEUED, `key(J) <= now()`, lifecycle-eligible, fence < MAX) at t0 and stay lifecycle-eligible. Define
+
+A = { X != J : X.state in (QUEUED, LEASED) at t0, and (key(X), X.id) < (key(J), J.id) },
+
+including lifecycle-ineligible members (they may become eligible again). VERIFYING and terminal jobs are excluded: they never return to QUEUED.
+
+Late-committing new jobs: `created_at` = the creating transaction's start. A job whose creating transaction starts after `key(J)` follows J. One with `created_at == key(J)` exactly is ordered by id. Define
+
+T = { jobs not in A whose creating transaction began at or before `key(J)` and committed after t0 },
+
+which is finite (bounded by the transactions in flight at t0). "Began at or before `key(J)`" compares the transaction's `now()` with `key(J)`. The finiteness and the claim that later-created jobs follow J both need C1′ (7.4): with a monotonic server clock, a creating transaction that begins after t0 has `created_at >= t0 >= key(J)`. Without C1′, a backward clock step of any size after t0, including one under 300 s, can give a job created after t0 a `created_at` below `key(J)`. Such a job is in neither A nor T. Deferred-in-future jobs are not in A or T. Their key exceeds t0 until they become eligible, and then they follow J.
+
+Let P = A ∪ T, the jobs that can precede J.
+
+**Lemma (no overtaking through deferral; RC-B).** Let Y be any job that does not precede J, that is, Y is not in P, with (key(Y), Y.id) > (key(J), J.id) or Y created after `key(J)`. Under the R44B11G selection (section 3), no deferral of Y produces a key that precedes J.
+
+Proof. A deferral of Y requires a committed lease of Y.
+1. **Eligibility at lease.** Y's lease transaction L starts at `s_L` (its `now()`). It selects Y only if the WHERE predicate `COALESCE(deferred_until, created_at) <= now()` holds for the row version it locks. EvalPlanQual re-evaluates the same predicate against the same `s_L` for a concurrently updated row. So `key(Y) <= s_L`, where `key(Y)` is the key at lease time. Keys change only through a deferral, which needs Y LEASED, so no concurrent writer changes Y's key between selection and lease.
+2. **Lease before deferral.** The deferral request carries the lease token. The token exists only in the lease response, which is sent after `withTransaction` has run COMMIT (`workerLeaseService.ts:80-83`). So the deferral transaction D starts after L committed, hence after L started: `s_D >= s_L`. This uses the same server clock for both `now()` values, given assumption C1 (7.4).
+3. **New key.** `key'(Y) = s_D + d(n) >= s_L + 300 s >= key(Y) + 300 s > key(Y)`.
+4. **Comparison with J.** Because Y does not precede J, `key(Y) >= key(J)`. (Either `key(Y) > key(J)`, or keys tie and `Y.id > J.id`. A job created after `key(J)` has `created_at >= key(J)`.) So `key'(Y) >= key(J) + 300 s > key(J)`. The inequality is strict by at least 300 s, so microsecond timestamp precision and the id tie-break cannot reverse it.
+
+Natural-expiry requeue and lifecycle cancellation do not change a key, and no other writer can change the deferral columns (2.4). So no deferral of an existing job outside P moves it ahead of J. ∎
+
+Closure of P. The lemma covers deferrals. Newly created jobs are covered by C1′ (definition of T above). Under C1, C1′ and R44B11G selection, the set of jobs that can precede J never gains members beyond P.
+
+Limits of the lemma:
+- It does not hold for a pre-R44B11G API whose lease query has no eligibility predicate: such an API can lease Y before `key(Y) <= s_L`. That configuration is unsupported on 0011 (8.2).
+- It assumes C1 only, which tolerates backward clock steps under 300 s. The closure of P, and therefore both bounds below, also needs C1′.
+
+Every lease of a member X of P ends in exactly one of:
+- (a) **grant** -> never QUEUED again;
+- (b) **deferral** -> X is QUEUED with `key(X) = s_X + d(n)`, where `s_X` is the **start time of the deferral transaction** (`now()`), not its commit time. `s_X` may be earlier than t0 (the transaction may have begun before J became eligible). The comparison is `s_X + d(n)` against `key(J)`:
+  - a deferral counted here commits at `c_X >= t0` (X was QUEUED or LEASED at t0, or was created after it), so `key(J) <= t0 <= c_X`. Hence X follows J whenever `c_X - s_X < d(n)`, that is, whenever the deferral transaction's duration is below d(n) >= 300 s;
+  - if a deferral transaction ran for d(n) or longer, `s_X + d(n)` may be <= `key(J)`, and X can precede J again;
+  - this can happen only when X's lease transaction began before t0. If X's lease transaction starts at `s_L >= t0`, then by the lemma's step 2, `s_X >= s_L >= t0 >= key(J)`, so `s_X + d(n) > key(J)` whatever the deferral duration. Long-deferral returns are therefore limited to deferral transactions of leases begun before t0: at most one per member of P that was LEASED, or being leased, at t0. That is finite;
+- (c) **lifecycle cancellation** -> removed;
+- (d) **pre-grant natural expiry** -> QUEUED again with its key unchanged.
+
+Let R = the number of **returns**: transitions of members of P back to QUEUED with a key still preceding (key(J), J.id). R = E + L0, where:
+- E = the type-(d) natural-expiry returns, including every repeated unsuccessful attempt (a lease that ends by expiry before grant, for any reason);
+- L0 = the type-(b) deferrals whose transaction ran for d(n) or longer, measured on the PostgreSQL server clock as `c_X - s_X`. L0 is at most the number of members of P LEASED or being leased at t0, by the bullet above.
+
+**Bound (no duration or expiry assumption).** This bound still requires:
+- (iii) C1 and C1′ (7.4);
+- (iv) only R44B11G (or later) APIs serve lease requests throughout the acquisition interval, from t0 until J is acquired.
+
+Under (iii) and (iv), J is acquired after at most |P| + R successful acquisitions of jobs preceding J. It makes no assumption about deferral transaction duration or pre-grant expiry. R may be unbounded (7.4, continuous pre-grant failure). The bound is a count of acquisitions, not a waiting time.
+
+Each acquisition of a member of P either removes it from the preceding set for good ((a), (c), short (b)) or is followed by exactly one counted return. Jobs after J are also acquired, in two cases:
+- J itself is a skipped row (locked by another in-flight transaction);
+- the lease statement's snapshot predates the commit that made J visible as QUEUED (J's creation, or its return to QUEUED). That statement does not see J as QUEUED, so it may take a job after J. Its EvalPlanQual recheck applies only to rows it already selected, and cannot add J (n5).
+
+Neither case acquires a job preceding J, so neither enters the count of preceding-job acquisitions. Neither consumes or adds members of P. The fairness guarantee is not broadened: neither case bounds how often J is passed over in these ways.
+
+**Stronger guarantee (conditional).** The prerequisites of the main bound, (iii) C1 and C1′ and (iv) R44B11G-only selection, still apply. If in addition:
+- (i) every deferral transaction of a lease begun before t0 completes in under 300 s, measured on the PostgreSQL server clock as `c_X - s_X` (an operational assumption, see 7.4). A forward server-clock step can lengthen this measured duration even when the real elapsed time is short;
+- (ii) no member of P suffers a pre-grant natural expiry after t0;
+
+then R = 0 and J is acquired after at most |P| acquisitions of jobs preceding J.
+
+This is the fairness improvement over R44B11F: a successfully deferred unsupported job stops preceding supported work, and by the lemma no deferral lets a job overtake J.
+
+##### 7.4 Assumptions and limits
+
+- **Fleet.** All workers and the API are at R44B11G or later. An old worker's refusal is a type-(d) return.
+- **Deferral transaction duration < 300 s.** This is an **operational assumption, not a database guarantee**. The deferral transaction is three single-row statements under row locks and has no inherent long step, but R44B11G does not enforce a statement or transaction timeout. It matters only for deferrals of leases begun before t0 (7.3). If it is violated, the main bound (no duration or expiry assumption) still holds under its prerequisites (iii) and (iv), with L0 counting the late deferral.
+- **C1: server clock, lemma only.** All `now()` values compared in 7.3 come from the single PostgreSQL server clock. The lemma needs that clock not to step backwards by 300 s or more between a lease transaction's start and the following deferral transaction's start. This is an operational assumption. A backward step that large could let a deferred job's key precede J.
+- **C1′: monotonic server clock, both bounds.** The PostgreSQL server clock does not step backwards after t0. The no-overtaking lemma alone tolerates backward steps smaller than 300 seconds under C1, but the full preceding-set acquisition bound requires C1′. C1′ does not replace C1. A lease begun before t0 and deferred after t0 spans t0, so a backward step before t0 is excluded only by C1. Both bounds therefore require C1 and C1′. C1′ is used for three things:
+  - the finiteness of T;
+  - "a job created after t0 follows J";
+  - the comparisons `key(J) <= t0 <= c_X` and `s_L >= t0` (for a lease that starts after t0) in case (b).
+
+  It is an operational assumption, not a database guarantee.
+- **Selection policy.** The lemma and both bounds apply only while R44B11G (or later) APIs serve lease requests, throughout the acquisition interval. A pre-R44B11G API ignores deferral and the eligibility predicate (L10).
+- **Continuous pre-grant failure.** **No finite waiting-time bound is claimed under continuous pre-grant failure. This is existing R44B11F behavior.** If some preceding job's leases keep ending by natural expiry before grant (crashing workers, persistent UNCONFIRMED or NOT_SENT dispositions, an old-worker fleet), R grows without limit and the bound above is not finite. This limitation is separate from, and not removed by, the R44B11G improvement. That improvement applies when workers successfully defer unsupported jobs.
+- **Lock duration.** Transactions holding a lock on J are those of the existing services. R44B11G adds no long lock on J.
+- **Lifecycle.** If J becomes ineligible it is cancelled, which is outside the theorem.
+- **Invariants relied on.** The WHERE eligibility predicate and SKIP LOCKED (section 3).
+
+##### 7.5 Answers
+
+| Question | Answer |
+|---|---|
+| Deferral duration | d(n) = 300, 600, 1200, 2400, then 3600 s |
+| Grows with refusals | Yes, capped at 3600 s. Never terminal |
+| Capable worker obtains the job | Two separate facts. (1) **Eligibility:** a deferred job becomes eligible again d(n) after its deferral transaction started, with d(n) <= 3600 s. (2) **Acquisition:** once eligible, when it is actually leased is governed by 7.3. The main bound (no duration or expiry assumption) counts acquisitions of preceding jobs plus returns, and requires C1, C1′ and R44B11G-only selection. The stronger bound additionally requires conditions (i) and (ii) of 7.3. No wall-clock acquisition time is claimed. A capable worker is **not guaranteed to acquire it on the first poll**: in a mixed-capability fleet there is no deterministic routing, and whichever worker polls first leases it (with capable poll share c, the expected number of eligibility windows is 1/c). With every enabled worker capable (D5), the job's first acquisition after eligibility is by a capable worker. **No finite waiting-time bound is claimed under continuous pre-grant failure** (7.4, L13) |
+| One unsupported job starving supported work | No. At most one acquisition per deferral window, then it follows earlier-eligible work |
+| Many unsupported jobs (U) | Wasted acquisitions at most U/300 per second initially and U/3600 per second at the cap. Supported work bounded by 7.3 |
+| Old and new workers together | Section 8 |
+| Cost | Lease: one bounded range scan over `eligible_queue_ix` (deferred-future rows are not visited, given the plan of F6). Deferral: three single-row statements. Writes: one more partial index. Reconciler unchanged |
+
+#### 8. Migration, deployment and mixed-version contract (future operational contract)
+
+This section describes a future deployment. Nothing here authorises executing any step.
+
+##### 8.1 Facts at c9a99aa4
+
+- **Startup.** `verifyRuntimeDatabase` (run by `runCommercialApiProcess`) compares the applied `schema_migrations` with the build's manifest. Any applied version above the build's latest -> `RuntimeDatabaseError("SCHEMA_AHEAD")` and the process does not start (`verifyRuntimeDatabase.ts:128`).
+- **Readiness.** `createReadinessCheck` returns ready only while the newest applied migration's version and sha256 equal those verified at startup. `GET /__ready` otherwise answers 503 `NOT_READY` (`createCommercialApiServer.ts:76`).
+- **Grants.** Applied only by `grant-runtime`, never by migrations or API startup. The command refuses with `RUNTIME_GRANT_SCHEMA_MISMATCH` unless the applied schema's latest version equals the running build's latest migration (2.8).
+
+##### 8.2 Consequences (replacing the revised proposal's compatibility claims)
+
+1. Migration 0011 and the R44B11G commercial-api are one coupled operational change.
+2. As soon as 0011 is applied, every running pre-R44B11G API instance turns unready (`/__ready` 503). Any pre-R44B11G instance that restarts fails startup with `SCHEMA_AHEAD`. The individual SQL statements of the old API remain schema-compatible, but the old process is not a supported operating mode on 0011. An old instance that keeps receiving traffic until it is drained uses the R44B11F lease order, ignoring deferral, and has no deferral route (404).
+3. Updated runtime grants must be applied by the R44B11G build's `grant-runtime` command, and verified, after the migration and before any R44B11G API instance is relied on. A pre-R44B11G build's `grant-runtime` fails with `RUNTIME_GRANT_SCHEMA_MISMATCH` after 0011. The R44B11G build's `grant-runtime` fails with the same error if run before 0011. API startup never applies grants.
+4. Rolling back to an API whose manifest ends at 0010 is unsupported once 0011 is applied. No down migration exists.
+5. Recovery from a failed deployment is roll-forward to a compatible (R44B11G or later) API, not a schema downgrade.
+6. The operational deployment plan must budget and announce the readiness interruption from migration until the first R44B11G instance is ready.
+
+##### 8.3 Required deployment order
+
+1. Apply migration 0011 (`migrate`).
+2. Apply runtime grants with the R44B11G build's `grant-runtime`. Verify that the runtime role's `provider_verification_jobs` UPDATE columns equal the manifest (the privileges-test query shape).
+3. Deploy the R44B11G commercial-api. Its startup must pass `verifyRuntimeDatabase` and `/__ready` must answer ready.
+4. Deploy R44B11G workers.
+5. Verify fleet capability independently (D5) before any later, separately authorised live enablement.
+
+##### 8.4 Mixed-version table
+
+| Combination | Behaviour |
+|---|---|
+| R44B11G worker + pre-R44B11G API (on a 0010 database) | Route 404 -> `MALFORMED_CONTROL_RESPONSE` -> UNSUPPORTED_LEASE / UNCONFIRMED / `MALFORMED_CONTROL_RESPONSE`. One request, no retry. Natural expiry requeues (R44B11F behaviour) |
+| Pre-R44B11G worker + R44B11G API | The worker leaves the lease to expire. The requeue keeps the key and deferral columns. R44B11G workers defer the job when they lease it |
+| Pre-R44B11G API + 0011 database | Unsupported: running instances are unready, restarting instances fail `SCHEMA_AHEAD` |
+| API rollback after 0011 | Unsupported. Roll forward |
+| R44B11G API + 0010 database | Unsupported: startup fails `SCHEMA_BEHIND` |
+| R44B11G API without the R44B11G grants | Deferral UPDATE -> permission denied -> 503 -> worker UNCONFIRMED -> natural expiry. Safe but non-functional. Prevented by step 8.3.2 |
+| Pre-R44B11G `grant-runtime` on a 0011 database | Refused: `RUNTIME_GRANT_SCHEMA_MISMATCH`, no grant change |
+| R44B11G `grant-runtime` on a 0010 database | Refused: `RUNTIME_GRANT_SCHEMA_MISMATCH`, no grant change (run `migrate` first) |
+| Mixed-capability workers | No deterministic routing (7.5). Operationally excluded by D5 before live enablement |
+
+#### 9. Observability
+
+Ad hoc operator query, no endpoint:
+
+```text
+SELECT id, account_id, provider_connection_id, verification_policy_id,
+       unsupported_deferral_count, last_unsupported_refusal, deferred_until, created_at
+  FROM provider_verification_jobs
+ WHERE state = 'QUEUED' AND unsupported_deferral_count >= 5;
+```
+
+Such jobs may stay pending. Customers see only a pending verification. See D4.
+
+#### 10. File allowlist
+
+##### commercial-api
+
+| Action | Path |
+|---|---|
+| A | `migrations/0011_provider_verification_unsupported_deferral.sql` |
+| A | `src/workerControl/workerProviderVerificationDeferralService.ts` |
+| M | `src/workerControl/workerProviderVerificationLeaseService.ts` (the `SELECT_NEXT` SQL text only; `SELECT_NEXT` stays a non-exported `const`, so the production API surface is unchanged (m4). F6 obtains the text through a test-side recording pool and F8.3 reads the source file) |
+| M | `src/workerControl/workerControlApplication.ts` |
+| M | `src/workerControl/workerSecurityEvents.ts` |
+| M | `src/database/runtimeGrants.ts` |
+| A | `tests/db/workerProviderVerificationDeferral.test.ts` |
+| M | `tests/workerControl/workerControlUnit.test.ts` |
+| M | `tests/boundary.test.ts` (scope in B8) |
+| M | `tests/database/migrationFiles.test.ts` |
+| M | `tests/db/migrations.test.ts` |
+| M | `tests/db/runtimeDatabase.test.ts` |
+| M | `tests/db/catalog.test.ts` |
+| M | `tests/db/privileges.test.ts` |
+
+##### commercial-worker
+
+| Action | Path |
+|---|---|
+| M | `src/workerControlClient.ts` |
+| M | `src/workerError.ts` |
+| M | `src/providerVerificationRun.ts` |
+| M | `tests/providerVerificationClient.test.ts` |
+| M | `tests/providerVerificationRun.test.ts` |
+| M | `tests/boundary.test.ts` |
+| A | `tests/integration/providerVerificationDeferral.test.ts` |
+
+##### Architecture
+
+M `docs/commercial/COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE.md`: one new R44B11G section and its flags only. No historical line is modified.
+
+Exact placement (RC-6), from the document at c9a99aa4 (18262 lines, ending in a single LF):
+
+| Line | Content | After the amendment |
+|---|---|---|
+| ≤ 18259 | full R44B11F section, including its flag block, which ends with `R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT` | byte-identical |
+| 18260 | the closing code fence of the R44B11F flag block | byte-identical |
+| 18261 | blank line | byte-identical |
+| (new) | `### R44B11G — Unsupported verification lease bounded deferral`, its prose, its own ```` ```text ```` flag block and closing fence, followed by one blank line | inserted here, as a single hunk between line 18261 and the marker |
+| 18262 | `COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_23` | **byte-identical and still the last line**, followed by the existing single LF. Its line number moves down by the inserted length. No new or additional marker is added |
+
+Rationale:
+- Every amendment from R44B11C to R44B11F, including the Phase 9 sync `c9a99aa4`, was inserted before the document's lock-end marker line.
+- No test references the marker. The only test that reads this document (`apps/commercial-worker/tests/providerVerificationClient.test.ts:739`) resolves `^NAME=` flags by first match and reads only `R44B11F_GOOGLE_POLICY_ID` and `R44B11F_RUNWAY_POLICY_ID`.
+- R44B11G introduces no flag name already present in the document (m1). The global `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO` already appears at arch lines 4408 and 11336, so it is **not** repeated in the R44B11G flag block. Its existing occurrences and value are unchanged. Live-enablement status is expressed by `R44B11G_LIVE_VERIFICATION_ENABLEMENT=NO`.
+
+The amendment also updates no R44B11F flag value. In particular, `R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION=REQUIRED_BEFORE_LIVE_ENABLEMENT` stays as is.
+
+Regression gates (run, not modified):
+- API `tests/db/workerProviderVerification.test.ts`, `tests/db/providerVerification.test.ts`, `tests/db/providerConnectionsApplication.test.ts`;
+- worker `tests/integration/providerVerificationExecution.test.ts`.
+
+Untouched: the 19 D11-protected files, the reconciler, the verify route, the read model, the capability registry, `runDatabaseCommand.ts`, `verifyRuntimeDatabase.ts`, `createCommercialApiServer.ts`, `runCommercialApiProcess.ts`.
+
+#### 10A. Scope-lock plan and authorisations (prepared, not executed)
+
+Proposed evidence file: `.git/r44b11g-implementation-scope-lock.txt` (outside the tracked tree). Contents:
+
+1. Baseline: branch, HEAD = origin/master = the commit that publishes the R44B11G architecture amendment, empty index, clean tracked tree, backlog doc sha `cbf7e666...` unchanged.
+2. The R44B11G suffix lock: `R44B11G` is unused before the amendment and reserved by it.
+3. The complete allowlist of section 10 with an action per path (A/M), and the rule "stop and report before touching any other path".
+4. Carry-forward: the 19 D11 protected paths with their sha256 lines copied from `.git/r44b11f-implementation-scope-lock.txt` lines 109-127. Verified with `sha256sum -c` before implementation, before staging and after commit, 19/19 each time.
+5. The new migration path exactly as in section 10, version 11, LF only, no transaction control.
+6. Migration validation requirements:
+   - `migrationFiles.test` discovers 0001-0011 contiguously with stable checksums;
+   - `migrations.test` applies 0011 to an empty database and on top of 0010;
+   - `catalog.test` pins the four constraints, the index definition and both triggers;
+   - the 0010 guard `prosrc` is byte-identical to baseline.
+7. Runtime-grant validation requirements: `privileges.test` exact equality of `provider_verification_jobs` grants with the manifest, run on a test database only, via the test-support grant path.
+8. Gate commands:
+   - API non-DB;
+   - API DB (user-supplied `COMMERCIAL_API_TEST_DATABASE_*`);
+   - API build;
+   - worker unit and integration;
+   - worker tsc;
+   - safe-suite FFmpeg/provider-key guard.
+
+Actions that need explicit user authorisation at the implementation gate:
+
+- Writing the lock file itself.
+- Writing migration 0011 into the repository.
+- Modifying the allowlisted files.
+- Running any database suite against the user-supplied test database (this applies migrations and grants there).
+- Staging, commit and guarded FF push.
+- Any `migrate` or `grant-runtime` run against a non-test database (not part of implementation; a separate operational gate).
+- Any live enablement (out of scope).
+
+The present task authorises none of these.
+
+#### 11. Acceptance test matrix
+
+Real PostgreSQL for all S, N, F, C and M tests. Phase 8 timestamp-precision rules apply.
+
+##### S — schema and trigger
+- **S1.** Applies on empty and 0010 databases. Existing rows 0 / NULL / NULL.
+- **S2.** Each CHECK rejects its violation.
+- **S3.** An INSERT with non-default deferral columns is rejected.
+- **S4.** The deferral shape is accepted only as specified. Each predicate negated alone is rejected, including `x = now()` and `x = now() + d(n) + 1 µs`. `x < now() + d(n)` is accepted, proving the bound is an upper bound.
+- **S5.** No other transition changes the deferral columns.
+- **S6.** The 0010 guard `prosrc` equals baseline. Both triggers exist. EXECUTE is revoked from PUBLIC.
+- **S7.** The fence is unchanged by a deferral.
+
+##### N — no permanent cancellation (required)
+- **N1.** 30 refusals through the real service with a short schedule. After each: QUEUED, count = step (12 and 13 explicit), `completed_at` and `terminal_reason_code` NULL.
+- **N2.** After N1, a capable worker leases, is granted, crosses VERIFYING and reports VERIFIED successfully. The deferral columns persist on the COMPLETED row.
+- **N3.** After N1, the reconciler gives NONE while the job is eligible. After DISCONNECTED -> `LIFECYCLE_NO_LONGER_ELIGIBLE`, with the columns preserved.
+- **N4.** No UPDATE changing a deferral column can yield COMPLETED or CANCELLED.
+- **N5.** Static: the deferral service SQL has no `CANCELLED`, `COMPLETED`, `terminal_reason_code`, `completed_at` or `result_`. No source contains `VERIFICATION_UNSCHEDULABLE`. No source compares `unsupported_deferral_count` with a constant other than inside d(n).
+- **N6.** For n >= 5 (including 50) the delay is 3600 s.
+
+##### F — fairness and index
+- **F1.** Not leasable before `deferred_until`.
+- **F2.** Leasable at or after it.
+- **F3.** The default schedule writes exactly `now()` + 300, 600, 1200, 2400, 3600, 3600, 3600 s for n = 1..7.
+- **F4.** A re-eligible deferred job follows a job created before its deferral ended.
+- **F5.** 20 unsupported older jobs plus supported J: J is acquired within at most 21 acquisitions.
+- **F6. Index evidence.** Real PostgreSQL. The seed phase and the inspection transaction are separate (RC-A). Migration 0011's trigger requires every deferral to set `deferred_until > now()` of its own transaction, so past-deferred eligible rows can only exist through committed earlier transactions and elapsed time.
+
+  **Seed phase** (several committed transactions):
+  1. Create the verification jobs through the authorised test fixtures (the existing `testDatabase.ts` helpers and the real customer-verify path or its fixture equivalent): eligible Account, owner, connection and ACTIVE latest credential version. Each open verification job has its own distinct eligible ProviderConnection and credential version, compatible with the existing uniqueness constraints: at most one ACTIVE version per connection (`provider_credential_versions_one_active_uq`) and at most one open job per connection and version (`provider_verification_jobs_one_open_per_version_uq`). Any connection creation idempotency key used by the fixtures must be distinct under `provider_connections_creation_idempotency_key_uq` (n4).
+  2. Lease and defer selected jobs through valid transitions only. Leasing uses the real `acquireProviderVerificationLease`; deferral uses the real deferral service with its test-only short schedule (4.3). For example:
+     - at least 500 jobs deferred with a 1 s schedule;
+     - at least 5,000 jobs deferred with the production d(1) = 300 s (future at inspection time);
+     - at least 500 never-deferred jobs;
+     - some LEASED and terminal rows (through the existing grant/VERIFYING/result or reconciler paths).
+  3. Each lease and each deferral is its own committed transaction (the services commit through `withTransaction`). Bounded concurrent seeding through the test pool is permitted (n4): several lease-then-defer sequences may run in parallel on independent pool connections, with a fixed concurrency limit. Every transition is still a valid, committed lease or deferral through the real services. SKIP LOCKED makes concurrent leases take distinct jobs.
+     - **Seeding window.** The trigger caps a first deferral at d(1) = 300 s, so every intended future-deferred row must be written, and inspection must start, within 300 s of the earliest 300 s deferral. The seeding phase has an explicit time bound inside that window, and the test records each sequence's elapsed time.
+     - If seeding exceeds the bound, or any intended future-deferred row is eligible when inspection starts (step 5), the run is a **test-environment/setup failure**. It is reported as such and is never treated as query-plan evidence, pass or fail. The index-plan assertion (step 10) is never weakened, and expired fixture rows are never silently accepted, to compensate.
+  4. The resulting mix has at least 1,000 eligible QUEUED rows (deferred-in-past plus never-deferred) and at least 5,000 future-deferred QUEUED rows.
+  5. Poll `SELECT clock_timestamp() > $1::timestamptz` (Phase 8 precision rule: `$1` is the largest intended-eligible `deferred_until`, captured as `::text`) until true, with a bounded test timeout. Also assert that every intended-future row still has `deferred_until > clock_timestamp()` when inspection starts.
+
+  **Statistics** (separate, before the inspection transaction):
+
+  6. On the **migrator connection** (the migration role owns the tables; in PostgreSQL 16 only the owner, a superuser or the database owner can ANALYZE a table, and a non-owner gets a WARNING and the table is skipped), run `ANALYZE provider_verification_jobs, accounts, users, provider_connections, provider_credential_versions`.
+  7. Verify that statistics were actually updated, rather than treating the absence of an error as success (n3).
+     - **Connection.** Every read in steps 6-7 uses the migrator (table-owner) connection, as separate autocommit statements, not inside an explicit transaction. This covers the "before" capture, ANALYZE and every "after" read.
+     - **Why the migrator.** In PostgreSQL 16 only the owner, a superuser or the database owner can ANALYZE the table. `pg_stats` also hides rows the caller lacks column privilege for, which includes the expression-index rows for a non-owner.
+     - **Why autocommit.** `pg_stat_*` views are snapshotted per transaction (`stats_fetch_consistency = cache`), so a read inside a transaction that already read them could return a stale snapshot.
+
+     For `provider_verification_jobs`:
+     - `pg_stat_user_tables.analyze_count` increased (or `last_analyze` moved forward) relative to a value captured before step 6;
+     - `pg_class.reltuples` is greater than 0;
+     - `pg_stats` contains a row for `provider_verification_jobs_eligible_queue_ix` (expression-index statistics).
+
+     Any WARNING notice raised during ANALYZE fails the test: the migrator connection's notice handler is attached before step 6. A command that emitted only a WARNING, for example a skipped table, is never treated as successful statistics collection, even if it returned without error.
+
+  **Inspection transaction** (fresh, on the **runtime** connection, which has the production privileges):
+
+  8. `BEGIN`; `SET LOCAL enable_seqscan = off`.
+  9. Run `EXPLAIN (FORMAT JSON)` on the exact, complete lease-selection SQL: all four joins (accounts, users, provider_connections, provider_credential_versions), every eligibility and lifecycle predicate, `ORDER BY COALESCE(j.deferred_until, j.created_at), j.id`, `LIMIT 1`, `FOR UPDATE OF j SKIP LOCKED`.
+     - The SQL text is obtained without exporting `SELECT_NEXT` (m4). The seed phase's real `acquireProviderVerificationLease` calls (step 2) run through a recording `TransactionalPool` wrapper whose clients forward every `query` unchanged and record its text. The test takes the distinct recorded statement containing `FOR UPDATE OF j SKIP LOCKED` and asserts that exactly one distinct text was recorded. No extra lease call is made, so the seeded mix is undisturbed.
+     - Plain `EXPLAIN` (without ANALYZE) does not execute the statement and takes no row locks. `ROLLBACK` afterwards.
+     - Inspect the actual PostgreSQL output, not a hand-written expectation.
+  10. Assert on the parsed JSON plan tree, outer to inner, matching node fields structurally:
+      - the root node (or the first node under any wrapping `Result`) is `Limit`;
+      - the `Limit` node's child is `LockRows` (PostgreSQL places row locking below `Limit` for `LIMIT ... FOR UPDATE`);
+      - below `LockRows` is the join subtree. Within it, the ordered driving input is a node with `Node Type = "Index Scan"`, `Scan Direction = "Forward"`, `Index Name = "provider_verification_jobs_eligible_queue_ix"`, `Relation Name = "provider_verification_jobs"` and `Alias = "j"`;
+      - that node's `Index Cond` matches the COALESCE eligibility range **after alias normalisation** (m3): remove the `j.` qualifier and redundant parentheses and casts, then require `COALESCE(deferred_until, created_at) <= now()`. The `j.`-qualified form printed by PostgreSQL is accepted and an alias-free textual match is not required;
+      - no node with `Node Type` `Sort` or `Incremental Sort` exists anywhere in the plan;
+      - no `Bitmap Index Scan` or `Bitmap Heap Scan` node on `provider_verification_jobs` exists.
+  11. Behaviourally (outside the EXPLAIN transaction), the real lease call returns the minimum-key eligible row.
+
+  Expected obtainability (not verified; this task runs nothing): every join from `j` has a unique index on its join key (`accounts` and `users` primary keys; the composite unique keys referenced by the 0010 foreign keys on `provider_connections (account_id, id)` and `provider_credential_versions (account_id, provider_connection_id, id)`). So a nested-loop plan driven by the ordered partial index is available, and with `LIMIT 1` it has the lowest startup cost under `enable_seqscan = off`. If the implementation's F6 run cannot obtain this plan for the complete query, that is a **design blocker to report at implementation acceptance**. The assertion must not be weakened, for example to accept a bitmap scan plus sort.
+
+  F6 proves index applicability and plan shape on a representative synthetic distribution under `enable_seqscan = off` only. It does not claim the planner chooses this plan for every production data distribution. A plan assessment on a production-like distribution and size remains a **separate implementation-acceptance requirement** and is not claimed here.
+- **F7.** Natural-expiry requeue keeps the key and columns.
+- **F8.** Concurrency evidence, in three parts:
+  1. **SKIP LOCKED (RC-5).**
+     1. Create two eligible QUEUED jobs J1 and J2 (lifecycle-eligible, never deferred), with `(key(J1), J1.id) < (key(J2), J2.id)`, and no other eligible job.
+     2. In transaction A (a separate connection), `SELECT id FROM provider_verification_jobs WHERE id = J1 FOR UPDATE`, and leave A open.
+     3. Call `acquireProviderVerificationLease` (transaction B, the real service, on an independent pool connection) under a bounded wait: the call must settle within 5 s while A still holds its lock. Bounded completion is the discriminating evidence. Without SKIP LOCKED, B would block on J1's row lock until A ends, and fail this assertion. No backend-PID instrumentation is used (m6). In particular, `pg_blocking_pids()` of A's backend is not evidence of B's behaviour.
+        - Negative control, proving A's lock is effective (n2). It is separate from the positive proof above and runs on a third, independent database connection C (neither A's connection nor a pool connection used by B), while A still holds J1's row lock:
+          1. `BEGIN`;
+          2. `SET LOCAL lock_timeout = '500ms'`. It is issued only inside this transaction, never outside a transaction block, where it would be a no-op with a WARNING and the SELECT would wait for A;
+          3. `SELECT id FROM provider_verification_jobs WHERE id = J1 FOR UPDATE` (no SKIP LOCKED);
+          4. require PostgreSQL SQLSTATE `55P03` (`lock_not_available`);
+          5. fail the test if the statement succeeds or fails with any other error;
+          6. always `ROLLBACK` in `finally`, whether or not the error occurred;
+          7. release C through the existing test cleanup mechanism (the suite's client teardown).
+
+          The negative control proves only that A's lock blocks a non-SKIP-LOCKED locker. The positive SKIP LOCKED evidence remains step 3's bounded completion of the real lease call while A holds the lock, plus step 4's J2 result. The blocking PID of A is not used as evidence that B skipped J1.
+     4. Assert B returned J2 (not J1, not null).
+     5. Roll back A.
+     6. Assert J1 is still QUEUED with fence 0 and NULL lease fields, and J2 is LEASED to B's worker with fence 1 and a lease token hash.
+     7. A second `acquireProviderVerificationLease` now returns J1.
+  2. **After commit.** Lease an eligible job and defer it through the real service, with the deferral transaction committed. A subsequent `acquireProviderVerificationLease` does not return that job while `deferred_until > now()`. If no other eligible job exists, it returns null.
+  3. **WHERE invariant (structural).** A boundary assertion on the `SELECT_NEXT` source text requires the `COALESCE(j.deferred_until, j.created_at) <= now()` predicate inside the WHERE clause.
+
+  The EvalPlanQual recheck itself (a row committed between snapshot and lock) is a documented PostgreSQL READ COMMITTED guarantee. R44B11G relies on it and does not claim to reproduce that interleaving deterministically.
+
+##### H — HTTP and authentication
+- **H1.** Missing or invalid bearer -> 401.
+- **H2.** Inactive principal -> 401 + event, rolled back.
+- **H3.** Origin -> 403.
+- **H4.** Every 409 reason with its event and no state change.
+- **H5.** Every body defect -> 400, including any extra member such as `deferralSeconds`.
+- **H6.** 405, 404 for an uppercase UUID, `/release` 404, 413, 415.
+- **H7.** The 200 body has exactly four keys.
+- **H8.** A sink failure on rejection -> 503.
+- **H9.** Repeat after commit -> 409 `NOT_LEASED`.
+
+##### C — concurrency
+- **C1.** Concurrent duplicate: one 200, one 409, count +1.
+- **C2.** Deferral vs grant: exactly one wins.
+- **C3.** Deferral vs expiry: transaction-start liveness, and the reconciler requeue afterwards.
+- **C4.** Deferral vs lifecycle cancellation: serialised, no deadlock.
+- **C5.** `pg_locks`: no lifecycle locks.
+- **C6.** After a re-lease by another worker -> `OTHER_WORKER` or `FENCING_MISMATCH`.
+
+##### W — client
+- **W1.** Exact three-member body.
+- **W2.** Response validation.
+- **W3.** Full status mapping, including 404 -> `MALFORMED_CONTROL_RESPONSE`.
+- **W4.** Local invalid input: zero requests.
+- **W5.** Read-once accessors.
+
+##### R / SD — run dispositions and shutdown
+- **R1-R11.** One per precedence row in 5.2 (R*k* covers row *k*; R5 is SD12).
+- **R12.** At most one deferral request on every path (exactly one wherever `sent === true`), no retry.
+- **R13.** A client lacking the method -> `STOPPED / START`.
+- **SD1.** External signal aborted at entry -> `ABANDONED / START / SHUTDOWN`, zero requests.
+- **SD2.** Shutdown recorded after lease and before send (synchronous abort from a lease member getter) -> NOT_SENT / `SHUTDOWN` / cause `SHUTDOWN`, zero deferral requests.
+- **SD3.** Shutdown while the deferral is in flight -> UNCONFIRMED / `SHUTDOWN` / cause `SHUTDOWN`. Exactly one request. The late settlement (a later resolution or rejection of the fake fetch) is absorbed, and zero `unhandledRejection` events are observed during the test.
+- **SD4 seam (deterministic, M-2).** Use the existing injected `deadlineTimer` dependency and an injected external `shutdownSignal` (an `AbortController` signal).
+  - The fake timer counts its invocations. Before admission the run installs exactly one deadline timer (call #1, the lease attempt; no budget timer exists before admission). The deferral attempt's timer is therefore call #2. Calls #1 and #3+ return an ordinary no-op cancel function.
+  - Call #2 returns a cancel function that synchronously calls `shutdownController.abort()`.
+  - Published `finish()` (`providerVerificationRun.ts`) sets `ended = true`, then calls the cancel function, then `unlink()`. So the abort runs after the settled outcome is fixed:
+    1. the external `abort` listener `onShutdown` runs `record("SHUTDOWN")`;
+    2. this sets the cause and aborts the run controller;
+    3. the still-linked `onRunAbort` calls `interrupt`, which returns immediately because `ended` is true;
+    4. `finish` returns the settled outcome;
+    5. the run samples `currentCause()` and builds the result.
+  - Each test also asserts:
+    - call #1's cancel did not abort (the lease attempt is unaffected, and `leaseProviderVerification` was called exactly once);
+    - `record` took effect once: a second abort is a no-op, and the cause is `SHUTDOWN` exactly;
+    - zero `unhandledRejection` events;
+    - after the run returns, the external signal has no remaining `abort` listener from the run (`getEventListeners`), and the run signal listener was unlinked.
+- **SD4-A (DEFERRED + SHUTDOWN).** The deferral client method resolves a validated `{ providerVerificationJobId, fencingCounter, state: "QUEUED", deferredUntil }`. The cancel on call #2 records shutdown. Assert `disposition = "DEFERRED"`, `cause = "SHUTDOWN"`, `deferredUntil` equals the response value, and exactly one deferral request.
+- **SD4-B (REJECTED + SHUTDOWN).** The deferral client method rejects with `WorkerError("PROVIDER_VERIFICATION_DEFERRAL_REJECTED")` (the client's mapping of HTTP 409, also exercised over a fake 409 control fetch with the real client). The cancel on call #2 records shutdown. Assert `disposition = "REJECTED"`, `detail = "PROVIDER_VERIFICATION_DEFERRAL_REJECTED"`, `cause = "SHUTDOWN"`, and exactly one deferral request.
+- **SD4-C (race, supplementary).** The fake control fetch resolves a valid response and the test aborts the external signal in the same synchronous turn and in a later microtask. Whatever the race selects, assert the invariants: `cause: null` only if no shutdown was recorded before return, and DEFERRED only for a validated value. This test is not relied on for SD10 coverage.
+- **SD5.** Confirmed value, no shutdown -> DEFERRED, cause `null`.
+- **SD6.** Shutdown after the run returned -> the result is unchanged, the listener is removed, no event effect.
+- **SD7.** Timer install failure with a cause already recorded -> NOT_SENT / `WORKER_CONFIGURATION_INVALID` / cause `SHUTDOWN`. Without a cause -> cause `null`.
+- **SD8.** Commit at the server but the response is dropped (fake control fetch commits then rejects) -> UNCONFIRMED / `CONTROL_API_UNAVAILABLE`, and the database row shows the deferral (integration test).
+- **SD9.** Malformed 200 after commit -> UNCONFIRMED / `MALFORMED_CONTROL_RESPONSE`.
+- **SD10.** Every disposition×cause combination has a deterministic producing test. Each result is frozen and has exactly the permitted keys of 5.2:
+
+  | Combination | Producing test |
+  |---|---|
+  | DEFERRED × null | SD5 |
+  | DEFERRED × SHUTDOWN | SD4-A |
+  | REJECTED × null | R7 (409) |
+  | REJECTED × SHUTDOWN | SD4-B |
+  | UNCONFIRMED × null | SD8, SD9, SD12 (row 5: `WORKER_CONFIGURATION_INVALID`) |
+  | UNCONFIRMED × SHUTDOWN | SD3, SD12-S (row 5: `WORKER_CONFIGURATION_INVALID`) |
+  | NOT_SENT × null | SD7 (no cause), SD11 (no cause), R4 |
+  | NOT_SENT × SHUTDOWN | SD2, SD7 (cause recorded), SD11 (cause recorded) |
+
+- **SD11 (RC-2, synchronous expiry before dispatch).** The fake `deadlineTimer` call #2 invokes the deadline callback synchronously inside `timer(...)`, then returns a no-op cancel function. Assert:
+  - `sent === false` (observable as zero calls to the deferral client method and zero control requests);
+  - `disposition = "NOT_SENT"`, `detail = "CONTROL_API_UNAVAILABLE"`, `cause = null`.
+
+  The variant with shutdown already recorded (SD2 technique) gives the same disposition and detail with `cause = "SHUTDOWN"`.
+- **SD12 (RC-D, unusable `deferredUntil`).** Deterministic, with no shutdown signal aborted. The injected deferral client method resolves, in separate cases:
+  - (a) `{ ...valid members, deferredUntil: new Date(NaN) }`;
+  - (b) `deferredUntil: "2026-11-24T00:00:00.000Z"` (a string);
+  - (c) an object whose `deferredUntil` getter throws;
+  - (d) `Object.create(Date.prototype)` (forged: `getTime` throws);
+  - (e) `null`.
+
+  Each case asserts:
+  - the result is `{ status: "UNSUPPORTED_LEASE", disposition: "UNCONFIRMED", detail: "WORKER_CONFIGURATION_INVALID", cause: null, ... }` with exactly the non-DEFERRED key set, frozen;
+  - the run promise resolves (no rejection);
+  - exactly one deferral request and no retry;
+  - the `deferredUntil` getter was read at most once (case c counts reads);
+  - zero `unhandledRejection` events.
+
+- **SD12-S (RR-2, unusable `deferredUntil` with shutdown).** The SD2 technique is not used here. It records the shutdown before the deferral attempt, and `controlAttempt` then returns `CANCELLED` without invoking the send closure (run.ts :353). That yields NOT_SENT / `SHUTDOWN` (row 2) and never reaches row 5. SD12-S uses the SD4 seam instead:
+  - the fake `deadlineTimer` counts its invocations;
+  - call #1 (the lease attempt) returns a no-op cancel function;
+  - call #2 (the deferral attempt) returns a cancel function that synchronously calls `shutdownController.abort()`. Published `finish()` sets `ended = true` before calling it, so the abort runs inside `finish()` after the VALUE has settled.
+  - Ordering: the deferral attempt settles and `finish()`, including call #2's cancel, completes before the run reads `deferredUntil` and constructs its result (5.2, cause sampling and never-reject). The assertions below do not depend on whether an implementation reads `deferredUntil` before or after `finish()`. The outcome is the same either way.
+
+  The injected deferral client method resolves an object whose `deferredUntil` is an own accessor that counts its reads. In separate cases it returns `new Date(NaN)` (case a) or throws (case c). Each case asserts:
+  - the result is frozen, has exactly the non-DEFERRED key set, and equals `{ status: "UNSUPPORTED_LEASE", disposition: "UNCONFIRMED", detail: "WORKER_CONFIGURATION_INVALID", cause: "SHUTDOWN", ... }`;
+  - exactly one deferral request, and no retry;
+  - the lease request is unaffected: `leaseProviderVerification` was called exactly once, and call #1's cancel did not abort;
+  - no provider request: zero provider fetch, opener, grant, VERIFYING or result calls;
+  - the `deferredUntil` accessor was read exactly once;
+  - the run promise resolves, and no exception escapes the run;
+  - zero `unhandledRejection` events;
+  - after the run returns, the external signal has no remaining `abort` listener from the run (`getEventListeners`), and the run-signal listener was unlinked.
+- SD7 technique for "cause already recorded": a lease member getter synchronously aborts the external signal (as in SD2). Then `deadlineTimer` call #2 throws, giving TIMER_INVALID, which ranks first.
+
+##### M / RD — migration, mixed version and readiness
+- **M1.** Worker against a router without the route -> UNCONFIRMED / `MALFORMED_CONTROL_RESPONSE`, one request, later requeued.
+- **M2.** R44B11F-style refusal (no deferral request) against the R44B11G API: expiry requeue, columns unchanged.
+- **M3.** The existing API DB suites (`workerProviderVerification`, `providerVerification`, `providerConnectionsApplication`, `workerControl`, `workerCredentialGrant`, `workerGrantedLeaseRecovery`) pass, unmodified, against the 0011 schema when run by the R44B11G code.
+- **M4.** `verifyRuntimeDatabase` with the 0001-0010 manifest against a database with 0011 applied -> `RuntimeDatabaseError` code `SCHEMA_AHEAD` (extends `runtimeDatabase.test`; the fake "ahead" migration moves to version 12).
+- **RD1.** Readiness check verified on 0011, then a further version recorded -> the check returns false (`/__ready` 503 `NOT_READY` semantics).
+- **RD2.** A readiness check created against a 0010 database returns false once 0011 is applied (the old-instance interruption).
+- **RD3.** The R44B11G manifest against a 0010 database -> `SCHEMA_BEHIND`.
+
+##### Z — secrets and zero provider
+- **Z1.** No provider fetch, opener, grant, VERIFYING or result request on the unsupported path.
+- **Z2.** No token, verifier, credential or envelope in any response, event, result or diagnostic.
+- **Z3.** Integration traffic only to the control origin.
+- **Z4.** Provider keys absent or empty (safe-suite guard). `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+
+##### B — boundary and seam
+- **B1.** The deferral route handler in `workerControlApplication.ts` calls the deferral service with exactly the arguments `(pool, context, jobId, proof, refusal)`, with no schedule argument (source assertion).
+- **B2.** No file under `apps/commercial-api/src` other than the deferral service references the schedule parameter or type. Only test files pass one.
+- **B3.** The route's member set is exactly `fencingCounter`, `leaseToken`, `refusal` (H5 proves an extra member is a 400).
+- **B4.** The worker client body has exactly three members (W1). No worker source sends a duration.
+- **B5.** S4 proves the database refuses any deferral beyond d(n) whatever the caller, and N1/F2 prove tests achieve short deferrals through the seam without changing the production default (F3).
+- **B6.** Phase 8 integration-file rules apply to the new worker integration file.
+- **B7.** API boundary: migration list 0001-0011. Worker boundary: the deferral method is called only in the run's unsupported branch, after admission and before any grant.
+- **B8 (m5). API `tests/boundary.test.ts` scope**, against the published file:
+  - The exact `src/workerControl` inventory (the `toEqual([...])` list at ~:446-461) gains `src/workerControl/workerProviderVerificationDeferralService.ts`, and nothing else. The route-owner (`workerControlApplication.ts` only) and no-importer assertions are unchanged.
+  - The "R44B11F provider-verification worker-control boundary" describe (~:645-675): the service set `ALL` gains `DEFERRAL = "workerProviderVerificationDeferralService.ts"`. So the existing NO_PROVIDER_CALL and NO_GENERATION assertions apply to it unchanged.
+  - The state-write confinement map gains exactly one entry: `[DEFERRAL]: /SET state = 'QUEUED', lease_worker_principal_id = NULL, lease_token_sha256 = NULL,\s*leased_at = NULL, lease_expires_at = NULL,\s*unsupported_deferral_count = unsupported_deferral_count \+ 1/`. The LEASE, VERIFYING and RESULT patterns and the GRANT "no STATE_WRITE" assertion are unchanged. The deferral service is the only new authorised `LEASED -> QUEUED` writer in `src/workerControl`. The reconciler's existing natural-expiry requeue lives in `src/providerConnections` and is outside this describe, unchanged.
+  - A new assertion confines writes of `deferred_until`, `unsupported_deferral_count` and `last_unsupported_refusal` (`/\b(deferred_until|unsupported_deferral_count|last_unsupported_refusal)\s*=(?!=)/` after comment stripping, excluding SQL comparison contexts such as `<=`) to the deferral service across all of `apps/commercial-api/src`. The lease service's `COALESCE(j.deferred_until, j.created_at) <= now()` read is allowed, because it is a comparison, not an assignment.
+  - The deferral service has no `CANCELLED`, `COMPLETED`, `terminal_reason_code`, `completed_at` or `result_` (N5), no audit insert, and no Account/connection/version lock.
+  - No existing assertion is weakened or removed.
+
+#### 12. Remaining carries and limitations
+
+- `R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION`: **open** (targeted by R44B11G). Closes only after independent validation, acceptance and publication of the implementation.
+- `R44B11F_CREDENTIAL_INGRESS_OR_REPORTABLE_REASON_PRE_LIVE_DECISION`: **open**, out of scope.
+- `R44B11G_PERSISTENT_UNSUPPORTED_RESOLUTION_CARRY`: **open**. Persistently unsupported jobs may stay pending. Not an operational solution.
+- **L1.** No deterministic capability routing in mixed fleets. D5 is operational, not code-enforced.
+- **L2.** A compromised authenticated worker can delay each job it leases by up to 3600 s per refusal. It cannot terminate any job. Principal deactivation stops it.
+- **L3.** Transaction-start liveness: a deferral begun before expiry may commit after expiry (as with grant and barrier).
+- **L4.** A 404 is indistinguishable from a malformed response in the worker result (historical `post()` mapping).
+- **L5.** The migration+API deployment causes a readiness interruption. API rollback is unsupported after 0011.
+- **L6.** The production-distribution query plan is unproven until implementation acceptance.
+- **L7.** The trigger bound is an upper bound. Exactness of d(n) rests on the service and F3.
+- **L8.** `queue_ix` is retained and unused by the lease query.
+- **L9.** No production composition of the worker-control router. No live provider enablement. `WORKER_LIVE_PROVIDER_SUBMISSION_ENABLED=NO`.
+- **L10.** Old API instances that keep receiving traffic after 0011 is applied, until they are drained or become unavailable, do not honour the deferral order and answer the deferral route with 404.
+- **L11.** A local-validation NOT_SENT (`PROVIDER_VERIFICATION_REQUEST_INVALID`) is possible only before dispatch. `sent === true` proves only that the closure was invoked, never network delivery.
+- **L12.** The section 9 persistent-unsupported query is observation only. It is not a hidden terminal decision, and nothing reads it automatically.
+- **L13.** No finite waiting-time bound under continuous pre-grant failure (7.4). This is existing R44B11F behaviour.
+- **L14.** The stronger fairness guarantee assumes that deferral transactions of leases begun before t0 finish in under 300 s, measured on the PostgreSQL server clock as `c_X - s_X` (7.3 (i)); a forward server-clock step can lengthen that measured duration even when the real elapsed time is short. This is operational and not enforced by the database. Deferrals of leases begun at or after t0 need no duration assumption.
+- **L15.** The `grant-runtime` command is version-coupled (`RUNTIME_GRANT_SCHEMA_MISMATCH` in both mismatched directions).
+- **L16.** Row 4's NOT_SENT for `PROVIDER_VERIFICATION_REQUEST_INVALID` relies on the real client throwing it before `post()`. An injected client that violated this would be misclassified. Row 5 keeps the run fail-closed for malformed injected values.
+- **L17.** Fairness assumptions, by conclusion (7.3, 7.4):
+  - **No-overtaking lemma:** C1 (no backward server-clock step of 300 s or more between a lease's start and its deferral's start) and R44B11G-or-later lease selection.
+  - **Main acquisition bound (|P| + R):** the lemma's conditions plus C1′ (no backward server-clock step after t0), with R44B11G-or-later selection throughout the acquisition interval. No deferral-duration or expiry assumption.
+  - **Stronger bound (|P|):** all of the above plus (i) deferral transactions of leases begun before t0 finish in under 300 s (L14) and (ii) no pre-grant natural expiry of a member of P after t0.
+  - **Continuous pre-grant failure:** R is unbounded, and no finite waiting-time guarantee is claimed (L13).
+
+  All clock and selection conditions are operational, not enforced by the database.
+
+#### 13. Assumptions
+
+- **A1.** PostgreSQL 16 or later, the repository-enforced minimum (`MINIMUM_SERVER_VERSION_NUM = 160000`).
+- **A2.** One commercial-api and database for all workers.
+- **A3.** D5 is operational.
+- **A4.** Live verification is disabled.
+- **A5.** The R44B11G suffix is reserved by the amendment before implementation.
+
+#### 14. Flags
+
+```text
+R44B11G_SCOPE=UNSUPPORTED_VERIFICATION_LEASE_BOUNDED_DEFERRAL
+R44B11G_TARGETS=R44B11F_UNSUPPORTED_LEASE_STARVATION_PRE_LIVE_DECISION
+R44B11G_TARGET_CARRY_OPTION=A_EXPLICIT_RELEASE_DISPOSITION_ROUTE
+R44B11G_TARGET_CARRY_STATUS=OPEN_UNTIL_IMPLEMENTATION_VALIDATED_ACCEPTED_PUBLISHED
+R44B11G_CREDENTIAL_CARRY_STATUS=OPEN_OUT_OF_SCOPE
+R44B11G_SUPERSEDES_FOR_DEFERRAL_PATH_ONLY=R44B11F_PHASE_7_CAUSE_PRECEDENCE,R44B11F_PHASE_7_CAUSE_WINDOW,R44B11F_PHASE_7_UNSUPPORTED_LEASE,R44B11F_UNSUPPORTED_LEASE_RUN_DISPOSITION,P7_M4_LISTENER_REMOVAL_AND_NO_ROUTE_PROSE
+R44B11G_HISTORICAL_TEXT_EDITED=NO
+R44B11G_WORKER_REFUSAL_TERMINAL_AUTHORITY=NO
+R44B11G_AUTOMATIC_CANCELLATION=NONE
+R44B11G_NEW_TERMINAL_REASON=NONE
+R44B11G_NEW_PROVIDER_RESULT_REASON=NONE
+R44B11G_PERSISTENT_UNSUPPORTED_RESOLUTION=CAPABLE_WORKER_OR_LIFECYCLE_ONLY
+R44B11G_PERSISTENT_UNSUPPORTED_RESOLUTION_CARRY=OPEN_SEPARATELY_AUTHORISED_SLICE_REQUIRED
+R44B11G_ADMIN_ENDPOINT=NO
+R44B11G_OPERATOR_AUTHORITY=NO
+R44B11G_ROUTE=POST_/worker-control/v1/provider-verifications/:jobId/unsupported
+R44B11G_REQUEST_MEMBERS=fencingCounter,leaseToken,refusal
+R44B11G_REFUSALS=UNSUPPORTED_PROVIDER,UNSUPPORTED_POLICY,PROVIDER_POLICY_MISMATCH
+R44B11G_PRECONDITION=LEASED_LIVE_PROOF_NO_CREDENTIAL_GRANT
+R44B11G_LOCK_ORDER=WORKER_PRINCIPAL_THEN_VERIFICATION_JOB
+R44B11G_LIFECYCLE_LOCKS=NONE
+R44B11G_DEFERRAL_SCHEDULE_SECONDS=300,600,1200,2400,3600_CAP
+R44B11G_DEFERRAL_DB_BOUND=NOW_EXCLUSIVE_TO_NOW_PLUS_D_N_INCLUSIVE_UPPER_BOUND_ONLY
+R44B11G_DEFERRAL_SERVICE_SCHEDULE=EXACT_D_N
+R44B11G_SCHEDULE_SEAM=TEST_ONLY_BOUNDARY_LOCKED_DB_BOUND_AUTHORITATIVE
+R44B11G_WORKER_INFLUENCES_DURATION=NO
+R44B11G_COUNTER_OVERFLOW=TRANSACTION_ERROR_503_NATURAL_EXPIRY_NON_TERMINAL
+R44B11G_QUEUE_ORDER=COALESCE_DEFERRED_UNTIL_CREATED_AT_THEN_ID
+R44B11G_ELIGIBILITY_PREDICATE_IN_WHERE=REQUIRED
+R44B11G_EVALPLANQUAL_RECHECK=RELIED_ON
+R44B11G_INDEX=provider_verification_jobs_eligible_queue_ix
+R44B11G_EXISTING_QUEUE_INDEX=RETAINED
+R44B11G_PRODUCTION_PLAN_PROOF=DEFERRED_TO_IMPLEMENTATION_ACCEPTANCE
+R44B11G_SCHEDULING_COUNTER=unsupported_deferral_count
+R44B11G_FENCING_COUNTER_USED_FOR_SCHEDULING=NO
+R44B11G_FENCING_COUNTER_CHANGED=NO
+R44B11G_EXACT_REPLAY=NO
+R44B11G_WORKER_DEFERRAL_ATTEMPTS=1
+R44B11G_WORKER_DEFERRAL_RETRY=NO
+R44B11G_WORKER_DISPOSITIONS=DEFERRED,REJECTED,UNCONFIRMED,NOT_SENT
+R44B11G_WORKER_RESULT_CAUSE=SHUTDOWN_OR_NULL_SAMPLED_ONCE_BEFORE_RETURN
+R44B11G_DEFERRAL_CAUSE_PRECEDENCE=TIMER_INSTALL_FAILURE_THEN_SETTLEMENT_DISPOSITION_CAUSE_REPORTED_SEPARATELY
+R44B11G_SHUTDOWN_LISTENER=REGISTERED_UNTIL_RUN_RETURNS
+R44B11G_AUDIT_EVENT=NONE
+R44B11G_CUSTOMER_VISIBLE_CHANGE=NO
+R44B11G_NEW_HTTP_ERROR_CODE=NO
+R44B11G_NEW_REJECTION_REASON=NO
+R44B11G_NEW_SECURITY_EVENT_TYPE=WORKER_PROVIDER_VERIFICATION_DEFERRAL_REJECTED
+R44B11G_NEW_WORKER_ERROR_CODE=PROVIDER_VERIFICATION_DEFERRAL_REJECTED
+R44B11G_404_MAPPING=MALFORMED_CONTROL_RESPONSE_HISTORICAL_POST
+R44B11G_DATABASE_MIGRATION_REQUIRED=YES
+R44B11G_MIGRATION=apps/commercial-api/migrations/0011_provider_verification_unsupported_deferral.sql
+R44B11G_EXISTING_GUARD_FUNCTION_REPLACED=NO
+R44B11G_RUNTIME_GRANT_CHANGE=PROVIDER_VERIFICATION_JOBS_UPDATE_COLUMNS_DEFERRAL_ONLY
+R44B11G_RUNTIME_GRANT_APPLICATION=GRANT_RUNTIME_COMMAND_FROM_R44B11G_BUILD
+R44B11G_MIGRATION_API_COUPLED=YES
+R44B11G_OLD_API_ON_0011=UNSUPPORTED_UNREADY_OR_SCHEMA_AHEAD
+R44B11G_API_ROLLBACK_AFTER_0011=UNSUPPORTED_ROLL_FORWARD_ONLY
+R44B11G_DEPLOYMENT_ORDER=MIGRATE_0011,GRANT_RUNTIME_AND_VERIFY,API,WORKERS,FLEET_CAPABILITY_VERIFICATION
+R44B11G_READINESS_INTERRUPTION=EXPECTED_MUST_BE_PLANNED
+R44B11G_SCOPE_LOCK_FILE=.git/r44b11g-implementation-scope-lock.txt
+R44B11G_SCOPE_LOCK_CARRIES_D11_HASHES=19
+R44B11G_PROVIDER_CALL_ON_UNSUPPORTED_PATH=NO
+R44B11G_SHARED_PROTOCOL_CHANGE=NO
+R44B11G_WORKER_AUTHENTICATION_CHANGE=NO
+R44B11G_D11_PROTECTED_FILE_CHANGE=NO
+R44B11G_LIVE_VERIFICATION_ENABLEMENT=NO
+R44B11G_LIVE_ENABLEMENT_REQUIRES_ALL_WORKERS_AT_OR_AFTER_R44B11G=YES
+R44B11G_REGISTRY_POLICY_ENABLEMENT_REQUIRES_FLEET_SUPPORT=YES
+R44B11G_FLEET_SUPPORT_ENFORCEMENT=OPERATIONAL_NOT_CODE
+R44B11G_DETERMINISTIC_CAPABILITY_ROUTING=NO
+R44B11G_CREDENTIAL_SHAPE_DECISION_INCLUDED=NO
+R44B11G_FUTURE_SLICE_SUFFIXES_LOCKED=NO
+R44B11G_POSTGRES_MINIMUM=16
+R44B11G_RUNTIME_GRANT_VERSIONING=OLD_BUILD_AFTER_0011_AND_NEW_BUILD_BEFORE_0011_FAIL_RUNTIME_GRANT_SCHEMA_MISMATCH
+R44B11G_SENT_FLAG_MEANS=SEND_CLOSURE_INVOKED_NOT_NETWORK_DELIVERY
+R44B11G_SYNC_DEADLINE_BEFORE_DISPATCH=NOT_SENT_CONTROL_API_UNAVAILABLE
+R44B11G_SHUTDOWN_COVERAGE=DETERMINISTIC_VIA_DEFERRAL_ATTEMPT_DEADLINE_CANCEL
+R44B11G_F6_PLAN_SHAPE=LIMIT_LOCKROWS_JOIN_SUBTREE_INDEX_SCAN_ELIGIBLE_QUEUE_IX_NO_SORT_NO_BITMAP
+R44B11G_F6_PLAN_UNOBTAINABLE=DESIGN_BLOCKER_NOT_WEAKENED
+R44B11G_SKIP_LOCKED_TEST=ELIGIBLE_QUEUED_ROW_LOCKED_NEXT_JOB_ACQUIRED_WITHOUT_WAIT
+R44B11G_EVALPLANQUAL_REPRODUCED=NO
+R44B11G_FAIRNESS_BOUND=P_PLUS_RETURNS_UNDER_MONOTONIC_CLOCK_AND_R44B11G_SELECTION_CONDITIONAL_P_IF_DEFERRAL_TX_UNDER_300S_AND_NO_PRE_GRANT_EXPIRY
+R44B11G_CONTINUOUS_PRE_GRANT_FAILURE_WAIT_BOUND=NONE_CLAIMED
+R44B11G_ARCH_PLACEMENT=AFTER_R44B11F_FLAG_FENCE_AND_BLANK_LINE_BEFORE_LOCK_END_MARKER
+R44B11G_ARCH_LOCK_END_MARKER=BYTE_IDENTICAL_REMAINS_LAST_LINE_NO_NEW_MARKER
+R44B11G_FAIRNESS_NO_OVERTAKING_LEMMA=LEASE_ELIGIBLE_AT_LEASE_START_DEFERRAL_STARTS_AFTER_LEASE_COMMIT_NEW_KEY_AT_LEAST_300S_LATER
+R44B11G_FAIRNESS_LONG_DEFERRAL_RETURNS=ONLY_LEASES_BEGUN_BEFORE_T0
+R44B11G_FAIRNESS_CLOCK_ASSUMPTION=NO_BACKWARD_STEP_AFTER_T0_LEMMA_TOLERATES_UNDER_300S
+R44B11G_CAPABLE_WORKER_WAIT_BOUND=NONE_CLAIMED_ELIGIBLE_AFTER_D_N_ACQUISITION_PER_7_3
+R44B11G_INVALID_DEFERRED_UNTIL=UNCONFIRMED_WORKER_CONFIGURATION_INVALID_NEVER_DEFERRED
+R44B11G_WORKER_PRECEDENCE_ROWS=11
+R44B11G_F6_SEED_SEPARATE_FROM_INSPECTION=YES
+R44B11G_F6_ANALYZE_ROLE=MIGRATION_OWNER_STATISTICS_VERIFIED
+R44B11G_F6_INDEX_COND_MATCH=STRUCTURAL_ALIAS_NORMALISED
+R44B11G_SELECT_NEXT_EXPORTED=NO
+R44B11G_F8_BLOCKING_EVIDENCE=BOUNDED_COMPLETION_PLUS_LOCK_TIMEOUT_NEGATIVE_CONTROL
+R44B11G_API_BOUNDARY_DEFERRAL_WRITER=ADDED_TO_WORKERCONTROL_INVENTORY_ALL_AND_WRITE_CONFINEMENT
+R44B11G_GLOBAL_FLAGS_REPEATED=NONE
+```
+
 COMMERCIAL_WORKER_BRIDGE_ARCHITECTURE_LOCK_END_2026_11_23

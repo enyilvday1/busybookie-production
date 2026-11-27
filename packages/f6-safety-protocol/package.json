@@ -1,0 +1,23 @@
+{
+  "name": "f6-safety-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pure, non-authoritative BusyBookie F6 safety data contracts; no execution or infrastructure access",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts --passWithNoTests=false"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  }
+}

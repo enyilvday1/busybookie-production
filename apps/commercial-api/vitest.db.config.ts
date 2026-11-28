@@ -12,6 +12,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/db/**/*.test.ts"],
+    // The heavyweight F6 assessment runs only through vitest.f6.config.ts.
+    exclude: ["tests/db/f6/**"],
     fileParallelism: false,
     maxWorkers: 1,
     restoreMocks: true,

@@ -88,3 +88,56 @@ This scope **does not** permit any other root config change, dependency installa
 **Controlled Git publication candidate:** Exactly **25 paths** (23 initial F6 package/manifest paths plus `package.json` and `package-lock.json`), subject to a separate publication/staging authorization and recheck of the actual Windows worktree. Explicit exclusions: modified `apps/commercial-api/tests/db/workerProviderVerificationDeferral.test.ts` and untracked `docs/commercial/BUSYBOOKIE_FREE_BYO_HOSTED_TRIAL_BACKLOG.md`. As of this documentation update, the F6 protocol is not committed, merged or deployed by this checkpoint. Protected source must continue to hash to `9567dc0f5e8e95a52629bbcf1bc45a74636b4da9e48867df0cfb8ebe364698bc`.
 
 **Evidence provenance:** 6b2, 6c and 6d outcomes come from operator-provided Git Bash logs, with the pure source independently reconstructed and inspected at 6e. Documentation reconciliation itself is not new runtime test evidence. R1 remains fail-closed; F6/QEMU/PostgreSQL, cloud billing/IAM, synthetic execution, independent containment and paid Runway/Veo remain **NO-GO** without their own explicit authorization and evidence.
+
+
+## F6-ISO-001 heavyweight-assessment lifecycle isolation and governance amendment (2026-11-28)
+
+**Separate scope:** F6-ISO-001 is its own authorized scope. It is not a retroactive authorization under A1.4e.7, and it does not expand, amend or re-open any earlier scope. The historical 25-path pure-protocol publication candidate above stays unchanged as a historical record.
+
+**Relocation and hashes (SHA-256, raw working-file bytes, LF):**
+
+| Role | Path | SHA-256 |
+|---|---|---|
+| Historical protected assessment source (pre-isolation working copy) | `apps/commercial-api/tests/db/workerProviderVerificationDeferral.test.ts` | `9567dc0f5e8e95a52629bbcf1bc45a74636b4da9e48867df0cfb8ebe364698bc` |
+| Restored regression file (equals the `54a8351` HEAD blob) | `apps/commercial-api/tests/db/workerProviderVerificationDeferral.test.ts` | `eaa779c9820843ec8b6dc842ba61d25db3f6da65ee5835ce45697d7bfe372c12` |
+| New isolated heavyweight assessment | `apps/commercial-api/tests/db/f6/defaultPlannerAssessment.heavyweight.ts` | `5a54bfce33224799eba9640c618e01885203221da3298eed39c343a7a0cf4a7c` |
+
+**Supersession (narrow):** The earlier requirement that the protected source "must continue to hash to `9567dc0f…`" is superseded **only** for the approved relocation of the heavyweight assessment into its own module. It is not superseded for any other purpose. The restored regression file is a protected verification target: it must equal the HEAD blob (`eaa779c9…`) and is **not** an authorized modification under this scope.
+
+**F6-ISO-001 isolation and governance scope (exactly five paths):**
+
+1. `apps/commercial-api/tests/db/f6/defaultPlannerAssessment.heavyweight.ts`
+2. `apps/commercial-api/vitest.f6.config.ts`
+3. `apps/commercial-api/vitest.db.config.ts`
+4. `apps/commercial-api/tests/boundary.test.ts`
+5. `docs/commercial/R44B11G_F6_A14D_FILE_MANIFEST.md`
+
+`docs/commercial/BUSYBOOKIE_FREE_BYO_HOSTED_TRIAL_BACKLOG.md` remains untracked, unrelated and untouched.
+
+**Safety status:**
+
+- The heavyweight assessment remains **blocked**. `f6RequireResourceAdmission()` still throws unconditionally, and no environment-variable or injected-token bypass exists. Selecting the assessment through `vitest.f6.config.ts` is not admission.
+- The ordinary `test:db` runner excludes `tests/db/f6/**`. `vitest.f6.config.ts` is now in the commercial-api boundary scanner's configuration inventory.
+- No production service change, provider enablement, PostgreSQL execution, migration, schema reset or heavyweight assessment run is authorized by this amendment.
+
+**Unresolved:**
+
+- The pinned Git baseline (`d47e7e591929288b363055faa38a9a1dc5dbc0d8`, not the current HEAD) and the tracked-modification allowlist are preserved as authored. They fail closed and need a separate review.
+- **Historical source backup:** the `9567dc0f…` bytes currently exist only in a session-local scratch copy. They need durable evidence retention. Archival is complete only after the retained copy is re-hashed and matches `9567dc0f5e8e95a52629bbcf1bc45a74636b4da9e48867df0cfb8ebe364698bc`.
+
+Git staging and commit are not authorized by this amendment.
+
+### F6-ISO-001 historical archive verification (2026-11-28)
+
+The historical F6 assessment source retention requirement was subsequently satisfied by a verified external archival copy.
+
+- Medium: Samsung T7 Shield, drive D:.
+- Archive: `D:\Busybookie\Recovery\F6-ISO-001\workerProviderVerificationDeferral.pre-isolation.9567dc0f.ts`
+- SHA-256: `9567dc0f5e8e95a52629bbcf1bc45a74636b4da9e48867df0cfb8ebe364698bc`.
+- Evidence: operator-provided Git Bash output confirmed the source hash, archive hash, external-drive identity and `STEP_727=PASS`.
+- Original temporary source was not deleted.
+- No repository staging or commit occurred during archival.
+
+This closes the F6-ISO-001 historical-source archival requirement for the verified Samsung T7 copy. It does not certify a secondary OneDrive backup, authorize heavyweight execution, lift resource admission, or resolve the pinned-baseline and modification-allowlist blockers.
+
+F6-ISO-001 archival evidence is separate from F6 runtime acceptance.

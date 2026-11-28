@@ -15,7 +15,7 @@ const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC_ROOT = join(APP_ROOT, "src");
 const REPO_ROOT = resolve(APP_ROOT, "..", "..");
 const MIGRATIONS_ROOT = join(APP_ROOT, "migrations");
-const APP_CONFIG_FILES = ["package.json", "tsconfig.json", "tsconfig.build.json", "vitest.config.ts", "vitest.db.config.ts"] as const;
+const APP_CONFIG_FILES = ["package.json", "tsconfig.json", "tsconfig.build.json", "vitest.config.ts", "vitest.db.config.ts", "vitest.f6.config.ts"] as const;
 // The only approved external runtime imports: pg (R44B2D) and the shared,
 // pure commercial-worker protocol package (R44B6I1). Everything else must be a
 // node: built-in or a module inside src.
